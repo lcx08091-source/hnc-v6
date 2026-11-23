@@ -50,12 +50,7 @@ func writeAlertsConfigRaw(hncDir string, m map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
-	dst := alertConfigPath(hncDir)
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, b, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, dst)
+	return writeFileAtomic(alertConfigPath(hncDir), b)
 }
 
 // apiAlertConfig GET /api/alert_config — dpid 默认配置为底、用户文件覆盖。

@@ -124,10 +124,34 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	if s.signalCtl != nil {
 		resp["signal"] = s.signalCtl.Snapshot(s)
 	}
+	if !active && hotspotExplicitlyInactive(s.hncDir) && !simLive {
+		resp["throttle_sources"] = []string{}
+		resp["active_limiter_reason"] = ""
+	} else {
+		arbSnap := s.shaperArbiter().Snapshot()
+		sources := arbSnap.ThrottleSources
+		if sources == nil {
+			sources = []string{}
+		}
+		resp["throttle_sources"] = sources
+		resp["active_limiter_reason"] = arbSnap.ActiveLimiterReason
+	}
 	if r.URL.Query().Get("devices") == "1" {
 		resp["devices"] = devices
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func hotspotExplicitlyInactive(hncDir string) bool {
+	if hncDir == "" {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state"))
+	if err != nil {
+		return false
+	}
+	line := strings.TrimSpace(string(b))
+	return strings.HasPrefix(line, "INACTIVE") || strings.HasPrefix(line, "OFF") || strings.HasPrefix(line, "DOWN")
 }
 
 // currentHotspotIface 走 s.jsonCache 读 rules.json 兜底 —— /api/live 每次轮询

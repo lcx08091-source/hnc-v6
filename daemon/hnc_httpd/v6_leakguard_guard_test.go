@@ -720,3 +720,380 @@ func TestLeakGuardRC2LedgerCapsNotifySemAndSSEDeadline(t *testing.T) {
 	}
 }
 
+func TestLeakGuardExpandConnBlocksSharedInfraAndReservedIPFilter(t *testing.T) {
+	// 强校验跨片区锁定签名 detectSharedInfraIP(s *server, ipStr string) (bool, string) 零变更
+	var sigGuard func(*server, string) (bool, string) = detectSharedInfraIP
+	s, _, dir := newV6TestMux(t)
+
+	// 1. 覆盖腾讯、阿里、字节、华为、苹果、谷歌、微软七大生态及公共云/CDN 识别
+	sharedDomainCases := []struct {
+		domain string
+		ip     string
+	}{
+		{"short.weixin.qq.com", "198.51.100.11"},
+		{"cos.ap-shanghai.myqcloud.com", "119.29.10.20"},
+		{"oss-cn-hangzhou.aliyuncs.com", "47.95.10.20"},
+		{"v26-web.douyinvod.com", "198.51.100.12"},
+		{"tos-s3-cn-beijing.volces.com", "198.51.100.13"},
+		{"grs.dbankcloud.com", "114.115.200.10"},
+		{"gateway.icloud.com", "17.253.144.10"},
+		{"mtalk.google.com", "142.250.190.46"},
+		{"edge.microsoft.com", "20.190.159.2"},
+		{"cdn.cloudflare.com", "104.16.132.229"},
+	}
+	for _, tc := range sharedDomainCases {
+		if ok, vendor := detectSharedInfraTarget(s, tc.domain, tc.ip); !ok || vendor == "" {
+			t.Fatalf("expected detectSharedInfraTarget(%q, %q) to hit shared infra, got ok=%v vendor=%q",
+				tc.domain, tc.ip, ok, vendor)
+		}
+	}
+	for _, sharedIP := range []string{
+		"119.29.10.20",   // Tencent Cloud
+		"47.95.10.20",    // Alibaba Cloud
+		"114.115.200.10", // Huawei Cloud
+		"17.253.144.10",  // Apple
+		"142.250.190.46", // Google
+		"20.190.159.2",   // Microsoft Azure
+		"104.16.132.229", // Cloudflare
+	} {
+		if ok, vendor := sigGuard(s, sharedIP); !ok || vendor == "" {
+			t.Fatalf("expected detectSharedInfraIP(%q) to detect shared cloud/CDN IP, got ok=%v vendor=%q",
+				sharedIP, ok, vendor)
+		}
+	}
+
+	// 2. 构造 run/dpi_ipname.json 反查表: 同时混入私网/回环/链路本地/CGNAT/Fake-IP/大厂共享网关 IP 与 1 个独立追踪器公网 IP
+	nowTs := time.Now().Unix()
+	ipNamesRaw := fmt.Sprintf(`{"entries":{
+		"192.168.43.1":   {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"10.0.0.8":       {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"127.0.0.53":     {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"169.254.10.20":  {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"100.64.88.99":   {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"198.18.0.55":    {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"fc00::1234":     {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"104.16.132.229": {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"47.95.10.20":    {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"17.253.144.10":  {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"142.250.190.46": {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"20.190.159.2":   {"name": "sdk.solo-tracker.example", "src": "dns", "ts": %d},
+		"198.51.100.77":  {"name": "short.weixin.qq.com", "src": "sni", "ts": %d},
+		"198.51.100.88":  {"name": "sub.sdk.solo-tracker.example", "src": "dns", "ts": %d}
+	}}`, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs, nowTs)
+	if err := os.MkdirAll(filepath.Join(dir, "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(ipNamesRaw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mac := "aa:bb:cc:dd:ee:01"
+	cbf := connBlockFile{
+		Items: []connBlock{
+			{MAC: mac, Kind: "domain", Value: "sdk.solo-tracker.example", Ts: nowTs},
+			{MAC: mac, Kind: "domain", Value: "weixin.qq.com", Ts: nowTs},
+		},
+	}
+	expanded := s.expandConnBlocks(cbf)
+	wantOnly := mac + " 198.51.100.88"
+	if len(expanded) != 1 || expanded[0] != wantOnly {
+		t.Fatalf("expandConnBlocks leaked shared/reserved IPs into HNC_CONNBLK: got=%v want=[%q]", expanded, wantOnly)
+	}
+	// DNS 域名层阻断列表必须完整保留精确域名阻断项
+	dnsLines := expandConnBlockDomains(cbf)
+	if len(dnsLines) != 2 {
+		t.Fatalf("expected 2 exact DNS domain block rules preserved, got %v", dnsLines)
+	}
+
+	// 3. actionConnBlockAdd 显式拒绝 CGNAT 100.64.0.0/10 与代理 Fake-IP 198.18.0.0/15
+	for _, badIP := range []string{"100.64.0.1", "100.127.255.254", "198.18.0.1", "198.19.255.254"} {
+		resp := actionConnBlockAdd(s, map[string]string{"mac": mac, "kind": "ip", "value": badIP})
+		if resp.OK {
+			t.Fatalf("expected actionConnBlockAdd to reject reserved/Fake-IP %s, got %+v", badIP, resp)
+		}
+	}
+}
+
+func TestLeakGuardEmptyMACGuardUndoStackAlsoIPAndDNSSync(t *testing.T) {
+	s, mux, dir := newV6TestMux(t)
+	lg := s.v6State().leakGuard
+	lg.notifyExec = func(context.Context, string, ...string) error { return nil }
+
+	// 1. 空 MAC 爆炸半径防呆: scope != "global" 时空 MAC 必须返回 HTTP 400 missing_mac, 严禁静默封锁全热点设备
+	for _, body := range []string{
+		`{"action":"block","dst_host":"blast-test.evil.example","mac":""}`,
+		`{"action":"block","dst_host":"blast-test.evil.example","mac":"   ","scope":"device"}`,
+	} {
+		rec := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain", body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"reason_code":"missing_mac"`) {
+			t.Fatalf("expected 400 missing_mac for %s, got %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	if len(readConnBlocks(dir).Items) != 0 {
+		t.Fatalf("conn_blocks.json must stay empty after rejected empty-MAC requests")
+	}
+
+	// 显式指定 scope:"global" 且 mac 为空时允许全热点级封禁(00:00:00:00:00:00)并返回顶层 undo_id
+	recGlobal := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain",
+		`{"action":"block","dst_host":"global-ad.evil.example","mac":"","scope":"global"}`)
+	if recGlobal.Code != http.StatusOK {
+		t.Fatalf("scope:global block failed: %d %s", recGlobal.Code, recGlobal.Body.String())
+	}
+	var globalResp struct {
+		OK     bool   `json:"ok"`
+		UndoID string `json:"undo_id"`
+	}
+	_ = json.Unmarshal(recGlobal.Body.Bytes(), &globalResp)
+	if !globalResp.OK || globalResp.UndoID == "" {
+		t.Fatalf("expected top-level undo_id in global block response, got %s", recGlobal.Body.String())
+	}
+	// 秒级同步检查: 不等 10s 轮询, s.dnsTK() 必须立即对任意客户端拦截该全局域名!
+	if !s.dnsTK().blocked("aa:bb:cc:dd:ee:99", "sub.global-ad.evil.example") {
+		t.Fatal("expected s.dnsTK() blocklist to sync immediately after global block")
+	}
+
+	// 2. 单设备封禁 + 独立公网 AlsoIP 双栈联动落盘、顶层 undo_id、底层失败压回栈顶与成功后 100% 干净回滚
+	mac := "aa:bb:cc:dd:ee:01"
+	recDual := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain",
+		fmt.Sprintf(`{"action":"block","dst_host":"dual-ad.evil.example","also_ip":"198.51.100.201","mac":%q}`, mac))
+	if recDual.Code != http.StatusOK {
+		t.Fatalf("dual block failed: %d %s", recDual.Code, recDual.Body.String())
+	}
+	var dualResp struct {
+		OK            bool   `json:"ok"`
+		UndoID        string `json:"undo_id"`
+		BlockedAlsoIP string `json:"blocked_also_ip"`
+	}
+	_ = json.Unmarshal(recDual.Body.Bytes(), &dualResp)
+	if !dualResp.OK || dualResp.UndoID == "" || dualResp.BlockedAlsoIP != "198.51.100.201" {
+		t.Fatalf("unexpected dual block response: %s", recDual.Body.String())
+	}
+	if !s.dnsTK().blocked(mac, "api.dual-ad.evil.example") {
+		t.Fatal("expected s.dnsTK() blocklist to sync immediately after device block")
+	}
+
+	// 注入失败的 bin/connblock_sync.sh 模拟底层解封同步失败: undo-block 必须返回 500 且将记录重新压回栈顶!
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	syncScript := filepath.Join(binDir, "connblock_sync.sh")
+	if err := os.WriteFile(syncScript, []byte("echo 'mock iptables lock error'\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	recFailUndo := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/undo-block", `{}`)
+	if recFailUndo.Code != http.StatusInternalServerError || strings.Contains(recFailUndo.Body.String(), `"ok":true`) {
+		t.Fatalf("expected 500 ok:false when underlying connblock_sync.sh fails on undo, got %d %s",
+			recFailUndo.Code, recFailUndo.Body.String())
+	}
+	lg.mu.Lock()
+	stackLenAfterFail := len(lg.undoStack)
+	topIDAfterFail := ""
+	if stackLenAfterFail > 0 {
+		topIDAfterFail = lg.undoStack[stackLenAfterFail-1].ID
+	}
+	lg.mu.Unlock()
+	if stackLenAfterFail != 2 || topIDAfterFail != dualResp.UndoID {
+		t.Fatalf("failed undo MUST re-push entry onto top of undoStack: len=%d topID=%q wantID=%q",
+			stackLenAfterFail, topIDAfterFail, dualResp.UndoID)
+	}
+
+	// 修复底层脚本后再次执行 undo-block: 必须彻底移除域名及关联 AlsoIP, 且立即刷新 s.dnsTK() 放行!
+	if err := os.WriteFile(syncScript, []byte("exit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recOKUndo := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/undo-block", `{}`)
+	if recOKUndo.Code != http.StatusOK {
+		t.Fatalf("retry undo after script recovery failed: %d %s", recOKUndo.Code, recOKUndo.Body.String())
+	}
+	var undoResp struct {
+		OK     bool   `json:"ok"`
+		UndoID string `json:"undo_id"`
+		AlsoIP string `json:"also_ip"`
+	}
+	_ = json.Unmarshal(recOKUndo.Body.Bytes(), &undoResp)
+	if !undoResp.OK || undoResp.UndoID != dualResp.UndoID || undoResp.AlsoIP != "198.51.100.201" {
+		t.Fatalf("unexpected undo response: %s", recOKUndo.Body.String())
+	}
+	for _, it := range readConnBlocks(dir).Items {
+		if it.Value == "dual-ad.evil.example" || it.Value == "198.51.100.201" {
+			t.Fatalf("undo failed to clean domain or AlsoIP from conn_blocks.json: %+v", it)
+		}
+	}
+	if s.dnsTK().blocked(mac, "api.dual-ad.evil.example") {
+		t.Fatal("expected s.dnsTK() blocklist to clear unblocked domain immediately after undo")
+	}
+}
+
+func TestBlackboxRTTProbeActiveIdleNoFlushAndWifiStaAttribution(t *testing.T) {
+	globalJitterBlackbox.Clear()
+	t.Cleanup(globalJitterBlackbox.Clear)
+
+	s, mux, _ := newV6TestMux(t)
+	s.registerV6ScreenshotPackRoutes(mux)
+
+	var arMu sync.Mutex
+	arActive := false
+	arRTT := 0.0
+	s.blackboxAutorateHook = func() (blackboxAutorateReading, bool) {
+		arMu.Lock()
+		defer arMu.Unlock()
+		if !arActive {
+			return blackboxAutorateReading{}, false
+		}
+		return blackboxAutorateReading{
+			RTTMs:       arRTT,
+			BaseRTTMs:   20.0,
+			CapacityBps: 12_500_000,
+		}, true
+	}
+
+	var actMu sync.Mutex
+	curAct := Activity{Known: true, HotspotActive: true, ClientsOnline: 1}
+	actCh := make(chan struct{})
+	s.blackboxActivityHook = func() (<-chan struct{}, Activity) {
+		actMu.Lock()
+		defer actMu.Unlock()
+		return actCh, curAct
+	}
+
+	// 1. Autorate 未启用时: rtt_probe_active 必须严格为 false
+	recGet0 := doGuardJSONReq(t, mux, http.MethodGet, "/api/v6/blackbox?limit=10", "")
+	if recGet0.Code != http.StatusOK || !strings.Contains(recGet0.Body.String(), `"rtt_probe_active":false`) {
+		t.Fatalf("expected rtt_probe_active:false when autorate disabled, got %d %s", recGet0.Code, recGet0.Body.String())
+	}
+	if bbSum, _ := s.v6ScreenshotPackSummary()["blackbox"].(map[string]any); bbSum["rtt_probe_active"] != false {
+		t.Fatalf("expected summary blackbox.rtt_probe_active=false, got %+v", bbSum)
+	}
+
+	// 2. Autorate 启用且有新鲜真实 RTT 样本: 采样 5 帧(含 1 次突刺事件), 验证 rtt_probe_active:true
+	arMu.Lock()
+	arActive = true
+	arRTT = 26.5
+	arMu.Unlock()
+	s.rateMu.Lock()
+	s.rates = map[string]rateOut{"aa:bb:cc:dd:ee:01": {rxBps: 120_000, txBps: 40_000}}
+	s.rateMu.Unlock()
+
+	tBase := time.Now().Add(-5 * time.Second)
+	for i := 0; i < 4; i++ {
+		fr, _ := s.SampleBlackboxOnce(tBase.Add(time.Duration(i*200) * time.Millisecond))
+		if !fr.RTTProbeActive {
+			t.Fatalf("frame %d expected RTTProbeActive=true", i)
+		}
+	}
+	arMu.Lock()
+	arRTT = 98.0
+	arMu.Unlock()
+	spikeFr, spikeInc := s.SampleBlackboxOnce(tBase.Add(1200 * time.Millisecond))
+	if !spikeFr.RTTProbeActive || spikeInc == nil {
+		t.Fatalf("expected active spike frame & incident, got frame=%+v inc=%+v", spikeFr, spikeInc)
+	}
+
+	recGet1 := doGuardJSONReq(t, mux, http.MethodGet, "/api/v6/blackbox?limit=10", "")
+	if !strings.Contains(recGet1.Body.String(), `"rtt_probe_active":true`) {
+		t.Fatalf("expected rtt_probe_active:true when autorate has fresh RTT, got %s", recGet1.Body.String())
+	}
+
+	// 3. Law 7: 切入 lvlNoClients 与 lvlHotspotOff 空闲态后连续请求 sample_now, 严禁推入空白帧冲刷 blackboxRing!
+	ticksBeforeIdle := globalJitterBlackbox.totalTicks.Load()
+	for _, idleAct := range []Activity{
+		{Known: true, HotspotActive: true, ClientsOnline: 0},
+		{Known: true, HotspotActive: false, ClientsOnline: 0},
+	} {
+		actMu.Lock()
+		curAct = idleAct
+		actMu.Unlock()
+		arMu.Lock()
+		arActive = false
+		arRTT = 0
+		arMu.Unlock()
+
+		for i := 0; i < 10; i++ {
+			recNow := doGuardJSONReq(t, mux, http.MethodPost, "/api/v6/blackbox", `{"action":"sample_now"}`)
+			if recNow.Code != http.StatusOK {
+				t.Fatalf("idle sample_now failed: %d %s", recNow.Code, recNow.Body.String())
+			}
+			var nowResp struct {
+				OK             bool              `json:"ok"`
+				IdleSkipped    bool              `json:"idle_skipped"`
+				RTTProbeActive bool              `json:"rtt_probe_active"`
+				Frame          BlackboxFrame     `json:"frame"`
+				Incident       *BlackboxIncident `json:"incident"`
+			}
+			if err := json.Unmarshal(recNow.Body.Bytes(), &nowResp); err != nil {
+				t.Fatal(err)
+			}
+			if !nowResp.OK || !nowResp.IdleSkipped || nowResp.RTTProbeActive {
+				t.Fatalf("expected idle_skipped=true & rtt_probe_active=false during %+v, got %+v", idleAct, nowResp)
+			}
+			if nowResp.Frame.Seq != spikeFr.Seq || nowResp.Incident == nil || nowResp.Incident.IncidentID != spikeInc.IncidentID {
+				t.Fatalf("idle sample_now failed to preserve latest frame/incident: got frame.Seq=%d inc=%+v",
+					nowResp.Frame.Seq, nowResp.Incident)
+			}
+		}
+	}
+	if gotTicks := globalJitterBlackbox.totalTicks.Load(); gotTicks != ticksBeforeIdle {
+		t.Fatalf("idle sample_now pushed blank frames into blackboxRing: totalTicks=%d want=%d", gotTicks, ticksBeforeIdle)
+	}
+	framesAfterIdle, incsAfterIdle := globalJitterBlackbox.Snapshot(300, false)
+	if len(framesAfterIdle) != 5 || len(incsAfterIdle) != 1 {
+		t.Fatalf("expected 5 frames & 1 incident intact after 20 idle sample_now calls, got frames=%d incs=%d",
+			len(framesAfterIdle), len(incsAfterIdle))
+	}
+
+	// 4. attributeBlackboxSpike: 上游为 wifi_sta 或 !SignalAvailable 时绝不归因为 5G/蜂窝基站信号掉格
+	jb := NewJitterBlackbox(16, 8)
+	_, incWifi := jb.RecordSample(BlackboxTickInput{
+		Now:             time.Unix(1880000010, 0),
+		RTTMs:           132.0,
+		BaseRTTMs:       20.0,
+		CapacityBps:     12_500_000,
+		SignalAvailable: true,
+		SignalMode:      "wifi_sta",
+		SignalQuality:   "weak",
+		SignalRSRPdBm:   -115,
+		SignalSINRdB:    -5,
+		Devices: []BlackboxDeviceSample{
+			{MAC: "aa:bb:cc:dd:ee:01", Name: "掌机", RxBps: 25_000, TxBps: 12_000},
+		},
+	})
+	if incWifi == nil || incWifi.CauseDim != BlackboxDimWifiJitter || incWifi.CulpritIsHog {
+		t.Fatalf("expected wifi_jitter with CulpritIsHog=false for wifi_sta upstream, got %+v", incWifi)
+	}
+	if incWifi.RSRPdBm != 0 || incWifi.SINRdB != 0 {
+		t.Fatalf("wifi_sta incident must not carry cellular RSRP/SINR: %+v", incWifi)
+	}
+	for _, forbidden := range []string{"基站", "蜂窝", "5G"} {
+		if strings.Contains(incWifi.VerdictZh, forbidden) || strings.Contains(incWifi.RootCauseZh, forbidden) || strings.Contains(incWifi.CauseLabelZh, forbidden) {
+			t.Fatalf("wifi_sta attribution falsely blamed cellular (%q): %+v", forbidden, incWifi)
+		}
+	}
+
+	_, incNoSig := jb.RecordSample(BlackboxTickInput{
+		Now:             time.Unix(1880000020, 0),
+		RTTMs:           140.0,
+		BaseRTTMs:       22.0,
+		CapacityBps:     12_500_000,
+		SignalAvailable: false,
+		SignalMode:      "unknown",
+		SignalRSRPdBm:   -118,
+		Devices: []BlackboxDeviceSample{
+			{MAC: "aa:bb:cc:dd:ee:01", Name: "掌机", RxBps: 20_000, TxBps: 10_000},
+		},
+	})
+	if incNoSig == nil || incNoSig.CauseDim != BlackboxDimUpstreamJitter || incNoSig.CulpritIsHog {
+		t.Fatalf("expected upstream_jitter with CulpritIsHog=false when !SignalAvailable, got %+v", incNoSig)
+	}
+	if incNoSig.RSRPdBm != 0 || incNoSig.SINRdB != 0 {
+		t.Fatalf("!SignalAvailable incident must not carry cellular RSRP/SINR: %+v", incNoSig)
+	}
+	for _, forbidden := range []string{"基站", "蜂窝", "5G"} {
+		if strings.Contains(incNoSig.VerdictZh, forbidden) || strings.Contains(incNoSig.RootCauseZh, forbidden) || strings.Contains(incNoSig.CauseLabelZh, forbidden) {
+			t.Fatalf("!SignalAvailable attribution falsely blamed cellular (%q): %+v", forbidden, incNoSig)
+		}
+	}
+}
+
+

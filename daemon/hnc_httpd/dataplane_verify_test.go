@@ -316,9 +316,9 @@ func TestDataplaneVerifyFourVerdictsAndDelta(t *testing.T) {
 		t.Fatalf("expected device 2 verdict=idle, got %+v", d2)
 	}
 
-	// 校验 3: bypass_offload
-	if d3 := byMAC["aa:bb:cc:dd:ee:03"]; d3.Verdict != "bypass_offload" {
-		t.Fatalf("expected device 3 verdict=bypass_offload, got %+v", d3)
+	// 校验 3: bypass + qcom_tether_bpf_bypass + 双路径修复指引
+	if d3 := byMAC["aa:bb:cc:dd:ee:03"]; d3.Verdict != "bypass" || d3.ReasonCode != "qcom_tether_bpf_bypass" || d3.Advice != dpBypassDualPathAdvice {
+		t.Fatalf("expected device 3 verdict=bypass reason_code=qcom_tether_bpf_bypass advice=dual-path, got %+v", d3)
 	}
 
 	// 校验 4: missing_class
@@ -638,3 +638,140 @@ func TestCheckIPv6QUICControlledExactChainMatch(t *testing.T) {
 		t.Fatalf("runDataplaneVerify with quic_block=false and HNC_QUIC_APPLIM only: IPv6QUICControlled=true, want false")
 	}
 }
+
+func TestDataplaneVerifyRC4RatioBypassAndUnavailableAndHonestBPFMaps(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite := func(rel, content string) {
+		t.Helper()
+		full := filepath.Join(tmp, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mustWrite("run/hnc_state", "ACTIVE:wlan2\n")
+	mustWrite("run/offload_guard.json", `{"mode":"auto","offload_state":"IDLE","slowpath":true,"tether_offload_disabled":true}`)
+	mustWrite("data/rules.json", `{
+		"devices": {
+			"aa:bb:cc:dd:ee:11": {"mark_id": 1, "down_mbps": 20, "up_mbps": 10, "limit_enabled": true}
+		}
+	}`)
+	mustWrite("data/devices.json", `{
+		"aa:bb:cc:dd:ee:11": {"ip": "192.168.43.111", "online": true, "rx_bytes": 100000, "tx_bytes": 20000}
+	}`)
+
+	curNow := time.Unix(1763600000, 0)
+	downSent := uint64(10240)
+	hasTetherBPF := true
+	snaps := newDPVerifySnapshotStore()
+
+	env := &dpVerifyEnv{
+		HNCDir:            tmp,
+		UplinkIface:       "ifb0",
+		BPFMACMapPin:      filepath.Join(tmp, "unreadable_mac_map"),
+		BPFIPMapPin:       filepath.Join(tmp, "unreadable_ip_map"),
+		BPFTetherLimitPin: filepath.Join(tmp, "fake_tether_limit"),
+		Now:               func() time.Time { return curNow },
+		ReadFile: func(p string) ([]byte, error) {
+			if strings.Contains(p, "unreadable_") {
+				return nil, errors.New("permission denied")
+			}
+			return os.ReadFile(p)
+		},
+		Exists: func(p string) bool {
+			if strings.Contains(p, "unreadable_") {
+				return true
+			}
+			if strings.Contains(p, "fake_tether_limit") {
+				return hasTetherBPF
+			}
+			_, err := os.Stat(p)
+			return err == nil
+		},
+		Ifindex: func(ifc string) int {
+			if ifc == "wlan2" {
+				return 11
+			}
+			return 12
+		},
+		DumpHTBNetlink: func(ifindex int) (map[string]TCClassStats, error) {
+			if ifindex == 11 {
+				return map[string]TCClassStats{
+					"1:1":   {ClassID: "1:1", ParentID: "root", SentBytes: downSent},
+					"1:100": {ClassID: "1:100", ParentID: "1:1", SentBytes: downSent, SentPkts: 40},
+				}, nil
+			}
+			return map[string]TCClassStats{
+				"1:1":   {ClassID: "1:1", ParentID: "root", SentBytes: 2048},
+				"1:100": {ClassID: "1:100", ParentID: "1:1", SentBytes: 2048, SentPkts: 10},
+			}, nil
+		},
+		RunCmd: func(_ context.Context, name string, args ...string) (string, error) {
+			joined := name + " " + strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, "tc filter show dev wlan2"):
+				return "filter parent 1: protocol all pref 50 fw chain 0 handle 0x00810000/0x00ff0000 fw classid 1:100\n", nil
+			case strings.Contains(joined, "tc filter show dev ifb0"):
+				return "filter parent 1: protocol all pref 50 fw chain 0 handle 0x00810000/0x00ff0000 fw classid 1:100\n", nil
+			}
+			return "", nil
+		},
+		Snaps: snaps,
+	}
+
+	// 1. 首帧建基线 + 验证 BPF Map 不可读时诚实置 BpfMapReadable=false 且条目数为 0 (绝不拿 rules.json 条数冒充!)
+	rep1 := runDataplaneVerify(env, dpVerifyOptions{})
+	if rep1.BPFMaps.BpfMapReadable || rep1.BPFMaps.MACMarkEntries != 0 || rep1.BPFMaps.IPMarkEntries != 0 {
+		t.Fatalf("unreadable BPF maps must set BpfMapReadable=false and 0 entries (no dpCountSyncedSpecs fake fallback), got %+v", rep1.BPFMaps)
+	}
+
+	// 2. 第二帧(+2s): 客户端实际收发暴涨 +512 KiB (524288 B >= 64 KiB), 但 HTB 仅有 +4 KiB TCP 握手小包经过 (< 30%)!
+	//    旧代码因 htbDelta=4096>0 会误判为 "hit", 新逻辑必须判为 Verdict="bypass", ReasonCode="qcom_tether_bpf_bypass"!
+	curNow = curNow.Add(2 * time.Second)
+	downSent += 4096
+	mustWrite("data/devices.json", `{
+		"aa:bb:cc:dd:ee:11": {"ip": "192.168.43.111", "online": true, "rx_bytes": 624288, "tx_bytes": 20000}
+	}`)
+	rep2 := runDataplaneVerify(env, dpVerifyOptions{})
+	if len(rep2.Devices) != 1 {
+		t.Fatalf("expected 1 device, got %d", len(rep2.Devices))
+	}
+	dev := rep2.Devices[0]
+	if dev.Verdict != "bypass" || dev.ReasonCode != "qcom_tether_bpf_bypass" {
+		t.Fatalf("expected Verdict='bypass' ReasonCode='qcom_tether_bpf_bypass' on 0.78%% HTB capture, got %+v", dev)
+	}
+	if dev.Advice != dpBypassDualPathAdvice || rep2.Summary.Advice != dpBypassDualPathAdvice || rep2.Advice != dpBypassDualPathAdvice {
+		t.Fatalf("expected dual-path bypass advice in device/summary/report, got dev=%q sum=%q rep=%q",
+			dev.Advice, rep2.Summary.Advice, rep2.Advice)
+	}
+
+	// 3. 无 tether BPF 映射的异构硬件快径(如联发科 HNAT/MDDP)同样比例截流 -> ReasonCode="hw_offload_bypass"
+	hasTetherBPF = false
+	curNow = curNow.Add(2 * time.Second)
+	downSent += 2048
+	mustWrite("data/devices.json", `{
+		"aa:bb:cc:dd:ee:11": {"ip": "192.168.43.111", "online": true, "rx_bytes": 924288, "tx_bytes": 20000}
+	}`)
+	rep3 := runDataplaneVerify(env, dpVerifyOptions{})
+	if rep3.Devices[0].Verdict != "bypass" || rep3.Devices[0].ReasonCode != "hw_offload_bypass" {
+		t.Fatalf("expected Verdict='bypass' ReasonCode='hw_offload_bypass' without tether BPF, got %+v", rep3.Devices[0])
+	}
+
+	// 4. 当 tc 和 Netlink 读取均失败时 -> 必须返回 Verdict="unavailable" 而非 "idle"!
+	env.DumpHTBNetlink = func(int) (map[string]TCClassStats, error) {
+		return nil, errors.New("netlink EPERM")
+	}
+	env.RunCmd = func(_ context.Context, _ string, _ ...string) (string, error) {
+		return "", errors.New("tc/iptables exec EACCES")
+	}
+	curNow = curNow.Add(2 * time.Second)
+	repUnavail := runDataplaneVerify(env, dpVerifyOptions{})
+	if repUnavail.Devices[0].Verdict != "unavailable" || repUnavail.Summary.OverallStatus != "unavailable" {
+		t.Fatalf("expected Verdict='unavailable' and OverallStatus='unavailable' on tc read failure, got dev=%+v sum=%+v",
+			repUnavail.Devices[0], repUnavail.Summary)
+	}
+}
+

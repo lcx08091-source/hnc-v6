@@ -105,13 +105,10 @@ func (s *server) flipFlagFile(w http.ResponseWriter, r *http.Request, flagPath, 
 		return
 	}
 	if *body.Enabled {
-		f, err := os.OpenFile(flagPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if err != nil {
+		if err := writeFileAtomic(flagPath, []byte("enabled\n")); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		_, _ = f.WriteString("enabled\n")
-		_ = f.Close()
 	} else {
 		if err := os.Remove(flagPath); err != nil && !os.IsNotExist(err) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -280,19 +277,36 @@ func (s *server) apiSelfAttrib(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	// Find most recent self_attrib.*.jsonl
-	runDir := filepath.Join(s.hncDir, "run")
-	entries, err := os.ReadDir(runDir)
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"error": err.Error()})
+	// Find most recent self_attrib.*.jsonl (data/self_studio/ preferred, fallback run/)
+	chosenPath := map[string]string{}
+	anyDirOK := false
+	var lastDirErr error
+	for _, dir := range selfStudioScanDirs(s.hncDir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			lastDirErr = err
+			continue
+		}
+		anyDirOK = true
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			n := e.Name()
+			if strings.HasPrefix(n, "self_attrib.") && strings.HasSuffix(n, ".jsonl") {
+				if _, seen := chosenPath[n]; !seen {
+					chosenPath[n] = filepath.Join(dir, n)
+				}
+			}
+		}
+	}
+	if !anyDirOK && lastDirErr != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"error": lastDirErr.Error()})
 		return
 	}
-	var files []string
-	for _, e := range entries {
-		n := e.Name()
-		if strings.HasPrefix(n, "self_attrib.") && strings.HasSuffix(n, ".jsonl") {
-			files = append(files, n)
-		}
+	files := make([]string, 0, len(chosenPath))
+	for n := range chosenPath {
+		files = append(files, n)
 	}
 	if len(files) == 0 {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -303,7 +317,7 @@ func (s *server) apiSelfAttrib(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(files)
 	latest := files[len(files)-1]
-	f, err := os.Open(filepath.Join(runDir, latest))
+	f, err := os.Open(chosenPath[latest])
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

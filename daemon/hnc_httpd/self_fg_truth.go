@@ -37,9 +37,30 @@ const (
 	selfFGCmdTimeout = 2 * time.Second
 	// selfFGRetainDays 前台真值保留天数, 与样本一致(§2.2)。
 	selfFGRetainDays = 7
-	// selfFGFileMode run/ 下私有, 不放全局可读。
+	// selfFGMaxDayBytes 单日硬上限 1 MiB, 超限后停止当日追加(死定律四: 防写爆存储)。
+	selfFGMaxDayBytes = 1 << 20
+	// selfFGFileMode data/self_studio/ 下私有, 不放全局可读。
 	selfFGFileMode = os.FileMode(0o640)
 )
+
+// selfStudioDir 本机自训工坊统一落盘目录(<hncDir>/data/self_studio)。
+func selfStudioDir(hncDir string) string {
+	return filepath.Join(hncDir, "data", "self_studio")
+}
+
+// ensureSelfStudioDir 确保 <hncDir>/data/self_studio 存在(0755)。
+func ensureSelfStudioDir(hncDir string) (string, error) {
+	dir := selfStudioDir(hncDir)
+	return dir, os.MkdirAll(dir, 0o755)
+}
+
+// selfStudioScanDirs 读取/清理优先级目录: 先 data/self_studio/, 后回退兼容旧 run/。
+func selfStudioScanDirs(hncDir string) []string {
+	return []string{
+		selfStudioDir(hncDir),
+		filepath.Join(hncDir, "run"),
+	}
+}
 
 // selfFGRecord 是落到 jsonl 的一行(字段名固定, 见工作文档 T2)。
 type selfFGRecord struct {
@@ -182,19 +203,29 @@ func firstPkg(line string) string {
 	return m[1]
 }
 
-// selfFGPath 当天前台真值文件路径。
+// selfFGPath 当天前台真值文件路径(统一写入 data/self_studio/)。
 func selfFGPath(hncDir string, t time.Time) string {
-	return filepath.Join(hncDir, "run", "self_fg."+t.Local().Format("20060102")+".jsonl")
+	return filepath.Join(selfStudioDir(hncDir), "self_fg."+t.Local().Format("20060102")+".jsonl")
 }
 
-// appendSelfFG 追加一行(文件不存在则创建)。失败只返回 err, 不影响循环。
+// appendSelfFG 追加一行(文件不存在则创建, 单日上限 1 MiB 超限停止当日追加)。
+// 失败只返回 err, 不影响循环。
 func appendSelfFG(hncDir string, t time.Time, rec selfFGRecord) error {
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
 	b = append(b, '\n')
+	if len(b) > selfFGMaxDayBytes {
+		return nil
+	}
+	if _, err := ensureSelfStudioDir(hncDir); err != nil {
+		return err
+	}
 	path := selfFGPath(hncDir, t)
+	if fi, err := os.Stat(path); err == nil && fi.Size()+int64(len(b)) > selfFGMaxDayBytes {
+		return nil
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, selfFGFileMode)
 	if err != nil {
 		return err
@@ -204,26 +235,75 @@ func appendSelfFG(hncDir string, t time.Time, rec selfFGRecord) error {
 	return err
 }
 
-// sweepSelfFG 删除 7 天前的 self_fg.*.jsonl。只删自己前缀 + 标准日期名的文件,
-// 绝不碰别人的东西。读目录失败 / 删除失败都静默(采集不能因此中断)。
+// sweepSelfFG 删除 7 天前的 self_fg.*.jsonl(同时覆盖 data/self_studio/ 与旧版 run/)。
+// 只删自己前缀 + 标准日期名的文件, 绝不碰别人的东西。读目录失败 / 删除失败都静默。
 func sweepSelfFG(hncDir string, now time.Time) {
-	dir := filepath.Join(hncDir, "run")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
 	cutoff := now.AddDate(0, 0, -selfFGRetainDays).Format("20060102")
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "self_fg.") || !strings.HasSuffix(name, ".jsonl") {
+	for _, dir := range selfStudioScanDirs(hncDir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
 			continue
 		}
-		day := strings.TrimSuffix(strings.TrimPrefix(name, "self_fg."), ".jsonl")
-		if len(day) != 8 || day >= cutoff {
-			continue
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasPrefix(name, "self_fg.") || !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			day := strings.TrimSuffix(strings.TrimPrefix(name, "self_fg."), ".jsonl")
+			if len(day) != 8 || day >= cutoff {
+				continue
+			}
+			_ = os.Remove(filepath.Join(dir, name))
 		}
-		_ = os.Remove(filepath.Join(dir, name))
 	}
+}
+
+// readSelfFGRecordsForDay 优先读取 data/self_studio/self_fg.<day>.jsonl, 并兼容合并旧版 run/ 残留。
+func readSelfFGRecordsForDay(hncDir, day string) []selfFGRecord {
+	type dedupKey struct {
+		ts  int64
+		pkg string
+		src string
+	}
+	seen := map[dedupKey]bool{}
+	var out []selfFGRecord
+	// 先扫 data/self_studio/ 再扫旧 run/, 去重合并后按时间保序排列
+	for _, dir := range selfStudioScanDirs(hncDir) {
+		f, err := os.Open(filepath.Join(dir, "self_fg."+day+".jsonl"))
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 0, 8*1024), 64*1024)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
+			}
+			var rec selfFGRecord
+			if json.Unmarshal([]byte(line), &rec) != nil || rec.Pkg == "" || rec.Ts <= 0 {
+				continue
+			}
+			k := dedupKey{ts: rec.Ts, pkg: rec.Pkg, src: rec.Source}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, rec)
+		}
+		_ = f.Close()
+	}
+	// 按时间戳升序稳定插入排序(通常原本已有序, 合并双目录时恢复全局时序)
+	for i := 1; i < len(out); i++ {
+		cur := out[i]
+		j := i - 1
+		for j >= 0 && out[j].Ts > cur.Ts {
+			out[j+1] = out[j]
+			j--
+		}
+		out[j+1] = cur
+	}
+	return out
 }
 
 // selfFGSummary 给评估接口(T4)用: 24 小时内前台切换次数 + 最近一次。
@@ -240,23 +320,8 @@ func summarizeSelfFG(hncDir string, now time.Time) selfFGSummary {
 	sum.Source = "none"
 	cutoff := now.Add(-24 * time.Hour).Unix()
 	// 扫最近两天的文件(跨零点时 24 小时窗口会横跨两个日期文件)。
-	for _, day := range []string{now.Local().Format("20060102"), now.AddDate(0, 0, -1).Local().Format("20060102")} {
-		path := filepath.Join(hncDir, "run", "self_fg."+day+".jsonl")
-		f, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 0, 8*1024), 64*1024)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" {
-				continue
-			}
-			var rec selfFGRecord
-			if json.Unmarshal([]byte(line), &rec) != nil {
-				continue
-			}
+	for _, day := range []string{now.AddDate(0, 0, -1).Local().Format("20060102"), now.Local().Format("20060102")} {
+		for _, rec := range readSelfFGRecordsForDay(hncDir, day) {
 			if rec.Ts < cutoff {
 				continue
 			}
@@ -265,7 +330,6 @@ func summarizeSelfFG(hncDir string, now time.Time) selfFGSummary {
 				sum.LastTs, sum.LastPkg, sum.Source = rec.Ts, rec.Pkg, rec.Source
 			}
 		}
-		f.Close()
 	}
 	return sum
 }

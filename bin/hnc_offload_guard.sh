@@ -108,8 +108,22 @@ has_active_policy() {
     return 1
 }
 
+SYS_NET_ERR=""
 hotspot_iface() {
     local s=""
+    SYS_NET_ERR=""
+    if [ ! -e "$SYS_NET" ]; then
+        SYS_NET_ERR="node_missing"
+        return 1
+    fi
+    if [ ! -r "$SYS_NET" ] || [ ! -x "$SYS_NET" ]; then
+        SYS_NET_ERR="permission_denied"
+        return 1
+    fi
+    if [ -e "$RUN/hnc_state" ] && [ ! -r "$RUN/hnc_state" ]; then
+        SYS_NET_ERR="permission_denied"
+        return 1
+    fi
     s=$(sed -n 's/^ACTIVE://p' "$RUN/hnc_state" 2>/dev/null | head -n1 | tr -d ' \r\n')
     case "$s" in *[!a-zA-Z0-9_.:-]*) s="" ;; esac
     if [ -n "$s" ] && [ -e "$SYS_NET/$s" ]; then
@@ -119,9 +133,31 @@ hotspot_iface() {
     return 1
 }
 
-st_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n1; }
+is_sta_ap_same_iface() {
+    local _ifc="$1" _idj _up _tup _lup
+    [ -n "$_ifc" ] || return 1
+    [ -r "$RUN/iface_detect.json" ] || return 1
+    _idj=$(tr -d '\r\n' < "$RUN/iface_detect.json" 2>/dev/null) || return 1
+    _up=$(printf '%s' "$_idj" | grep -oE '"upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    _tup=$(printf '%s' "$_idj" | grep -oE '"tether_upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    _lup=$(printf '%s' "$_idj" | grep -oE '"local_upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    if [ "$_up" = "$_ifc" ] || [ "$_tup" = "$_ifc" ] || [ "$_lup" = "$_ifc" ]; then
+        return 0
+    fi
+    if [ "$_ifc" = "wlan0" ] && printf '%s' "$_idj" | grep -qE '"wlan0_ap"[[:space:]]*:[[:space:]]*true'; then
+        return 0
+    fi
+    return 1
+}
+
+st_get() { [ -r "$STATE" ] || return 0; sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n1; }
 st_save() {
-    { echo "fallback=$1"; echo "since=$2"; echo "calm=$3"; } > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null
+    local _stmp="$STATE.tmp.$$"
+    if { echo "fallback=$1"; echo "since=$2"; echo "calm=$3"; } > "$_stmp" 2>/dev/null && [ -s "$_stmp" ]; then
+        mv -f "$_stmp" "$STATE" 2>/dev/null || rm -f "$_stmp" 2>/dev/null || true
+    else
+        rm -f "$_stmp" 2>/dev/null || true
+    fi
 }
 
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\r\n'; }
@@ -144,12 +180,15 @@ is_tether_offload_disabled() {
 }
 
 write_status() {
-    local fb=false tod=false
+    local fb=false tod=false _rc_code="${9:-ok}" _stmp="$STATUS.tmp.$$"
     [ "$3" = 1 ] && fb=true
     is_tether_offload_disabled "$3" && tod=true
-    printf '{"mode":"%s","offload_state":"%s","fallback_active":%s,"tether_offload_disabled":%s,"since":%s,"detail":"%s","last_check":%s,"slowpath":"%s","clsact":"%s","iface":"%s","hwnat":"%s"}\n' \
-        "$1" "$2" "$fb" "$tod" "${4:-0}" "$(json_str "$5")" "$(now_s)" "$6" "$7" "$8" "${HWNAT_ST:-n/a}" > "$STATUS.tmp" 2>/dev/null \
-        && mv -f "$STATUS.tmp" "$STATUS" 2>/dev/null
+    if printf '{"mode":"%s","offload_state":"%s","fallback_active":%s,"tether_offload_disabled":%s,"since":%s,"reason_code":"%s","detail":"%s","last_check":%s,"slowpath":"%s","clsact":"%s","iface":"%s","hwnat":"%s"}\n' \
+        "$1" "$2" "$fb" "$tod" "${4:-0}" "$(json_str "$_rc_code")" "$(json_str "$5")" "$(now_s)" "$6" "$7" "$8" "${HWNAT_ST:-n/a}" > "$_stmp" 2>/dev/null && [ -s "$_stmp" ]; then
+        mv -f "$_stmp" "$STATUS" 2>/dev/null || rm -f "$_stmp" 2>/dev/null || true
+    else
+        rm -f "$_stmp" 2>/dev/null || true
+    fi
 }
 
 # Android Settings.Global.tether_offload_disabled 三态(null/0/1)无损备份与恢复
@@ -159,20 +198,28 @@ tether_hal_suppress() {
     fi
     command -v "$SETTINGS_BIN" >/dev/null 2>&1 || return 0
     if [ ! -f "$ORIG_TETHER_FILE" ]; then
-        local _raw
+        local _raw _otmp="${ORIG_TETHER_FILE}.tmp.$$"
         _raw=$("$SETTINGS_BIN" get global tether_offload_disabled 2>/dev/null | strip_ws)
         case "$_raw" in
             0|1|null)
-                printf '%s\n' "$_raw" > "${ORIG_TETHER_FILE}.tmp" 2>/dev/null \
-                    && mv -f "${ORIG_TETHER_FILE}.tmp" "$ORIG_TETHER_FILE" 2>/dev/null || return 0
+                if printf '%s\n' "$_raw" > "$_otmp" 2>/dev/null && [ -s "$_otmp" ]; then
+                    mv -f "$_otmp" "$ORIG_TETHER_FILE" 2>/dev/null || { rm -f "$_otmp" 2>/dev/null; return 0; }
+                else
+                    rm -f "$_otmp" 2>/dev/null
+                    return 0
+                fi
                 log "backed up orig tether_offload_disabled=$_raw"
                 ;;
             "")
                 return 0
                 ;;
             *)
-                printf '%s\n' "$_raw" > "${ORIG_TETHER_FILE}.tmp" 2>/dev/null \
-                    && mv -f "${ORIG_TETHER_FILE}.tmp" "$ORIG_TETHER_FILE" 2>/dev/null || return 0
+                if printf '%s\n' "$_raw" > "$_otmp" 2>/dev/null && [ -s "$_otmp" ]; then
+                    mv -f "$_otmp" "$ORIG_TETHER_FILE" 2>/dev/null || { rm -f "$_otmp" 2>/dev/null; return 0; }
+                else
+                    rm -f "$_otmp" 2>/dev/null
+                    return 0
+                fi
                 ;;
         esac
     fi
@@ -347,7 +394,7 @@ do_restore() {
 }
 
 tick() {
-    local mode ifc state fb since calm sp="n/a" cl="off" detail policy_on=0 mtk_plat=0
+    local mode ifc state fb since calm sp="n/a" cl="off" detail policy_on=0 mtk_plat=0 rcode="ok" _co_rc="" _hw_rc=""
     MTK_TETHER_SUPPRESSED=0
     mode=$(guard_mode)
     ifc=$(hotspot_iface) || ifc=""
@@ -364,7 +411,7 @@ tick() {
             log "mode=off: fallback restored"
         fi
         st_save 0 0 0
-        write_status off "SKIPPED" 0 0 "已关闭: 不检测、不干预 offload" "n/a" "off" "$ifc"
+        write_status off "SKIPPED" 0 0 "已关闭: 不检测、不干预 offload" "n/a" "off" "$ifc" "ok"
         GUARD_LAST_MODE=off; GUARD_LAST_FB=0
         return 0
     fi
@@ -374,6 +421,9 @@ tick() {
     else
         state=$($CHECK_CMD 2>/dev/null | tail -n1 | tr -d ' \r\n')
         case "$state" in NOMAP|IDLE|CAPABLE|ACTIVE) ;; *) state="UNKNOWN" ;; esac
+        if [ -r "$RUN/check_offload.json" ]; then
+            _co_rc=$(grep -oE '"reason_code"[[:space:]]*:[[:space:]]*"[^"]*"' "$RUN/check_offload.json" 2>/dev/null | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')
+        fi
     fi
 
     local want=0 t0_preempt=0
@@ -465,7 +515,29 @@ tick() {
         esac
         st_save "$fb" "$since" "$calm"
     fi
-    write_status "$mode" "$state" "$fb" "$since" "$detail" "$sp" "$cl" "$ifc"
+
+    if [ -r "$RUN/mtk_hwnat.json" ]; then
+        _hw_rc=$(grep -oE '"reason_code"[[:space:]]*:[[:space:]]*"[^"]*"' "$RUN/mtk_hwnat.json" 2>/dev/null | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')
+    fi
+    if [ -n "$ifc" ] && is_sta_ap_same_iface "$ifc"; then
+        rcode="sta_ap_same_iface"
+    elif [ -z "$ifc" ] && [ -n "$SYS_NET_ERR" ]; then
+        rcode="$SYS_NET_ERR"
+    elif [ "$_co_rc" = "permission_denied" ] || [ "$HWNAT_ST" = "failed" ] || { [ "$HWNAT_ST" = "detected_no_knob" ] && [ "$_hw_rc" = "permission_denied" ]; }; then
+        rcode="permission_denied"
+    elif [ "$state" = "ACTIVE" ]; then
+        rcode="qcom_tether_bpf_active"
+    elif [ "$HWNAT_ST" = "skipped_not_mtk" ] && [ "$state" = "NOMAP" ]; then
+        rcode="unsupported_soc"
+    elif [ "$HWNAT_ST" = "detected_no_knob" ]; then
+        rcode="node_missing"
+    elif [ "$state" = "NOMAP" ] && [ "$mtk_plat" = "0" ] && [ "$want" = "0" ]; then
+        rcode="${_co_rc:-node_missing}"
+    else
+        rcode="ok"
+    fi
+
+    write_status "$mode" "$state" "$fb" "$since" "$detail" "$sp" "$cl" "$ifc" "$rcode"
     GUARD_LAST_MODE=$mode; GUARD_LAST_FB=$fb
 }
 

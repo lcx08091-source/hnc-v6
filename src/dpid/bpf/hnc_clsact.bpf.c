@@ -44,7 +44,17 @@ struct dev_stats_val {
     __u64 rx_bytes;
     __u64 tx_bytes;
     __u64 packets;
-};
+} __attribute__((aligned(8)));
+
+_Static_assert(sizeof(__u32) == 4U && _Alignof(__u32) == 4U,
+               "ip_mark_map / dev_stats_map 32-bit key/value size and alignment mismatch");
+_Static_assert(sizeof(struct mac_key) == 8U && _Alignof(struct mac_key) >= 2U &&
+               __builtin_offsetof(struct mac_key, pad) == 6U,
+               "mac_mark_map key struct layout mismatch");
+_Static_assert(sizeof(struct dev_stats_val) == 24U && _Alignof(struct dev_stats_val) == 8U &&
+               __builtin_offsetof(struct dev_stats_val, tx_bytes) == 8U &&
+               __builtin_offsetof(struct dev_stats_val, packets) == 16U,
+               "dev_stats_map value struct 8-byte alignment mismatch");
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -79,16 +89,41 @@ static __always_inline const __u8 *skb_data_end_ptr(const struct __sk_buff *skb)
     return (const __u8 *)(long)(*(const volatile __u32 *)&skb->data_end);
 }
 
+/* Byte-wise wire readers preserving network byte representation in memory
+ * (matches bpf_htons() and inet_pton() map keys without any pointer casts or
+ * unaligned multi-byte loads on strict-alignment 32-bit ARMv7). */
+static __always_inline __u16 load_wire_u16(const __u8 *p)
+{
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return (__u16)(((__u16)p[0]) | ((__u16)p[1] << 8));
+#else
+    return (__u16)(((__u16)p[0] << 8) | ((__u16)p[1]));
+#endif
+}
+
+static __always_inline __u32 load_wire_u32(const __u8 *p)
+{
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return ((__u32)p[0]) |
+           ((__u32)p[1] << 8) |
+           ((__u32)p[2] << 16) |
+           ((__u32)p[3] << 24);
+#else
+    return ((__u32)p[0] << 24) |
+           ((__u32)p[1] << 16) |
+           ((__u32)p[2] << 8) |
+           ((__u32)p[3]);
+#endif
+}
+
 static __always_inline void copy_mac_key(struct mac_key *key, const __u8 *addr)
 {
-    /* Ethernet dst/src offsets (0 and 6) are always 2-byte aligned regardless
-     * of NET_IP_ALIGN (0 on arm64/x86, 2 on armv7). Using three u16 copies
-     * avoids 4-byte unaligned packet loads on strict-alignment 32-bit ARM. */
-    const __u16 *src = (const __u16 *)addr;
-    __u16 *dst = (__u16 *)key->mac;
-    dst[0] = src[0];
-    dst[1] = src[1];
-    dst[2] = src[2];
+    key->mac[0] = addr[0];
+    key->mac[1] = addr[1];
+    key->mac[2] = addr[2];
+    key->mac[3] = addr[3];
+    key->mac[4] = addr[4];
+    key->mac[5] = addr[5];
     key->pad = 0;
 }
 
@@ -447,7 +482,7 @@ static __always_inline int parse_l2_hdr(struct __sk_buff *skb, int use_src_mac,
 
     copy_mac_key(out_mac, use_src_mac ? (data + 6) : data);
 
-    __u16 h_proto = *(const __u16 *)(data + 12);
+    __u16 h_proto = load_wire_u16(data + 12);
     __u32 l3_off = 14;
 
     if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
@@ -459,7 +494,7 @@ static __always_inline int parse_l2_hdr(struct __sk_buff *skb, int use_src_mac,
             if (data + 18 > data_end)
                 return -1;
         }
-        h_proto = *(const __u16 *)(data + 16);
+        h_proto = load_wire_u16(data + 16);
         l3_off = 18;
 
         if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(ETH_P_8021AD)) {
@@ -471,7 +506,7 @@ static __always_inline int parse_l2_hdr(struct __sk_buff *skb, int use_src_mac,
                 if (data + 22 > data_end)
                     return -1;
             }
-            h_proto = *(const __u16 *)(data + 20);
+            h_proto = load_wire_u16(data + 20);
             l3_off = 22;
         }
     }
@@ -556,11 +591,7 @@ int hnc_clsact_ingress(struct __sk_buff *skb)
         if ((ver_ihl >> 4) != 4 || (ver_ihl & 0x0fU) < 5)
             return TC_ACT_UNSPEC;
 
-        __u32 src_ip = 0;
-        const __u16 *sip = (const __u16 *)(nh + 12);
-        __u16 *dip = (__u16 *)&src_ip;
-        dip[0] = sip[0];
-        dip[1] = sip[1];
+        __u32 src_ip = load_wire_u32(nh + 12);
 
         __u32 *m_ip = bpf_map_lookup_elem(&ip_mark_map, &src_ip);
         if (m_ip && *m_ip != 0)

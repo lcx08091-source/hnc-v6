@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -49,7 +50,7 @@ const (
 )
 
 // netdStatsKey is the key struct of the BPF map. Layout matches AOSP's
-// definition byte-for-byte (4×uint32, native endianness).
+// definition byte-for-byte (4*uint32, native endianness).
 type netdStatsKey struct {
 	UID        uint32
 	Tag        uint32
@@ -57,7 +58,7 @@ type netdStatsKey struct {
 	IfaceIndex uint32
 }
 
-// netdStatsValue is the value struct (4×uint64).
+// netdStatsValue is the value struct (4*uint64).
 type netdStatsValue struct {
 	RxPackets uint64
 	RxBytes   uint64
@@ -67,15 +68,15 @@ type netdStatsValue struct {
 
 // EBPFSampler implements ByteSampler against the netd BPF map.
 type EBPFSampler struct {
-	fd int
+	// 严格置于偏移 0 处并附带 atomic.Uint64 对齐标记, 确保 32 位 armeabi-v7a
+	// 下堆分配起始地址与 64 位计数字段均按 8 字节边界对齐, 防止未对齐 panic/SIGBUS。
+	_   [0]atomic.Uint64
+	val netdStatsValue
 
-	// v5.12: 传给 bpf(2) 的 key/next/val 缓冲区放在(必然堆分配的)sampler
-	// 结构体里。旧代码用 Sample() 的局部变量, 其地址以 uint64 形式写进 attr
-	// 字节数组 —— 局部变量不逃逸时在 goroutine 栈上, 而 Go 栈在增长/GC 缩栈
-	// 时会整体搬迁, 藏在整数里的地址不会被更新, 内核随后按旧地址读写 =
-	// 越界写栈内存(违反 unsafe.Pointer 规则 4)。堆对象不会被移动。
+	// 传给 bpf(2) 的 key/next/val 缓冲区放在堆分配的 sampler 结构体里,
+	// 避免栈扩容搬迁导致内核按旧地址越界读写。
 	key, next netdStatsKey
-	val       netdStatsValue
+	fd        int
 }
 
 // NewEBPFSampler opens the pinned BPF map. Returns an error if the map
@@ -173,13 +174,26 @@ func (s *EBPFSampler) Sample() (map[int]ByteCounts, error) {
 
 // ─── raw bpf(2) syscall wrappers ─────────────────────────────────────
 
+// bpfAttrBuf 为 bpf(2) 系统调用提供严格 8 字节对齐的 union bpf_attr 原始缓冲区。
+// 同时包含 [0]atomic.Uint64 与 [0]uint64, 确保在 32 位 ARM 与 64 位架构上均按 8 字节对齐。
+type bpfAttrBuf struct {
+	_   [0]atomic.Uint64
+	_   [0]uint64
+	pad [120]byte
+}
+
+// 编译期偏移与对齐断言(零运行时开销): 若 32 位/64 位下偏移偏离 0 或对齐不足 8 字节则直接拒绝编译。
+var (
+	_ [0 - int(unsafe.Offsetof(EBPFSampler{}.val))]byte
+	_ [0 - int(unsafe.Offsetof(bpfAttrBuf{}.pad))]byte
+	_ [8 - int(unsafe.Alignof(EBPFSampler{}))]byte
+	_ [int(unsafe.Alignof(EBPFSampler{})) - 8]byte
+	_ [8 - int(unsafe.Alignof(bpfAttrBuf{}))]byte
+	_ [int(unsafe.Alignof(bpfAttrBuf{})) - 8]byte
+)
+
 // bpfAttrObjGet matches union bpf_attr { struct { ... } obj_get; } in
-// Linux kernel uapi/linux/bpf.h. Size is fixed at 12 bytes (8+4 padded).
-//
-// Actually the kernel's bpf_attr union is the LARGEST member's size,
-// but for this command we only need to set Pathname and Flags. To
-// satisfy the kernel ABI check, we pad to the full union size by
-// declaring a larger buffer.
+// Linux kernel uapi/linux/bpf.h.
 type bpfAttrObjGet struct {
 	Pathname  uint64 // user pointer to NUL-terminated path
 	BPFFD     uint32
@@ -194,21 +208,19 @@ func bpfObjGetCall(path string) (int, error) {
 	attr := bpfAttrObjGet{
 		Pathname: uint64(uintptr(unsafe.Pointer(cptr))),
 	}
-	// We need the syscall to see the full union size. Padding to 128 B
-	// (current largest bpf_attr member as of Linux 6.x) is safe.
-	var pad [128]byte
-	binary.NativeEndian.PutUint64(pad[0:8], attr.Pathname)
-	binary.NativeEndian.PutUint32(pad[8:12], attr.BPFFD)
-	binary.NativeEndian.PutUint32(pad[12:16], attr.FileFlags)
+	var buf bpfAttrBuf
+	binary.NativeEndian.PutUint64(buf.pad[0:8], attr.Pathname)
+	binary.NativeEndian.PutUint32(buf.pad[8:12], attr.BPFFD)
+	binary.NativeEndian.PutUint32(buf.pad[12:16], attr.FileFlags)
 
 	r1, _, errno := syscall.Syscall(
 		sysBPF,
 		bpfObjGet,
-		uintptr(unsafe.Pointer(&pad)),
+		uintptr(unsafe.Pointer(&buf.pad[0])),
 		unsafe.Sizeof(attr),
 	)
 	runtime.KeepAlive(cptr)
-	runtime.KeepAlive(&pad)
+	runtime.KeepAlive(&buf)
 	if errno != 0 {
 		return -1, errno
 	}
@@ -230,21 +242,21 @@ func bpfMapLookupElemCall(mapFD int, key, value unsafe.Pointer) error {
 		Key:   uint64(uintptr(key)),
 		Value: uint64(uintptr(value)),
 	}
-	var pad [128]byte
-	binary.NativeEndian.PutUint32(pad[0:4], attr.MapFD)
-	binary.NativeEndian.PutUint64(pad[8:16], attr.Key)
-	binary.NativeEndian.PutUint64(pad[16:24], attr.Value)
-	binary.NativeEndian.PutUint64(pad[24:32], attr.Flags)
+	var buf bpfAttrBuf
+	binary.NativeEndian.PutUint32(buf.pad[0:4], attr.MapFD)
+	binary.NativeEndian.PutUint64(buf.pad[8:16], attr.Key)
+	binary.NativeEndian.PutUint64(buf.pad[16:24], attr.Value)
+	binary.NativeEndian.PutUint64(buf.pad[24:32], attr.Flags)
 
 	_, _, errno := syscall.Syscall(
 		sysBPF,
 		bpfMapLookupElem,
-		uintptr(unsafe.Pointer(&pad)),
+		uintptr(unsafe.Pointer(&buf.pad[0])),
 		unsafe.Sizeof(attr),
 	)
 	runtime.KeepAlive(key)
 	runtime.KeepAlive(value)
-	runtime.KeepAlive(&pad)
+	runtime.KeepAlive(&buf)
 	if errno != 0 {
 		return errno
 	}
@@ -261,20 +273,20 @@ func bpfMapGetNextKeyCall(mapFD int, key, nextKey unsafe.Pointer) error {
 		Key:   keyPtr,
 		Value: uint64(uintptr(nextKey)), // overloaded: holds next_key pointer
 	}
-	var pad [128]byte
-	binary.NativeEndian.PutUint32(pad[0:4], attr.MapFD)
-	binary.NativeEndian.PutUint64(pad[8:16], attr.Key)
-	binary.NativeEndian.PutUint64(pad[16:24], attr.Value)
+	var buf bpfAttrBuf
+	binary.NativeEndian.PutUint32(buf.pad[0:4], attr.MapFD)
+	binary.NativeEndian.PutUint64(buf.pad[8:16], attr.Key)
+	binary.NativeEndian.PutUint64(buf.pad[16:24], attr.Value)
 
 	_, _, errno := syscall.Syscall(
 		sysBPF,
 		bpfMapGetNextKey,
-		uintptr(unsafe.Pointer(&pad)),
+		uintptr(unsafe.Pointer(&buf.pad[0])),
 		unsafe.Sizeof(attr),
 	)
 	runtime.KeepAlive(key)
 	runtime.KeepAlive(nextKey)
-	runtime.KeepAlive(&pad)
+	runtime.KeepAlive(&buf)
 	if errno != 0 {
 		return errno
 	}

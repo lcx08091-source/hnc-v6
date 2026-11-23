@@ -1668,6 +1668,13 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 	locked = false
 	unlock()
 
+	// 重建 tc 树后立即重放 RootShaperArbiter 当前仲裁生效上限, 防止设备规则刷新冲掉温控/5G 自适应/静态总限速
+	primaryIface := ""
+	if len(rep.DownstreamIfaces) > 0 {
+		primaryIface = rep.DownstreamIfaces[0]
+	}
+	s.replayRootShaperArbiterAfterRestore(primaryIface)
+
 	if rep.AppQoSDevices > 0 && useNativeDataplane(s.hncDir) && len(rep.DownstreamIfaces) > 0 {
 		_ = os.MkdirAll(filepath.Join(s.hncDir, "run"), 0o755)
 		_ = os.WriteFile(filepath.Join(s.hncDir, "run", "app_limit.dirty"), nil, 0o644)

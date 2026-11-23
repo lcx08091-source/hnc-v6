@@ -96,8 +96,14 @@ cb_unlock() {
     [ "$DRY" = 1 ] && return 0
     [ "$(cat "$CB_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$CB_LOCK" 2>/dev/null
 }
-cb_lock || true
-trap 'cb_unlock' EXIT INT TERM
+if ! cb_lock; then
+    log "WARN: connblock.lock timeout, aborting sync to prevent unlocked concurrent iptables-restore"
+    echo "CONN_BLOCK=lock_timeout"
+    exit 11
+fi
+trap 'cb_unlock' EXIT
+trap 'cb_unlock; trap - EXIT; exit 130' INT
+trap 'cb_unlock; trap - EXIT; exit 143' TERM
 
 v6=0
 command -v "${IP6T%% *}" >/dev/null 2>&1 && $IP6T -t filter -L -n >/dev/null 2>&1 && v6=1

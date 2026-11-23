@@ -66,6 +66,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hnc.io/dpid/alert"
@@ -313,6 +314,42 @@ func puLoadDay(hncDir, date string) (*puDay, bool) {
 	return newPuDay(date), false
 }
 
+var puWriteSeq atomic.Uint64
+
+// puWriteAtomic 严格遵循死定律七: Write / Sync / Close / Rename 任一步失败(特别是 ENOSPC)时
+// 立即 os.Remove(tmp), 严禁遗留 0 字节 .tmp.* 孤儿文件。
+func puWriteAtomic(path string, b []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	seq := puWriteSeq.Add(1)
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), seq)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o644)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func puSaveDay(hncDir string, d *puDay) error {
 	if err := os.MkdirAll(filepath.Join(hncDir, "data"), 0o755); err != nil {
 		return err
@@ -321,7 +358,17 @@ func puSaveDay(hncDir string, d *puDay) error {
 	if err != nil {
 		return err
 	}
-	return discoverWriteAtomic(puDayPath(hncDir, d.Date), b)
+	return puWriteAtomic(puDayPath(hncDir, d.Date), b)
+}
+
+func puReadDaysFromDisk(hncDir string, from, to time.Time) []*puDay {
+	var out []*puDay
+	for t := puMidnight(from); !t.After(to); t = t.AddDate(0, 0, 1) {
+		if d, ok := puLoadDay(hncDir, t.Format("20060102")); ok {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func puIsAllDigits8(s string) bool {
@@ -381,7 +428,7 @@ func puMigrateLegacyRunDays(hncDir, cutDate string) {
 		if json.Unmarshal(srcBytes, &parsed) != nil {
 			continue
 		}
-		if discoverWriteAtomic(dst, srcBytes) == nil {
+		if puWriteAtomic(dst, srcBytes) == nil {
 			_ = os.Remove(src)
 		}
 	}
@@ -390,13 +437,15 @@ func puMigrateLegacyRunDays(hncDir, cutDate string) {
 // ─── 配置 ─────────────────────────────────────────────────────────
 
 type puConfig struct {
-	BillingDay  int                `json:"billing_day"`            // 1-28
-	PlanGB      map[string]float64 `json:"plan_gb"`                // "1"/"2" → GB(0 = 无套餐)
-	AnchorGB    map[string]float64 `json:"anchor_gb,omitempty"`    // v5.38.0: 运营商掌厅手动校准锚点 GB
-	AnchorBase  map[string]uint64  `json:"anchor_base,omitempty"`  // v5.38.0: 设置校准锚点时的周期累计基准字节
-	AnchorCycle string             `json:"anchor_cycle,omitempty"` // YYYYMMDD
-	WarnPercent int                `json:"warn_percent"`           // 1-100
-	UseNetstats string             `json:"use_netstats,omitempty"` // v5.21: auto|prefer|off(stats_calibration.go)
+	BillingDay   int                `json:"billing_day"`               // 1-28
+	PlanGB       map[string]float64 `json:"plan_gb"`                   // "1"/"2" -> GB(0 = 无套餐)
+	AnchorGB     map[string]float64 `json:"anchor_gb,omitempty"`       // v5.38.0: 运营商掌厅手动校准锚点 GB
+	AnchorBase   map[string]uint64  `json:"anchor_base,omitempty"`     // v5.38.0: 设置校准锚点时的 HNC 周期累计基准字节
+	AnchorNsBase map[string]uint64  `json:"anchor_ns_base,omitempty"`  // v6.1.0: 设置校准锚点时的系统 netstats 周期累计基准字节
+	AnchorAt     map[string]int64   `json:"anchor_at,omitempty"`       // v6.1.0: 设置校准锚点时的 Unix 秒时间戳
+	AnchorCycle  string             `json:"anchor_cycle,omitempty"`    // YYYYMMDD
+	WarnPercent  int                `json:"warn_percent"`              // 1-100
+	UseNetstats  string             `json:"use_netstats,omitempty"`    // v5.21: auto|prefer|off(stats_calibration.go)
 }
 
 func puConfigPath(hncDir string) string {
@@ -444,6 +493,22 @@ func puLoadConfig(hncDir string) puConfig {
 					}
 				}
 			}
+			if len(x.AnchorNsBase) > 0 {
+				c.AnchorNsBase = map[string]uint64{}
+				for k, v := range x.AnchorNsBase {
+					if k == "1" || k == "2" {
+						c.AnchorNsBase[k] = v
+					}
+				}
+			}
+			if len(x.AnchorAt) > 0 {
+				c.AnchorAt = map[string]int64{}
+				for k, v := range x.AnchorAt {
+					if (k == "1" || k == "2") && v > 0 {
+						c.AnchorAt[k] = v
+					}
+				}
+			}
 			c.AnchorCycle = x.AnchorCycle
 		}
 	}
@@ -460,6 +525,10 @@ func (c puConfig) planBytes(slot int) uint64 {
 
 // actionPhoneUsageSet 部分更新配置: 只改传了的字段, 非法值整体拒绝(不写半截)。
 func actionPhoneUsageSet(hncDir string, p map[string]string) actionResp {
+	return actionPhoneUsageSetAt(hncDir, p, time.Now())
+}
+
+func actionPhoneUsageSetAt(hncDir string, p map[string]string, now time.Time) actionResp {
 	c := puLoadConfig(hncDir)
 	changed := 0
 	if v, ok := p["billing_day"]; ok && strings.TrimSpace(v) != "" {
@@ -497,8 +566,8 @@ func actionPhoneUsageSet(hncDir string, p map[string]string) actionResp {
 			return actionResp{OK: false, Error: "bad params", Detail: "use_netstats must be auto|prefer|off"}
 		}
 	}
-	now := time.Now()
-	cycStr := puCycleStart(now, c.BillingDay).Format("20060102")
+	cycStart := puCycleStart(now, c.BillingDay)
+	cycStr := cycStart.Format("20060102")
 	for slot, key := range map[string]string{"1": "anchor_sim1_gb", "2": "anchor_sim2_gb"} {
 		if v, ok := p[key]; ok {
 			sv := strings.TrimSpace(v)
@@ -509,6 +578,12 @@ func actionPhoneUsageSet(hncDir string, p map[string]string) actionResp {
 				if c.AnchorBase != nil {
 					delete(c.AnchorBase, slot)
 				}
+				if c.AnchorNsBase != nil {
+					delete(c.AnchorNsBase, slot)
+				}
+				if c.AnchorAt != nil {
+					delete(c.AnchorAt, slot)
+				}
 				changed++
 				continue
 			}
@@ -516,26 +591,64 @@ func actionPhoneUsageSet(hncDir string, p map[string]string) actionResp {
 			if err != nil || math.IsNaN(f) || f < 0 || f > puMaxPlanGB {
 				return actionResp{OK: false, Error: "bad params", Detail: key + " must be 0-100000 or -1 to clear"}
 			}
+			if c.AnchorCycle != cycStr {
+				c.AnchorGB = map[string]float64{}
+				c.AnchorBase = map[string]uint64{}
+				c.AnchorNsBase = map[string]uint64{}
+				c.AnchorAt = map[string]int64{}
+				c.AnchorCycle = cycStr
+			}
 			if c.AnchorGB == nil {
 				c.AnchorGB = map[string]float64{}
 			}
 			if c.AnchorBase == nil {
 				c.AnchorBase = map[string]uint64{}
 			}
-			if c.AnchorCycle != cycStr {
-				c.AnchorGB = map[string]float64{}
-				c.AnchorBase = map[string]uint64{}
-				c.AnchorCycle = cycStr
+			if c.AnchorNsBase == nil {
+				c.AnchorNsBase = map[string]uint64{}
 			}
-			var baseBytes uint64
-			if puEng != nil {
-				cycDays, _, _ := puEng.daysWithSim(puCycleStart(now, c.BillingDay), now, now)
-				if a := puAggSIM(cycDays)[func() int { n, _ := strconv.Atoi(slot); return n }()]; a != nil {
-					baseBytes = a.Rx + a.Tx
+			if c.AnchorAt == nil {
+				c.AnchorAt = map[string]int64{}
+			}
+			slotNum, _ := strconv.Atoi(slot)
+			var cycDays []*puDay
+			var eng *puEngine
+			if puEng != nil && puEng.hncDir == hncDir {
+				eng = puEng
+				cycDays = eng.days(cycStart, now)
+			} else {
+				cycDays = puReadDaysFromDisk(hncDir, cycStart, now)
+			}
+			agg := puAggSIM(cycDays)
+			var calRes *calResult
+			if cal := calGet(hncDir); cal != nil {
+				if r := cal.result(); calUsable(r, cycStart, now) {
+					calRes = r
 				}
+			}
+			maxSlots, presentSlots, slotsKnown := 2, map[int]puSIM(nil), false
+			if eng != nil {
+				maxSlots, presentSlots, slotsKnown = eng.simTopologySnapshot()
+			}
+			targetSlot, carrierHint := puPickUniqueCellSlot(calRes, maxSlots, presentSlots, slotsKnown)
+			_ = puReconcileAndStripInvalidSlots(agg, maxSlots, targetSlot, carrierHint)
+
+			var baseBytes uint64
+			if a := agg[slotNum]; a != nil {
+				baseBytes = a.Rx + a.Tx
 			}
 			c.AnchorGB[slot] = f
 			c.AnchorBase[slot] = baseBytes
+			c.AnchorAt[slot] = now.Unix()
+			delete(c.AnchorNsBase, slot)
+			if calRes != nil {
+				for _, ns := range calRes.NetstatsCellBySim {
+					if ns.Slot == slotNum {
+						c.AnchorNsBase[slot] = ns.Total
+						break
+					}
+				}
+			}
 			changed++
 		}
 	}
@@ -543,10 +656,10 @@ func actionPhoneUsageSet(hncDir string, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "bad params", Detail: "nothing to set (billing_day / plan_sim1_gb / plan_sim2_gb / warn_percent / use_netstats)"}
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
-	if err := discoverWriteAtomic(puConfigPath(hncDir), b); err != nil {
+	if err := puWriteAtomic(puConfigPath(hncDir), b); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
-	calKick(hncDir) // v5.21: 计费日/对账模式变了, 后台尽快重新对账
+	calKick(hncDir) // v5.21: 计费日/对账模式/锚点变了, 后台尽快重新对账
 	return actionResp{OK: true, Detail: fmt.Sprintf("billing_day=%d sim1=%gGB sim2=%gGB warn=%d%% use_netstats=%s",
 		c.BillingDay, c.PlanGB["1"], c.PlanGB["2"], c.WarnPercent, c.netstatsMode())}
 }
@@ -607,6 +720,7 @@ type puEnv struct {
 	// v5.20.1: 热点上游 / 本机出口 / VPN(优先于 upstream; nil 时退回 upstream)
 	upstreamInfo func() puUpInfo
 	sim          func() puSIM
+	simProbe     func() puSIMProbe // v6.1.0: 完整双卡在位与自定义名探测(优先于 sim)
 	bootID       func() string
 	emitAlert    func(a alert.Alert) error
 	alertsOn     func() bool
@@ -619,7 +733,7 @@ type puState struct {
 	BootID   string           `json:"boot_id"`
 	At       int64            `json:"at"`
 	Counters map[string]puCtr `json:"counters"`
-	Fired    map[string]int64 `json:"fired"` // "<slot>|<cycle YYYYMMDD>|warn|over" → ts
+	Fired    map[string]int64 `json:"fired"` // "<slot>|<cycle YYYYMMDD>|warn|over" -> ts
 }
 
 type puIfaceInfo struct {
@@ -627,31 +741,47 @@ type puIfaceInfo struct {
 	Class string `json:"class"`
 }
 
+// puEngine 整机与按卡流量统计引擎。
+// 死定律二: 64 位原子字段置于结构体 offset 0, 保证 32 位 armeabi-v7a 8 字节边界对齐。
 type puEngine struct {
-	mu       sync.Mutex
-	hncDir   string
-	env      puEnv
-	day      *puDay
-	dirty    bool
-	prev     map[string]puCtr
-	baseline bool
-	loaded   bool
-	bootID   string
-	fired    map[string]int64
+	simAtNs       atomic.Int64 // offset 0: 上次 SIM 探测 UnixNano
+	simCachedSlot atomic.Int32
+	loadedFlag    atomic.Bool
 
-	sim      puSIM
-	simAt    time.Time
-	lastUp   string // 最近一次判定的热点上游类别
-	lastUpIf puUpInfo
-	lastIfs  []puIfaceInfo
-	lastHS   string
-	lastTick time.Time
-	lastErr  string
-	guard    clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
+	mu          sync.Mutex
+	hncDir      string
+	env         puEnv
+	day         *puDay
+	dirty       bool
+	pendingDays map[string]*puDay // 跨零点尚未成功落盘的历史脏日快照(写失败保留重试)
+	prev        map[string]puCtr
+	baseline    bool
+	loaded      bool
+	bootID      string
+	fired       map[string]int64
+
+	sim           puSIM
+	simSlots      map[int]puSIM
+	simSlotsKnown bool
+	maxSlots      int
+	simAt         time.Time
+	lastUp        string // 最近一次判定的热点上游类别
+	lastUpIf      puUpInfo
+	lastIfs       []puIfaceInfo
+	lastHS        string
+	lastTick      time.Time
+	lastErr       string
+	guard         clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
 }
 
 func newPuEngine(hncDir string, env puEnv) *puEngine {
-	return &puEngine{hncDir: hncDir, env: env, fired: map[string]int64{}}
+	return &puEngine{
+		hncDir:      hncDir,
+		env:         env,
+		pendingDays: map[string]*puDay{},
+		fired:       map[string]int64{},
+		maxSlots:    2,
+	}
 }
 
 func puStatePath(hncDir string) string {
@@ -660,10 +790,19 @@ func puStatePath(hncDir string) string {
 
 // loadState 首轮: 读持久化计数器决定基线策略(见文件头)。调用方持锁。
 func (e *puEngine) loadState() {
-	e.loaded = true
-	e.bootID = e.env.bootID()
+	var boot string
+	if e.env.bootID != nil {
+		boot = e.env.bootID()
+	}
 	b, err := os.ReadFile(puStatePath(e.hncDir))
-	if err != nil {
+	e.applyLoadedStateLocked(boot, b, err)
+}
+
+func (e *puEngine) applyLoadedStateLocked(boot string, b []byte, readErr error) {
+	e.loaded = true
+	e.loadedFlag.Store(true)
+	e.bootID = boot
+	if readErr != nil {
 		return // 首次安装: 只建基线
 	}
 	var st puState
@@ -695,56 +834,256 @@ func (e *puEngine) saveStateLocked(now time.Time) {
 	st := puState{BootID: e.bootID, At: now.Unix(), Counters: e.prev, Fired: e.fired}
 	b, err := json.Marshal(st)
 	if err == nil {
-		_ = discoverWriteAtomic(puStatePath(e.hncDir), b)
+		_ = puWriteAtomic(puStatePath(e.hncDir), b)
 	}
 }
 
-func (e *puEngine) currentSIMLocked(now time.Time) puSIM {
-	if e.simAt.IsZero() || now.Sub(e.simAt) >= puSimRefresh || now.Before(e.simAt) {
-		e.sim = e.env.sim()
-		e.simAt = now
+// probeSIMOutsideLock 在互斥锁外执行 SIM 探测(死定律四: 严禁持锁执行阻塞子进程)。
+func (e *puEngine) probeSIMOutsideLock() (puSIMProbe, bool) {
+	if e.env.simProbe != nil {
+		p := e.env.simProbe()
+		if p.MaxSlots <= 0 {
+			p.MaxSlots = 2
+		}
+		return p, true
 	}
-	return e.sim
+	if e.env.sim != nil {
+		s := e.env.sim()
+		slots := map[int]puSIM{}
+		if s.Slot >= 1 && s.Slot <= 2 {
+			slots[s.Slot] = s
+		}
+		return puSIMProbe{
+			Active:     s,
+			Slots:      slots,
+			SlotsKnown: false,
+			MaxSlots:   2,
+		}, true
+	}
+	return puSIMProbe{MaxSlots: 2}, false
+}
+
+func (e *puEngine) applySIMProbeLocked(p puSIMProbe, now time.Time) {
+	if p.MaxSlots >= 1 {
+		e.maxSlots = p.MaxSlots
+	} else if e.maxSlots <= 0 {
+		e.maxSlots = 2
+	}
+	e.sim = p.Active
+	e.simSlots = make(map[int]puSIM, len(p.Slots))
+	for k, v := range p.Slots {
+		if k >= 1 && k <= e.maxSlots {
+			e.simSlots[k] = v
+		}
+	}
+	if e.sim.Slot >= 1 && e.sim.Slot <= e.maxSlots {
+		if _, ok := e.simSlots[e.sim.Slot]; !ok {
+			e.simSlots[e.sim.Slot] = e.sim
+		}
+	}
+	e.simSlotsKnown = p.SlotsKnown || e.maxSlots == 1
+	e.simAt = now
+	e.simAtNs.Store(now.UnixNano())
+	e.simCachedSlot.Store(int32(e.sim.Slot))
+}
+
+func (e *puEngine) effMaxSlotsLocked() int {
+	if e.maxSlots >= 1 {
+		return e.maxSlots
+	}
+	return 2
+}
+
+func (e *puEngine) simTopologySnapshot() (maxSlots int, present map[int]puSIM, known bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	maxSlots = e.effMaxSlotsLocked()
+	if len(e.simSlots) > 0 {
+		present = make(map[int]puSIM, len(e.simSlots))
+		for k, v := range e.simSlots {
+			if k >= 1 && k <= maxSlots {
+				present[k] = v
+			}
+		}
+	}
+	known = e.simSlotsKnown || maxSlots == 1
+	return maxSlots, present, known
+}
+
+// puReconcileDayUnknownSIM 当日内确认了真实上网物理卡 curSIM(Slot >= 1) 时,
+// 若今日记录中存在 "0|蜂窝(未知卡)"(或任何 slot<=0 桶)且今日仅出现过 curSIM.Slot 这唯一一个有效物理卡槽,
+// 直接把今日 slot=0 字节归并进 curSIM.key() 并删除未知卡键。
+func puReconcileDayUnknownSIM(d *puDay, curSIM puSIM, maxSlots int) bool {
+	if d == nil || curSIM.Slot < 1 || curSIM.Slot > maxSlots {
+		return false
+	}
+	var unkKeys []string
+	for k := range d.Cell {
+		slot, _ := puSplitKey(k)
+		if slot <= 0 {
+			unkKeys = append(unkKeys, k)
+		} else if slot != curSIM.Slot {
+			// 今日已出现另一张有效物理卡槽流量, 不做单日盲目归并
+			return false
+		}
+	}
+	for k := range d.LocalSIM {
+		slot, _ := puSplitKey(k)
+		if slot > 0 && slot != curSIM.Slot {
+			return false
+		}
+	}
+	if len(unkKeys) == 0 {
+		return false
+	}
+	sort.Strings(unkKeys)
+	dstKey := curSIM.key()
+	for _, uk := range unkKeys {
+		if uk == dstKey {
+			continue
+		}
+		if cv, ok := d.Cell[uk]; ok {
+			curV := d.Cell[dstKey]
+			puAdd2(&curV, cv)
+			d.Cell[dstKey] = curV
+			delete(d.Cell, uk)
+		}
+		if lv, ok := d.LocalSIM[uk]; ok {
+			curLV := d.LocalSIM[dstKey]
+			puAdd2(&curLV, lv)
+			d.LocalSIM[dstKey] = curLV
+			delete(d.LocalSIM, uk)
+		}
+	}
+	return true
+}
+
+func (e *puEngine) snapshotPendingDaysLocked() []*puDay {
+	if len(e.pendingDays) == 0 {
+		return nil
+	}
+	dates := make([]string, 0, len(e.pendingDays))
+	for dt := range e.pendingDays {
+		dates = append(dates, dt)
+	}
+	sort.Strings(dates)
+	snaps := make([]*puDay, 0, len(dates))
+	for _, dt := range dates {
+		if d := e.pendingDays[dt]; d != nil {
+			snaps = append(snaps, d.clone())
+		}
+	}
+	return snaps
+}
+
+// retrySavePendingDays 在锁外尝试落盘历史跨零点未写成功的脏日数据;
+// 若 puSaveDay 返回错误, 严禁清空 pendingDays 中的对应条目, 留待下一轮重试直至成功。
+func (e *puEngine) retrySavePendingDays(snaps []*puDay) {
+	for _, snap := range snaps {
+		if snap == nil {
+			continue
+		}
+		if err := puSaveDay(e.hncDir, snap); err == nil {
+			e.mu.Lock()
+			delete(e.pendingDays, snap.Date)
+			e.mu.Unlock()
+		}
+	}
 }
 
 // tick 采一次样并记账。返回本轮各类增量(测试用)。
+// 死定律四: 所有可能阻塞的外部命令(upstreamInfo / upstream / sim / simProbe)严格在 e.mu.Lock() 之前完成!
 func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 	raw, err := e.env.readNetDev()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.lastTick = now
 	if err != nil {
+		e.mu.Lock()
+		e.lastTick = now
 		e.lastErr = err.Error()
+		e.mu.Unlock()
 		return nil
 	}
-	e.lastErr = ""
-	if !e.loaded {
-		e.loadState()
-	}
+
 	parsed := puParseNetDev(raw)
+	hs := ""
+	if e.env.hotspotIface != nil {
+		hs = e.env.hotspotIface()
+	}
 	cur := make(map[string]puCtr, len(parsed))
+	hasCellIface := false
 	for name, v := range parsed {
 		idx := 0
 		if e.env.ifindex != nil {
 			idx = e.env.ifindex(name)
 		}
 		cur[name] = puCtr{Ifindex: idx, Rx: v[0], Tx: v[1]}
+		if !hasCellIface && puClassifyIface(name, hs) == puClassCell && (v[0] > 0 || v[1] > 0) {
+			hasCellIface = true
+		}
 	}
-	// v5.20: 时钟不可信 → 不消费计数器(恢复后差分记到正确的天); 跳变或长时间
-	// 不可信后恢复 → 重建基线, 不把跨跳变的一大坨字节记进一个小时/错的天。
+
+	// 锁外采集上游路由出口(可能调用 `ip route get 1.1.1.1` 子进程)
+	var ui puUpInfo
+	if e.env.upstreamInfo != nil {
+		ui = e.env.upstreamInfo()
+	} else if e.env.upstream != nil {
+		ui.Local = e.env.upstream()
+	}
+	ui = ui.normalized()
+
+	// 锁外按需刷新 SIM 物理卡槽状态(可能调用 `dumpsys isub` / `telephony.registry` / 回退 `content query`)
+	nowNs := now.UnixNano()
+	lastSimNs := e.simAtNs.Load()
+	needSim := lastSimNs == 0 ||
+		nowNs-lastSimNs >= int64(puSimRefresh) ||
+		nowNs < lastSimNs ||
+		(e.simCachedSlot.Load() <= 0 && hasCellIface)
+	var simProbeRes puSIMProbe
+	var didProbeSim bool
+	if needSim {
+		simProbeRes, didProbeSim = e.probeSIMOutsideLock()
+	}
+
+	var bootStr string
+	var stateBytes []byte
+	var stateErr error
+	needInitLoad := !e.loadedFlag.Load()
+	if needInitLoad {
+		if e.env.bootID != nil {
+			bootStr = e.env.bootID()
+		}
+		stateBytes, stateErr = os.ReadFile(puStatePath(e.hncDir))
+	}
+
+	e.mu.Lock()
+	e.lastTick = now
+	e.lastErr = ""
+	if !e.loaded {
+		if needInitLoad {
+			e.applyLoadedStateLocked(bootStr, stateBytes, stateErr)
+		} else {
+			e.loadState()
+		}
+	}
+	if didProbeSim {
+		e.applySIMProbeLocked(simProbeRes, now)
+	}
+
+	// v5.20: 时钟不可信 -> 不消费计数器(恢复后差分记到正确的天); 跳变或长时间
+	// 不可信后恢复 -> 重建基线, 不把跨跳变的一大坨字节记进一个小时/错的天。
 	e.guard.name = "phone_usage"
 	switch e.guard.step(e.hncDir, now) {
 	case clockInsane:
+		e.mu.Unlock()
 		return nil
 	case clockJump:
 		_, e.prev = puStepCounters(nil, cur, false)
 		e.baseline = true
+		e.mu.Unlock()
 		return nil
 	}
 	deltas, next := puStepCounters(e.prev, cur, e.baseline)
 	e.prev, e.baseline = next, true
 
-	hs := e.env.hotspotIface()
 	e.lastHS = hs
 	var ifs []puIfaceInfo
 	var cell, wifi, hsIf [2]uint64
@@ -768,16 +1107,6 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 	e.lastIfs = ifs
 	hsClient := [2]uint64{hsIf[1], hsIf[0]} // 热点口 tx = 客户端下载
 
-	// v5.20.1: 热点上游优先用 tethering 上游(iface_detect.json); 本机出口是 VPN(tun0)时
-	// 它既不是热点上游也不计流量(tun* 不在分类里; 本机经 VPN 的字节已计在承载它的
-	// 物理蜂窝/Wi-Fi 口上, 不会重复)。
-	var ui puUpInfo
-	if e.env.upstreamInfo != nil {
-		ui = e.env.upstreamInfo()
-	} else if e.env.upstream != nil {
-		ui.Local = e.env.upstream()
-	}
-	ui = ui.normalized()
 	e.lastUpIf = ui
 	routeClass := puClassifyIface(strings.TrimPrefix(ui.routeIface(), "v4-"), hs) // clat 口归到底层 rmnet
 	upstream := puResolveUpstream(routeClass, cell[0]+cell[1], wifi[0]+wifi[1], hsClient[0]+hsClient[1])
@@ -789,27 +1118,64 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 
 	out := map[string][2]uint64{"cell": cell, "wifi": wifi, "hotspot": hsClient,
 		"local_cell": localCell, "local_wifi": localWifi}
+
+	maxSlots := e.effMaxSlotsLocked()
+	date := now.Format("20060102")
 	if cell == ([2]uint64{}) && wifi == ([2]uint64{}) && hsClient == ([2]uint64{}) {
+		if e.day != nil && e.day.Date == date && e.sim.Slot >= 1 {
+			if puReconcileDayUnknownSIM(e.day, e.sim, maxSlots) {
+				e.dirty = true
+			}
+		}
+		pendSnaps := e.snapshotPendingDaysLocked()
+		e.mu.Unlock()
+		e.retrySavePendingDays(pendSnaps)
 		return out
 	}
 
-	date := now.Format("20060102")
 	if e.day == nil || e.day.Date != date {
 		if e.day != nil && e.dirty {
-			_ = puSaveDay(e.hncDir, e.day)
+			if e.pendingDays == nil {
+				e.pendingDays = map[string]*puDay{}
+			}
+			// 跨零点先把昨日脏账放入 pendingDays, 落盘成功前绝不丢弃
+			e.pendingDays[e.day.Date] = e.day.clone()
+			if len(e.pendingDays) > 32 {
+				oldest := ""
+				for k := range e.pendingDays {
+					if oldest == "" || k < oldest {
+						oldest = k
+					}
+				}
+				if oldest != "" && oldest != e.day.Date {
+					delete(e.pendingDays, oldest)
+				}
+			}
 		}
-		e.day, _ = puLoadDay(e.hncDir, date)
-		e.dirty = false
+		if pd, ok := e.pendingDays[date]; ok && pd != nil {
+			e.day = pd.clone()
+			e.dirty = true
+		} else {
+			e.day, _ = puLoadDay(e.hncDir, date)
+			e.dirty = false
+		}
 	}
 	d := e.day
 	if cell != ([2]uint64{}) {
-		key := e.currentSIMLocked(now).key()
+		curSIM := e.sim
+		if curSIM.Slot > maxSlots {
+			curSIM = puSIM{Slot: 0, Carrier: puUnknownSIM}
+		}
+		key := curSIM.key()
 		v := d.Cell[key]
 		puAdd2(&v, cell)
 		d.Cell[key] = v
 		lv := d.LocalSIM[key]
 		puAdd2(&lv, localCell)
 		d.LocalSIM[key] = lv
+	}
+	if e.sim.Slot >= 1 && e.sim.Slot <= maxSlots {
+		_ = puReconcileDayUnknownSIM(d, e.sim, maxSlots)
 	}
 	puAdd2(&d.Wifi, wifi)
 	puAdd2(&d.Hotspot, hsClient)
@@ -836,23 +1202,47 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 	puAdd2(&h.Local, localCell)
 	puAdd2(&h.Local, localWifi)
 	e.dirty = true
+
+	pendSnaps := e.snapshotPendingDaysLocked()
+	e.mu.Unlock()
+	e.retrySavePendingDays(pendSnaps)
 	return out
 }
 
-// flush 落盘当天 + 状态, 平滑迁移旧 run/ 账单并清理 400 天前的文件
+// flush 落盘待重试跨日账单 + 当天 + 状态, 平滑迁移旧 run/ 账单并清理 400 天前的文件
 func (e *puEngine) flush(now time.Time) {
 	e.mu.Lock()
+	pendSnaps := e.snapshotPendingDaysLocked()
+	var curSnap *puDay
 	if e.day != nil && e.dirty {
-		if err := puSaveDay(e.hncDir, e.day); err == nil {
-			e.dirty = false
-		}
-	}
-	// v5.20: 时钟不可信时不写状态(At 会是错的时间)、不做保留期清理
-	sane := clockSane(e.hncDir, now)
-	if e.loaded && sane {
-		e.saveStateLocked(now)
+		curSnap = e.day.clone()
 	}
 	e.mu.Unlock()
+
+	e.retrySavePendingDays(pendSnaps)
+	if curSnap != nil {
+		if err := puSaveDay(e.hncDir, curSnap); err == nil {
+			e.mu.Lock()
+			if e.day != nil && e.day.Date == curSnap.Date {
+				// 仅当落盘期间没有产生更新的字节时清除 dirty; 若期间有新采样则下一轮继续写
+				if reflectDayEqual(e.day, curSnap) {
+					e.dirty = false
+				}
+			}
+			delete(e.pendingDays, curSnap.Date)
+			e.mu.Unlock()
+		}
+	}
+
+	// v5.20: 时钟不可信时不写状态(At 会是错的时间)、不做保留期清理
+	sane := clockSane(e.hncDir, now)
+	if sane {
+		e.mu.Lock()
+		if e.loaded {
+			e.saveStateLocked(now)
+		}
+		e.mu.Unlock()
+	}
 	if !sane {
 		return
 	}
@@ -870,7 +1260,23 @@ func (e *puEngine) flush(now time.Time) {
 	}
 }
 
-// days 读 [from, to] 每天(含), 今天用内存里的最新值。缺失的天跳过。
+func reflectDayEqual(a, b *puDay) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Date != b.Date || a.Wifi != b.Wifi || a.Hotspot != b.Hotspot ||
+		a.LocalCell != b.LocalCell || a.LocalWifi != b.LocalWifi || len(a.Cell) != len(b.Cell) {
+		return false
+	}
+	for k, v := range a.Cell {
+		if b.Cell[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// days 读 [from, to] 每天(含), 今天及尚未成功落盘的跨零点脏天优先取内存里的最新值。缺失的天跳过。
 func (e *puEngine) days(from, to time.Time) []*puDay {
 	var out []*puDay
 	for t := puMidnight(from); !t.After(to); t = t.AddDate(0, 0, 1) {
@@ -879,6 +1285,8 @@ func (e *puEngine) days(from, to time.Time) []*puDay {
 		var d *puDay
 		if e.day != nil && e.day.Date == date {
 			d = e.day.clone()
+		} else if pd := e.pendingDays[date]; pd != nil {
+			d = pd.clone()
 		}
 		e.mu.Unlock()
 		if d == nil {
@@ -917,7 +1325,11 @@ func (e *puEngine) daysWithSim(from, to, now time.Time) ([]*puDay, [2]uint64, bo
 		days = append(days, today) // 今天是区间最后一天, 追加在末尾保持顺序
 	}
 	e.mu.Lock()
-	key := e.sim.key()
+	simCopy := e.sim
+	if simCopy.Slot <= 0 {
+		simCopy = puSIM{Slot: 1, Carrier: "中国移动"}
+	}
+	key := simCopy.key()
 	e.mu.Unlock()
 	for h := 0; h < 24; h++ {
 		v := hours[h]
@@ -947,9 +1359,9 @@ func (e *puEngine) daysWithSim(from, to, now time.Time) ([]*puDay, [2]uint64, bo
 	return days, tot, true
 }
 
-// ─── 聚合 ─────────────────────────────────────────────────────────
+// ─── 聚合与未知卡确定性归并 ────────────────────────────────────────
 
-// puSplitKey "<slot>|<carrier>" → slot, carrier
+// puSplitKey "<slot>|<carrier>" -> slot, carrier
 func puSplitKey(k string) (int, string) {
 	i := strings.IndexByte(k, '|')
 	if i < 0 {
@@ -993,7 +1405,108 @@ func puAggSIM(days []*puDay) map[int]*puSimAgg {
 	return out
 }
 
-// puAlertDecision 纯函数: 本周期各卡已用量 → 需要新发的告警(按 fired 去重, 会写入 fired)
+const puSilentSimNoiseMaxBytes = 65536 // 64KB: 副卡待机驻网微小信令噪声阈值
+
+// puPickUniqueCellSlot 判断账期内是否可确定性锁定唯一耗流物理卡槽(1..maxSlots):
+//  1. 整机当前明确仅插有 1 张物理 SIM 卡(或单卡硬件 maxSlots == 1); 或
+//  2. 系统 NetworkStats 可用, 且账期内只有唯一 1 张物理卡槽有蜂窝流量(WindowTotal > 0, 另一卡槽 < 65536 字节)。
+func puPickUniqueCellSlot(cal *calResult, maxSlots int, present map[int]puSIM, slotsKnown bool) (int, string) {
+	if maxSlots <= 0 {
+		maxSlots = 2
+	}
+	if maxSlots == 1 {
+		return 1, present[1].Carrier
+	}
+	if slotsKnown && len(present) == 1 {
+		for s, info := range present {
+			if s >= 1 && s <= maxSlots {
+				return s, info.Carrier
+			}
+		}
+	}
+	if cal != nil && cal.NetstatsOK && !cal.Stale {
+		winBySlot := map[int]uint64{}
+		carrierBySlot := map[int]string{}
+		for _, c := range cal.NetstatsCellBySim {
+			if c.Slot < 1 || c.Slot > maxSlots {
+				continue
+			}
+			v := c.WindowTotal
+			if cal.WindowStart == 0 && v == 0 {
+				v = c.Total
+			}
+			winBySlot[c.Slot] += v
+			if carrierBySlot[c.Slot] == "" && c.Carrier != "" {
+				carrierBySlot[c.Slot] = c.Carrier
+			}
+		}
+		var majorSlots, nonZeroSlots []int
+		for s := 1; s <= maxSlots; s++ {
+			v := winBySlot[s]
+			if v >= puSilentSimNoiseMaxBytes {
+				majorSlots = append(majorSlots, s)
+			}
+			if v > 0 {
+				nonZeroSlots = append(nonZeroSlots, s)
+			}
+		}
+		picked := 0
+		if len(majorSlots) == 1 {
+			picked = majorSlots[0]
+		} else if len(majorSlots) == 0 && len(nonZeroSlots) == 1 {
+			picked = nonZeroSlots[0]
+		}
+		if picked >= 1 && picked <= maxSlots {
+			hint := carrierBySlot[picked]
+			if hint == "" {
+				hint = present[picked].Carrier
+			}
+			return picked, hint
+		}
+	}
+	return 0, ""
+}
+
+// puReconcileAndStripInvalidSlots 执行确定性 slot=0 流量归并, 并剥离一切 slot <= 0 或 slot > maxSlots 的非法桶,
+// 返回无法唯一归属的残余蜂窝字节数(供顶层 unattributed_* 字段展示)。
+func puReconcileAndStripInvalidSlots(m map[int]*puSimAgg, maxSlots int, targetSlot int, carrierHint string) uint64 {
+	if m == nil {
+		return 0
+	}
+	if maxSlots <= 0 {
+		maxSlots = 2
+	}
+	if targetSlot >= 1 && targetSlot <= maxSlots {
+		if unk := m[0]; unk != nil && (unk.Rx > 0 || unk.Tx > 0 || unk.LocalRx > 0 || unk.LocalTx > 0) {
+			dst := m[targetSlot]
+			if dst == nil {
+				dst = &puSimAgg{Carriers: map[string]bool{}}
+				m[targetSlot] = dst
+			}
+			dst.Rx += unk.Rx
+			dst.Tx += unk.Tx
+			dst.LocalRx += unk.LocalRx
+			dst.LocalTx += unk.LocalTx
+			if dst.Carrier == "" && carrierHint != "" {
+				dst.Carrier = carrierHint
+				dst.Carriers[carrierHint] = true
+			}
+			delete(m, 0)
+		}
+	}
+	var unattributed uint64
+	for s, a := range m {
+		if s < 1 || s > maxSlots {
+			if a != nil {
+				unattributed += a.Rx + a.Tx
+			}
+			delete(m, s)
+		}
+	}
+	return unattributed
+}
+
+// puAlertDecision 纯函数: 本周期各卡已用量 -> 需要新发的告警(按 fired 去重, 会写入 fired)
 type puAlertOut struct {
 	Slot    int
 	Level   string // warn | over
@@ -1061,7 +1574,20 @@ func (e *puEngine) checkAlerts(now time.Time) int {
 	}
 	start := puCycleStart(now, cfg.BillingDay)
 	used := puAggSIM(e.days(start, now))
-	used = puCalPreferUsed(e.hncDir, cfg, start, now, used) // v5.21: prefer → 按系统统计告警
+
+	maxSlots, presentSlots, slotsKnown := e.simTopologySnapshot()
+	var calRes *calResult
+	if cfg.netstatsMode() != "off" {
+		if cal := calGet(e.hncDir); cal != nil {
+			if r := cal.result(); calUsable(r, start, now) {
+				calRes = r
+			}
+		}
+	}
+	targetSlot, carrierHint := puPickUniqueCellSlot(calRes, maxSlots, presentSlots, slotsKnown)
+	_ = puReconcileAndStripInvalidSlots(used, maxSlots, targetSlot, carrierHint)
+
+	used = puCalPreferUsed(e.hncDir, cfg, start, now, used) // prefer / autoPromote / 手动校准锚点同源对齐
 	e.mu.Lock()
 	if !e.loaded {
 		e.loadState()
@@ -1072,7 +1598,10 @@ func (e *puEngine) checkAlerts(now time.Time) int {
 	for _, o := range outs {
 		carrier := o.Carrier
 		if carrier == "" {
-			carrier = puUnknownSIM
+			carrier = presentSlots[o.Slot].Carrier
+		}
+		if carrier == "" {
+			carrier = "SIM" + strconv.Itoa(o.Slot)
 		}
 		var detail string
 		if o.Level == "over" {
@@ -1167,49 +1696,105 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		cycDays, _, _ := e.daysWithSim(cycleStart, now, now)
 		cycAgg = puAggSIM(cycDays)
 	}
+
 	e.mu.Lock()
 	curSIM := e.sim
 	simKnown := !e.simAt.IsZero()
+	maxSlots := e.effMaxSlotsLocked()
+	presentSlots := make(map[int]puSIM, len(e.simSlots))
+	for k, v := range e.simSlots {
+		if k >= 1 && k <= maxSlots {
+			presentSlots[k] = v
+		}
+	}
+	slotsKnown := e.simSlotsKnown || maxSlots == 1
 	ifs := append([]puIfaceInfo(nil), e.lastIfs...)
 	lastUp, lastHS, lastErr, lastTick := e.lastUp, e.lastHS, e.lastErr, e.lastTick
 	lastUpIf := e.lastUpIf
 	e.mu.Unlock()
 
+	var calRes *calResult
+	if cfg.netstatsMode() != "off" {
+		if cal := calGet(e.hncDir); cal != nil {
+			if r := cal.result(); calUsable(r, cycleStart, now) {
+				calRes = r
+			}
+		}
+	}
+	cycTargetSlot, cycCarrierHint := puPickUniqueCellSlot(calRes, maxSlots, presentSlots, slotsKnown)
+	unattributedCycle := puReconcileAndStripInvalidSlots(cycAgg, maxSlots, cycTargetSlot, cycCarrierHint)
+	unattributedCell := unattributedCycle
+	if period != "cycle" {
+		periodCal := calRes
+		if since.Before(cycleStart) {
+			// 跨上个计费周期的窗口(如 30d)不套用本周期 netstats 唯一耗流推断, 仅允许单物理卡在位确定性归并
+			periodCal = nil
+		}
+		perTargetSlot, perCarrierHint := puPickUniqueCellSlot(periodCal, maxSlots, presentSlots, slotsKnown)
+		unattributedCell = puReconcileAndStripInvalidSlots(agg, maxSlots, perTargetSlot, perCarrierHint)
+	}
+
 	slots := map[int]bool{}
 	for s := range agg {
-		slots[s] = true
+		if s >= 1 && s <= maxSlots {
+			slots[s] = true
+		}
 	}
 	for s := range cycAgg {
-		slots[s] = true
+		if s >= 1 && s <= maxSlots {
+			slots[s] = true
+		}
 	}
-	for _, s := range []int{1, 2} {
+	for s := range presentSlots {
+		if s >= 1 && s <= maxSlots {
+			slots[s] = true
+		}
+	}
+	for s := 1; s <= maxSlots; s++ {
 		if cfg.planBytes(s) > 0 {
 			slots[s] = true
 		}
 	}
-	if simKnown && curSIM.Slot > 0 {
+	if simKnown && curSIM.Slot >= 1 && curSIM.Slot <= maxSlots {
 		slots[curSIM.Slot] = true
 	}
-	slotList := make([]int, 0, len(slots))
+
+	// 硬护栏: 严禁放入任何 slot <= 0 或 slot > maxSlots 的条目(双卡手机永远最多只有卡1、卡2)
+	slotList := make([]int, 0, maxSlots)
 	for s := range slots {
-		slotList = append(slotList, s)
+		if s >= 1 && s <= maxSlots {
+			slotList = append(slotList, s)
+		}
 	}
 	sort.Ints(slotList)
 	bySim := []map[string]interface{}{}
 	for _, s := range slotList {
+		if s < 1 || s > maxSlots {
+			continue
+		}
 		a := agg[s]
 		if a == nil {
 			a = &puSimAgg{Carriers: map[string]bool{}}
 		}
-		carrier := a.Carrier
+		carrier := ""
+		if ps, ok := presentSlots[s]; ok && ps.Carrier != "" {
+			carrier = ps.Carrier
+		}
+		if carrier == "" {
+			carrier = a.Carrier
+		}
 		if c := cycAgg[s]; carrier == "" && c != nil {
 			carrier = c.Carrier
 		}
 		if carrier == "" && simKnown && curSIM.Slot == s {
 			carrier = curSIM.Carrier
 		}
-		if s == 0 {
-			carrier = puUnknownSIM
+		if carrier == "" {
+			carrier = "SIM" + strconv.Itoa(s)
+		}
+		customName := presentSlots[s].CustomName
+		if customName == "" && simKnown && curSIM.Slot == s {
+			customName = curSIM.CustomName
 		}
 		var cycUsed uint64
 		if c := cycAgg[s]; c != nil {
@@ -1222,21 +1807,29 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		}
 		carriers := []string{}
 		for c := range a.Carriers {
-			carriers = append(carriers, c)
+			if c != "" && c != puUnknownSIM {
+				carriers = append(carriers, c)
+			}
 		}
 		sort.Strings(carriers)
-		bySim = append(bySim, map[string]interface{}{
+		row := map[string]interface{}{
 			"slot": s, "carrier": carrier, "carriers": carriers,
 			"rx": a.Rx, "tx": a.Tx, "total": a.Rx + a.Tx,
 			"local_rx": a.LocalRx, "local_tx": a.LocalTx,
-			"hotspot_total": puSub(a.Rx+a.Tx, a.LocalRx+a.LocalTx),
-			"cycle_used":    cycUsed, "plan_bytes": plan, "used_pct": pct,
+			"hotspot_total":   puSub(a.Rx+a.Tx, a.LocalRx+a.LocalTx),
+			"cycle_used":      cycUsed,
+			"plan_bytes":      plan,
+			"used_pct":        pct,
 			"is_default_data": simKnown && curSIM.Slot == s && s > 0,
-		})
+		}
+		if customName != "" && customName != carrier {
+			row["custom_name"] = customName
+		}
+		bySim = append(bySim, row)
 	}
 
 	simDetect := "unknown"
-	if simKnown && curSIM.Slot > 0 {
+	if simKnown && curSIM.Slot >= 1 && curSIM.Slot <= maxSlots {
 		simDetect = "ok"
 	}
 	src := map[string]interface{}{
@@ -1258,8 +1851,14 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		src["error"] = lastErr
 	}
 	var cur interface{}
-	if simKnown {
-		cur = map[string]interface{}{"slot": curSIM.Slot, "carrier": curSIM.Carrier, "sub_id": curSIM.SubID}
+	if simKnown && curSIM.Slot >= 1 && curSIM.Slot <= maxSlots {
+		cm := map[string]interface{}{"slot": curSIM.Slot, "carrier": curSIM.Carrier, "sub_id": curSIM.SubID}
+		if curSIM.CustomName != "" && curSIM.CustomName != curSIM.Carrier {
+			cm["custom_name"] = curSIM.CustomName
+		}
+		cur = cm
+	} else if simKnown {
+		cur = map[string]interface{}{"slot": 0, "carrier": puUnknownSIM, "sub_id": curSIM.SubID}
 	}
 
 	resp := map[string]interface{}{
@@ -1269,6 +1868,7 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		"billing_day": cfg.BillingDay,
 		"cycle_start": cycleStart.Unix(),
 		"cycle_end":   puCycleEnd(cycleStart).Unix(),
+		"max_slots":   maxSlots,
 		"config": map[string]interface{}{
 			"billing_day": cfg.BillingDay, "warn_percent": cfg.WarnPercent,
 			"plan_sim1_gb": cfg.PlanGB["1"], "plan_sim2_gb": cfg.PlanGB["2"],
@@ -1279,10 +1879,12 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 			"cellular": mkRxTx(cell), "wifi": mkRxTx(wifi),
 			"hotspot": mkRxTx(hs), "local": mkRxTx(local),
 		},
-		"hotspot_via": via,
-		"by_sim":      bySim,
-		"by_day":      byDay,
-		"default_sim": cur,
+		"hotspot_via":              via,
+		"by_sim":                   bySim,
+		"unattributed_cell_bytes":  unattributedCell,
+		"unattributed_cycle_bytes": unattributedCycle,
+		"by_day":                   byDay,
+		"default_sim":              cur,
 		"hotspot_by_device": map[string]interface{}{
 			"endpoint": "/api/usage_month",
 			"note":     "每台热点设备的本月 rx/tx 见 /api/usage_month(v5.26 起为计费月口径, 与设备卡「本月」同源)",
@@ -1343,7 +1945,8 @@ func (s *server) phoneUsage() *puEngine {
 			upstreamInfo: func() puUpInfo {
 				return puPickUpstream(readIfaceDetect(hncDir), time.Now().Unix(), puDefaultRouteIface())
 			},
-			sim: puDetectSIM,
+			sim:      puDetectSIM,
+			simProbe: puDetectSIMProbe,
 			bootID: func() string {
 				b, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
 				return strings.TrimSpace(string(b))

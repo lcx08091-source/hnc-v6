@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	qhStatusOK   = "ok"
-	qhStatusWarn = "warn"
-	qhStatusFail = "fail"
+	qhStatusOK          = "ok"
+	qhStatusWarn        = "warn"
+	qhStatusFail        = "fail"
+	qhStatusUnavailable = "unavailable"
 
 	qhFixNone   = "none"
 	qhFixAction = "action"
@@ -49,18 +50,19 @@ type quickStatfsInfo struct {
 
 // QuickHealthCheckItem 单张大白话体检卡 JSON 契约。
 type QuickHealthCheckItem struct {
-	ID        string            `json:"id"`
-	Title     string            `json:"title"`
-	Status    string            `json:"status"` // "ok" | "warn" | "fail"
-	Badge     string            `json:"badge"`
-	Verdict   string            `json:"verdict"`
-	Detail    string            `json:"detail"`
-	FixKind   string            `json:"fix_kind"` // "none" | "action" | "nav"
-	FixLabel  string            `json:"fix_label"`
-	FixAction string            `json:"fix_action"`
-	FixParams map[string]string `json:"fix_params"`
-	NavTarget string            `json:"nav_target"`
-	Metrics   map[string]any    `json:"metrics"`
+	ID         string            `json:"id"`
+	Title      string            `json:"title"`
+	Status     string            `json:"status"` // "ok" | "warn" | "fail" | "unavailable"
+	ReasonCode string            `json:"reason_code,omitempty"`
+	Badge      string            `json:"badge"`
+	Verdict    string            `json:"verdict"`
+	Detail     string            `json:"detail"`
+	FixKind    string            `json:"fix_kind"` // "none" | "action" | "nav"
+	FixLabel   string            `json:"fix_label"`
+	FixAction  string            `json:"fix_action"`
+	FixParams  map[string]string `json:"fix_params"`
+	NavTarget  string            `json:"nav_target"`
+	Metrics    map[string]any    `json:"metrics"`
 }
 
 // QuickHealthCheckReport GET /api/health_check 顶层响应契约。
@@ -72,7 +74,7 @@ type QuickHealthCheckReport struct {
 	VersionCode     string                 `json:"version_code,omitempty"`
 	DPIDVersion     string                 `json:"dpid_version,omitempty"`
 	WatchdogVersion string                 `json:"watchdog_version,omitempty"`
-	Overall         string                 `json:"overall"` // "ok" | "warn" | "fail"
+	Overall         string                 `json:"overall"` // "ok" | "warn" | "fail" | "unavailable"
 	Headline        string                 `json:"headline"`
 	Subline         string                 `json:"subline"`
 	Items           []QuickHealthCheckItem `json:"items"`
@@ -87,10 +89,12 @@ type quickHealthEnv struct {
 	EnforceTmpfs  bool // 为 true 时非 /data/local/hnc 目录也校验 tmpfs 挂载态(供单测注入)
 }
 
+var defaultQuickHealthIPForwardPath = "/proc/sys/net/ipv4/ip_forward"
+
 func defaultQuickHealthEnv() quickHealthEnv {
 	return quickHealthEnv{
 		Now:           time.Now,
-		IPForwardPath: "/proc/sys/net/ipv4/ip_forward",
+		IPForwardPath: defaultQuickHealthIPForwardPath,
 		Statfs:        queryDirStatfsPlatform,
 		IfaceIPv4:     ifaceIPv4,
 	}
@@ -115,7 +119,7 @@ func (s *server) buildQuickHealthReport(env quickHealthEnv) QuickHealthCheckRepo
 		env.Now = time.Now
 	}
 	if env.IPForwardPath == "" {
-		env.IPForwardPath = "/proc/sys/net/ipv4/ip_forward"
+		env.IPForwardPath = defaultQuickHealthIPForwardPath
 	}
 	if env.Statfs == nil {
 		env.Statfs = queryDirStatfsPlatform
@@ -153,13 +157,18 @@ func (s *server) buildQuickHealthReport(env quickHealthEnv) QuickHealthCheckRepo
 		if items[i].Metrics == nil {
 			items[i].Metrics = map[string]any{}
 		}
+		if items[i].ReasonCode != "" {
+			if _, exists := items[i].Metrics["reason_code"]; !exists {
+				items[i].Metrics["reason_code"] = items[i].ReasonCode
+			}
+		}
 		switch items[i].Status {
 		case qhStatusFail:
 			failCnt++
 			if firstFail == "" {
 				firstFail = items[i].Verdict
 			}
-		case qhStatusWarn:
+		case qhStatusWarn, qhStatusUnavailable:
 			warnCnt++
 			if firstWarn == "" {
 				firstWarn = items[i].Verdict
@@ -297,6 +306,7 @@ func (s *server) evalHotspotForwardCard(hncDir string, now time.Time, env quickH
 	switch {
 	case hotspotActive && ipForwardKnown && ipForward == 0:
 		item.Status = qhStatusFail
+		item.ReasonCode = "ip_forward_disabled"
 		item.Badge = "转发中断"
 		item.Verdict = "热点已开启，但系统网络转发未打开，连接设备可能无法上网"
 		item.Detail = "检测到内核 IPv4 转发开关为关闭状态，点击下方按钮即可重新开启并恢复网关转发"
@@ -305,14 +315,27 @@ func (s *server) evalHotspotForwardCard(hncDir string, now time.Time, env quickH
 		item.FixAction = "refresh"
 	case watchdogPassive:
 		item.Status = qhStatusWarn
+		item.ReasonCode = "watchdog_passive"
 		item.Badge = "守护暂停"
 		item.Verdict = "后台守护因连续重试失败已进入保护暂停模式"
 		item.Detail = "自动恢复巡检暂时挂起，建议一键重启后台服务恢复全自动守护"
 		item.FixKind = qhFixAction
 		item.FixLabel = "重启后台服务"
 		item.FixAction = "restart_service"
+	case !ipForwardKnown:
+		item.Status = qhStatusWarn
+		item.ReasonCode = "ip_forward_unreadable"
+		item.Badge = "转发状态未知"
+		item.Verdict = "无法读取内核网络转发开关状态，暂不能确认转发通道是否正常"
+		item.Detail = "读取 /proc/sys/net/ipv4/ip_forward 失败（可能受系统权限或内核节点限制），建议检查 Root 授权后重试"
+		if hotspotActive {
+			item.FixKind = qhFixAction
+			item.FixLabel = "一键恢复转发"
+			item.FixAction = "refresh"
+		}
 	case hotspotActive && ip == "" && !simLive:
 		item.Status = qhStatusWarn
+		item.ReasonCode = "hotspot_ip_missing"
 		item.Badge = "地址待就绪"
 		item.Verdict = "热点已开启，但尚未识别到网关内网地址"
 		item.Detail = "常见于刚开热点或网卡切换瞬间，可点击重新识别热点网卡"
@@ -429,15 +452,18 @@ func (s *server) evalZeroWakeupPowerCard(hncDir string, hotspotActive bool) Quic
 		"screen_on":         act.ScreenOn,
 		"clients_online":    act.ClientsOnline,
 		"power_sampled":     powerSampled,
-		"cpu_sec_per_hour":  math.Round(cpuSec1H*10) / 10,
-		"wakeups_per_min":   math.Round(wakeupsPerMin*10) / 10,
 		"watchdog_calls_1h": wdCalls1H,
 		"watchdog_fails_1h": wdFails1H,
+	}
+	if powerSampled {
+		item.Metrics["cpu_sec_per_hour"] = math.Round(cpuSec1H*10) / 10
+		item.Metrics["wakeups_per_min"] = math.Round(wakeupsPerMin*10) / 10
 	}
 
 	switch {
 	case powerSampled && cpuSec1H >= qhCPUFailSec1H:
 		item.Status = qhStatusFail
+		item.ReasonCode = "cpu_usage_high"
 		item.Badge = "耗电偏高"
 		item.Verdict = fmt.Sprintf("后台组件每小时消耗约 %.0f 秒 CPU，高于省电安全线", cpuSec1H)
 		item.Detail = "可能存在频繁重试或持续高负载抓包，建议打开分析页查看各进程功耗占比"
@@ -446,13 +472,27 @@ func (s *server) evalZeroWakeupPowerCard(hncDir string, hotspotActive bool) Quic
 		item.NavTarget = "stats"
 	case (powerSampled && cpuSec1H >= powerWarnSecPerHour) || wdCalls1H > scWatchdogActionsMaxCalls1H || wdFails1H > 0:
 		item.Status = qhStatusWarn
+		item.ReasonCode = "wakeups_elevated"
 		item.Badge = "唤醒偏多"
 		if wdFails1H > 0 {
 			item.Verdict = fmt.Sprintf("近 1 小时后台有 %d 次巡检动作重试，唤醒略微增多", wdFails1H)
 		} else {
 			item.Verdict = "后台调度频率略高于日常静默基线，建议留意"
 		}
-		item.Detail = fmt.Sprintf("当前每小时约 %.1f 秒 CPU · 看门狗外部调用 %d 次/小时", cpuSec1H, wdCalls1H)
+		if powerSampled {
+			item.Detail = fmt.Sprintf("当前每小时约 %.1f 秒 CPU · 看门狗外部调用 %d 次/小时", cpuSec1H, wdCalls1H)
+		} else {
+			item.Detail = fmt.Sprintf("看门狗近 1 小时外部调用 %d 次（失败重试 %d 次），功耗快照待生成", wdCalls1H, wdFails1H)
+		}
+		item.FixKind = qhFixNav
+		item.FixLabel = "打开功耗面板"
+		item.NavTarget = "stats"
+	case !powerSampled:
+		item.Status = qhStatusWarn
+		item.ReasonCode = "power_stats_missing"
+		item.Badge = "功耗待采样"
+		item.Verdict = "尚未生成后台功耗统计快照，暂无法确认待机零唤醒指标"
+		item.Detail = "未读取到 run/power_stats.json（常见于服务刚启动尚未完成首轮功耗采样），请稍后刷新或打开功耗面板查看"
 		item.FixKind = qhFixNav
 		item.FixLabel = "打开功耗面板"
 		item.NavTarget = "stats"
@@ -469,11 +509,7 @@ func (s *server) evalZeroWakeupPowerCard(hncDir string, hotspotActive bool) Quic
 			item.Badge = "按需省电"
 			item.Verdict = "动态省电调度正常，熄屏或关热点后将自动转入静默休眠"
 		}
-		if powerSampled {
-			item.Detail = fmt.Sprintf("实测后台每小时仅用 %.1f 秒 CPU（约 %.1f 次调度/分钟），不拖累手机续航", cpuSec1H, wakeupsPerMin)
-		} else {
-			item.Detail = "本体检亦采用按需零常驻设计，不额外增加任何后台轮询与唤醒"
-		}
+		item.Detail = fmt.Sprintf("实测后台每小时仅用 %.1f 秒 CPU（约 %.1f 次调度/分钟），不拖累手机续航", cpuSec1H, wakeupsPerMin)
 	}
 
 	return item
@@ -565,8 +601,10 @@ func (s *server) evalShapingOffloadCard(hncDir string, hotspotActive bool) Quick
 
 	offloadState := "UNKNOWN"
 	offloadBypass := false
+	offloadGuardPresent := false
 	if hncDir != "" {
-		if og := readOffloadGuard(hncDir); og != nil {
+		if og := readOffloadGuard(hncDir); len(og) > 0 {
+			offloadGuardPresent = true
 			if st := asString(og["offload_state"]); st != "" {
 				offloadState = st
 			} else if st := asString(og["state"]); st != "" {
@@ -581,23 +619,25 @@ func (s *server) evalShapingOffloadCard(hncDir string, hotspotActive bool) Quick
 	}
 
 	item.Metrics = map[string]any{
-		"controlled_devices": controlledDevices,
-		"blacklisted_count":  blacklistedCount,
-		"app_limits_count":   appLimitsCount,
-		"global_shaper":      globalShaper,
-		"total_policies":     totalPolicies,
-		"clsact_mode":        clsactMode,
-		"offload_state":      offloadState,
-		"tc_htb_supported":   htbSupported,
-		"tc_htb_known":       htbKnown,
-		"tc_repair_fails":    tcRepairFails,
-		"qos_fallback":       qosFallback,
-		"restore_pending":    restorePending,
+		"controlled_devices":    controlledDevices,
+		"blacklisted_count":     blacklistedCount,
+		"app_limits_count":      appLimitsCount,
+		"global_shaper":         globalShaper,
+		"total_policies":        totalPolicies,
+		"clsact_mode":           clsactMode,
+		"offload_state":         offloadState,
+		"offload_guard_present": offloadGuardPresent,
+		"tc_htb_supported":      htbSupported,
+		"tc_htb_known":          htbKnown,
+		"tc_repair_fails":       tcRepairFails,
+		"qos_fallback":          qosFallback,
+		"restore_pending":       restorePending,
 	}
 
 	switch {
 	case (controlledDevices > 0 || appLimitsCount > 0 || globalShaper) && htbKnown && !htbSupported:
 		item.Status = qhStatusFail
+		item.ReasonCode = "tc_htb_unsupported"
 		item.Badge = "内核受限"
 		item.Verdict = "当前手机内核未开启 HTB 流量整形支持，限速规则无法挂入内核"
 		item.Detail = "拉黑与统计仍可正常工作；可前往设置页打开兼容性自检查看当前 ROM 支持详情"
@@ -606,6 +646,7 @@ func (s *server) evalShapingOffloadCard(hncDir string, hotspotActive bool) Quick
 		item.NavTarget = "settings"
 	case hotspotActive && tcRepairFails >= qhTCRepairLimit:
 		item.Status = qhStatusFail
+		item.ReasonCode = "tc_repair_failed"
 		item.Badge = "规则失步"
 		item.Verdict = fmt.Sprintf("限速规则同步连续失败 %d 次，部分限速可能未生效", tcRepairFails)
 		item.Detail = "点击一键重同步将立即校准硬件卸载慢路径并重新挂载全部设备限速队列"
@@ -615,6 +656,7 @@ func (s *server) evalShapingOffloadCard(hncDir string, hotspotActive bool) Quick
 		item.FixParams = map[string]string{"resync": "1"}
 	case hotspotActive && offloadBypass:
 		item.Status = qhStatusWarn
+		item.ReasonCode = "offload_bypass_risk"
 		item.Badge = "加速抢跑"
 		item.Verdict = "系统硬件加速处于活跃态且防旁路兜底已关闭，测速可能绕过限速"
 		item.Detail = "建议将防旁路模式切回自动，或点击一键校准让受控设备流量走限速队列"
@@ -624,9 +666,20 @@ func (s *server) evalShapingOffloadCard(hncDir string, hotspotActive bool) Quick
 		item.FixParams = map[string]string{"mode": "auto"}
 	case hotspotActive && (tcRepairFails > 0 || restorePending):
 		item.Status = qhStatusWarn
+		item.ReasonCode = "tc_restore_pending"
 		item.Badge = "待重校准"
 		item.Verdict = "检测到限速队列有待恢复标记，建议执行一次规则校准"
 		item.Detail = "点击下方按钮可立即核验内核命中计数并补齐缺失规则"
+		item.FixKind = qhFixAction
+		item.FixLabel = "一键校准规则"
+		item.FixAction = "dataplane_verify_run"
+		item.FixParams = map[string]string{"resync": "1"}
+	case hotspotActive && !offloadGuardPresent:
+		item.Status = qhStatusWarn
+		item.ReasonCode = "offload_guard_missing"
+		item.Badge = "加速状态未知"
+		item.Verdict = "热点已开启，但缺少硬件卸载守卫状态快照，暂无法确认是否防旁路"
+		item.Detail = "未读取到 run/offload_guard.json，建议点击一键校准重新探测并同步硬件加速守卫状态"
 		item.FixKind = qhFixAction
 		item.FixLabel = "一键校准规则"
 		item.FixAction = "dataplane_verify_run"
@@ -687,8 +740,9 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		}
 	}
 
+	statfsValid := st.Supported && st.TotalBytes > 0 && statfsErr == ""
 	var totalMB, usedMB, freeMB, usedPct, freePct float64
-	if st.Supported && st.TotalBytes > 0 {
+	if statfsValid {
 		totalMB = float64(st.TotalBytes) / (1024.0 * 1024.0)
 		usedMB = float64(st.UsedBytes) / (1024.0 * 1024.0)
 		freeMB = float64(st.FreeBytes) / (1024.0 * 1024.0)
@@ -742,34 +796,38 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 	expectTmpfs := env.EnforceTmpfs || (hncDir != "" && filepath.Clean(hncDir) == "/data/local/hnc")
 
 	item.Metrics = map[string]any{
-		"statfs_supported":             st.Supported,
-		"run_is_tmpfs":                 st.IsTmpfs,
-		"tmpfs_unavailable":            tmpfsUnavailable,
-		"run_fs_magic":                 fmt.Sprintf("0x%x", st.FSType),
-		"run_total_bytes":              st.TotalBytes,
-		"run_used_bytes":               st.UsedBytes,
-		"run_free_bytes":               st.FreeBytes,
-		"run_used_pct":                 math.Round(usedPct*10) / 10,
-		"run_free_pct":                 math.Round(freePct*10) / 10,
-		"json_checked":                 checkedFiles,
-		"json_bad_count":               len(badFiles),
-		"json_bad_files":               badFiles,
-		"backup_count":                 backupCount,
-		"misblocked_public_dns":        misblockedDNS,
-		"misblocked_public_dns_count":  len(misblockedDNS),
+		"statfs_supported":            st.Supported,
+		"statfs_available":            statfsValid,
+		"run_is_tmpfs":                st.IsTmpfs,
+		"tmpfs_unavailable":           tmpfsUnavailable,
+		"run_fs_magic":                fmt.Sprintf("0x%x", st.FSType),
+		"json_checked":                checkedFiles,
+		"json_bad_count":              len(badFiles),
+		"json_bad_files":              badFiles,
+		"backup_count":                backupCount,
+		"misblocked_public_dns":       misblockedDNS,
+		"misblocked_public_dns_count": len(misblockedDNS),
+	}
+	if statfsValid {
+		item.Metrics["run_total_bytes"] = st.TotalBytes
+		item.Metrics["run_used_bytes"] = st.UsedBytes
+		item.Metrics["run_free_bytes"] = st.FreeBytes
+		item.Metrics["run_used_pct"] = math.Round(usedPct*10) / 10
+		item.Metrics["run_free_pct"] = math.Round(freePct*10) / 10
 	}
 	if statfsErr != "" {
 		item.Metrics["statfs_error"] = statfsErr
 	}
 
-	spaceFail := st.Supported && st.TotalBytes > 0 &&
+	spaceFail := statfsValid &&
 		((st.IsTmpfs && usedPct >= qhTmpfsFailPct && st.FreeBytes < 4<<20) || st.FreeBytes < 2<<20)
-	spaceWarn := !spaceFail && st.Supported && st.TotalBytes > 0 &&
+	spaceWarn := !spaceFail && statfsValid &&
 		((st.IsTmpfs && (st.FreeBytes < 4<<20 || freePct < 15.0)) || (!st.IsTmpfs && st.FreeBytes < 4<<20))
 
 	switch {
 	case len(badFiles) > 0:
 		item.Status = qhStatusFail
+		item.ReasonCode = "json_config_corrupt"
 		item.Badge = "配置损坏"
 		item.Verdict = fmt.Sprintf("检测到 %d 个核心配置文件异常（%s），可能导致规则丢失", len(badFiles), strings.Join(badFiles, "、"))
 		if backupCount > 0 {
@@ -782,6 +840,7 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		item.FixAction = "json_doctor_repair"
 	case spaceFail:
 		item.Status = qhStatusFail
+		item.ReasonCode = "run_space_critical"
 		item.Badge = "空间告急"
 		if st.IsTmpfs {
 			item.Verdict = fmt.Sprintf("运行态内存盘已占用 %.0f%%（仅剩 %.1f MB），随时可能写满", usedPct, freeMB)
@@ -794,6 +853,7 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		item.FixAction = "cache_clear"
 	case len(misblockedDNS) > 0:
 		item.Status = qhStatusWarn
+		item.ReasonCode = "misblocked_public_dns"
 		item.Badge = "误封公共DNS"
 		item.Verdict = fmt.Sprintf("检测到连接封锁配置中历史误封了公共基础 DNS（%s），会导致设备解析断网", strings.Join(misblockedDNS, "、"))
 		item.Detail = "建议立即移除对应公共基础 DNS 封禁条目（如 223.5.5.5、119.29.29.29 等），恢复设备正常联网解析"
@@ -808,8 +868,15 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 			item.FixLabel = "前往清理封禁"
 			item.NavTarget = "devices"
 		}
+	case !statfsValid:
+		item.Status = qhStatusWarn
+		item.ReasonCode = "statfs_unavailable"
+		item.Badge = "空间未知"
+		item.Verdict = "无法读取运行目录（run/）真实空间容量，暂无法核验内存盘余量"
+		item.Detail = fmt.Sprintf("底层 Statfs 系统调用未返回有效空间数据（已校验 %d 个核心配置文件无损坏），严禁伪造空间占用绿灯", checkedFiles)
 	case spaceWarn:
 		item.Status = qhStatusWarn
+		item.ReasonCode = "run_space_low"
 		item.Badge = "空间偏紧"
 		if st.IsTmpfs {
 			item.Verdict = fmt.Sprintf("运行态内存盘已用 %.1f / %.0f MB（剩余 %.1f MB，%.0f%%），剩余空间偏少", usedMB, totalMB, freeMB, freePct)
@@ -822,6 +889,7 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		item.FixAction = "cache_clear"
 	case st.Supported && expectTmpfs && !st.IsTmpfs && !tmpfsUnavailable:
 		item.Status = qhStatusWarn
+		item.ReasonCode = "tmpfs_not_mounted"
 		item.Badge = "未挂内存盘"
 		item.Verdict = "运行态目录未挂载到 32M 内存盘，高频状态正直接读写手机闪存"
 		item.Detail = "重启后台服务可重新挂载 32M 内存盘，让实时状态读写零闪存损耗"
@@ -836,10 +904,10 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 			item.Detail = fmt.Sprintf("已校验 %d 个核心配置文件无损坏；无需重复重启服务，长稳写节流已生效", checkedFiles)
 		} else {
 			item.Badge = "零擦写健康"
-			if st.Supported && st.IsTmpfs && totalMB > 0 {
+			if st.IsTmpfs && totalMB > 0 {
 				item.Verdict = fmt.Sprintf("32M 内存盘余量充足（已用 %.1f / %.0f MB），核心配置文件全部完好", usedMB, totalMB)
 			} else {
-				item.Verdict = "核心 JSON 配置文件全部完好，运行目录剩余空间充足"
+				item.Verdict = fmt.Sprintf("运行目录余量充足（剩余 %.1f MB），核心 JSON 配置文件全部完好", freeMB)
 			}
 			item.Detail = fmt.Sprintf("已校验 %d 个核心配置文件无损坏，高频运行态驻留内存保护手机闪存", checkedFiles)
 		}

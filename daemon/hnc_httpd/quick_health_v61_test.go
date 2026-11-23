@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,8 +32,16 @@ func setupQuickHealthTestDir(t *testing.T) string {
 	}
 	mustWriteQH("module.prop", "id=hotspot_net_ctl\nversion=v6.1.0-beta.2\nversionCode=6009202\n")
 	mustWriteQH("run/local_admin.secret", testAdminHexSecret+"\n")
+	mustWriteQH("run/power_stats.json", `{"total":{"cpu_sec_per_hour":3.2,"wakeups_per_min":0.5}}`)
+	mustWriteQH("run/fake_ip_forward_default", "1\n")
 	mustWriteQH("data/rules.json", `{"version":1,"auth_required":true,"whitelist_mode":false,"clsact_bpf_mode":"auto","devices":{},"blacklist":[],"whitelist":[]}`)
 	mustWriteQH("data/devices.json", `{}`)
+
+	prevIPFwd := defaultQuickHealthIPForwardPath
+	defaultQuickHealthIPForwardPath = filepath.Join(dir, "run", "fake_ip_forward_default")
+	t.Cleanup(func() {
+		defaultQuickHealthIPForwardPath = prevIPFwd
+	})
 	return dir
 }
 
@@ -498,4 +507,59 @@ func TestQuickHealthRC2Tmpfs32MAndPublicDNSGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestQuickHealthZeroFakeGreenOnMissingMetrics(t *testing.T) {
+	dir := setupQuickHealthTestDir(t)
+	_ = os.WriteFile(filepath.Join(dir, "run", "hnc_state"), []byte("ACTIVE:wlan2\n"), 0o600)
+	_ = os.Remove(filepath.Join(dir, "run", "power_stats.json"))
+	_ = os.Remove(filepath.Join(dir, "run", "offload_guard.json"))
+
+	s := newServer(dir)
+	env := quickHealthEnv{
+		Now:           func() time.Time { return time.Unix(1780005000, 0) },
+		IPForwardPath: filepath.Join(dir, "run", "nonexistent_ip_forward"),
+		IfaceIPv4:     func(string) string { return "192.168.43.1" },
+		Statfs: func(string) (quickStatfsInfo, error) {
+			return quickStatfsInfo{}, errors.New("statfs EACCES")
+		},
+	}
+
+	rep := s.buildQuickHealthReport(env)
+	if rep.Overall == "ok" {
+		t.Fatalf("expected non-ok overall when all 4 underlying metrics are unreadable/missing, got %q", rep.Overall)
+	}
+
+	byID := map[string]QuickHealthCheckItem{}
+	for _, it := range rep.Items {
+		byID[it.ID] = it
+	}
+
+	// 1. ip_forward 不可读 -> 严禁返回 ok
+	c1 := byID["hotspot_forward"]
+	if c1.Status == "ok" || c1.ReasonCode != "ip_forward_unreadable" {
+		t.Fatalf("hotspot_forward with unreadable ip_forward must NOT be ok: %+v", c1)
+	}
+
+	// 2. power_stats.json 缺失 -> 严禁返回 ok
+	c2 := byID["zero_wakeup_power"]
+	if c2.Status == "ok" || c2.ReasonCode != "power_stats_missing" {
+		t.Fatalf("zero_wakeup_power without power_stats.json must NOT be ok: %+v", c2)
+	}
+
+	// 3. 热点活跃态下 offload_guard.json 缺失 -> 严禁返回 ok
+	c3 := byID["shaping_offload"]
+	if c3.Status == "ok" || c3.ReasonCode != "offload_guard_missing" {
+		t.Fatalf("shaping_offload without offload_guard.json while hotspot active must NOT be ok: %+v", c3)
+	}
+
+	// 4. syscall.Statfs 失败 -> 严禁返回 ok 或伪造 0.0 / 32 MB
+	c4 := byID["tmpfs_config"]
+	if c4.Status == "ok" || c4.ReasonCode != "statfs_unavailable" {
+		t.Fatalf("tmpfs_config on failed Statfs must NOT be ok: %+v", c4)
+	}
+	if strings.Contains(c4.Verdict, "0.0") || strings.Contains(c4.Verdict, "32 MB") || strings.Contains(c4.Verdict, "32M") {
+		t.Fatalf("tmpfs_config on failed Statfs must NEVER fabricate 0.0 / 32 MB, got %q", c4.Verdict)
+	}
+}
+
 

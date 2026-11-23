@@ -73,7 +73,7 @@ echo "[build] Compiler: $CC"
 echo "[build] Target:   $ARCH  Version: $HNC_VER  Output: $OUT"
 echo "[build] libs:     $LIBS_OUT/lib/libbpf.a (libelf/libz not linked)"
 
-CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE -pthread"
+CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Wcast-align -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE -pthread"
 LDFLAGS="-pie -pthread -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 # shellcheck disable=SC2086

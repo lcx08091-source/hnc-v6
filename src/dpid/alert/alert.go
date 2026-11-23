@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -367,8 +368,9 @@ func makeAlertID(kind, mac string, ts int64) string {
 // call. There's no clean fallback that works everywhere, so we just log
 // and rely on the WebUI's bell-badge UX.
 func postNotification(title, body string) error {
-	// v5.12: 10s 超时。`cmd notification` 走 binder, system_server 卡顿时可能
-	// 不返回; 旧代码无超时会把 hnc_watchdog 的告警扫描 goroutine 永久挂住。
+	// v5.12 + RC4: 10s 硬超时 + Setpgid 进程组强杀 + WaitDelay。
+	// `cmd notification` 依赖 ART 运行环境, 必须保留宿主进程中的
+	// BOOTCLASSPATH / SYSTEMSERVERCLASSPATH / ANDROID_* 等环境变量, 严禁清空。
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "cmd", "notification", "post",
@@ -376,6 +378,18 @@ func postNotification(title, body string) error {
 		"-t", title,
 		"hnc_alert",
 		body)
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+				return nil
+			}
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("cmd notification: %v (out=%q)", err, string(out))
@@ -768,10 +782,12 @@ func MarkSeen(cfg Config, ids []string) error {
 	return writeFileAtomic(path, b)
 }
 
+var alertAtomicSeq atomic.Uint64
+
 // writeFileAtomic v5.12: 写同目录临时文件 → fsync → rename, 读者要么看到旧
-// 内容要么看到新内容。临时文件名带 pid, 避免 httpd/watchdog 两个进程互踩。
+// 内容要么看到新内容。临时文件名带 pid 与递增序号, 避免多进程/并发互踩。
 func writeFileAtomic(path string, b []byte) error {
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), alertAtomicSeq.Add(1))
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err

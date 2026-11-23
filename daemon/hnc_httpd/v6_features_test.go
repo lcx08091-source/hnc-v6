@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -956,5 +958,403 @@ func TestV6DataplaneAndLimitRegressions(t *testing.T) {
 	st2, err := os.Stat(stateFile)
 	if err != nil || st2.ModTime().Equal(oldTime) {
 		t.Fatalf("usageDirty limitCtl should persist after 5m interval: err=%v mtime=%v", err, st2.ModTime())
+	}
+}
+
+func TestV6SelfStudioMigrationAndTmpfsRescue(t *testing.T) {
+	s, _, dir := newV6TestMux(t)
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.Local)
+	day := now.Format("20060102")
+	prevDay := now.AddDate(0, 0, -1).Format("20060102")
+
+	// 1) self_fg_truth.go: 写入路径迁至 data/self_studio/ + 1 MiB 单日硬上限 + 回退合并旧 run/
+	legacyFG := filepath.Join(dir, "run", "self_fg."+prevDay+".jsonl")
+	legacyRec, _ := json.Marshal(selfFGRecord{Ts: now.Add(-2 * time.Hour).Unix(), Pkg: "com.legacy.app", Source: "window"})
+	if err := os.WriteFile(legacyFG, append(legacyRec, '\n'), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendSelfFG(dir, now, selfFGRecord{Ts: now.Unix(), Pkg: "com.studio.app", Source: "activities"}); err != nil {
+		t.Fatalf("appendSelfFG failed: %v", err)
+	}
+	fgStudioPath := filepath.Join(dir, "data", "self_studio", "self_fg."+day+".jsonl")
+	if _, err := os.Stat(fgStudioPath); err != nil {
+		t.Fatalf("expected self_fg written under data/self_studio/: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "run", "self_fg."+day+".jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("new self_fg must NOT be written into run/")
+	}
+	sum := summarizeSelfFG(dir, now)
+	if sum.Switches24h != 2 || sum.LastPkg != "com.studio.app" {
+		t.Fatalf("expected merged switches_24h=2 and LastPkg=com.studio.app, got %+v", sum)
+	}
+
+	// 验证单日 1 MiB 硬上限: 超限后停止当日追加, 文件体积绝不超过 1 MiB
+	bigPkg := "com.cap." + strings.Repeat("a", 8000)
+	for i := 0; i < 200; i++ {
+		if err := appendSelfFG(dir, now, selfFGRecord{Ts: now.Unix() + int64(i+1), Pkg: bigPkg, Source: "activities"}); err != nil {
+			t.Fatalf("appendSelfFG cap loop err: %v", err)
+		}
+	}
+	fiCap, err := os.Stat(fgStudioPath)
+	if err != nil || fiCap.Size() > selfFGMaxDayBytes {
+		t.Fatalf("self_fg daily cap violated: err=%v size=%d max=%d", err, fiCap.Size(), selfFGMaxDayBytes)
+	}
+
+	// 2) main.go rescueRunTmpfs: 抢救 >4 MiB 膨胀文件(仅保留尾部 <=4 MiB) + 迁出 fg_timeline/apk_domains/app_labels_live + 立即删 run/ 原文件与 *.tmp*
+	bloatedAttrib := filepath.Join(dir, "run", "self_attrib."+day+".jsonl")
+	var sb strings.Builder
+	row := `{"t":1800000000,"conns":[{"remote":"1.1.1.1:443"}]}` + "\n"
+	for sb.Len() < (4<<20)+(512<<10) {
+		sb.WriteString(row)
+	}
+	if err := os.WriteFile(bloatedAttrib, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "label_samples."+day+".jsonl"),
+		[]byte(`{"ts":1800000010,"pkg":"com.demo.app","uid":10123,"sni":"api.demo.example"}`+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "fg_timeline."+day+".json"),
+		[]byte(`{"date":"`+day+`","devices":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "apk_domains.json"),
+		[]byte(`{"generated_at":1800000099,"apps":{"com.demo.app":{"label":"DemoApp"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "app_labels_live.json"), []byte(`{"com.demo.app":"DemoApp"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "orphan_crash.json.tmp.999"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "self_capture.enabled"), []byte("enabled\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "self_attrib.enabled"), []byte("enabled\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cleaned := rescueRunTmpfs(dir)
+	if cleaned < 6 {
+		t.Fatalf("expected rescueRunTmpfs to clean/migrate >=6 files, got %d", cleaned)
+	}
+
+	rescuedAttrib := filepath.Join(dir, "data", "self_studio", "self_attrib."+day+".jsonl")
+	stAttrib, err := os.Stat(rescuedAttrib)
+	if err != nil || stAttrib.Size() == 0 || stAttrib.Size() > rescueMaxTailBytes {
+		t.Fatalf("rescued self_attrib invalid: err=%v size=%v", err, stAttrib)
+	}
+	for _, mustGone := range []string{
+		"self_attrib." + day + ".jsonl",
+		"label_samples." + day + ".jsonl",
+		"self_fg." + prevDay + ".jsonl",
+		"fg_timeline." + day + ".json",
+		"apk_domains.json",
+		"app_labels_live.json",
+		"orphan_crash.json.tmp.999",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, "run", mustGone)); !os.IsNotExist(err) {
+			t.Fatalf("run/%s should have been removed by rescueRunTmpfs", mustGone)
+		}
+	}
+	// 实时开关标志文件必须保留在 run/
+	for _, mustKeep := range []string{"self_capture.enabled", "self_attrib.enabled"} {
+		if _, err := os.Stat(filepath.Join(dir, "run", mustKeep)); err != nil {
+			t.Fatalf("run/%s must survive rescueRunTmpfs: %v", mustKeep, err)
+		}
+	}
+
+	// 验证 apiSelfAttrib、loadAPKIndex、fgLoadDay 均从新路径正常读取
+	attReq := httptest.NewRequest(http.MethodGet, "/api/self/attrib?limit=5", nil)
+	attRec := httptest.NewRecorder()
+	s.apiSelfAttrib(attRec, attReq)
+	if attRec.Code != http.StatusOK || !strings.Contains(attRec.Body.String(), `"shown":5`) {
+		t.Fatalf("apiSelfAttrib from data/self_studio failed: code=%d body=%s", attRec.Code, attRec.Body.String())
+	}
+	if ix := s.loadAPKIndex(); ix.apps != 1 || ix.labels["com.demo.app"] != "DemoApp" {
+		t.Fatalf("loadAPKIndex from data/apk_domains.json failed: %+v", ix)
+	}
+	if d := fgLoadDay(dir, day); d == nil || d.Date != day {
+		t.Fatalf("fgLoadDay from data/fg_timeline failed: %+v", d)
+	}
+
+	// 验证 self_attrib_purge 与 actionCacheClear 清理双目录与孤儿 .tmp, 且绝不误删 *.enabled 开关
+	if r := dispatchAction(s, "self_attrib_purge", nil, true); !r.OK {
+		t.Fatalf("self_attrib_purge failed: %+v", r)
+	}
+	if _, err := os.Stat(rescuedAttrib); !os.IsNotExist(err) {
+		t.Fatalf("self_attrib_purge did not delete data/self_studio/self_attrib.*")
+	}
+	_ = os.WriteFile(filepath.Join(dir, "data", "dangling.json.tmp.12"), []byte("x"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "run", "label_samples.20260101.jsonl"), []byte("{}\n"), 0o644)
+	if r := actionCacheClear(dir); !r.OK {
+		t.Fatalf("actionCacheClear failed: %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "data", "dangling.json.tmp.12")); !os.IsNotExist(err) {
+		t.Fatal("actionCacheClear did not remove data/*.tmp.*")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "run", "label_samples.20260101.jsonl")); !os.IsNotExist(err) {
+		t.Fatal("actionCacheClear did not remove legacy run/label_samples.*")
+	}
+	for _, mustKeep := range []string{"self_capture.enabled", "self_attrib.enabled"} {
+		if _, err := os.Stat(filepath.Join(dir, "run", mustKeep)); err != nil {
+			t.Fatalf("run/%s must survive actionCacheClear: %v", mustKeep, err)
+		}
+	}
+}
+
+func TestV6SimulationPhysicalIsolationAndVectorSync(t *testing.T) {
+	s, _, dir := newV6TestMux(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/vector_sync", s.apiVectorSync)
+	mux.HandleFunc("/api/devices", s.apiDevices)
+	mux.HandleFunc("/api/dpi_state", s.apiDPIState)
+
+	// 写入 1 台真实设备与 run/dpi_state.json(验证 jsonCache 绝不被原地污染到 vector_sync)
+	if err := os.WriteFile(filepath.Join(dir, "data", "devices.json"), []byte(`{
+		"aa:bb:cc:dd:ee:01": {"ip": "192.168.43.10", "hostname": "RealPhone", "online": true, "last_seen": 1800000000}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "dpi_state.json"), []byte(`{
+		"clients": {
+			"aa:bb:cc:dd:ee:01": {"client_ip": "192.168.43.10", "client_mac": "aa:bb:cc:dd:ee:01", "last_seen": 1800000000}
+		}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 开启仿真预设 home -> /api/devices 与 /api/dpi_state 可见 02:5e:00:*, /api/vector_sync 立即刷新 sim=true
+	if r := actionSimPreset(s, map[string]string{"preset": "home"}); !r.OK {
+		t.Fatalf("actionSimPreset failed: %+v", r)
+	}
+	devOn := doV6JSONReq(t, mux, http.MethodGet, "/api/devices", "")
+	if devOn.Code != http.StatusOK || !strings.Contains(devOn.Body.String(), "02:5e:00:") {
+		t.Fatalf("expected 02:5e:00:* devices in /api/devices when sim_enabled=true: %s", devOn.Body.String())
+	}
+	dpiOn := doV6JSONReq(t, mux, http.MethodGet, "/api/dpi_state", "")
+	if dpiOn.Code != http.StatusOK || !strings.Contains(dpiOn.Body.String(), "02:5e:00:") {
+		t.Fatalf("expected 02:5e:00:* clients in /api/dpi_state when sim_enabled=true: %s", dpiOn.Body.String())
+	}
+	vsOn := doV6JSONReq(t, mux, http.MethodGet, "/api/vector_sync", "")
+	if vsOn.Code != http.StatusOK || !strings.Contains(vsOn.Body.String(), `"sim":true`) {
+		t.Fatalf("expected /api/vector_sync live.sim=true immediately after preset: %s", vsOn.Body.String())
+	}
+
+	// 2) 验证 simMergeDPIState 深拷贝 clients map, 绝不原地污染 jsonCache 共享 map
+	sharedClients := map[string]interface{}{
+		"aa:bb:cc:dd:ee:01": map[string]interface{}{
+			"client_ip":  "192.168.43.10",
+			"client_mac": "aa:bb:cc:dd:ee:01",
+		},
+	}
+	sharedRoot := map[string]interface{}{"clients": sharedClients}
+	mergedOn := s.simMergeDPIState(sharedRoot).(map[string]interface{})
+	mergedClients := mergedOn["clients"].(map[string]interface{})
+	if len(mergedClients) <= 1 {
+		t.Fatalf("expected simulated clients merged in copy, got %d", len(mergedClients))
+	}
+	if len(sharedClients) != 1 {
+		t.Fatalf("BUG: simMergeDPIState mutated shared jsonCache clients map in place! len=%d", len(sharedClients))
+	}
+
+	// 注入内存模拟残留状态与被污染的 jsonCache 快照, 验证 sim_set(false) 瞬间清零并刷新快照
+	simMAC := "02:5e:00:aa:bb:cc"
+	s.rateMu.Lock()
+	s.rates[simMAC] = rateOut{rxBps: 99999, txBps: 88888}
+	s.rateMu.Unlock()
+	fgSt.mu.Lock()
+	fgSt.devs[simMAC] = &fgDev{shown: "douyin"}
+	fgSt.mu.Unlock()
+	s.jsonCache.mu.Lock()
+	s.jsonCache.entries[filepath.Join(dir, "run", "dpi_state.json")] = jsonCacheEntry{
+		modTime: time.Now(),
+		size:    123,
+		val: map[string]any{
+			"clients": map[string]any{
+				"sim-" + simMAC: map[string]any{
+					"client_ip":  "192.168.43.201",
+					"client_mac": simMAC,
+					"last_seen":  float64(time.Now().Unix()),
+				},
+			},
+		},
+	}
+	s.jsonCache.mu.Unlock()
+	s.CoreHub().RefreshSnapshotNow()
+
+	// 3) 执行 sim_set(false): 必须立即清空残留并调用 CoreHub().RefreshSnapshotNow(), /api/vector_sync 瞬间剔除全部 02:5e:00:* 且 sim=false
+	if r := actionSimSet(s, map[string]string{"enabled": "false"}); !r.OK {
+		t.Fatalf("actionSimSet(false) failed: %+v", r)
+	}
+	vsOff := doV6JSONReq(t, mux, http.MethodGet, "/api/vector_sync", "")
+	if vsOff.Code != http.StatusOK {
+		t.Fatalf("GET /api/vector_sync failed: %d", vsOff.Code)
+	}
+	if strings.Contains(vsOff.Body.String(), "02:5e:00:") || strings.Contains(vsOff.Body.String(), `"sim":true`) {
+		t.Fatalf("ISOLATION BREACH: /api/vector_sync still contains sim state after sim_set(false): %s", vsOff.Body.String())
+	}
+	if !strings.Contains(vsOff.Body.String(), "aa:bb:cc:dd:ee:01") {
+		t.Fatalf("real device missing from /api/vector_sync after sim_set(false): %s", vsOff.Body.String())
+	}
+	devOff := doV6JSONReq(t, mux, http.MethodGet, "/api/devices", "")
+	if strings.Contains(devOff.Body.String(), "02:5e:00:") {
+		t.Fatalf("/api/devices still contains 02:5e:00:* after sim_set(false): %s", devOff.Body.String())
+	}
+	dpiOff := doV6JSONReq(t, mux, http.MethodGet, "/api/dpi_state", "")
+	if strings.Contains(dpiOff.Body.String(), "02:5e:00:") {
+		t.Fatalf("/api/dpi_state still contains 02:5e:00:* after sim_set(false): %s", dpiOff.Body.String())
+	}
+
+	s.rateMu.Lock()
+	_, rateHasSim := s.rates[simMAC]
+	s.rateMu.Unlock()
+	fgSt.mu.Lock()
+	_, fgHasSim := fgSt.devs[simMAC]
+	fgSt.mu.Unlock()
+	if rateHasSim || fgHasSim {
+		t.Fatalf("in-memory sim residue was not purged: rateHasSim=%v fgHasSim=%v", rateHasSim, fgHasSim)
+	}
+
+	// 4) 当 !s.simOn() 时, simMergeDPIState 主动过滤意外混入的 02:5e:00: 模拟客户端且不改动原 map
+	pollutedClients := map[string]interface{}{
+		"aa:bb:cc:dd:ee:01": map[string]interface{}{"client_mac": "aa:bb:cc:dd:ee:01"},
+		"02:5e:00:11:22:33": map[string]interface{}{"client_mac": "02:5e:00:11:22:33"},
+		"sim-ghost":         map[string]interface{}{"client_mac": "02:5e:00:44:55:66", "sim": true},
+	}
+	cleanedDPI := s.simMergeDPIState(map[string]interface{}{"clients": pollutedClients}).(map[string]interface{})
+	outClients := cleanedDPI["clients"].(map[string]interface{})
+	if len(outClients) != 1 || outClients["aa:bb:cc:dd:ee:01"] == nil {
+		t.Fatalf("expected !simOn() to strip all 02:5e:00:* entries, got %+v", outClients)
+	}
+	if len(pollutedClients) != 3 {
+		t.Fatalf("expected input pollutedClients map to remain unmutated, got len=%d", len(pollutedClients))
+	}
+}
+
+func TestV6NetlinkStandbyZeroWakeupAndEpollReconnect(t *testing.T) {
+	s, _, _ := newV6TestMux(t)
+
+	prevAct := activityNow()
+	origOpen := ctOpenDestroySubFn
+	defer func() {
+		ctOpenDestroySubFn = origOpen
+		activityPublish(prevAct)
+	}()
+
+	var openSockets atomic.Int32
+	var totalSubscribes atomic.Int32
+	var writerMu sync.Mutex
+	var peerWriteFD int = -1
+	subReady := make(chan struct{}, 8)
+	closedSig := make(chan struct{}, 8)
+
+	ctOpenDestroySubFn = func() (*netlinkSubConn, error) {
+		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, 0)
+		if err != nil {
+			return nil, err
+		}
+		writerMu.Lock()
+		if peerWriteFD >= 0 {
+			_ = syscall.Close(peerWriteFD)
+		}
+		peerWriteFD = fds[1]
+		writerMu.Unlock()
+
+		openSockets.Add(1)
+		totalSubscribes.Add(1)
+		conn := newNetlinkSubConnFromFile(os.NewFile(uintptr(fds[0]), "mock-netlink-epoll"))
+		conn.onClose = func() {
+			openSockets.Add(-1)
+			select {
+			case closedSig <- struct{}{}:
+			default:
+			}
+		}
+		select {
+		case subReady <- struct{}{}:
+		default:
+		}
+		return conn, nil
+	}
+	defer func() {
+		writerMu.Lock()
+		if peerWriteFD >= 0 {
+			_ = syscall.Close(peerWriteFD)
+			peerWriteFD = -1
+		}
+		writerMu.Unlock()
+	}()
+
+	// 1) 初始处于待机态 lvlHotspotOff: CtEventLoop 绝不创建任何 socket (0 socket, 0 唤醒)
+	activityPublish(Activity{Known: true, HotspotActive: false})
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.CtEventLoop(stop)
+	}()
+
+	time.Sleep(80 * time.Millisecond)
+	if got := openSockets.Load(); got != 0 || totalSubscribes.Load() != 0 {
+		t.Fatalf("expected 0 sockets during initial lvlHotspotOff standby, got open=%d total=%d", got, totalSubscribes.Load())
+	}
+
+	// 2) 热点开启 -> 立即唤醒并建立 epoll 非阻塞订阅, 且能实时接收事件
+	activityPublish(Activity{Known: true, HotspotActive: true, HotspotIface: "ap0", ClientsOnline: 1, ScreenKnown: true, ScreenOn: true})
+	select {
+	case <-subReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for CtEventLoop to subscribe on hotspot wakeup")
+	}
+	if openSockets.Load() != 1 {
+		t.Fatalf("expected 1 open socket when hotspot active, got %d", openSockets.Load())
+	}
+
+	delFrame, err := buildConntrackDeleteNetlinkMsg(ScalpelTuple{
+		Proto: "tcp", SrcIP: "192.168.43.55", Sport: 51234, DstIP: "1.1.1.1", Dport: 443,
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = ctEventsDrain()
+	writerMu.Lock()
+	_, werr := syscall.Write(peerWriteFD, delFrame)
+	writerMu.Unlock()
+	if werr != nil {
+		t.Fatalf("write mock netlink frame: %v", werr)
+	}
+	deadline := time.Now().Add(time.Second)
+	gotEv := false
+	for time.Now().Before(deadline) {
+		evs, active, _ := ctEventsDrain()
+		if active && len(evs) == 1 && evs[0].Key == "tcp|192.168.43.55|51234|1.1.1.1|443" {
+			gotEv = true
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !gotEv {
+		t.Fatal("epoll CtEventLoop did not deliver conntrack destroy frame")
+	}
+
+	// 3) 热点再次关闭进入 lvlHotspotOff -> 立即主动关闭订阅 socket 回到 0 socket 休眠
+	activityPublish(Activity{Known: true, HotspotActive: false})
+	select {
+	case <-closedSig:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for CtEventLoop to close socket on lvlHotspotOff")
+	}
+	if openSockets.Load() != 0 || ctEventsPrecise() {
+		t.Fatalf("expected 0 open sockets and active=false in standby, got open=%d active=%v", openSockets.Load(), ctEventsPrecise())
+	}
+
+	// 4) stop 信号立即无泄漏退出
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("CtEventLoop did not exit promptly on stop")
 	}
 }

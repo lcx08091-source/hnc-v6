@@ -92,10 +92,14 @@ write_state(){
     done
     _mver=${_mver#v}
     _mver=$(json_escape "${_mver:-unknown}")
-    cat > "$RUN/dpi_state.json.tmp.$$" <<EOF_STATE
+    _st_tmp="$RUN/dpi_state.json.tmp.$$"
+    if cat > "$_st_tmp" 2>/dev/null <<EOF_STATE && [ -s "$_st_tmp" ]; then
 {"schema_version":"2.0","timestamp":$now,"version":"0.5.4-rebind+${_mver}","mode":"blind","interface":"$iface","uptime_s":0,"blind_reason":"$reason","stats":{"packets":0,"dns_events":0,"tls_events":0,"kernel_drops":0,"ignored_packets":0,"parse_errors":0}}
 EOF_STATE
-    mv -f "$RUN/dpi_state.json.tmp.$$" "$RUN/dpi_state.json" 2>/dev/null || true
+        mv -f "$_st_tmp" "$RUN/dpi_state.json" 2>/dev/null || rm -f "$_st_tmp" 2>/dev/null || true
+    else
+        rm -f "$_st_tmp" 2>/dev/null || true
+    fi
 }
 
 kill_pidfile(){
@@ -154,9 +158,12 @@ log "manual rebind requested arg='${EXPLICIT_ARG:-auto}' resolved='$STATE_IFACE'
 write_state "${LIVE_IFACE:-}" "manual DPI rebind requested; restarting capture (${STATE_IFACE})"
 
 if [ -n "$LIVE_IFACE" ]; then
-    echo "$LIVE_IFACE" > "$RUN/hotspot_iface.tmp.$$" 2>/dev/null \
-        && mv -f "$RUN/hotspot_iface.tmp.$$" "$RUN/hotspot_iface" 2>/dev/null \
-        || echo "$LIVE_IFACE" > "$RUN/hotspot_iface" 2>/dev/null || true
+    _if_tmp="$RUN/hotspot_iface.tmp.$$"
+    if echo "$LIVE_IFACE" > "$_if_tmp" 2>/dev/null && [ -s "$_if_tmp" ]; then
+        mv -f "$_if_tmp" "$RUN/hotspot_iface" 2>/dev/null || rm -f "$_if_tmp" 2>/dev/null || true
+    else
+        rm -f "$_if_tmp" 2>/dev/null || true
+    fi
 fi
 
 # 无显式固定口需求时不把瞬态网卡名写死进 etc/dpi_config.json, 让 dpid 动态跟随 iface_detect.json / hotspot_iface
@@ -169,20 +176,37 @@ fi
 
 if [ -n "$PINNED_IFACE" ]; then
     if [ -s "$CONFIG" ] && grep -q '"iface"[[:space:]]*:' "$CONFIG" 2>/dev/null; then
-        sed 's/"iface"[[:space:]]*:[[:space:]]*"[^"]*"/"iface":"'"$PINNED_IFACE"'"/' "$CONFIG" > "$CONFIG.tmp.$$" 2>/dev/null \
-            && mv -f "$CONFIG.tmp.$$" "$CONFIG" 2>/dev/null \
-            || printf '{"iface":"%s","log_level":"info"}\n' "$PINNED_IFACE" > "$CONFIG" 2>/dev/null || true
+        _cfg_tmp="$CONFIG.tmp.$$"
+        if sed 's/"iface"[[:space:]]*:[[:space:]]*"[^"]*"/"iface":"'"$PINNED_IFACE"'"/' "$CONFIG" > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
+            mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
+        else
+            rm -f "$_cfg_tmp" 2>/dev/null || true
+        fi
     else
-        printf '{"iface":"%s","log_level":"info"}\n' "$PINNED_IFACE" > "$CONFIG" 2>/dev/null || true
+        _cfg_tmp="$CONFIG.tmp.$$"
+        if printf '{"iface":"%s","log_level":"info"}\n' "$PINNED_IFACE" > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
+            mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
+        else
+            rm -f "$_cfg_tmp" 2>/dev/null || true
+        fi
     fi
 else
     if [ -s "$CONFIG" ]; then
         if grep -q '"iface"[[:space:]]*:[[:space:]]*"[^"]\+"' "$CONFIG" 2>/dev/null; then
-            sed 's/"iface"[[:space:]]*:[[:space:]]*"[^"]*"/"iface":""/' "$CONFIG" > "$CONFIG.tmp.$$" 2>/dev/null \
-                && mv -f "$CONFIG.tmp.$$" "$CONFIG" 2>/dev/null || rm -f "$CONFIG.tmp.$$" 2>/dev/null || true
+            _cfg_tmp="$CONFIG.tmp.$$"
+            if sed 's/"iface"[[:space:]]*:[[:space:]]*"[^"]*"/"iface":""/' "$CONFIG" > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
+                mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
+            else
+                rm -f "$_cfg_tmp" 2>/dev/null || true
+            fi
         fi
     else
-        printf '{"log_level":"info"}\n' > "$CONFIG" 2>/dev/null || true
+        _cfg_tmp="$CONFIG.tmp.$$"
+        if printf '{"log_level":"info"}\n' > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
+            mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
+        else
+            rm -f "$_cfg_tmp" 2>/dev/null || true
+        fi
     fi
 fi
 chmod 644 "$CONFIG" 2>/dev/null || true

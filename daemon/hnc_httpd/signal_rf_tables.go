@@ -320,7 +320,8 @@ func describeBandTrait(primaryBand, bandCombo string, totalBWMHz, caCount int, i
 }
 
 // build4DSignalLabels 生成普通用户一眼看懂的四维射频体感标签。
-func build4DSignalLabels(rsrp, sinr, rsrq int, hasRSRQ bool, alpha float64, isWifi bool, wifiRSSI int) (rsrpLbl, sinrLbl, rsrqLbl string, speedPct int, speedTxt string) {
+// 当 !hasSINR 或 !hasRSRQ 时如实标注未上报, 绝不将缺失零值误判为强干扰或假正常。
+func build4DSignalLabels(rsrp, sinr, rsrq int, hasSINR, hasRSRQ bool, alpha float64, isWifi bool, wifiRSSI int) (rsrpLbl, sinrLbl, rsrqLbl string, speedPct int, speedTxt string) {
 	speedPct = int(math.Round(alpha * 100))
 	if speedPct < 35 {
 		speedPct = 35
@@ -350,7 +351,21 @@ func build4DSignalLabels(rsrp, sinr, rsrq int, hasRSRQ bool, alpha float64, isWi
 		default:
 			rsrpLbl = "偏弱（边缘易抖动）"
 		}
-		return rsrpLbl, "Wi-Fi 信道", "自动协商", speedPct, speedTxt
+		if !hasSINR {
+			sinrLbl = "底噪未上报"
+		} else {
+			switch {
+			case sinr >= 30:
+				sinrLbl = "极纯净"
+			case sinr >= 20:
+				sinrLbl = "纯净"
+			case sinr >= 12:
+				sinrLbl = "轻度干扰"
+			default:
+				sinrLbl = "同频拥挤"
+			}
+		}
+		return rsrpLbl, sinrLbl, "信道协商", speedPct, speedTxt
 	}
 
 	switch {
@@ -366,21 +381,25 @@ func build4DSignalLabels(rsrp, sinr, rsrq int, hasRSRQ bool, alpha float64, isWi
 		rsrpLbl = "极弱"
 	}
 
-	switch {
-	case sinr >= 20:
-		sinrLbl = "极纯净"
-	case sinr >= 13:
-		sinrLbl = "纯净"
-	case sinr >= 3:
-		sinrLbl = "轻度干扰"
-	case sinr >= -3:
-		sinrLbl = "干扰明显"
-	default:
-		sinrLbl = "嘈杂易跳Ping"
+	if !hasSINR {
+		sinrLbl = "基带未上报"
+	} else {
+		switch {
+		case sinr >= 20:
+			sinrLbl = "极纯净"
+		case sinr >= 13:
+			sinrLbl = "纯净"
+		case sinr >= 3:
+			sinrLbl = "轻度干扰"
+		case sinr >= -3:
+			sinrLbl = "干扰明显"
+		default:
+			sinrLbl = "嘈杂易跳Ping"
+		}
 	}
 
 	if !hasRSRQ {
-		rsrqLbl = "正常"
+		rsrqLbl = "基带未上报"
 	} else {
 		switch {
 		case rsrq >= -10:

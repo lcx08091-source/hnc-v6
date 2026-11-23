@@ -530,7 +530,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-rc.3', HNC_UI_VC = '6009303', HNC_UI_DATE = '2026-11-23';
+  var HNC_UI_VER = 'v6.1.0-rc.4', HNC_UI_VC = '6009304', HNC_UI_DATE = '2026-11-23';
   var bVer = cleanVer(l.backend_version, HNC_UI_VER);
   var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -593,20 +593,30 @@ function renderSettings(anim1) {
       (gMap['设备'] || '') + (gMap['飞轮排除名单'] || ''))
   ];
   var dpvNorm = typeof dpvNormalize === 'function' ? dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled) : null;
-  var dpvHasErr = !!(dpvNorm && dpvNorm.sampled_ok && dpvNorm.summary && dpvNorm.summary.bypass_or_missing_count > 0);
+  var dpvIsUnavail = !!(dpvNorm && dpvNorm.sampled_ok && dpvNorm.is_unavailable);
+  var dpvIsBypass = !!(dpvNorm && dpvNorm.sampled_ok && dpvNorm.is_bypass);
+  var dpvHasErr = !!(dpvNorm && dpvNorm.sampled_ok && !dpvIsUnavail && (dpvIsBypass || (dpvNorm.summary && dpvNorm.summary.bypass_or_missing_count > 0)));
   if (dpvHasErr && S.open['scard-dpv'] === undefined) S.open['scard-dpv'] = true;
   var dpvSubTxt = !dpvNorm || !dpvNorm.sampled_ok
     ? '检验给设备设的限速是否真正管用，有无被手机系统加速绕过'
-    : dpvHasErr
-      ? ('发现 ' + dpvInt(dpvNorm.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
-      : ('已设限速 ' + dpvInt(dpvNorm.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dpvNorm.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
+    : dpvIsUnavail
+      ? ('暂不可读 · ' + esc(dpvNorm.unavailable_reason || '未能读取内核队列状态'))
+      : dpvIsBypass
+        ? '检测到高通 tether_limit_map / 系统硬件加速绕过截流 · 点开一键兜底'
+        : dpvHasErr
+          ? ('发现 ' + dpvInt(dpvNorm.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
+          : ('已设限速 ' + dpvInt(dpvNorm.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dpvNorm.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
   var dpvBadgeHtml = !dpvNorm || !dpvNorm.sampled_ok
     ? '<span class="badge b-gray" id="dpv-scard-badge">点开检验</span>'
-    : dpvHasErr
-      ? '<span class="badge b-warn" id="dpv-scard-badge">待修复</span>'
-      : (dpvNorm.summary.hitting_count > 0
-          ? '<span class="badge b-ok" id="dpv-scard-badge">真实生效</span>'
-          : '<span class="badge b-acc" id="dpv-scard-badge">待命就绪</span>');
+    : dpvIsUnavail
+      ? '<span class="badge b-gray" id="dpv-scard-badge">暂不可读</span>'
+      : dpvIsBypass
+        ? '<span class="badge b-warn" id="dpv-scard-badge">硬件截流</span>'
+        : dpvHasErr
+          ? '<span class="badge b-warn" id="dpv-scard-badge">待修复</span>'
+          : (dpvNorm.summary.hitting_count > 0
+              ? '<span class="badge b-ok" id="dpv-scard-badge">真实生效</span>'
+              : '<span class="badge b-acc" id="dpv-scard-badge">待命就绪</span>');
   var diagCards = [
     (function () {
       var qh = S.quickHealth && !S.quickHealth._err ? S.quickHealth : null;
@@ -1299,7 +1309,7 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.3';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.4';
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
@@ -1408,6 +1418,7 @@ var DPV_APP_NAMES = {
 var DPV_STATE = {
   loading: false,
   resyncing: false,
+  guardSwitching: false,
   seq: 0,
   leakEnabled: false,
   leakUserToggled: false,
@@ -1554,9 +1565,11 @@ function dpvFormatCheckedTime(tsSec, fallbackStr) {
 }
 
 function dpvVerdictMeta(verdict) {
-  var v = dpvStr(verdict, 'idle');
+  var v = dpvStr(verdict, 'idle').toLowerCase();
   if (v === 'hit') return { key: 'hit', label: '队列真实命中', cls: 'dpv-status-hit' };
-  if (v === 'bypass_offload' || v === 'bypass') return { key: 'bypass_offload', label: '疑似快径旁路', cls: 'dpv-status-bypass' };
+  if (v === 'bypass') return { key: 'bypass', label: '硬件加速绕过截流', cls: 'dpv-status-bypass' };
+  if (v === 'bypass_offload') return { key: 'bypass_offload', label: '疑似快径旁路', cls: 'dpv-status-bypass' };
+  if (v === 'unavailable' || v === 'unknown') return { key: 'unavailable', label: '状态不可读', cls: 'dpv-status-idle' };
   if (v === 'missing_class' || v === 'missing') return { key: 'missing_class', label: '内核队列缺失', cls: 'dpv-status-missing' };
   if (v === 'missing_rule') return { key: 'missing_rule', label: '掩码过滤器缺失', cls: 'dpv-status-missing' };
   return { key: 'idle', label: '链路就绪（空闲）', cls: 'dpv-status-idle' };
@@ -1571,6 +1584,34 @@ function dpvAppLabel(appId, rawName) {
   return id;
 }
 
+function dpvExtractGuidancePaths(src, sum, off) {
+  var out = [];
+  var rawArr = (Array.isArray(src.guidance_paths) ? src.guidance_paths : null) ||
+    (Array.isArray(src.bypass_paths) ? src.bypass_paths : null) ||
+    (Array.isArray(src.remediation_paths) ? src.remediation_paths : null) ||
+    (Array.isArray(src.paths) ? src.paths : null) ||
+    (sum && Array.isArray(sum.guidance_paths) ? sum.guidance_paths : null) ||
+    (off && Array.isArray(off.guidance_paths) ? off.guidance_paths : null);
+  if (rawArr) {
+    rawArr.forEach(function (it) {
+      if (!it) return;
+      if (typeof it === 'string') {
+        if (it.trim()) out.push(it.trim());
+      } else if (typeof it === 'object') {
+        var title = dpvStr(it.title || it.label || it.name, '');
+        var desc = dpvStr(it.desc || it.detail || it.text || it.steps || it.guidance, '');
+        if (title && desc) out.push(title + '：' + desc);
+        else if (title || desc) out.push(title || desc);
+      }
+    });
+  }
+  var p1 = dpvStr(src.path_a || src.path_1 || src.system_toggle_guide || (off && off.system_toggle_guide), '');
+  var p2 = dpvStr(src.path_b || src.path_2 || src.always_guard_guide || (off && off.always_guard_guide), '');
+  if (p1 && out.indexOf(p1) < 0) out.push(p1);
+  if (p2 && out.indexOf(p2) < 0) out.push(p2);
+  return out;
+}
+
 /* 未采样 / 首次静默加载未返回时的诚实中性态（严禁伪装 BPF 已挂载或全绿健康） */
 function dpvDefaultData(leakOn) {
   var ifc = (typeof S === 'object' && S && S.hotspot && S.hotspot.iface) ? S.hotspot.iface : '—';
@@ -1578,15 +1619,23 @@ function dpvDefaultData(leakOn) {
   return {
     ok: false,
     sampled_ok: false,
+    verdict: 'unsampled',
+    is_unavailable: false,
+    unavailable_reason: '',
+    reason_code: '',
+    is_bypass: false,
+    bypass_guidance: '',
+    bypass_paths: [],
     checked_at: 0,
     checked_at_str: '待首次采样',
     iface: ifc || '—',
     hotspot_active: hsOn,
     engine_mode: 'pending',
     engine_label: '待采样核验',
-    mark_layout: 'orthogonal_v540_0xffff0000',
-    fwmark_mask: '0xffff0000',
-    netd_low16_protected: true,
+    mark_layout: '',
+    fwmark_mask: '—',
+    netd_low16_known: false,
+    netd_low16_protected: false,
     ipv6_quic_controlled: false,
     bpf_maps: {
       mac_mark_entries: 0,
@@ -1596,6 +1645,7 @@ function dpvDefaultData(leakOn) {
       ifb_redirect_prio2: false
     },
     offload_guard: {
+      mode: '',
       slowpath_active: false,
       tether_offload_disabled: false,
       hwnat: 'unknown'
@@ -1604,6 +1654,7 @@ function dpvDefaultData(leakOn) {
       controlled_devices: 0,
       hitting_count: 0,
       idle_count: 0,
+      unavailable_count: 0,
       bypass_or_missing_count: 0,
       app_classes_total: 0,
       overall_status: 'unsampled',
@@ -1612,7 +1663,7 @@ function dpvDefaultData(leakOn) {
     devices: [],
     goroutineleak: {
       sampled: false,
-      supported: true,
+      supported: false,
       trigger: '',
       total_goroutines: 0,
       leaked_count: 0,
@@ -1627,18 +1678,25 @@ function dpvDefaultData(leakOn) {
 function dpvNormalize(raw, leakOn) {
   var base = dpvDefaultData(leakOn);
   if (!raw || typeof raw !== 'object') return base;
-  var src = raw.data && typeof raw.data === 'object' && (raw.data.summary || raw.data.devices) ? raw.data : raw;
+  var src = raw.data && typeof raw.data === 'object' && (raw.data.summary || raw.data.devices || raw.data.verdict) ? raw.data : raw;
   if (src.sampled_ok === false) return base;
+  var topVerdictRaw = dpvStr(src.verdict || (src.summary && src.summary.verdict), '').toLowerCase();
   var hasPayload = Boolean(
     src.ok === true ||
     src.sampled_ok === true ||
+    topVerdictRaw === 'unavailable' ||
+    topVerdictRaw === 'bypass' ||
+    topVerdictRaw === 'bypass_offload' ||
     src.checked_at > 0 ||
     (src.summary && typeof src.summary === 'object') ||
     Array.isArray(src.devices) ||
     (src.bpf_maps && typeof src.bpf_maps === 'object') ||
     (src.goroutineleak && typeof src.goroutineleak === 'object')
   );
-  if (!hasPayload || src.ok === false) return base;
+  if (!hasPayload) return base;
+  if (src.ok === false && topVerdictRaw !== 'unavailable' && topVerdictRaw !== 'bypass' && !(src.summary && typeof src.summary === 'object')) {
+    return base;
+  }
 
   var eng = src.engine && typeof src.engine === 'object' ? src.engine : {};
   var sum = src.summary && typeof src.summary === 'object' ? src.summary : {};
@@ -1648,7 +1706,8 @@ function dpvNormalize(raw, leakOn) {
   var devs = Array.isArray(src.devices) ? src.devices : [];
 
   var normDevs = [];
-  var hitCnt = 0, idleCnt = 0, errCnt = 0, appTotal = 0;
+  var hitCnt = 0, idleCnt = 0, unavailCnt = 0, errCnt = 0, bypassDevCnt = 0, appTotal = 0;
+  var devBypassReasons = [];
 
   for (var i = 0; i < devs.length; i++) {
     var d = devs[i] || {};
@@ -1669,8 +1728,8 @@ function dpvNormalize(raw, leakOn) {
     var normApps = [];
     for (var j = 0; j < rawApps.length; j++) {
       var a = rawApps[j] || {};
-      var aClassId = dpvStr(a.class_id || a.classid, '1:' + (0x9001 + j).toString(16));
-      var aParent = dpvStr(a.parent_class_id || a.parent, classId !== '—' ? classId : '1:1');
+      var aClassId = dpvStr(a.class_id || a.classid, '—');
+      var aParent = dpvStr(a.parent_class_id || a.parent, classId !== '—' ? classId : '—');
       var aDownMbps = typeof a.down_limit_mbps !== 'undefined'
         ? dpvNum(a.down_limit_mbps, 0)
         : dpvNum(a.ceil_kbps, 0) / 1000;
@@ -1683,7 +1742,7 @@ function dpvNormalize(raw, leakOn) {
         class_id: aClassId,
         parent_class_id: aParent,
         down_limit_mbps: aDownMbps,
-        class_present: a.class_present !== false,
+        class_present: a.class_present === true,
         sent_bytes: aSent,
         delta_bytes: aDelta,
         drops: dpvNum(a.drops, 0),
@@ -1701,14 +1760,22 @@ function dpvNormalize(raw, leakOn) {
     var vMeta = dpvVerdictMeta(rawVerdict);
     if (vMeta.key === 'hit') hitCnt++;
     else if (vMeta.key === 'idle') idleCnt++;
-    else errCnt++;
+    else if (vMeta.key === 'unavailable') unavailCnt++;
+    else {
+      errCnt++;
+      if (vMeta.key === 'bypass' || vMeta.key === 'bypass_offload') {
+        bypassDevCnt++;
+        var bTxt = dpvStr(d.guidance_cn || d.guidance || d.reason, '');
+        if (bTxt && devBypassReasons.indexOf(bTxt) < 0) devBypassReasons.push(bTxt);
+      }
+    }
     appTotal += normApps.length;
 
     normDevs.push({
-      mac: dpvStr(d.mac, '02:00:00:00:00:' + pad2(i + 1)),
+      mac: dpvStr(d.mac, '—'),
       name: dpvStr(d.name, dpvStr(d.mac, '受控设备 #' + (i + 1))),
       ip: dpvStr(d.ip, '—'),
-      online: d.online !== false,
+      online: d.online === true,
       blacklisted: Boolean(d.blacklisted),
       mark_id: mid,
       mark_hex: markHex,
@@ -1732,27 +1799,31 @@ function dpvNormalize(raw, leakOn) {
       verdict: vMeta.key,
       status_label: dpvStr(d.status_label || d.status_text, vMeta.label),
       status_cls: vMeta.cls,
-      reason: dpvStr(d.reason, ''),
-      fix: dpvStr(d.fix, ''),
+      reason: dpvStr(d.reason || d.reason_cn || d.detail, ''),
+      fix: dpvStr(d.fix || d.guidance_cn || d.guidance, ''),
+      guidance_paths: dpvExtractGuidancePaths(d, null, null),
       app_classes: normApps
     });
   }
 
-  var engineMode = dpvStr(src.engine_mode || eng.mode, 'go_native_netlink');
+  var engineMode = dpvStr(src.engine_mode || eng.mode, 'unknown');
   var engineLabel = dpvStr(
     eng.label,
-    engineMode === 'shell_compat' ? 'tc -s 兼容解析引擎' : 'Go 1.27 原生 RTNetlink · Green Tea GC'
+    engineMode === 'shell_compat'
+      ? 'tc -s 兼容解析引擎'
+      : (engineMode === 'go_native_netlink' ? 'Go 原生 RTNetlink 统计引擎' : (engineMode === 'unknown' ? '引擎未上报' : engineMode))
   );
+  var low16Known = typeof src.netd_low16_protected === 'boolean' || typeof eng.netd_low16_preserved === 'boolean';
   var low16Protected = typeof src.netd_low16_protected === 'boolean'
     ? src.netd_low16_protected
-    : (eng.netd_low16_preserved !== false);
-  var markLayout = dpvStr(src.mark_layout, low16Protected ? 'orthogonal_v540_0xffff0000' : 'legacy_low16_overlap');
+    : (eng.netd_low16_preserved === true);
+  var markLayout = dpvStr(src.mark_layout, '');
   var fwmarkMask = markLayout.indexOf('0xffff0000') !== -1
     ? '0xffff0000'
-    : dpvStr(eng.fwmark_mask, low16Protected ? '0xffff0000' : markLayout);
+    : dpvStr(eng.fwmark_mask, low16Protected ? '0xffff0000' : (markLayout || '—'));
   var ipv6Quic = typeof src.ipv6_quic_controlled === 'boolean'
     ? src.ipv6_quic_controlled
-    : (sum.quic_guard_dualstack !== false);
+    : (sum.quic_guard_dualstack === true);
 
   var ctrlTotal = typeof sum.controlled_devices !== 'undefined'
     ? dpvNum(sum.controlled_devices, normDevs.length)
@@ -1769,44 +1840,71 @@ function dpvNormalize(raw, leakOn) {
         ? dpvNum(sum.bypass_suspected, 0) + dpvNum(sum.missing_queue, 0)
         : errCnt);
 
-  var rawOverall = dpvStr(sum.overall_status || sum.health, '');
+  var rawOverall = dpvStr(topVerdictRaw || sum.overall_status || sum.health, '').toLowerCase();
   if (rawOverall === 'healthy') rawOverall = 'ok';
   if (rawOverall === 'error') rawOverall = 'fail';
-  if (rawOverall !== 'ok' && rawOverall !== 'idle' && rawOverall !== 'warn' && rawOverall !== 'fail') {
+  if (rawOverall === 'bypass_offload') rawOverall = 'bypass';
+  var isUnavailable = rawOverall === 'unavailable' || (ctrlTotal === 0 && unavailCnt > 0) || (src.available === false);
+  var isBypass = rawOverall === 'bypass' || bypassDevCnt > 0 || src.bypass_detected === true || off.bypass_detected === true;
+  if (isUnavailable) rawOverall = 'unavailable';
+  else if (isBypass && rawOverall !== 'fail') rawOverall = 'bypass';
+  else if (rawOverall !== 'ok' && rawOverall !== 'idle' && rawOverall !== 'warn' && rawOverall !== 'fail') {
     rawOverall = bypassMissingCount > 0 ? 'warn' : (hittingCount > 0 ? 'ok' : 'idle');
   }
 
   var hsActive = typeof src.hotspot_active === 'boolean'
     ? src.hotspot_active
-    : ((typeof S === 'object' && S && S.hotspot && typeof S.hotspot.active === 'boolean') ? S.hotspot.active : true);
+    : ((typeof S === 'object' && S && S.hotspot && typeof S.hotspot.active === 'boolean') ? S.hotspot.active : false);
 
-  var defaultHeadline = !hsActive
-    ? '当前未开启热点，开启热点后即可检验设备限速是否真实生效'
-    : bypassMissingCount > 0
-      ? '发现 ' + bypassMissingCount + ' 台设备的限速可能被手机硬件加速绕过，请点击下方「一键修复限速」'
-      : hittingCount > 0
-        ? '限速已真实生效：' + hittingCount + '/' + ctrlTotal + ' 台限速设备的上网流量正经过限速通道（其余 ' + idleCount + ' 台当前无流量待命）'
-        : ctrlTotal > 0
-          ? '全部 ' + ctrlTotal + ' 台设备的限速通道已准备就绪，设备开始上网下载后即可看到生效计数'
-          : '热点运行正常，目前还没有给任何设备单独设置限速或封锁';
+  var unavailReason = dpvStr(
+    src.unavailable_reason || src.reason_cn || src.reason_zh || src.reason || src.detail || src.error || sum.reason || (isUnavailable ? sum.headline : ''),
+    isUnavailable ? '当前内核接口、Netlink 权限或热点队列状态暂不可读' : ''
+  );
+  var reasonCode = dpvStr(src.reason_code || sum.reason_code, '');
+
+  var bypassGuidance = dpvStr(
+    src.bypass_guidance || src.dual_path_guidance || src.guidance_cn || src.guidance_zh || src.guidance || sum.guidance_cn || sum.guidance || off.guidance_cn || off.guidance || src.advice || (isBypass ? (src.fix || sum.fix) : ''),
+    devBypassReasons.join('；')
+  );
+  var bypassPaths = dpvExtractGuidancePaths(src, sum, off);
+  if (isBypass && !bypassPaths.length && !bypassGuidance) {
+    bypassPaths = [
+      '路径一（系统设置根治）：前往手机「设置 -> 连接与共享 -> 个人热点」，关闭「热点硬件加速 / WLAN 共享加速」，阻止高通 IPA / tether_limit_map 硬件快径绕过限速队列。',
+      '路径二（HNC 始终兜底）：若系统界面无此开关或不便重开热点，点击下方「一键切为始终兜底」将硬件加速兜底切换为「始终」常驻压制模式。'
+    ];
+  }
+
+  var defaultHeadline = isUnavailable
+    ? ('数据面核验暂不可读：' + unavailReason)
+    : !hsActive
+      ? '当前未开启热点，开启热点后即可检验设备限速是否真实生效'
+      : isBypass
+        ? '检测到高通 tether_limit_map / 系统热点硬件加速绕过截流，限速流量未完整经过内核队列'
+        : bypassMissingCount > 0
+          ? '发现 ' + bypassMissingCount + ' 台设备的限速队列或规则异常，请点击下方「一键修复限速」'
+          : hittingCount > 0
+            ? '限速已真实生效：' + hittingCount + '/' + ctrlTotal + ' 台限速设备的上网流量正经过限速通道（其余 ' + idleCount + ' 台当前无流量待命）'
+            : ctrlTotal > 0
+              ? '全部 ' + ctrlTotal + ' 台设备的限速通道已准备就绪，设备开始上网下载后即可看到生效计数'
+              : '热点运行正常，目前还没有给任何设备单独设置限速或封锁';
 
   var ipEntries = typeof bpf.ip_mark_entries !== 'undefined'
     ? dpvNum(bpf.ip_mark_entries, 0)
     : (dpvNum(bpf.ip_mark_v4_entries, 0) + dpvNum(bpf.ip_mark_v6_entries, 0));
 
   var leakSampled = glk
-    ? (typeof glk.sampled === 'boolean' ? glk.sampled : (typeof glk.enabled === 'boolean' ? glk.enabled : true))
+    ? Boolean(glk.sampled === true || glk.enabled === true)
     : false;
-  var leakSupported = glk ? glk.supported !== false : true;
+  var leakSupported = glk ? Boolean(glk.supported === true) : false;
   var leakLeaked = glk ? dpvNum(glk.leaked_count, 0) : 0;
   var leakStatus = glk
-    ? dpvStr(glk.status, !leakSupported ? 'unsupported' : (leakLeaked > 0 ? 'leak_detected' : 'clean'))
+    ? dpvStr(glk.status, !leakSupported ? 'unsupported' : (leakLeaked > 0 ? 'leak_detected' : (leakSampled ? 'clean' : 'idle')))
     : 'idle';
   var leakObj = {
     sampled: leakSampled,
     supported: leakSupported,
     trigger: glk ? dpvStr(glk.trigger, '') : '',
-    total_goroutines: glk ? dpvNum(glk.total_goroutines, 18) : 0,
+    total_goroutines: glk ? dpvNum(glk.total_goroutines, 0) : 0,
     leaked_count: leakLeaked,
     duration_ms: glk
       ? (typeof glk.duration_ms !== 'undefined' ? dpvNum(glk.duration_ms, 0) : dpvNum(glk.checked_ms, 0))
@@ -1821,34 +1919,44 @@ function dpvNormalize(raw, leakOn) {
   };
 
   return {
-    ok: true,
+    ok: src.ok !== false,
     sampled_ok: true,
+    verdict: rawOverall,
+    is_unavailable: isUnavailable,
+    unavailable_reason: unavailReason,
+    reason_code: reasonCode,
+    is_bypass: isBypass,
+    bypass_guidance: bypassGuidance,
+    bypass_paths: bypassPaths,
     checked_at: dpvNum(src.checked_at, 0),
     checked_at_str: dpvFormatCheckedTime(src.checked_at, dpvStr(src.checked_at_str, '刚刚就绪')),
-    iface: dpvStr(src.iface, base.iface !== '—' ? base.iface : 'wlan2'),
+    iface: dpvStr(src.iface, base.iface !== '—' ? base.iface : '—'),
     hotspot_active: hsActive,
     engine_mode: engineMode,
     engine_label: engineLabel,
     mark_layout: markLayout,
     fwmark_mask: fwmarkMask,
+    netd_low16_known: low16Known,
     netd_low16_protected: low16Protected,
     ipv6_quic_controlled: ipv6Quic,
     bpf_maps: {
       mac_mark_entries: dpvNum(bpf.mac_mark_entries, 0),
       ip_mark_entries: ipEntries,
-      tether_limit_zeroed: bpf.tether_limit_zeroed !== false,
-      clsact_attached: typeof bpf.clsact_attached === 'boolean' ? bpf.clsact_attached : true,
-      ifb_redirect_prio2: typeof bpf.ifb_redirect_prio2 === 'boolean' ? bpf.ifb_redirect_prio2 : (bpf.clsact_attached !== false)
+      tether_limit_zeroed: bpf.tether_limit_zeroed === true,
+      clsact_attached: bpf.clsact_attached === true,
+      ifb_redirect_prio2: bpf.ifb_redirect_prio2 === true
     },
     offload_guard: {
-      slowpath_active: typeof off.slowpath_active === 'boolean' ? off.slowpath_active : (off.tether_offload_disabled !== false),
-      tether_offload_disabled: off.tether_offload_disabled !== false,
-      hwnat: dpvStr(off.hwnat, 'none')
+      mode: dpvStr(off.mode || (typeof S === 'object' && S && S.cfg && S.cfg.clsact_bpf_mode), ''),
+      slowpath_active: off.slowpath_active === true,
+      tether_offload_disabled: off.tether_offload_disabled === true,
+      hwnat: dpvStr(off.hwnat, 'unknown')
     },
     summary: {
       controlled_devices: ctrlTotal,
       hitting_count: hittingCount,
       idle_count: idleCount,
+      unavailable_count: unavailCnt,
       bypass_or_missing_count: bypassMissingCount,
       app_classes_total: dpvNum(sum.app_classes_active, appTotal),
       overall_status: rawOverall,
@@ -1863,8 +1971,11 @@ function dpvFetchVerifyStrict(leakOn) {
   var params = leakOn ? { goroutineleak: '1' } : null;
   if (typeof api === 'object' && api && typeof api.get === 'function') {
     return api.get(DPV_API_PATH, params).then(function (res) {
-      if (!res || typeof res !== 'object' || res.ok === false) {
-        throw new Error((res && res.error) || '数据面核验响应无效');
+      if (!res || typeof res !== 'object') {
+        throw new Error('数据面核验响应无效');
+      }
+      if (res.ok === false && !res.verdict && !res.summary) {
+        throw new Error(res.error || '数据面核验响应无效');
       }
       return dpvNormalize(res, leakOn);
     });
@@ -1880,11 +1991,11 @@ function dpvRunVerifyAction(leakOn, resync) {
   if (typeof api === 'object' && api && typeof api.action === 'function') {
     return api.action(DPV_RUN_ACT, payload, { timeout: 25000, maxTime: 22 }).then(function (res) {
       if (res && typeof res === 'object') {
-        if (res.summary || Array.isArray(res.devices)) {
+        if (res.summary || Array.isArray(res.devices) || res.verdict) {
           return dpvNormalize(res, leakOn);
         }
         var parsed = typeof detailJSON === 'function' ? detailJSON(res) : null;
-        if (parsed && (parsed.summary || Array.isArray(parsed.devices))) {
+        if (parsed && (parsed.summary || Array.isArray(parsed.devices) || parsed.verdict)) {
           return dpvNormalize(parsed, leakOn);
         }
       }
@@ -1921,18 +2032,60 @@ function dpvLoadSilent() {
   });
 }
 
+function dpvRenderBypassOrUnavailBoxHtml(d, isBusy) {
+  if (!d || !d.sampled_ok) return '';
+  if (d.is_unavailable) {
+    return '<div class="dbox" style="margin:8px 0;padding:12px 14px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">' +
+        '<b>数据面状态暂不可读</b>' +
+        '<span class="badge b-gray">不可读</span>' +
+      '</div>' +
+      '<div class="note" style="margin:0;color:var(--text-2)">' + dpvEsc(d.unavailable_reason || '未能读取内核 HTB / Netlink 队列状态') + '</div>' +
+      (d.reason_code ? '<div class="note mono" style="margin-top:4px">原因码：' + dpvEsc(d.reason_code) + '</div>' : '') +
+    '</div>';
+  }
+  if (!d.is_bypass) return '';
+  var pathsHtml = (d.bypass_paths && d.bypass_paths.length)
+    ? '<div style="display:grid;gap:6px;margin-top:6px">' + d.bypass_paths.map(function (p, idx) {
+        return '<div class="note" style="margin:0;color:var(--text-1);line-height:1.5">' + (d.bypass_paths.length > 1 && !/^路径/.test(p) ? ('<b>路径 ' + (idx + 1) + '：</b>') : '') + dpvEsc(p) + '</div>';
+      }).join('') + '</div>'
+    : '';
+  var guardMode = (d.offload_guard && d.offload_guard.mode) || (typeof S === 'object' && S && S.cfg && S.cfg.clsact_bpf_mode) || '';
+  var guardAlwaysOn = guardMode === 'on' || guardMode === 'always';
+  return '<div class="dbox" style="margin:8px 0;padding:12px 14px;border:1px solid rgba(255,149,0,.35);background:rgba(255,149,0,.08)">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:4px">' +
+      '<b style="color:var(--text-1)">高通 tether_limit_map / 系统热点硬件加速绕过截流告警</b>' +
+      '<span class="badge b-warn">硬件快径截流</span>' +
+    '</div>' +
+    (d.bypass_guidance ? '<div class="note" style="margin:0;color:var(--text-1);line-height:1.5;white-space:pre-line">' + dpvEsc(d.bypass_guidance) + '</div>' : '') +
+    pathsHtml +
+    '<div class="dpv-actions" style="margin-top:10px">' +
+      '<button type="button" class="dpv-btn dpv-btn-warn press" data-dpv-act="offload-guard-always"' + (isBusy ? ' disabled' : '') + '>' +
+        DPV_ICONS.repair +
+        '<span>' + (isBusy && DPV_STATE.guardSwitching ? '正在切换为始终兜底…' : (guardAlwaysOn ? '重新执行始终兜底压制' : '一键切为始终兜底')) + '</span>' +
+      '</button>' +
+    '</div>' +
+  '</div>';
+}
+
 function dpvDiagRowHtml() {
   var d = dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled);
   var s = d.summary;
-  var maskSummary = d.netd_low16_protected
-    ? '与系统路由互不冲突'
-    : '存在系统网络标记冲突 (' + dpvEsc(d.mark_layout) + ')';
-  var sub = d.sampled_ok
-    ? '已设限速 ' + dpvInt(s.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(s.hitting_count) + ' 台 · ' + maskSummary
-    : '尚未检验 · 点击查看并核对每台设备的限速生效情况';
-  var icoTone = !d.sampled_ok
+  var maskSummary = !d.netd_low16_known
+    ? '路由标记待核验'
+    : (d.netd_low16_protected
+        ? '与系统路由互不冲突'
+        : '存在系统网络标记冲突 (' + dpvEsc(d.mark_layout || '未保护') + ')');
+  var sub = !d.sampled_ok
+    ? '尚未检验 · 点击查看并核对每台设备的限速生效情况'
+    : (d.is_unavailable
+        ? ('暂不可读 · ' + dpvEsc(d.unavailable_reason))
+        : (d.is_bypass
+            ? '检测到系统热点硬件加速绕过截流 · 点开查看双路径指引或一键兜底'
+            : ('已设限速 ' + dpvInt(s.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(s.hitting_count) + ' 台 · ' + maskSummary)));
+  var icoTone = !d.sampled_ok || d.is_unavailable
     ? 'gray'
-    : (s.bypass_or_missing_count > 0 || !d.netd_low16_protected ? 'orange' : 'blue');
+    : (d.is_bypass || s.bypass_or_missing_count > 0 || (d.netd_low16_known && !d.netd_low16_protected) ? 'orange' : 'blue');
   return '<button type="button" class="row" data-dpv-act="sheet" data-dpv-diag-row="1">' +
     gi(icoTone, 'gauge') +
     '<span class="tx"><div class="t">每台设备限速生效明细</div><div class="s">' + sub + '</div></span>' +
@@ -1945,58 +2098,63 @@ function dpvRenderCardHtml(data, isBusy) {
   var bpf = d.bpf_maps;
   var off = d.offload_guard;
   var sampled = Boolean(d.sampled_ok);
+  var kpiReady = sampled && !d.is_unavailable;
   var markLayout = d.mark_layout;
+  var low16Known = Boolean(d.netd_low16_known);
   var low16Protected = Boolean(d.netd_low16_protected);
 
   var hwnatLow = String(off.hwnat || '').toLowerCase();
   var hwnatSkipped = hwnatLow === 'skipped_qcom' || hwnatLow === 'skipped_not_mtk' || hwnatLow === 'n/a';
-  var offloadHealthy = sampled && (off.tether_offload_disabled || off.slowpath_active || hwnatSkipped) &&
+  var offloadHealthy = kpiReady && !d.is_bypass && (off.tether_offload_disabled || off.slowpath_active || hwnatSkipped) &&
     off.hwnat !== 'detected_no_knob' && off.hwnat !== 'failed';
-  var hwnatLabel = !sampled
-    ? '系统加速接管状态：待检验'
-    : (off.hwnat === 'none' || off.hwnat === 'disabled' || off.hwnat === 'suppressed'
-        ? '系统硬件加速已受控（不绕过限速）'
-        : hwnatSkipped
-          ? '当前平台无需额外内核卸载干预'
-          : '硬件加速状态：' + off.hwnat);
+  var hwnatLabel = !kpiReady
+    ? '系统加速接管状态：' + (d.is_unavailable ? '不可读' : '待检验')
+    : (d.is_bypass
+        ? '系统硬件加速正在绕过限速'
+        : (off.hwnat === 'none' || off.hwnat === 'disabled' || off.hwnat === 'suppressed'
+            ? '系统硬件加速已受控（不绕过限速）'
+            : hwnatSkipped
+              ? '当前平台无需额外内核卸载干预'
+              : '硬件加速状态：' + off.hwnat));
 
-  var fwmarkBadgeCls = !sampled ? '' : (low16Protected ? 'dpv-chip-ok' : 'dpv-chip-warn');
-  var fwmarkBadgeText = !sampled
-    ? '系统网络标记隔离（待检验）'
+  var fwmarkBadgeCls = !kpiReady || !low16Known ? '' : (low16Protected ? 'dpv-chip-ok' : 'dpv-chip-warn');
+  var fwmarkBadgeText = !kpiReady || !low16Known
+    ? '系统网络标记隔离（' + (d.is_unavailable ? '不可读' : '待检验') + '）'
     : (low16Protected
         ? '与系统路由互不冲突 (' + dpvEsc(d.fwmark_mask) + ')'
-        : '存在标记冲突 (' + dpvEsc(markLayout) + ')');
+        : '存在标记冲突 (' + dpvEsc(markLayout || '未保护') + ')');
 
-  var hasAnomaly = sampled && sum.bypass_or_missing_count > 0;
+  var hasAnomaly = kpiReady && (d.is_bypass || sum.bypass_or_missing_count > 0);
   var repairBtnCls = hasAnomaly ? 'dpv-btn dpv-btn-warn press' : 'dpv-btn dpv-btn-secondary press';
-  var runLabel = isBusy && !DPV_STATE.resyncing ? '正在检验限速通道…' : '立即重新检验';
+  var runLabel = isBusy && !DPV_STATE.resyncing && !DPV_STATE.guardSwitching ? '正在检验限速通道…' : '立即重新检验';
   var repairLabel = isBusy && DPV_STATE.resyncing ? '正在修复限速规则…' : '一键修复限速';
 
   return (
     '<div class="dpv-inline-wrap" id="dpv-settings-card" aria-label="限速真实生效检验">' +
     '  <div class="dpv-plain-intro">' +
     '    部分手机开启自带热点硬件加速后，网页里显示的限速可能会被系统底层直接绕过（俗称“假限速”）。这里通过核对每台限速设备的真实过包流量，帮您确认限速 100% 生效。' +
-    (sampled ? ' <span class="note">（热点接口 ' + dpvEsc(d.iface || 'wlan2') + ' · 检验时间 ' + dpvEsc(d.checked_at_str) + '）</span>' : '') +
+    (sampled ? ' <span class="note">（热点接口 ' + dpvEsc(d.iface && d.iface !== '—' ? d.iface : '未绑定接口') + ' · 检验时间 ' + dpvEsc(d.checked_at_str) + '）</span>' : '') +
     '  </div>' +
     '  <div class="dpv-kpi-grid">' +
     '    <div class="dpv-kpi-cell">' +
-    '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.controlled_devices) : '—') + '</span>' +
+    '      <span class="dpv-kpi-num">' + (kpiReady ? dpvInt(sum.controlled_devices) : '—') + '</span>' +
     '      <span class="dpv-kpi-label">已设限速设备</span>' +
     '    </div>' +
-    '    <div class="dpv-kpi-cell ' + (sampled ? 'is-hit' : '') + '">' +
-    '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.hitting_count) : '—') + '</span>' +
+    '    <div class="dpv-kpi-cell ' + (kpiReady ? 'is-hit' : '') + '">' +
+    '      <span class="dpv-kpi-num">' + (kpiReady ? dpvInt(sum.hitting_count) : '—') + '</span>' +
     '      <span class="dpv-kpi-label">正在生效</span>' +
     '    </div>' +
-    '    <div class="dpv-kpi-cell ' + (sampled ? 'is-idle' : '') + '">' +
-    '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.idle_count) : '—') + '</span>' +
+    '    <div class="dpv-kpi-cell ' + (kpiReady ? 'is-idle' : '') + '">' +
+    '      <span class="dpv-kpi-num">' + (kpiReady ? dpvInt(sum.idle_count) : '—') + '</span>' +
     '      <span class="dpv-kpi-label">空闲待命</span>' +
     '    </div>' +
     '    <div class="dpv-kpi-cell ' + (hasAnomaly ? 'is-alert' : '') + '">' +
-    '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.bypass_or_missing_count) : '—') + '</span>' +
+    '      <span class="dpv-kpi-num">' + (kpiReady ? dpvInt(sum.bypass_or_missing_count) : '—') + '</span>' +
     '      <span class="dpv-kpi-label">绕过/失效异常</span>' +
     '    </div>' +
     '  </div>' +
     '  <p class="dpv-verdict-line">' + dpvEsc(sum.headline) + '</p>' +
+    dpvRenderBypassOrUnavailBoxHtml(d, isBusy) +
     '  <div class="dpv-actions">' +
     '    <button type="button" class="dpv-btn dpv-btn-primary press" data-dpv-act="run"' + (isBusy ? ' disabled' : '') + '>' +
     DPV_ICONS.runVerify +
@@ -2015,27 +2173,27 @@ function dpvRenderCardHtml(data, isBusy) {
     '    <summary><span>底层内核队列与硬件加速技术指标</span><span class="v6-adv-r"><span>开发者详情</span></span></summary>' +
     '    <div class="v6-adv-body">' +
     '      <div class="dpv-tag-strip">' +
-    '        <span class="dpv-chip ' + (sampled ? 'dpv-chip-primary' : '') + '">' + dpvEsc(d.engine_label) + '</span>' +
+    '        <span class="dpv-chip ' + (kpiReady ? 'dpv-chip-primary' : '') + '">' + dpvEsc(d.engine_label) + '</span>' +
     '        <span class="dpv-chip ' + fwmarkBadgeCls + '">' + DPV_ICONS.fwmark + '<span>' + fwmarkBadgeText + '</span></span>' +
-    '        <span class="dpv-chip ' + (!sampled ? '' : (offloadHealthy ? 'dpv-chip-ok' : 'dpv-chip-warn')) + '">' + dpvEsc(hwnatLabel) + '</span>' +
+    '        <span class="dpv-chip ' + (!kpiReady ? '' : (offloadHealthy ? 'dpv-chip-ok' : 'dpv-chip-warn')) + '">' + dpvEsc(hwnatLabel) + '</span>' +
     '      </div>' +
     '      <div class="dpv-bpf-grid" role="list" aria-label="底层模块状态">' +
     '        <div class="dpv-bpf-item" role="listitem">' +
     '          <span class="dpv-bpf-name">下行标记挂点 (clsact)</span>' +
-    '          <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.clsact_attached ? 'is-ok' : 'is-warn')) + '">' +
-    (!sampled ? '待采样' : (bpf.clsact_attached ? '正常 · ' + dpvInt(bpf.mac_mark_entries) + ' 项' : '待挂载')) +
+    '          <span class="dpv-bpf-val ' + (!kpiReady ? 'is-muted' : (bpf.clsact_attached ? 'is-ok' : 'is-warn')) + '">' +
+    (!kpiReady ? (d.is_unavailable ? '不可读' : '待采样') : (bpf.clsact_attached ? '正常 · ' + dpvInt(bpf.mac_mark_entries) + ' 项' : '未挂载')) +
     '          </span>' +
     '        </div>' +
     '        <div class="dpv-bpf-item" role="listitem">' +
     '          <span class="dpv-bpf-name">上行重定向队列 (ifb0)</span>' +
-    '          <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.ifb_redirect_prio2 ? 'is-ok' : 'is-warn')) + '">' +
-    (!sampled ? '待采样' : (bpf.ifb_redirect_prio2 ? '就绪 · ' + dpvInt(bpf.ip_mark_entries) + ' 项' : dpvInt(bpf.ip_mark_entries) + ' 项')) +
+    '          <span class="dpv-bpf-val ' + (!kpiReady ? 'is-muted' : (bpf.ifb_redirect_prio2 ? 'is-ok' : 'is-warn')) + '">' +
+    (!kpiReady ? (d.is_unavailable ? '不可读' : '待采样') : (bpf.ifb_redirect_prio2 ? '就绪 · ' + dpvInt(bpf.ip_mark_entries) + ' 项' : dpvInt(bpf.ip_mark_entries) + ' 项')) +
     '          </span>' +
     '        </div>' +
     '        <div class="dpv-bpf-item" role="listitem">' +
     '          <span class="dpv-bpf-name">防加速绕过开关 (tether_limit)</span>' +
-    '          <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.tether_limit_zeroed ? 'is-ok' : 'is-warn')) + '">' +
-    (!sampled ? '待采样' : (bpf.tether_limit_zeroed ? '已压制防绕过' : '存在绕过风险')) +
+    '          <span class="dpv-bpf-val ' + (!kpiReady ? 'is-muted' : (bpf.tether_limit_zeroed ? 'is-ok' : 'is-warn')) + '">' +
+    (!kpiReady ? (d.is_unavailable ? '不可读' : '待采样') : (bpf.tether_limit_zeroed ? '已压制防绕过' : '未清零（存在截流风险）')) +
     '          </span>' +
     '        </div>' +
     '      </div>' +
@@ -2103,7 +2261,7 @@ function dpvRenderDeviceItemHtml(dev, iface) {
     '  </div>' +
     '  <div class="dpv-counter-pair">' +
     '    <div class="dpv-counter-box">' +
-    '      <div class="dpv-counter-label">下行 HTB 队列 (' + dpvEsc(iface || 'wlan2') + ' egress' + (downObs ? ' · ' + dpvEsc(downObs) : '') + ')</div>' +
+    '      <div class="dpv-counter-label">下行 HTB 队列 (' + dpvEsc(iface && iface !== '—' ? iface : '未绑定接口') + ' egress' + (downObs ? ' · ' + dpvEsc(downObs) : '') + ')</div>' +
     '      <div class="dpv-counter-bytes">' +
     '        <strong>' + dpvEsc(dpvBytes(dev.down_sent_bytes)) + '</strong>' +
     '        <span class="dpv-delta">' + dpvEsc(dpvDeltaBytes(dev.down_delta_bytes)) + '</span>' +
@@ -2121,6 +2279,7 @@ function dpvRenderDeviceItemHtml(dev, iface) {
     '  </div>' +
     (dev.reason ? '<div class="dpv-dev-reason">' + dpvEsc(dev.reason) + '</div>' : '') +
     (dev.fix ? '<div class="dpv-dev-fix">修复建议：' + dpvEsc(dev.fix) + '</div>' : '') +
+    (dev.guidance_paths && dev.guidance_paths.length ? '<div class="dpv-dev-fix">' + dev.guidance_paths.map(function (gp) { return '<div>' + dpvEsc(gp) + '</div>'; }).join('') + '</div>' : '') +
     subHtml +
     '</article>'
   );
@@ -2153,6 +2312,12 @@ function dpvRenderSheetContentHtml(data, isBusy) {
     devListHtml =
       '<div class="dpv-empty">' +
       '尚未读取数据：请点击上方「刷新实时数据」或「一键修复限速」，查看每台设备的限速通道实时流量。' +
+      '</div>';
+  } else if (d.is_unavailable) {
+    devListHtml =
+      '<div class="dpv-empty">' +
+      '数据面核验暂不可读：' + dpvEsc(d.unavailable_reason || '未能读取内核 HTB / Netlink 队列状态') +
+      (d.reason_code ? '（' + dpvEsc(d.reason_code) + '）' : '') +
       '</div>';
   } else if (d.devices.length === 0) {
     devListHtml =
@@ -2201,15 +2366,23 @@ function dpvRenderSheetContentHtml(data, isBusy) {
 
   var plainSummaryLine = !sampled
     ? '点击下方「刷新实时数据」即可核对每台限速设备的流量是否真正经过限速通道。'
+    : (d.is_unavailable
+        ? ('暂不可读：' + dpvEsc(d.unavailable_reason || '未能读取内核队列状态'))
+        : (d.is_bypass
+            ? '检测到高通 tether_limit_map / 系统热点硬件加速正在绕过限速队列，请参考下方双路径指引处理'
+            : (!d.netd_low16_known
+                ? ('路由标记状态待上报 · 已登记设备地址 ' + dpvInt(bpf.mac_mark_entries) + ' 项 / IP ' + dpvInt(bpf.ip_mark_entries) + ' 项')
+                : (d.netd_low16_protected
+                    ? '系统网络路由与限速标记互不干扰 · ' + (d.ipv6_quic_controlled ? 'IPv4 / IPv6 双栈限速闭环正常' : '按需启用双栈 QUIC 管控') + ' · 已登记设备地址 ' + dpvInt(bpf.mac_mark_entries) + ' 项 / IP ' + dpvInt(bpf.ip_mark_entries) + ' 项'
+                    : '检测到限速标记可能与手机系统网络冲突，建议点击下方「一键修复限速」自动恢复'))));
+
+  var pipeMaskLine = !sampled || d.is_unavailable || !d.netd_low16_known
+    ? '等待后端上报正交 fwmark 掩码状态'
     : (d.netd_low16_protected
-        ? '系统网络路由与限速标记互不干扰 · ' + (d.ipv6_quic_controlled ? 'IPv4 / IPv6 双栈限速闭环正常' : '按需启用双栈 QUIC 管控') + ' · 已登记设备地址 ' + dpvInt(bpf.mac_mark_entries) + ' 项 / IP ' + dpvInt(bpf.ip_mark_entries) + ' 项'
-        : '检测到限速标记可能与手机系统网络冲突，建议点击下方「一键修复限速」自动恢复');
+        ? '设备标记 <code>0x00800000 | (mid &lt;&lt; 16)</code>（如 mid=1 → <code>0x00810000</code>，mid=5 → <code>0x00850000</code>），掩码 <code>' + dpvEsc(d.fwmark_mask) + '</code>，低 16 位 <code>0x0000ffff</code> 完整保留给 Android netd 策略路由'
+        : '检测到低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')，建议点击「一键修复限速」恢复 <code>0xffff0000</code> 正交掩码保护');
 
-  var pipeMaskLine = d.netd_low16_protected
-    ? '设备标记 <code>0x00800000 | (mid &lt;&lt; 16)</code>（如 mid=1 → <code>0x00810000</code>，mid=5 → <code>0x00850000</code>），掩码 <code>' + dpvEsc(d.fwmark_mask) + '</code>，低 16 位 <code>0x0000ffff</code> 完整保留给 Android netd 策略路由'
-    : '检测到低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')，建议点击「一键修复限速」恢复 <code>0xffff0000</code> 正交掩码保护';
-
-  var hasAnomaly = sampled && sum.bypass_or_missing_count > 0;
+  var hasAnomaly = sampled && !d.is_unavailable && (d.is_bypass || sum.bypass_or_missing_count > 0);
   var sheetRepairCls = 'dpv-btn dpv-btn-compact press' + (hasAnomaly ? ' dpv-btn-warn' : '');
 
   return (
@@ -2220,10 +2393,11 @@ function dpvRenderSheetContentHtml(data, isBusy) {
     '      <div class="v6-adv-body" style="gap:4px;padding-top:6px">' +
     '        <div><strong>正交位域契约：</strong>' + pipeMaskLine + '</div>' +
     '        <div><strong>clsact / GRO 管道：</strong>eBPF 返回 <code>TC_ACT_UNSPEC (-1)</code>（prio 1 着色 → prio 2 ifb0/police 128KB 突发桶）· ' + (d.ipv6_quic_controlled ? '双栈 IPv4/IPv6 QUIC (UDP 443) 已闭环管控' : '按需启用双栈 QUIC 管控') + '</div>' +
-    '        <div><strong>采集引擎状态：</strong>' + (sampled ? dpvEsc(d.engine_label) + ' · BPF mac_mark ' + dpvInt(bpf.mac_mark_entries) + ' 项 / ip_mark ' + dpvInt(bpf.ip_mark_entries) + ' 项' : '尚未采样核验') + '</div>' +
+    '        <div><strong>采集引擎状态：</strong>' + (sampled && !d.is_unavailable ? dpvEsc(d.engine_label) + ' · BPF mac_mark ' + dpvInt(bpf.mac_mark_entries) + ' 项 / ip_mark ' + dpvInt(bpf.ip_mark_entries) + ' 项' : (d.is_unavailable ? '暂不可读' : '尚未采样核验')) + '</div>' +
     '      </div>' +
     '    </details>' +
     '  </div>' +
+    dpvRenderBypassOrUnavailBoxHtml(d, isBusy) +
     '  <div class="dpv-leak-box">' +
     '    <div class="dpv-leak-row">' +
     '      <div class="dpv-leak-info">' +
@@ -2243,7 +2417,7 @@ function dpvRenderSheetContentHtml(data, isBusy) {
     stacksHtml +
     '  </div>' +
     '  <div class="dpv-sheet-toolbar">' +
-    '    <span class="dpv-sheet-count">已设限速设备明细（' + (sampled ? '共 ' + dpvInt(d.devices.length) + ' 台 · 单应用规则 ' + dpvInt(sum.app_classes_total) + ' 个' : '尚未检验') + '）</span>' +
+    '    <span class="dpv-sheet-count">已设限速设备明细（' + (!sampled ? '尚未检验' : (d.is_unavailable ? '状态不可读' : ('共 ' + dpvInt(d.devices.length) + ' 台 · 单应用规则 ' + dpvInt(sum.app_classes_total) + ' 个'))) + '）</span>' +
     '    <div class="dpv-sheet-actions">' +
     '      <button type="button" class="' + sheetRepairCls + '" data-dpv-act="repair"' + (isBusy ? ' disabled' : '') + '>' +
     DPV_ICONS.repair +
@@ -2251,7 +2425,7 @@ function dpvRenderSheetContentHtml(data, isBusy) {
     '      </button>' +
     '      <button type="button" class="dpv-btn dpv-btn-compact press" data-dpv-act="run"' + (isBusy ? ' disabled' : '') + '>' +
     DPV_ICONS.runVerify +
-    '<span>' + (isBusy && !DPV_STATE.resyncing ? '读取中…' : '刷新实时数据') + '</span>' +
+    '<span>' + (isBusy && !DPV_STATE.resyncing && !DPV_STATE.guardSwitching ? '读取中…' : '刷新实时数据') + '</span>' +
     '      </button>' +
     '    </div>' +
     '  </div>' +
@@ -2266,20 +2440,32 @@ function dpvRenderSelfCheckSummaryHtml(data) {
   var d = dpvNormalize(data || DPV_STATE.lastData, DPV_STATE.leakEnabled);
   var sum = d.summary;
   var sampled = Boolean(d.sampled_ok);
-  var maskTxt = d.netd_low16_protected
-    ? '与系统路由互不冲突'
-    : '存在系统网络标记冲突 (' + dpvEsc(d.mark_layout) + ')';
+  var maskTxt = !d.netd_low16_known
+    ? '标记隔离待核验'
+    : (d.netd_low16_protected
+        ? '与系统路由互不冲突'
+        : '存在系统网络标记冲突 (' + dpvEsc(d.mark_layout || '未保护') + ')');
+  var titleTxt = !sampled
+    ? '限速真实生效检验：待检验'
+    : (d.is_unavailable
+        ? '限速真实生效检验：暂不可读'
+        : (d.is_bypass
+            ? '限速真实生效检验：检测到系统加速绕过截流'
+            : ('限速真实生效检验：' + dpvInt(sum.hitting_count) + ' / ' + dpvInt(sum.controlled_devices) + ' 台设备正在生效')));
+  var subTxt = !sampled
+    ? '点击右侧「核验明细」查看每台设备的限速过包情况'
+    : (d.is_unavailable
+        ? dpvEsc(d.unavailable_reason || '未能读取内核队列状态')
+        : (d.is_bypass
+            ? '高通 tether_limit_map / 热点硬件加速截流中 · 点击右侧查看双路径指引与一键兜底'
+            : (maskTxt + ' · ' + (d.bpf_maps.clsact_attached ? '底层分流已就绪' : '底层分流待挂载'))));
   return (
     '<div class="dpv-selfcheck-bar" data-dpv-selfcheck="1">' +
     '  <div class="dpv-selfcheck-left">' +
     DPV_ICONS.dataplane +
     '    <div>' +
-    '      <div class="dpv-selfcheck-title">' + (sampled
-      ? '限速真实生效检验：' + dpvInt(sum.hitting_count) + ' / ' + dpvInt(sum.controlled_devices) + ' 台设备正在生效'
-      : '限速真实生效检验：待检验') + '</div>' +
-    '      <div class="dpv-selfcheck-sub">' + (sampled
-      ? maskTxt + ' · ' + (d.bpf_maps.clsact_attached ? '底层分流已就绪' : '底层分流待挂载') + ' · 实时计数正常'
-      : '点击右侧「核验明细」查看每台设备的限速过包情况') + '</div>' +
+    '      <div class="dpv-selfcheck-title">' + titleTxt + '</div>' +
+    '      <div class="dpv-selfcheck-sub">' + subTxt + '</div>' +
     '    </div>' +
     '  </div>' +
     '  <button type="button" class="dpv-btn dpv-btn-compact press" data-dpv-act="sheet">核验明细</button>' +
@@ -2302,15 +2488,19 @@ function dpvRefreshRenderedViews() {
       var dn = dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled);
       var subEl = scardEl.querySelector('.scard-h small');
       var bdgEl = document.getElementById('dpv-scard-badge');
-      var hasErr2 = dn.summary.bypass_or_missing_count > 0;
+      var hasErr2 = !dn.is_unavailable && (dn.is_bypass || dn.summary.bypass_or_missing_count > 0);
       if (subEl) {
-        subEl.textContent = hasErr2
-          ? ('发现 ' + dpvInt(dn.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
-          : ('已设限速 ' + dpvInt(dn.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dn.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
+        subEl.textContent = dn.is_unavailable
+          ? ('暂不可读 · ' + (dn.unavailable_reason || '未能读取内核队列状态'))
+          : dn.is_bypass
+            ? '检测到高通 tether_limit_map / 系统硬件加速绕过截流 · 点开一键兜底'
+            : hasErr2
+              ? ('发现 ' + dpvInt(dn.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
+              : ('已设限速 ' + dpvInt(dn.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dn.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
       }
       if (bdgEl) {
-        bdgEl.className = 'badge ' + (hasErr2 ? 'b-warn' : (dn.summary.hitting_count > 0 ? 'b-ok' : 'b-acc'));
-        bdgEl.textContent = hasErr2 ? '待修复' : (dn.summary.hitting_count > 0 ? '真实生效' : '待命就绪');
+        bdgEl.className = 'badge ' + (dn.is_unavailable ? 'b-gray' : (hasErr2 ? 'b-warn' : (dn.summary.hitting_count > 0 ? 'b-ok' : 'b-acc')));
+        bdgEl.textContent = dn.is_unavailable ? '暂不可读' : (dn.is_bypass ? '硬件截流' : (hasErr2 ? '待修复' : (dn.summary.hitting_count > 0 ? '真实生效' : '待命就绪')));
       }
     }
   }
@@ -2365,11 +2555,66 @@ function dpvOpenSheet() {
   }
 }
 
+function dpvSetOffloadGuardAlways() {
+  if (DPV_STATE.loading) return Promise.resolve(DPV_STATE.lastData);
+  var mySeq = ++DPV_STATE.seq;
+  DPV_STATE.loading = true;
+  DPV_STATE.resyncing = false;
+  DPV_STATE.guardSwitching = true;
+  dpvRefreshRenderedViews();
+
+  return api.action('clsact_mode_set', { mode: 'on' }, { timeout: 30000, maxTime: 28 }).then(function (r) {
+    var g = typeof detailJSON === 'function' ? detailJSON(r) : null;
+    if (typeof S === 'object' && S && S.cfg) {
+      S.cfg.clsact_bpf_mode = 'on';
+      if (g && typeof g === 'object') S.cfg.offload_guard = g;
+      S.clsact = null;
+    }
+    return Promise.all([
+      typeof loadConfig === 'function' ? loadConfig().catch(function () {}) : Promise.resolve(),
+      typeof loadOffload === 'function' ? loadOffload().catch(function () {}) : Promise.resolve(),
+      dpvRunVerifyAction(DPV_STATE.leakEnabled, false)
+    ]);
+  }).then(function (arr) {
+    var norm = arr && arr[2] ? arr[2] : dpvDefaultData(DPV_STATE.leakEnabled);
+    if (mySeq === DPV_STATE.seq) {
+      DPV_STATE.lastData = norm;
+      DPV_STATE.loading = false;
+      DPV_STATE.guardSwitching = false;
+      dpvRefreshRenderedViews();
+      if (typeof S === 'object' && S && S.page === 'settings' && typeof renderSettings === 'function') {
+        renderSettings(false);
+      }
+      if (typeof toast === 'function') {
+        toast(
+          norm.is_bypass
+            ? '已切换为始终兜底模式，若系统硬件快径仍截流请配合关闭系统热点加速开关'
+            : '已切换硬件加速兜底为「始终」模式并重新核验限速状态',
+          norm.is_bypass ? 'warn' : 'ok'
+        );
+      }
+    }
+    return norm;
+  }).catch(function (err) {
+    if (mySeq === DPV_STATE.seq) {
+      DPV_STATE.loading = false;
+      DPV_STATE.guardSwitching = false;
+      dpvRefreshRenderedViews();
+      if (typeof toast === 'function') {
+        var msg = typeof errText === 'function' ? errText(err) : String((err && err.message) || err || '切换始终兜底失败');
+        toast(msg, 'err');
+      }
+    }
+    return DPV_STATE.lastData || dpvDefaultData(DPV_STATE.leakEnabled);
+  });
+}
+
 function dpvTriggerVerify(runAction, resync, isManualToggle) {
   var mySeq = ++DPV_STATE.seq;
   var doResync = Boolean(runAction && resync);
   DPV_STATE.loading = true;
   DPV_STATE.resyncing = doResync;
+  DPV_STATE.guardSwitching = false;
   dpvRefreshRenderedViews();
 
   var p = runAction
@@ -2383,7 +2628,11 @@ function dpvTriggerVerify(runAction, resync, isManualToggle) {
       DPV_STATE.resyncing = false;
       dpvRefreshRenderedViews();
       if (runAction && typeof toast === 'function') {
-        if (doResync) {
+        if (norm.is_unavailable) {
+          toast('数据面状态暂不可读：' + (norm.unavailable_reason || '请确认热点与内核状态'), 'warn');
+        } else if (norm.is_bypass) {
+          toast('检测到高通 tether_limit_map / 系统热点硬件加速绕过截流，请查看双路径指引或切为始终兜底', 'warn');
+        } else if (doResync) {
           toast(
             norm.summary.bypass_or_missing_count > 0
               ? '已执行重下发修复，仍有 ' + dpvInt(norm.summary.bypass_or_missing_count) + ' 台设备异常，请检查内核状态'
@@ -2440,6 +2689,9 @@ function dpvBindGlobalDelegate() {
     } else if (act === 'repair') {
       ev.preventDefault();
       dpvTriggerVerify(true, true);
+    } else if (act === 'offload-guard-always') {
+      ev.preventDefault();
+      dpvSetOffloadGuardAlways();
     } else if (act === 'sheet') {
       ev.preventDefault();
       if (!DPV_STATE.lastData || !DPV_STATE.lastData.sampled_ok) {
@@ -2462,6 +2714,7 @@ if (typeof window !== 'undefined') {
   window.HNCDataPlaneVerify = {
     refresh: dpvTriggerVerify,
     repair: function () { return dpvTriggerVerify(true, true); },
+    setOffloadGuardAlways: dpvSetOffloadGuardAlways,
     openVerifySheet: dpvOpenSheet,
     normalize: dpvNormalize,
     formatMarkHex: dpvFormatMarkHex,

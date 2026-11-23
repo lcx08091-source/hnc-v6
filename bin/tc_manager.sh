@@ -633,7 +633,14 @@ mbps_to_rate() {
 # 100~999Mbps 由固定 200k 改为 max(200k, 时间窗量); ≥1000Mbps(DEFAULT_RATE)仍 200k。
 # v5.33: 删掉了「tc_rate_calc.sh 缺失时」的内联历史算法(第二份 burst 公式); 该文件随模块
 # 一起装, 缺了就是安装不完整。
-. "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh"
+BIN_DIR="${BIN_DIR:-$(dirname "$0")}"
+if [ -r "$HNC_DIR/bin/tc_rate_calc.sh" ]; then
+    . "$HNC_DIR/bin/tc_rate_calc.sh"
+else
+    [ -r "$BIN_DIR/tc_rate_calc.sh" ] && . "$BIN_DIR/tc_rate_calc.sh"
+fi
+command -v hnc_burst_k >/dev/null 2>&1 || { hnc_burst_k() { echo "200k"; }; }
+command -v hnc_quantum >/dev/null 2>&1 || { hnc_quantum() { :; }; }
 burst_for_rate() {
     local mbps mode
     mbps=$(rate_to_mbps_num "$1")
@@ -2308,7 +2315,7 @@ set_limit() {
 #   - loss 保持每方向原值(端到端 loss ≈ 2p,同样不做精确除)
 #   - 所以 v3.8.5 的语义:delay 是 RTT,jitter/loss 是每方向(在 WebUI 说明)
 #
-#   实测:设 250ms,ping RTT 从 ~500ms 降到 ~270ms(250 + ~20 base RTT)✓
+#   实测:设 250ms,ping RTT 从 ~500ms 降到 ~270ms(250 + ~20 base RTT)
 # ═══════════════════════════════════════════════════════════════
 set_delay() {
     local iface=$1 mark_id=$2 delay_ms=${3:-0} jitter_ms=${4:-0} loss=${5:-0} ip=${6:-}
@@ -3083,10 +3090,12 @@ tc_snapshot_async() {
 #   - 单设备写(set_limit / set_delay / set_all / remove): 【不加锁】
 #     假设调用方(WebUI / httpd)已经持有同 MAC 的 iptables per-MAC 锁。
 #   - 只读(status): 不加锁
-. "$HNC_DIR/bin/hnc_lock.sh" 2>/dev/null || {
+if [ -r "$HNC_DIR/bin/hnc_lock.sh" ]; then
+    . "$HNC_DIR/bin/hnc_lock.sh"
+else
     gate_lock()   { return 0; }
     gate_unlock() { return 0; }
-}
+fi
 
 case "$1" in
     init)

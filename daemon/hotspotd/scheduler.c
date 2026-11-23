@@ -582,12 +582,34 @@ static void trigger_adapter_restore_locked(void)
  * 主线程仍可 request_refresh / shutdown (会在下次循环检测到)
  * ══════════════════════════════════════════════════════════ */
 
+/* Compute CLOCK_MONOTONIC deadline safely on both 64-bit arm64 and 32-bit
+ * armv7a (where time_t and long are 32-bit signed): promote seconds/milliseconds
+ * to int64_t before multiplication/addition and clamp to INT32_MAX when
+ * sizeof(time_t) == 4 to eliminate 32-bit signed overflow UB. */
+static void monotonic_deadline_after_sec(struct timespec *ts, int wait_sec)
+{
+    clock_gettime(CLOCK_MONOTONIC, ts);
+    if (wait_sec <= 0)
+        return;
+
+    int64_t wait_ms  = (int64_t)wait_sec * 1000LL;
+    int64_t base_ns  = (int64_t)ts->tv_nsec + (wait_ms % 1000LL) * 1000000LL;
+    int64_t add_sec  = (wait_ms / 1000LL) + (base_ns / 1000000000LL);
+    int64_t final_ns = base_ns % 1000000000LL;
+    int64_t target_s = (int64_t)ts->tv_sec + add_sec;
+
+    if (sizeof(time_t) <= 4U && target_s > (int64_t)INT32_MAX)
+        target_s = (int64_t)INT32_MAX;
+
+    ts->tv_sec  = (time_t)target_s;
+    ts->tv_nsec = (long)final_ns;
+}
+
 static int scheduler_sleep_interruptible(int sec)
 {
     if (sec <= 0) return 0;
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    ts.tv_sec += sec;
+    monotonic_deadline_after_sec(&ts, sec);
     pthread_mutex_lock(&sched.worker_lock);
     while (!sched.worker_should_stop) {
         int rc = pthread_cond_timedwait(&sched.worker_cond, &sched.worker_lock, &ts);
@@ -613,8 +635,7 @@ static void *worker_main(void *arg)
         /* timed wait until: should_stop / refresh_requested / 60s timeout */
         if (!sched.worker_should_stop && !sched.worker_refresh_requested) {
             struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            ts.tv_sec += next_wait_sec;
+            monotonic_deadline_after_sec(&ts, next_wait_sec);
             pthread_cond_timedwait(&sched.worker_cond, &sched.worker_lock, &ts);
         }
 

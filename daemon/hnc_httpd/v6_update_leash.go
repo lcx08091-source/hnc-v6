@@ -12,6 +12,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,6 +38,8 @@ const (
 	leashStateLeashed  = "leashed"
 	leashStateBypassed = "bypassed"
 	leashStatePaused   = "paused"
+
+	leashMangleChainName = "HNC_V6_LEASH"
 )
 
 // 内置官方大包更新域名兜底集合（与 96-system-updates-v6.json 保持一致, 防测试空目录缺失规则文件）。
@@ -153,6 +157,7 @@ type updateLeashEngine struct {
 	lastPersistedKey  string
 	hasPersistedState bool
 	lastAppliedKbps   int
+	lastMangleDigest  string
 
 	pollInterval     time.Duration
 	idleExpire       time.Duration
@@ -161,6 +166,7 @@ type updateLeashEngine struct {
 	flowsHook        func() []UpdateFlowInput
 	applyDataplaneFn func(hncDir string, leashMark uint32, rateKbps int) error
 	removeNativeFn   func(hncDir string, leashMark uint32) error
+	mangleApplyFn    func(isIPv6 bool, payload string) error
 	invalidateFn     func(hncDir, iface string)
 }
 
@@ -577,6 +583,7 @@ func (e *updateLeashEngine) ObserveFlows(now time.Time, flows []UpdateFlowInput)
 	e.mu.Unlock()
 
 	e.persistActiveLeash(leashedList)
+	e.syncLeashMangleDataplane(leashedList)
 	if needApplyDP {
 		if e.applyLeashDataplane(applyKbps) == nil {
 			e.mu.Lock()
@@ -592,6 +599,162 @@ func (e *updateLeashEngine) ObserveFlows(now time.Time, flows []UpdateFlowInput)
 		hook(leashedList)
 	}
 	return out
+}
+
+// BuildUpdateLeashManglePayloads 构造双栈 *mangle 表 HNC_V6_LEASH 后台更新拴绳打标链载荷:
+// 严格限定在 [25:24] 高位掩码 0x03000000 (值 0x03000000), 严守低 16 位 0x0000ffff 零触碰。
+func BuildUpdateLeashManglePayloads(leashed []UpdateLeashSession, devIPsByMAC map[string][]string) (v4Payload, v6Payload string) {
+	const low16 = uint32(0x0000ffff)
+	markMask := DefaultAppQoSMarkMask &^ low16
+	if markMask == 0 {
+		markMask = 0x03000000
+	}
+	markVal := (v6LeashDefaultMark & markMask) &^ low16
+
+	var b4, b6 strings.Builder
+	b4.WriteString("*mangle\n:" + leashMangleChainName + " - [0:0]\n")
+	b6.WriteString("*mangle\n:" + leashMangleChainName + " - [0:0]\n")
+
+	if len(leashed) > 0 && markVal != 0 {
+		xmark := fmt.Sprintf("0x%08x/0x%08x", markVal, markMask)
+		fmt.Fprintf(&b4, "-A %s -m connmark --mark %s -j CONNMARK --restore-mark --nfmask 0x%08x --ctmask 0x%08x\n",
+			leashMangleChainName, xmark, markMask, markMask)
+		fmt.Fprintf(&b6, "-A %s -m connmark --mark %s -j CONNMARK --restore-mark --nfmask 0x%08x --ctmask 0x%08x\n",
+			leashMangleChainName, xmark, markMask, markMask)
+
+		sorted := make([]UpdateLeashSession, len(leashed))
+		copy(sorted, leashed)
+		sort.Slice(sorted, func(i, j int) bool {
+			if sorted[i].MAC != sorted[j].MAC {
+				return sorted[i].MAC < sorted[j].MAC
+			}
+			if sorted[i].DstIP != sorted[j].DstIP {
+				return sorted[i].DstIP < sorted[j].DstIP
+			}
+			return sorted[i].SessionKey < sorted[j].SessionKey
+		})
+
+		seenUp := make(map[string]bool)
+		seenDn := make(map[string]bool)
+		for _, sess := range sorted {
+			mac := canonMAC(sess.MAC)
+			dstIP := net.ParseIP(strings.TrimSpace(sess.DstIP))
+			if mac == "" || dstIP == nil || dstIP.IsLoopback() || dstIP.IsUnspecified() || dstIP.IsLinkLocalUnicast() || dstIP.IsMulticast() {
+				continue
+			}
+			dstCanon := dstIP.String()
+			isDstV4 := dstIP.To4() != nil
+
+			var cliIPs []string
+			if sIP := net.ParseIP(strings.TrimSpace(sess.SrcIP)); sIP != nil && (sIP.To4() != nil) == isDstV4 {
+				cliIPs = append(cliIPs, sIP.String())
+			}
+			for _, rawCli := range devIPsByMAC[mac] {
+				cIP := net.ParseIP(strings.TrimSpace(rawCli))
+				if cIP == nil || (cIP.To4() != nil) != isDstV4 || cIP.IsLoopback() || cIP.IsUnspecified() || cIP.IsLinkLocalUnicast() {
+					continue
+				}
+				cliIPs = append(cliIPs, cIP.String())
+			}
+			sort.Strings(cliIPs)
+
+			if isDstV4 {
+				d4 := dstIP.To4().String()
+				upKey := "4|" + mac + "|" + d4
+				if !seenUp[upKey] {
+					seenUp[upKey] = true
+					fmt.Fprintf(&b4, "-A %s -m mac --mac-source %s -d %s/32 -j MARK --set-xmark %s\n",
+						leashMangleChainName, mac, d4, xmark)
+				}
+				for _, c4 := range cliIPs {
+					dnKey := "4|" + d4 + "|" + c4
+					if !seenDn[dnKey] {
+						seenDn[dnKey] = true
+						fmt.Fprintf(&b4, "-A %s -s %s/32 -d %s/32 -j MARK --set-xmark %s\n",
+							leashMangleChainName, d4, c4, xmark)
+					}
+				}
+			} else {
+				upKey := "6|" + mac + "|" + dstCanon
+				if !seenUp[upKey] {
+					seenUp[upKey] = true
+					fmt.Fprintf(&b6, "-A %s -m mac --mac-source %s -d %s/128 -j MARK --set-xmark %s\n",
+						leashMangleChainName, mac, dstCanon, xmark)
+				}
+				for _, c6 := range cliIPs {
+					dnKey := "6|" + dstCanon + "|" + c6
+					if !seenDn[dnKey] {
+						seenDn[dnKey] = true
+						fmt.Fprintf(&b6, "-A %s -s %s/128 -d %s/128 -j MARK --set-xmark %s\n",
+							leashMangleChainName, dstCanon, c6, xmark)
+					}
+				}
+			}
+		}
+
+		fmt.Fprintf(&b4, "-A %s -m mark --mark %s -j CONNMARK --save-mark --nfmask 0x%08x --ctmask 0x%08x\n",
+			leashMangleChainName, xmark, markMask, markMask)
+		fmt.Fprintf(&b6, "-A %s -m mark --mark %s -j CONNMARK --save-mark --nfmask 0x%08x --ctmask 0x%08x\n",
+			leashMangleChainName, xmark, markMask, markMask)
+	}
+
+	b4.WriteString("COMMIT\n")
+	b6.WriteString("COMMIT\n")
+	return b4.String(), b6.String()
+}
+
+func (e *updateLeashEngine) syncLeashMangleDataplane(leashed []UpdateLeashSession) {
+	hncDir := ""
+	if e.srv != nil {
+		hncDir = e.srv.hncDir
+	}
+	if e.mangleApplyFn == nil && !useNativeDataplane(hncDir) {
+		return
+	}
+	var devIPs map[string][]string
+	if len(leashed) > 0 && e.srv != nil {
+		devIPs = e.srv.deviceIPsByMAC()
+	}
+	v4Payload, v6Payload := BuildUpdateLeashManglePayloads(leashed, devIPs)
+	digest := v4Payload + "\x00" + v6Payload
+
+	e.mu.Lock()
+	if e.lastMangleDigest == digest {
+		e.mu.Unlock()
+		return
+	}
+	mangleFn := e.mangleApplyFn
+	e.mu.Unlock()
+
+	if mangleFn != nil {
+		e1 := mangleFn(false, v4Payload)
+		e2 := mangleFn(true, v6Payload)
+		if e1 == nil && e2 == nil {
+			e.mu.Lock()
+			e.lastMangleDigest = digest
+			e.mu.Unlock()
+		}
+		return
+	}
+
+	v4OK := true
+	if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
+		if err := pipeIptablesRestoreWithTimeout(v4Bin, []byte(v4Payload), iptRestoreTimeout); err != nil {
+			v4OK = false
+		} else if len(leashed) > 0 {
+			ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("iptables"), leashMangleChainName, true)
+		}
+	}
+	if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
+		if err := pipeIptablesRestoreWithTimeout(v6Bin, []byte(v6Payload), iptRestoreTimeout); err == nil && len(leashed) > 0 {
+			ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("ip6tables"), leashMangleChainName, true)
+		}
+	}
+	if v4OK {
+		e.mu.Lock()
+		e.lastMangleDigest = digest
+		e.mu.Unlock()
+	}
 }
 
 func (e *updateLeashEngine) sortedSessionsLocked() []UpdateLeashSession {
@@ -670,6 +833,7 @@ func (e *updateLeashEngine) resetForHotspotOff() {
 	e.mu.Unlock()
 
 	e.persistActiveLeash(nil)
+	e.syncLeashMangleDataplane(nil)
 	e.removeLeashDataplane(true)
 	if hadLeashed && hook != nil {
 		hook(nil)

@@ -43,7 +43,7 @@ case "${1:-}" in
         CC="${CC:-gcc}"
         OUT="${HNC_HOST_OUT:-out/host}"
         mkdir -p "$OUT"
-        HFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -Wno-unused-parameter -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
+        HFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Wcast-align -Werror -Wno-unused-parameter -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
         $CC $HFLAGS -o "$OUT/fork_probe" fork_probe.c -pie
         $CC $HFLAGS -DHNC_VERSION="\"${HNC_VER}\"" -o "$OUT/hnc_launcher" hnc_launcher.c -pie
         echo "Host build OK: $OUT/hnc_launcher $OUT/fork_probe"
@@ -162,7 +162,7 @@ if [ "$ARCH" != "arm64" ]; then
     mkdir -p "$OUT"
 fi
 
-COMMON_FLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
+COMMON_FLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Wcast-align -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
 
 # rc30.12.28: Bionic (Android libc) 在 ARM64 要求 TLS segment 对齐至少 64 字节.
 # 同时 max-page-size 在 Android 16K page 设备上设为 16384 以保证 ELF LOAD 段对齐.
@@ -214,8 +214,8 @@ for s in "=== fork_probe v1 ===" "FORK FAILED" "EXECV FAILED" "RESULT: C fork+ex
     fi
 done
 
-echo "  ✓ hnc_launcher: all expected strings present"
-echo "  ✓ fork_probe:   all expected strings present"
+echo "  [OK] hnc_launcher: all expected strings present"
+echo "  [OK] fork_probe:   all expected strings present"
 
 # ─── 5. 可选: 拷贝到 bin/ ─────────────────────────────────────────
 
@@ -228,7 +228,7 @@ if [ "$DO_INSTALL" -eq 1 ]; then
     cp -v "$OUT/hnc_launcher" "$DEST/"
     cp -v "$OUT/fork_probe" "$DEST/"
     chmod 755 "$DEST/hnc_launcher" "$DEST/fork_probe"
-    echo "✓ installed to $DEST/"
+    echo "[OK] installed to $DEST/"
 fi
 
 echo ""

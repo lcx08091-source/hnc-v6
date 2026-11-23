@@ -883,8 +883,23 @@ func (r *Resolver) CacheSave() error {
 		fmt.Fprintf(&buf, "%q:{\"h\":%s,\"s\":%s,\"t\":%d}", k, hn, src, e.T)
 	}
 	buf.WriteString("}\n")
-	tmp := r.CachePath + ".tmp.go"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+	tmp := fmt.Sprintf("%s.tmp.go.%d.%d", r.CachePath, os.Getpid(), time.Now().UnixNano()&0xfffffff)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, r.CachePath); err != nil {

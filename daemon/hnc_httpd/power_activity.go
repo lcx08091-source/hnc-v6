@@ -144,6 +144,14 @@ func activityPublish(a Activity) bool {
 	return true
 }
 
+// activityNotifySubscribers 主动广播一次状态变更(例如仿真环境启停时立即唤醒待机阻塞循环)
+func activityNotifySubscribers() {
+	actState.mu.Lock()
+	close(actState.ch)
+	actState.ch = make(chan struct{})
+	actState.mu.Unlock()
+}
+
 // activityPoke 请活动循环尽快重探一次(非阻塞)
 func activityPoke() {
 	select {
@@ -383,7 +391,7 @@ func dumpsysScanArgs(args []string, keys []string, timeout time.Duration) (strin
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, path, args...))
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin"}
+	cmd.Env = hubAppendAndroidEnv("PATH=/system/bin:/system/xbin:/vendor/bin")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err
@@ -514,12 +522,7 @@ func writeActivity(hncDir string, a Activity) error {
 	if err != nil {
 		return err
 	}
-	p := activityPath(hncDir)
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return writeFileAtomic(activityPath(hncDir), append(b, '\n'))
 }
 
 // ActivityLoop 每 15 秒探一次; 被 poke(WebUI 刚来请求)时立即探。

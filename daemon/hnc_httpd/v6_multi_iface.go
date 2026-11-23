@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -80,6 +82,8 @@ type V6Tun0GuardPlan struct {
 	PhysicalUpstreams []string `json:"physical_upstreams,omitempty"`
 	MinVPNMTU         int      `json:"min_vpn_mtu,omitempty"`
 	ProtectedSubnets  []string `json:"protected_subnets,omitempty"`
+	IPRulesKnown      bool     `json:"ip_rules_known"`
+	IPRulesReason     string   `json:"ip_rules_reason,omitempty"`
 	LoopRiskDetected  bool     `json:"loop_risk_detected"`
 	LoopRiskReasons   []string `json:"loop_risk_reasons,omitempty"`
 	IPRuleSpecs       []string `json:"ip_rule_specs,omitempty"`
@@ -665,13 +669,30 @@ func BuildTun0AntiLoopPlan(
 	subnets []string,
 	existingIPRules []string,
 ) V6Tun0GuardPlan {
+	return buildTun0AntiLoopPlanDetail(vpnIfaces, physUpstreams, minVPNMTU, downstreams, subnets, existingIPRules, existingIPRules != nil, "")
+}
+
+func buildTun0AntiLoopPlanDetail(
+	vpnIfaces, physUpstreams []string,
+	minVPNMTU int,
+	downstreams []V6ManagedDownstream,
+	subnets []string,
+	existingIPRules []string,
+	rulesKnown bool,
+	rulesReason string,
+) V6Tun0GuardPlan {
 	globalV6MultiIface.tun0GuardChecks.Add(1)
+	if !rulesKnown && rulesReason == "" && existingIPRules == nil {
+		rulesReason = "ip_rule_unverified"
+	}
 	plan := V6Tun0GuardPlan{
 		VPNActive:         len(vpnIfaces) > 0,
 		VPNIfaces:         append([]string(nil), vpnIfaces...),
 		PhysicalUpstreams: append([]string(nil), physUpstreams...),
 		MinVPNMTU:         minVPNMTU,
 		ProtectedSubnets:  append([]string(nil), subnets...),
+		IPRulesKnown:      rulesKnown,
+		IPRulesReason:     rulesReason,
 		// HNC 全栈严格只写 [31:16] 0xffff0000, 低 16 位 [15:0] 100% 留给 Android netd / Clash / WireGuard 绕行标记!
 		Low16MarkSafe: true,
 	}
@@ -679,13 +700,18 @@ func BuildTun0AntiLoopPlan(
 		return plan
 	}
 
+	if !rulesKnown {
+		plan.LoopRiskDetected = true
+		plan.LoopRiskReasons = append(plan.LoopRiskReasons,
+			fmt.Sprintf("VPN 接口(%s)在线但无法读取系统 ip rule 策略路由表（%s），无法确认热点网段前置直连绕行是否就绪", strings.Join(vpnIfaces, ","), plan.IPRulesReason))
+	}
+
 	joinedRules := strings.Join(existingIPRules, "\n")
 	pref := v6Tun0BypassRulePrefBase
 	for _, sub := range subnets {
-		// 检查现有 ip rule 是否已在 VPN uidrange 之前为热点下游网段设置直连路由表保护
 		hasBypass := strings.Contains(joinedRules, "to "+sub+" lookup main") ||
 			strings.Contains(joinedRules, "to "+sub+" lookup local_network")
-		if !hasBypass && len(existingIPRules) > 0 {
+		if rulesKnown && !hasBypass {
 			plan.LoopRiskDetected = true
 			plan.LoopRiskReasons = append(plan.LoopRiskReasons,
 				fmt.Sprintf("VPN 接口(%s)在线但 ip rule 缺少目的网段 %s 的前置直连绕行规则，回包易误入 tun0 形成路由环路", strings.Join(vpnIfaces, ","), sub))
@@ -695,7 +721,6 @@ func BuildTun0AntiLoopPlan(
 		pref++
 	}
 
-	// 若未传入 existingIPRules (冷启动生成态), 检查 VPN MTU < 1500 时的 PMTU 黑洞风险
 	clampMSS := v6Tun0SafeClampMSS
 	if minVPNMTU >= 1280 && minVPNMTU-40 < clampMSS {
 		clampMSS = minVPNMTU - 40
@@ -722,6 +747,68 @@ func BuildTun0AntiLoopPlan(
 		}
 	}
 	return plan
+}
+
+var v6ReadLiveIPRulesFn = readLiveIPRulesOS
+
+func readLiveIPRulesOS() (rules []string, reasonCode string, ok bool) {
+	ipBin := resolveDataplaneSystemBin("ip")
+	if ipBin == "" {
+		return nil, "ip_binary_missing", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := hardenCmd(exec.CommandContext(ctx, ipBin, "-4", "rule", "show"))
+	cmd.Env = subprocEnvWithFallbackPath()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		if len(msg) > 120 {
+			msg = msg[:120]
+		}
+		return nil, "ip_rule_exec_failed: " + msg, false
+	}
+	var lines []string
+	for _, rawLn := range strings.Split(string(out), "\n") {
+		if ln := strings.TrimSpace(rawLn); ln != "" {
+			lines = append(lines, ln)
+		}
+	}
+	if len(lines) == 0 {
+		return nil, "ip_rule_empty", false
+	}
+	return lines, "", true
+}
+
+func analyzeMultiInterfacesWithLiveRules(inputs []V6IfaceProbeInput, preferredPrimary string) V6MultiIfaceSnapshot {
+	var (
+		rules       []string
+		rulesKnown  bool
+		rulesReason string
+	)
+	if v6ReadLiveIPRulesFn != nil {
+		rules, rulesReason, rulesKnown = v6ReadLiveIPRulesFn()
+	} else {
+		rulesReason = "ip_rule_reader_disabled"
+	}
+	snap := AnalyzeMultiInterfaces(inputs, preferredPrimary, rules)
+	snap.Tun0Guard = buildTun0AntiLoopPlanDetail(
+		snap.Tun0Guard.VPNIfaces,
+		snap.Tun0Guard.PhysicalUpstreams,
+		snap.Tun0Guard.MinVPNMTU,
+		snap.ManagedDownstreams,
+		snap.Tun0Guard.ProtectedSubnets,
+		rules,
+		rulesKnown,
+		rulesReason,
+	)
+	globalV6MultiIface.mu.Lock()
+	globalV6MultiIface.lastSnap = snap
+	globalV6MultiIface.mu.Unlock()
+	return snap
 }
 
 // ── 1:fffe 局域网互传 2.5Gbps 免限速直通类 Netlink 报文编码器 ──────────────
@@ -888,7 +975,7 @@ func (s *server) ReconcileMultiDownstreamV6() (V6MultiIfaceSnapshot, error) {
 		hncDir = s.hncDir
 	}
 	inputs := v6CollectProbeInputsFn(hncDir)
-	snap := AnalyzeMultiInterfaces(inputs, preferred, nil)
+	snap := analyzeMultiInterfacesWithLiveRules(inputs, preferred)
 	if !useNativeDataplane(hncDir) || len(snap.ManagedDownstreams) == 0 {
 		return snap, nil
 	}
@@ -932,7 +1019,7 @@ func (s *server) apiV6MultiIface(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preferred := s.currentHotspotIface()
-	snap := AnalyzeMultiInterfaces(CollectLiveIfaceProbeInputs(s.hncDir), preferred, nil)
+	snap := analyzeMultiInterfacesWithLiveRules(CollectLiveIfaceProbeInputs(s.hncDir), preferred)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
 		"snapshot": snap,

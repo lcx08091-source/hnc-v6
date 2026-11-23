@@ -18,7 +18,7 @@
 //   subsequent mutations here are safe.
 //
 //   Historical JSONL: every tick also appends one line to
-//   /data/local/hnc/run/self_attrib.YYYYMMDD.jsonl for offline analysis.
+//   /data/local/hnc/data/self_studio/self_attrib.YYYYMMDD.jsonl for offline analysis.
 //
 // Trade-offs:
 //
@@ -49,16 +49,19 @@ import (
 )
 
 const (
+	// DefaultSelfStudioSubdir is the persistent storage subdirectory under <hncDir>
+	// for self_attrib.*.jsonl and label_samples.* (moved out of 32M tmpfs run/).
+	DefaultSelfStudioSubdir = "data/self_studio"
+
 	// SelfAttribInterval is how often /proc/net is sampled.
 	SelfAttribInterval = 5 * time.Second
 
 	// SelfAttribRetainDays is how many daily self_attrib.YYYYMMDD.jsonl
-	// files are kept. Tightened to 2 days so 32M tmpfs run/ cannot fill up.
-	SelfAttribRetainDays = 2
+	// files are kept under persistent data/self_studio.
+	SelfAttribRetainDays = 3
 
-	// SelfAttribMaxDailyBytes caps each daily JSONL file at 2 MiB
-	// to avoid exhausting the 32M tmpfs run/ partition.
-	SelfAttribMaxDailyBytes = 2 << 20 // 2 MiB per day cap
+	// SelfAttribMaxDailyBytes caps each daily JSONL file at 4 MiB.
+	SelfAttribMaxDailyBytes = 4 << 20 // 4 MiB per day cap
 
 	// SelfPkgCacheTTL is how often pm list packages -U is re-run.
 	SelfPkgCacheTTL = 5 * time.Minute
@@ -76,10 +79,18 @@ const (
 	ruleHitCounterMax = 100000
 
 	// maxUnmatchedSNIs is the hard cap on the auto-expand candidate
-	// queue. Exceeded → silently drop new entries until the expander
+	// queue. Exceeded -> silently drop new entries until the expander
 	// goroutine drains. 4096 covers ~8 hours of normal usage.
 	maxUnmatchedSNIs = 4096
 )
+
+// SelfStudioDir resolves <hncDir>/data/self_studio from a given hncDir.
+func SelfStudioDir(hncDir string) string {
+	if strings.TrimSpace(hncDir) == "" {
+		hncDir = "/data/local/hnc"
+	}
+	return filepath.Join(filepath.Clean(hncDir), "data", "self_studio")
+}
 
 // SelfAttribObservation is one record written to the historical JSONL.
 type SelfAttribObservation struct {
@@ -96,7 +107,7 @@ type uint64BytePair struct {
 	Tx uint64
 }
 
-// SelfAttribConnRow is one connection from /proc/net joined with uid→pkg.
+// SelfAttribConnRow is one connection from /proc/net joined with uid->pkg.
 type SelfAttribConnRow struct {
 	Proto  string `json:"proto"`
 	Local  string `json:"local"`
@@ -109,18 +120,19 @@ type SelfAttribConnRow struct {
 // SelfAttribAggregator owns the per-uid aggregation. Lives for the
 // lifetime of dpid. Construct one with NewSelfAttribAggregator.
 type SelfAttribAggregator struct {
-	mu sync.Mutex
+	mu           sync.Mutex
+	pkgRefreshMu sync.Mutex
 
 	// lastJSONLSig is the sorted connection-set signature of the most recent
-	// JSONL append (see sampleOnce). Owned by the RunSampler goroutine.
+	// JSONL append (see sampleOnce). Owned by sampleMu.
 	lastJSONLSig string
 
-	// appsByUID is the live aggregation, by uid → SelfApp pointer.
+	// appsByUID is the live aggregation, by uid -> SelfApp pointer.
 	// Mutated under mu. Cleared (or filtered) when a uid hasn't been
 	// seen for staleEvictAge.
 	appsByUID map[int]*SelfApp
 
-	// remoteToUID maps "ip:port" → uid for the most recent sample.
+	// remoteToUID maps "ip:port" -> uid for the most recent sample.
 	// The capture-side (TLS/DNS events) consults this on every event
 	// to attribute SNIs to apps.
 	remoteToUID map[string]int
@@ -143,7 +155,7 @@ type SelfAttribAggregator struct {
 	// observed this sni since last expander tick.
 	unmatchedSNIs map[string]map[int]struct{}
 
-	// pkgCache is the resolved uid→pkg map (TTL'd, refreshed lazily).
+	// pkgCache is the resolved uid->pkg map (TTL'd, refreshed lazily).
 	pkgCache         map[int]string
 	pkgCacheLoadedAt time.Time
 	pkgCacheErr      string
@@ -153,7 +165,7 @@ type SelfAttribAggregator struct {
 	systemPkgs map[string]struct{}
 
 	// v5.7.0-rc33: set of VPN/proxy package names excluded from the flywheel
-	// (built-in seed ∪ user file). Refreshed alongside pkgCache. uids resolving
+	// (built-in seed U user file). Refreshed alongside pkgCache. uids resolving
 	// to these never accumulate candidates / get auto-promotions, because a VPN
 	// re-originates other apps' traffic and would mis-attribute their domains to
 	// itself. Initialized to the built-in seed in the constructor so the guard
@@ -171,13 +183,13 @@ type SelfAttribAggregator struct {
 
 	// v5.7.0-m1: per-uid cumulative byte counters from the kernel.
 	// Indexed by uid. Updated by RecordBytes on each byteSampler tick.
-	// Delta = current cumulative − prevByteCounters[uid] at sample time.
+	// Delta = current cumulative - prevByteCounters[uid] at sample time.
 	currByteCounters     map[int]uint64BytePair // (rx, tx) cumulative this sample
 	prevByteCounters     map[int]uint64BytePair // (rx, tx) cumulative last sample
 	byteSamplerSource    string                 // "ebpf" | "dumpsys" | "none"
 	byteSamplerUpdatedAt int64                  // last successful sample time (unix s)
 
-	// v5.7.0-m2: package→display-name resolver. Optional; nil means
+	// v5.7.0-m2: package->display-name resolver. Optional; nil means
 	// Snapshot leaves DisplayName empty (UI shows raw pkg fallback).
 	// Set via SetAppMetaResolver after construction so output/ stays
 	// independent of appmeta/ package.
@@ -205,13 +217,17 @@ type SelfAttribAggregator struct {
 	// Persistent dedupe set for cumulative TotalConns counting. Keyed by
 	// "proto|local|remote|uid". Bounded to avoid memory leak; on overflow,
 	// the oldest half is dropped (simple ring-style purge).
-	seenTuples    map[string]int64 // tuple → first-seen unix
+	seenTuples    map[string]int64 // tuple -> first-seen unix
 	maxSeenTuples int
 }
 
-// NewSelfAttribAggregator constructs one. jsonlDir is the directory
-// to write the daily JSONL into (usually cfg.RunDir).
+// NewSelfAttribAggregator constructs one. jsonlDir is the persistent directory
+// to write the daily JSONL into (typically <hncDir>/data/self_studio; if a
+// legacy <hncDir>/run path is passed, callers should prefer SelfStudioDir).
 func NewSelfAttribAggregator(jsonlDir string) *SelfAttribAggregator {
+	if jsonlDir != "" {
+		_ = os.MkdirAll(jsonlDir, 0o755)
+	}
 	return &SelfAttribAggregator{
 		appsByUID:        make(map[int]*SelfApp),
 		remoteToUID:      make(map[string]int),
@@ -535,8 +551,7 @@ func (a *SelfAttribAggregator) ensureAppLocked(uid int, now int64) *SelfApp {
 // returned pointer (typically passes it to Writer.SetSelf).
 func (a *SelfAttribAggregator) Snapshot() *SelfState {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-
+	resolver := a.appMeta
 	s := &SelfState{
 		Enabled:        a.enabled,
 		Reason:         a.reason,
@@ -570,9 +585,6 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 				cp.TopSNIs = snis
 			}
 			if hits := a.rulesByUID[uid]; hits != nil {
-				// v5.6.0-rc2: sort by hit count descending (was
-				// alphabetic). WebUI cares about "most-used rules",
-				// not lex order; ties broken by rule ID for stability.
 				rules := make([]string, 0, len(hits))
 				for k := range hits {
 					rules = append(rules, k)
@@ -584,25 +596,15 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 					return rules[i] < rules[j]
 				})
 				cp.TopRules = rules
-				// v5.6.0-rc5: also export the raw counts so debugging
-				// auto-expansion thresholds is possible from outside.
 				cp.RuleHitCounts = make(map[string]int, len(hits))
 				for k, v := range hits {
 					cp.RuleHitCounts[k] = v
 				}
 			}
-			// v5.7.0-m1: per-uid byte counters + delta. omitempty in the
-			// struct tag means uids with no byte data drop these fields
-			// entirely from the JSON (vs reporting zeros that confuse the
-			// UI into thinking the app is idle).
 			if curr, ok := a.currByteCounters[uid]; ok {
 				cp.RxBytes = curr.Rx
 				cp.TxBytes = curr.Tx
 				if prev, hasPrev := a.prevByteCounters[uid]; hasPrev {
-					// Diff against previous sample. If kernel counter
-					// somehow went backwards (counter reset on reboot
-					// reload, uid recycled, etc), clamp delta to 0
-					// rather than underflow.
 					if curr.Rx >= prev.Rx {
 						cp.RxBytesDelta = curr.Rx - prev.Rx
 					}
@@ -612,20 +614,9 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 				}
 				cp.ByteSamplerUpdatedAt = a.byteSamplerUpdatedAt
 			}
-			// v5.7.0-m2: resolve display name. Cheap (single map lookup
-			// inside appmeta + optional reloadOverridesIfChanged stat).
-			// Done here in Snapshot rather than at uid resolution time
-			// so user override file edits take effect within ~5s without
-			// dpid restart.
-			if a.appMeta != nil && cp.Pkg != "" {
-				cp.DisplayName = a.appMeta.Display(cp.Pkg)
-			}
 			s.AppsByUID[strconv.Itoa(uid)] = &cp
 		}
 	}
-	// v5.6.0-rc5: surface auto-expand input queue size and a sample of
-	// what's in it. Sample is capped to 20 SNIs alphabetically (stable
-	// across calls so the WebUI doesn't churn).
 	s.UnmatchedSNIsPending = len(a.unmatchedSNIs)
 	if len(a.unmatchedSNIs) > 0 {
 		snis := make([]string, 0, len(a.unmatchedSNIs))
@@ -638,18 +629,8 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 		}
 		s.UnmatchedSNISamples = snis
 	}
-	// v5.7.0-m1: surface which byte sampler backend is feeding data
-	// (ebpf/dumpsys/none). Empty string means RecordBytes was never
-	// called (byteSampler goroutine not started yet, or no backend).
 	s.ByteSamplerSource = a.byteSamplerSource
 
-	// app-label diagnostics: report whether DisplayName came from the live
-	// PackageManager helper or the curated fallback (best-effort capability).
-	if st, ok := a.appMeta.(appMetaStatser); ok {
-		s.LiveLabelCount, s.AppLabelSource = st.LiveLabelStats()
-	}
-
-	// v5.7: brand-new-apex candidate accumulator summary (shadow/auto-promote).
 	cs := a.candidateSummary
 	s.CandidatePending = cs.pending
 	s.CandidateHigh = cs.high
@@ -662,6 +643,19 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 	if len(cs.samples) > 0 {
 		s.CandidateSamples = append([]CandidateSample(nil), cs.samples...)
 	}
+	a.mu.Unlock()
+
+	// 死定律四: 在释放 a.mu 之后再解析 DisplayName 与 LiveLabelStats(内部可能触发磁盘 Stat/ReadFile)。
+	if resolver != nil {
+		for _, cp := range s.AppsByUID {
+			if cp.Pkg != "" {
+				cp.DisplayName = resolver.Display(cp.Pkg)
+			}
+		}
+		if st, ok := resolver.(appMetaStatser); ok {
+			s.LiveLabelCount, s.AppLabelSource = st.LiveLabelStats()
+		}
+	}
 	return s
 }
 
@@ -672,12 +666,6 @@ func (a *SelfAttribAggregator) RunSampler(ctx context.Context, isEnabled func() 
 	t := time.NewTicker(SelfAttribInterval)
 	defer t.Stop()
 
-	// v5.9.0: daily retention. lastTrimDay is goroutine-local (RunSampler is
-	// the only writer of these files' lifecycle), first tick trims once at
-	// startup, then once per local-time day change. Runs BEFORE the
-	// isEnabled gate on purpose: old files get cleaned up even when
-	// self-capture is currently disabled. Date base is LOCAL time to match
-	// sampleOnce's file naming (now.Format, not UTC — see trimDailyFiles).
 	lastTrimDay := ""
 
 	for {
@@ -701,13 +689,28 @@ func (a *SelfAttribAggregator) RunSampler(ctx context.Context, isEnabled func() 
 	}
 }
 
-// connsSignature builds an order-independent fingerprint of a connection set:
-// the sorted "proto|local|remote|uid" tuples joined together. Equal signature
-// ⇒ identical connection set (byte counters are not part of the JSONL row).
+// connsSignature builds an order-independent fingerprint of a connection set,
+// deliberately omitting the ephemeral local address/port (r.Local) and keeping
+// only "proto|uid|remote|pkg" deduplicated across short-lived reconnects.
+// This eliminates 90%+ redundant JSONL write amplification when apps rotate
+// ephemeral source ports against the same remote endpoint.
 func connsSignature(rows []SelfAttribConnRow) string {
-	keys := make([]string, len(rows))
-	for i, r := range rows {
-		keys[i] = r.Proto + "|" + r.Local + "|" + r.Remote + "|" + strconv.Itoa(r.UID)
+	if len(rows) == 0 {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(rows))
+	keys := make([]string, 0, len(rows))
+	for _, r := range rows {
+		rem := canonRemoteKey(r.Remote)
+		if rem == "" {
+			rem = r.Remote
+		}
+		k := r.Proto + "|" + strconv.Itoa(r.UID) + "|" + rem + "|" + r.Pkg
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	return strings.Join(keys, "\n")
@@ -732,11 +735,14 @@ func resolvePkgInMap(pkgMap map[int]string, uid int) string {
 }
 
 func (a *SelfAttribAggregator) sampleOnce() error {
+	// 死定律四: getPkgCache() 可能在 packages.list 不可读时回退执行 pm 子进程,
+	// 严格置于 sampleMu 与 a.mu 锁外执行。
+	pkgMap := a.getPkgCache()
+
 	a.sampleMu.Lock()
 	defer a.sampleMu.Unlock()
 
 	now := time.Now()
-	pkgMap := a.getPkgCache()
 
 	var rows []SelfAttribConnRow
 	seen := make(map[string]bool)
@@ -794,25 +800,30 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 		}
 	}
 
-	// Append to JSONL.
-	//
-	// v6 review fix: 变更检测 —— 5s 一tick全量 append 连接表, 空闲设备一天也
-	// 要写 ~17k 行 × 全量连接, eMMC 写放大严重。连接集 (proto|local|remote|uid
-	// 的有序签名) 与上次写入相同时跳过 append; 聚合路径不受影响照常执行。
-	// sig 只在 RunSampler 的单一 goroutine 里读写, 无需加锁。
+	// Append to persistent data/self_studio/self_attrib.YYYYMMDD.jsonl with
+	// ephemeral-port-insensitive signature dedupe and strict 4 MiB daily cap.
 	sig := connsSignature(rows)
 	if a.jsonlDir != "" && sig != a.lastJSONLSig {
-		dayPath := filepath.Join(a.jsonlDir,
-			fmt.Sprintf("self_attrib.%s.jsonl", now.Format("20060102")))
-		// BUG-002 (回移自 5.9.91 分叉): 单日 32MB 硬封顶 —— 签名去重治"没必要
-		// 写", 这里治"写太多", 双保险。防busy设备单日膨胀到 GB 级。
-		if info, err := os.Stat(dayPath); err == nil && info.Size() >= SelfAttribMaxDailyBytes {
-			// daily cap reached, skip writing
-		} else if f, err := os.OpenFile(dayPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		if err := os.MkdirAll(a.jsonlDir, 0o755); err == nil {
+			dayPath := filepath.Join(a.jsonlDir,
+				fmt.Sprintf("self_attrib.%s.jsonl", now.Format("20060102")))
 			obs := SelfAttribObservation{T: now.Unix(), Conns: rows}
-			_ = json.NewEncoder(f).Encode(obs)
-			_ = f.Close()
-			a.lastJSONLSig = sig
+			if line, merr := json.Marshal(obs); merr == nil {
+				line = append(line, '\n')
+				var curSize int64
+				if info, serr := os.Stat(dayPath); serr == nil {
+					curSize = info.Size()
+				}
+				if curSize < SelfAttribMaxDailyBytes && curSize+int64(len(line)) <= SelfAttribMaxDailyBytes {
+					if f, oerr := os.OpenFile(dayPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); oerr == nil {
+						_, werr := f.Write(line)
+						cerr := f.Close()
+						if werr == nil && cerr == nil {
+							a.lastJSONLSig = sig
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -890,7 +901,19 @@ var packagesListPath = "/data/system/packages.list"
 
 func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	a.mu.Lock()
-	if a.pkgCache != nil && time.Since(a.pkgCacheLoadedAt) < SelfPkgCacheTTL {
+	if a.pkgCache != nil && !a.pkgCacheLoadedAt.IsZero() && time.Since(a.pkgCacheLoadedAt) < SelfPkgCacheTTL {
+		out := a.pkgCache
+		a.mu.Unlock()
+		return out
+	}
+	a.mu.Unlock()
+
+	// Serialize slow refresh outside a.mu so concurrent callers never spawn duplicate pm subprocesses.
+	a.pkgRefreshMu.Lock()
+	defer a.pkgRefreshMu.Unlock()
+
+	a.mu.Lock()
+	if a.pkgCache != nil && !a.pkgCacheLoadedAt.IsZero() && time.Since(a.pkgCacheLoadedAt) < SelfPkgCacheTTL {
 		out := a.pkgCache
 		a.mu.Unlock()
 		return out
@@ -905,7 +928,7 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 		excl    map[string]struct{}
 	)
 	// Primary: single pure-Go pass over /data/system/packages.list extracts both
-	// uid→pkg and systemPkgs without forking app_process (`pm`).
+	// uid->pkg and systemPkgs without forking app_process (`pm`).
 	if lm, lsys, lerr := loadPackagesList(packagesListPath); lerr == nil && len(lm) > 0 {
 		m, sysPkgs = lm, lsys
 		excl = loadFlywheelExcludePkgs()
@@ -929,14 +952,9 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	a.pkgCache = m
 	a.pkgCacheLoadedAt = time.Now()
 	a.pkgCacheErr = ""
-	// Refresh the system-package set on the same cadence. Best-effort: keep the
-	// old set on error.
 	if sysErr == nil {
 		a.systemPkgs = sysPkgs
 	}
-	// v5.7.0-rc33: refresh the flywheel exclusion (built-in ∪ user file) so edits
-	// to flywheel_exclude.json take effect within the pkg-cache TTL without a
-	// dpid restart. Always non-nil (degrades to the built-in seed).
 	a.flywheelExcludePkgs = excl
 	return m
 }

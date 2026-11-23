@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -166,11 +167,74 @@ func actionTemplateDel(hncDir string, p map[string]string) actionResp {
 
 // ── 维护 ──────────────────────────────────────────────────────
 
+func isOrphanTmpFileName(name string) bool {
+	if name == "" {
+		return false
+	}
+	return strings.HasSuffix(name, ".tmp") ||
+		strings.Contains(name, ".tmp.") ||
+		strings.Contains(name, ".tmp_") ||
+		strings.Contains(name, ".tmp-")
+}
+
+func isProtectedRunSelfFile(name string) bool {
+	switch name {
+	case "self_capture.enabled", "self_attrib.enabled", "self_studio.poke", "self_runtime.json":
+		return true
+	}
+	return strings.HasSuffix(name, ".enabled") ||
+		strings.HasSuffix(name, ".poke") ||
+		strings.HasSuffix(name, ".pid") ||
+		strings.HasSuffix(name, ".lock")
+}
+
 func actionCacheClear(hncDir string) actionResp {
 	n := 0
 	for _, f := range []string{"hostname_cache", "dev_class_cache"} {
 		if err := os.Remove(filepath.Join(hncDir, "cache", f)); err == nil {
 			n++
+		}
+	}
+	// 清理 run/ 与 data/ (含子目录) 下的孤儿 *.tmp* 文件
+	tmpDirs := []string{
+		filepath.Join(hncDir, "run"),
+		filepath.Join(hncDir, "data"),
+		filepath.Join(hncDir, "data", "self_studio"),
+		filepath.Join(hncDir, "data", "dpi_history"),
+	}
+	for _, dir := range tmpDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if isOrphanTmpFileName(name) {
+				if os.Remove(filepath.Join(dir, name)) == nil {
+					n++
+				}
+			}
+		}
+	}
+	// 清理旧版遗留在 run/ 下的 self_* 与 label_samples.* 膨胀文件(保留实时控制开关文件)
+	runDir := filepath.Join(hncDir, "run")
+	if entries, err := os.ReadDir(runDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if isProtectedRunSelfFile(name) {
+				continue
+			}
+			if strings.HasPrefix(name, "self_") || strings.HasPrefix(name, "label_samples.") {
+				if os.Remove(filepath.Join(runDir, name)) == nil {
+					n++
+				}
+			}
 		}
 	}
 	return actionResp{OK: true, Detail: fmt.Sprintf("removed %d file(s)", n)}
@@ -642,12 +706,27 @@ func (s *server) apiDPIRules(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "missing top-level rules array"})
 			return
 		}
-		tmp := filepath.Join(s.hncDir, "run", fmt.Sprintf("dpi_rules_upload.%d.json", time.Now().UnixNano()))
-		if err := os.WriteFile(tmp, body, 0600); err != nil {
+		runDir := filepath.Join(s.hncDir, "run")
+		_ = os.MkdirAll(runDir, 0o755)
+		tf, err := os.CreateTemp(runDir, "dpi_rules_upload.json.tmp.*")
+		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "write failed"})
 			return
 		}
+		tmp := tf.Name()
 		defer os.Remove(tmp)
+		_ = tf.Chmod(0o600)
+		if _, werr := tf.Write(body); werr != nil {
+			_ = tf.Close()
+			_ = os.Remove(tmp)
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "write failed"})
+			return
+		}
+		if cerr := tf.Close(); cerr != nil {
+			_ = os.Remove(tmp)
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "write failed"})
+			return
+		}
 		s.actionMu.Lock()
 		rc, out := runBin(s.hncDir, "dpi_rules_import.sh", tmp)
 		s.actionMu.Unlock()
@@ -850,11 +929,14 @@ func lastLine(s string) string {
 	return s
 }
 
-func writeFileAtomic(path string, b []byte) error {
+func createSyncedTempFile(path string, b []byte, perm os.FileMode) (string, error) {
 	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp.*")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
 	if err != nil {
-		return err
+		return "", err
 	}
 	tmp := f.Name()
 	ok := false
@@ -863,18 +945,40 @@ func writeFileAtomic(path string, b []byte) error {
 			_ = os.Remove(tmp)
 		}
 	}()
-	if _, err := f.Write(b); err != nil {
+	if err := f.Chmod(perm); err != nil {
 		_ = f.Close()
-		return err
+		return "", err
 	}
-	_ = f.Chmod(0644)
-	_ = f.Sync()
+	if n, err := f.Write(b); err != nil || n != len(b) {
+		_ = f.Close()
+		if err != nil {
+			return "", err
+		}
+		return "", io.ErrShortWrite
+	}
+	if err := f.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
+		_ = f.Close()
+		return "", err
+	}
 	if err := f.Close(); err != nil {
+		return "", err
+	}
+	ok = true
+	return tmp, nil
+}
+
+func writeFileAtomicWithPerm(path string, b []byte, perm os.FileMode) error {
+	tmp, err := createSyncedTempFile(path, b, perm)
+	if err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	ok = true
 	return nil
+}
+
+func writeFileAtomic(path string, b []byte) error {
+	return writeFileAtomicWithPerm(path, b, 0o644)
 }

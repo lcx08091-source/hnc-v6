@@ -29,13 +29,68 @@ _HNC_PROC="$MODDIR/bin/hnc_proc.sh"
 [ -f "$_HNC_PROC" ] && . "$_HNC_PROC"
 command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$$" -500 2>/dev/null || true
 
-mkdir -p "$HNC_DIR/logs" "$RUN"
+mkdir -p "$HNC_DIR/logs" "$RUN" "$HNC_DIR/data/self_studio" 2>/dev/null || true
+chmod 700 "$HNC_DIR" "$HNC_DIR/logs" "$RUN" 2>/dev/null || true
+[ -d "$HNC_DIR/data" ] && chmod 700 "$HNC_DIR/data" 2>/dev/null || true
+[ -d "$HNC_DIR/data/self_studio" ] && chmod 0755 "$HNC_DIR/data/self_studio" 2>/dev/null || true
+
+# v6.1.0-rc.4: 开机与热重启 32M tmpfs 急救清扫。
+# 将历史遗留在 run/ 下的自训练样本与字典缓存安全迁往持久化 data/(或 data/self_studio/),
+# 大文件(>=4MB)仅保留尾部 2MB, 随后立即删除 run/ 下原文件及全部 *.tmp* 孤儿文件。
+_hnc_rescue_run_tmpfs() {
+    _rr_dir="${1:-$RUN_DIR}"
+    [ -d "$_rr_dir" ] || return 0
+    mkdir -p "$HNC_DIR/data/self_studio" 2>/dev/null || true
+    chmod 0755 "$HNC_DIR/data/self_studio" 2>/dev/null || true
+    for _rf in "$_rr_dir"/self_attrib.* "$_rr_dir"/label_samples.* "$_rr_dir"/self_fg.* \
+               "$_rr_dir"/fg_timeline.* "$_rr_dir"/apk_domains.json "$_rr_dir"/app_labels_live.json; do
+        [ -f "$_rf" ] || continue
+        _bn=${_rf##*/}
+        case "$_bn" in
+            *.enabled|*.poke|*.pid|*.lock) continue ;;
+            *.tmp*) rm -f "$_rf" 2>/dev/null || true; continue ;;
+        esac
+        case "$_bn" in
+            self_attrib.*|label_samples.*|self_fg.*)
+                _dst="$HNC_DIR/data/self_studio/$_bn"
+                ;;
+            *)
+                _dst="$HNC_DIR/data/$_bn"
+                ;;
+        esac
+        if [ ! -e "$HNC_DIR/data/self_studio/$_bn" ] && [ ! -e "$HNC_DIR/data/$_bn" ] && [ -s "$_rf" ]; then
+            _sz=$(stat -c %s "$_rf" 2>/dev/null | tr -dc '0-9')
+            [ -n "$_sz" ] || _sz=$(wc -c < "$_rf" 2>/dev/null | tr -dc '0-9')
+            _sz=${_sz:-0}
+            _dtmp="${_dst}.tmp.$$"
+            if awk 'BEGIN { exit !((ARGV[1] + 0) < 4194304) }' "$_sz" 2>/dev/null; then
+                if cp -f "$_rf" "$_dtmp" 2>/dev/null && [ -s "$_dtmp" ]; then
+                    mv -f "$_dtmp" "$_dst" 2>/dev/null || rm -f "$_dtmp" 2>/dev/null || true
+                else
+                    rm -f "$_dtmp" 2>/dev/null || true
+                fi
+            else
+                if tail -c 2097152 "$_rf" > "$_dtmp" 2>/dev/null && [ -s "$_dtmp" ]; then
+                    mv -f "$_dtmp" "$_dst" 2>/dev/null || rm -f "$_dtmp" 2>/dev/null || true
+                else
+                    rm -f "$_dtmp" 2>/dev/null || true
+                fi
+            fi
+            [ -f "$_dst" ] && chmod 0644 "$_dst" 2>/dev/null || true
+        fi
+        rm -f "$_rf" 2>/dev/null || true
+    done
+    rm -f "$_rr_dir"/*.tmp* "$_rr_dir"/.*.tmp* "$_rr_dir"/.*.hnc_json* "$_rr_dir"/hnc_json_literal.* 2>/dev/null || true
+    unset _rr_dir _rf _bn _dst _sz _dtmp
+}
+
 # v6.0.0 Vector: 将 /data/local/hnc/run 挂载为 32M 内存 tmpfs (mode=0700),
 # 令 shm_vector.bin 双槽 seqlock 共享内存与高频运行态快照 100% 驻留 RAM, 实现手机 UFS 闪存零擦写寿命损耗。
 if { [ -z "$HNC_TEST_MODE" ] && [ "$RUN" = "/data/local/hnc/run" ]; } || [ "${HNC_TEST_TMPFS_FALLBACK:-0}" = "1" ]; then
     if grep -q " $RUN tmpfs " /proc/mounts 2>/dev/null; then
         rm -f "$RUN/tmpfs_unavailable" 2>/dev/null || true
     else
+        _hnc_rescue_run_tmpfs "$RUN_DIR"
         _live_daemon=0
         if [ -f "$RUN/httpd.pid" ] && command -v pidfile_pid_matches >/dev/null 2>&1; then
             pidfile_pid_matches "$RUN/httpd.pid" hnc_httpd && _live_daemon=1
@@ -57,11 +112,15 @@ if { [ -z "$HNC_TEST_MODE" ] && [ "$RUN" = "/data/local/hnc/run" ]; } || [ "${HN
         fi
     fi
 fi
+# 紧跟 mount -t tmpfs 之后(无论本次新挂载还是热重启已挂载), 确保 data/self_studio 就绪且 32M tmpfs 干净宽裕
+_hnc_rescue_run_tmpfs "$RUN_DIR"
+
 # v5.9.3 BUG-009:run/ 下有 local_admin.secret(middleware 认它就给 root 级
 # 写 API)。secret 文件本身早已是 0600,但目录 0777 且无 sticky 位时,别人
 # 可以直接 unlink 掉它再写一个自己的 —— 收目录才是真正的修法。
 chmod 700 "$HNC_DIR" "$HNC_DIR/logs" "$RUN" 2>/dev/null
 [ -d "$HNC_DIR/data" ] && chmod 700 "$HNC_DIR/data" 2>/dev/null
+[ -d "$HNC_DIR/data/self_studio" ] && chmod 0755 "$HNC_DIR/data/self_studio" 2>/dev/null || true
 # hotfix16.4 + v6.0 重启即焚: 清理陈旧的上行降级标记及运行态敏感瞬态文件(leakguard_events.json / shm_vector.bin)
 rm -f "$RUN/uplink_unsupported" "$RUN/uplink_fail_count" "$RUN/uplink_unsupported_logged" \
       "$RUN_DIR/leakguard_events.json" "$RUN_DIR/shm_vector.bin" 2>/dev/null || true
@@ -716,9 +775,14 @@ case "$LAUNCHER_CHOICE" in
     c_launcher)     _dpid_choice="launcher" ;;
     *)              _dpid_choice="direct" ;;
 esac
-printf '%s\n' "$_dpid_choice" > "$RUN/dpid_launcher.choice.tmp" 2>/dev/null \
-    && mv -f "$RUN/dpid_launcher.choice.tmp" "$RUN/dpid_launcher.choice" 2>/dev/null \
-    || printf '%s\n' "$_dpid_choice" > "$RUN/dpid_launcher.choice" 2>/dev/null
+_dlc_tmp="$RUN/dpid_launcher.choice.tmp.$$"
+if printf '%s\n' "$_dpid_choice" > "$_dlc_tmp" 2>/dev/null && [ -s "$_dlc_tmp" ]; then
+    mv -f "$_dlc_tmp" "$RUN/dpid_launcher.choice" 2>/dev/null || rm -f "$_dlc_tmp" 2>/dev/null || true
+else
+    rm -f "$_dlc_tmp" 2>/dev/null || true
+    printf '%s\n' "$_dpid_choice" > "$RUN/dpid_launcher.choice" 2>/dev/null || true
+fi
+unset _dlc_tmp
 log "dpid launcher choice persisted: $_dpid_choice (raw=$LAUNCHER_CHOICE)"
 unset _dpid_choice
 

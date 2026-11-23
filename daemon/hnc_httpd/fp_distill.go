@@ -48,7 +48,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -428,6 +427,7 @@ func (s *server) DistillPersonalNow(now time.Time, opt DistillOptions) (DistillR
 	_ = saveFPDistillState(hncDir, dstState)
 	dpiEvalCache.Store(dpiEvalResult{})
 	_ = os.Remove(dpiEvalPath(hncDir))
+	_ = os.Remove(filepath.Join(hncDir, "run", "dpi_eval.json"))
 
 	// 9. 生成面向用户的可解释诊断建议
 	rep.Hints = buildDistillHints(rep)
@@ -464,7 +464,7 @@ type distillSample struct {
 }
 
 func readDistillLabelSamples(hncDir string, days int, cur startupCursor, now time.Time) (all, incremental []distillSample, next startupCursor) {
-	files := startupSampleFiles(filepath.Join(hncDir, "run"))
+	files := selfStudioLabelSampleFiles(hncDir)
 	cutoff := now.Local().AddDate(0, 0, -(days - 1)).Format("20060102")
 	dates := make([]string, 0, len(files))
 	for d := range files {
@@ -1096,19 +1096,7 @@ func loadRecentSelfFG(hncDir string, days int, now time.Time) []selfFGRecord {
 	var out []selfFGRecord
 	for i := days - 1; i >= 0; i-- {
 		day := now.Local().AddDate(0, 0, -i).Format("20060102")
-		f, err := os.Open(filepath.Join(hncDir, "run", "self_fg."+day+".jsonl"))
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(io.LimitReader(f, 8<<20))
-		sc.Buffer(make([]byte, 0, 4096), 64<<10)
-		for sc.Scan() {
-			var r selfFGRecord
-			if json.Unmarshal(sc.Bytes(), &r) == nil && r.Pkg != "" && r.Ts > 0 {
-				out = append(out, r)
-			}
-		}
-		_ = f.Close()
+		out = append(out, readSelfFGRecordsForDay(hncDir, day)...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Ts < out[j].Ts })
 	return out
@@ -1416,7 +1404,7 @@ func distillStartupSequences(
 func buildDistillHints(rep DistillReport) []string {
 	var hints []string
 	if rep.SamplesScanned == 0 {
-		hints = append(hints, "未读到本机真值样本(run/label_samples.*.jsonl)，请先开启「追踪本机应用流量」并打开目标 App 浏览数秒。")
+		hints = append(hints, "未读到本机真值样本(data/self_studio/label_samples.*.jsonl)，请先开启「追踪本机应用流量」并打开目标 App 浏览数秒。")
 		return hints
 	}
 	if !rep.ContrastReadyTCP {

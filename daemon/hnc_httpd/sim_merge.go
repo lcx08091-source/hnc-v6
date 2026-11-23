@@ -119,8 +119,32 @@ func simDeviceMap(v *simView, now int64) map[string]interface{} {
 	return m
 }
 
-// simAppendDevices 追加模拟设备到 /api/devices 列表(与真实 MAC 重复的跳过)
+// simAppendDevices 追加模拟设备到 /api/devices 列表(与真实 MAC 重复的跳过);
+// 当 !s.simOn() 时主动过滤剔除任何意外混入的 02:5e:00:* 模拟条目。
 func (s *server) simAppendDevices(out []map[string]interface{}, seen map[string]bool) []map[string]interface{} {
+	if !s.simOn() {
+		hasStray := false
+		for _, item := range out {
+			mac := strings.ToLower(strings.TrimSpace(asString(item["mac"])))
+			if strings.HasPrefix(mac, simMACPrefix) || item["sim"] == true {
+				hasStray = true
+				break
+			}
+		}
+		if !hasStray {
+			return out
+		}
+		filtered := make([]map[string]interface{}, 0, len(out))
+		for _, item := range out {
+			mac := strings.ToLower(strings.TrimSpace(asString(item["mac"])))
+			if strings.HasPrefix(mac, simMACPrefix) || item["sim"] == true {
+				delete(seen, mac)
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		return filtered
+	}
 	now := time.Now()
 	views, _ := s.simViews(now)
 	for i := range views {
@@ -718,21 +742,126 @@ func (s *server) simMergeAppLimits(items []AppLimitItem) []AppLimitItem {
 	return items
 }
 
-// simMergeDPIState /api/dpi_state: state.clients 追加模拟客户端(只在 dpid 状态存在时)
+func isSimDPIStateClientEntry(key string, val interface{}) bool {
+	lk := strings.ToLower(strings.TrimSpace(key))
+	if strings.HasPrefix(lk, "sim-") || strings.HasPrefix(lk, simMACPrefix) {
+		return true
+	}
+	m, ok := val.(map[string]interface{})
+	if !ok || m == nil {
+		return false
+	}
+	if m["sim"] == true {
+		return true
+	}
+	cm := strings.ToLower(strings.TrimSpace(asString(m["client_mac"])))
+	if strings.HasPrefix(cm, simMACPrefix) {
+		return true
+	}
+	dm := strings.ToLower(strings.TrimSpace(asString(m["mac"])))
+	return strings.HasPrefix(dm, simMACPrefix)
+}
+
+func deepCopyDPIJSONValue(v interface{}) interface{} {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		cp := make(map[string]interface{}, len(x))
+		for k, val := range x {
+			cp[k] = deepCopyDPIJSONValue(val)
+		}
+		return cp
+	case []interface{}:
+		cp := make([]interface{}, len(x))
+		for i, val := range x {
+			cp[i] = deepCopyDPIJSONValue(val)
+		}
+		return cp
+	case []string:
+		return append([]string(nil), x...)
+	case []map[string]interface{}:
+		cp := make([]map[string]interface{}, len(x))
+		for i, m := range x {
+			if m != nil {
+				cp[i] = deepCopyDPIJSONValue(m).(map[string]interface{})
+			}
+		}
+		return cp
+	default:
+		return v
+	}
+}
+
+// simMergeDPIState /api/dpi_state: 深拷贝 clients map 追加模拟客户端, 严禁原地修改 jsonCache 返回的共享 map;
+// 当 !s.simOn() 时主动过滤剔除任何意外混入的 02:5e:00: 模拟客户端条目。
 func (s *server) simMergeDPIState(raw interface{}) interface{} {
 	root, ok := raw.(map[string]interface{})
 	if !ok {
 		return raw
 	}
+	origClients, _ := root["clients"].(map[string]interface{})
+	if !s.simOn() {
+		hasSim := false
+		for k, cv := range origClients {
+			if isSimDPIStateClientEntry(k, cv) {
+				hasSim = true
+				break
+			}
+		}
+		if !hasSim {
+			return raw
+		}
+		cpRoot := make(map[string]interface{}, len(root))
+		for k, v := range root {
+			cpRoot[k] = v
+		}
+		cleanClients := make(map[string]interface{}, len(origClients))
+		for k, cv := range origClients {
+			if isSimDPIStateClientEntry(k, cv) {
+				continue
+			}
+			cleanClients[k] = deepCopyDPIJSONValue(cv)
+		}
+		cpRoot["clients"] = cleanClients
+		return cpRoot
+	}
+
 	now := time.Now()
 	views, seed := s.simViews(now)
 	if len(views) == 0 {
-		return raw
+		hasSim := false
+		for k, cv := range origClients {
+			if isSimDPIStateClientEntry(k, cv) {
+				hasSim = true
+				break
+			}
+		}
+		if !hasSim {
+			return raw
+		}
+		cpRoot := make(map[string]interface{}, len(root))
+		for k, v := range root {
+			cpRoot[k] = v
+		}
+		cleanClients := make(map[string]interface{}, len(origClients))
+		for k, cv := range origClients {
+			if !isSimDPIStateClientEntry(k, cv) {
+				cleanClients[k] = deepCopyDPIJSONValue(cv)
+			}
+		}
+		cpRoot["clients"] = cleanClients
+		return cpRoot
 	}
-	clients, _ := root["clients"].(map[string]interface{})
-	if clients == nil {
-		clients = map[string]interface{}{}
-		root["clients"] = clients
+
+	cpRoot := make(map[string]interface{}, len(root)+1)
+	for k, v := range root {
+		cpRoot[k] = v
+	}
+	clients := make(map[string]interface{}, len(origClients)+len(views))
+	for k, cv := range origClients {
+		if isSimDPIStateClientEntry(k, cv) {
+			continue
+		}
+		clients[k] = deepCopyDPIJSONValue(cv)
 	}
 	lib := func(id string) (simApp, bool) { return simFindApp(s.hncDir, id) }
 	for i := range views {
@@ -766,7 +895,8 @@ func (s *server) simMergeDPIState(raw interface{}) interface{} {
 		}
 		clients["sim-"+d.MAC] = cl
 	}
-	return raw
+	cpRoot["clients"] = clients
+	return cpRoot
 }
 
 // simOnlyMACs 非空且全部是模拟 MAC

@@ -100,7 +100,7 @@ union nl_tc_req {
         char            buf[RTNL_REQ_BUF_SIZE];
     } m;
     unsigned char raw[sizeof(struct nlmsghdr) + sizeof(struct tcmsg) + RTNL_REQ_BUF_SIZE];
-};
+} __attribute__((aligned(8)));
 
 static int req_addattr_l(union nl_tc_req *req, int type,
                          const void *data, size_t alen)
@@ -113,11 +113,13 @@ static int req_addattr_l(union nl_tc_req *req, int type,
         errno = EMSGSIZE;
         return -1;
     }
-    struct rtattr *rta = (struct rtattr *)(req->raw + cur_off);
-    rta->rta_type = (unsigned short)type;
-    rta->rta_len  = (unsigned short)len;
+    struct rtattr hdr = {
+        .rta_len  = (unsigned short)len,
+        .rta_type = (unsigned short)type,
+    };
+    memcpy(req->raw + cur_off, &hdr, sizeof(hdr));
     if (alen > 0 && data != NULL)
-        memcpy(RTA_DATA(rta), data, alen);
+        memcpy(req->raw + cur_off + RTA_LENGTH(0), data, alen);
     req->m.n.nlmsg_len = (uint32_t)new_len;
     return 0;
 }
@@ -132,9 +134,11 @@ static size_t req_nest_begin(union nl_tc_req *req, int type)
 
 static void req_nest_end(union nl_tc_req *req, size_t off)
 {
-    struct rtattr *nest = (struct rtattr *)(req->raw + off);
+    struct rtattr hdr;
     size_t end_off = NLMSG_ALIGN(req->m.n.nlmsg_len);
-    nest->rta_len = (unsigned short)(end_off - off);
+    memcpy(&hdr, req->raw + off, sizeof(hdr));
+    hdr.rta_len = (unsigned short)(end_off - off);
+    memcpy(req->raw + off, &hdr, sizeof(hdr));
 }
 
 /* ── Unsigned integer & rate parsers (32/64-bit armv7a/arm64 safe) ───── */
@@ -325,7 +329,7 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what, int ignor
         return -EIO;
     }
 
-    char         buf[RTNL_RECV_BUF_SIZE] __attribute__((aligned(NLMSG_ALIGNTO)));
+    _Alignas(8) uint8_t buf[RTNL_RECV_BUF_SIZE];
     struct iovec iov = { .iov_base = buf, .iov_len = sizeof(buf) };
     struct msghdr msg = {
         .msg_name    = &sa,
@@ -348,33 +352,36 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what, int ignor
 
         size_t rem = (size_t)len;
         for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
-            struct nlmsghdr *h = (struct nlmsghdr *)(buf + off);
-            if (h->nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h->nlmsg_len > rem)
+            struct nlmsghdr h;
+            memcpy(&h, buf + off, sizeof(h));
+            if (h.nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h.nlmsg_len > rem)
                 break;
-            size_t step = NLMSG_ALIGN(h->nlmsg_len);
+            size_t msg_off = off;
+            size_t step = NLMSG_ALIGN(h.nlmsg_len);
             if (step > rem)
                 step = rem;
             off += step;
             rem -= step;
-            if (h->nlmsg_seq != n->nlmsg_seq)
+            if (h.nlmsg_seq != n->nlmsg_seq)
                 continue;
 
-            if (h->nlmsg_type == NLMSG_ERROR) {
-                if (h->nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
-                    LOGE("%s: truncated NLMSG_ERROR (%u bytes)", what, h->nlmsg_len);
+            if (h.nlmsg_type == NLMSG_ERROR) {
+                if (h.nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
+                    LOGE("%s: truncated NLMSG_ERROR (%u bytes)", what, h.nlmsg_len);
                     return -EBADMSG;
                 }
-                struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(h);
-                if (err->error == 0 || err->error == -EEXIST)
+                struct nlmsgerr err;
+                memcpy(&err, buf + msg_off + NLMSG_LENGTH(0), sizeof(err));
+                if (err.error == 0 || err.error == -EEXIST)
                     return 0;
-                if (ignore_enoent && (err->error == -ENOENT || err->error == -EINVAL))
+                if (ignore_enoent && (err.error == -ENOENT || err.error == -EINVAL))
                     return 0;
                 LOGE("%s: kernel rejected: %s (errno=%d)",
-                     what, strerror(-err->error), -err->error);
-                return err->error;
+                     what, strerror(-err.error), -err.error);
+                return err.error;
             }
 
-            LOGE("%s: unexpected nlmsg_type=%u", what, h->nlmsg_type);
+            LOGE("%s: unexpected nlmsg_type=%u", what, h.nlmsg_type);
             return -EPROTO;
         }
     }

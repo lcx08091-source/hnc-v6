@@ -23,6 +23,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -55,6 +56,102 @@ const (
 	ctEventRcvBuf            = 4 << 20
 	ctEventRetryAfterFailure = 60 * time.Second
 )
+
+// netlinkSubConn 封装 SOCK_NONBLOCK|SOCK_CLOEXEC + os.NewFile 的 Netlink 订阅句柄,
+// 接入 Go runtime epoll netpoll(无 1s SO_RCVTIMEO 轮询唤醒), 并通过 sync.Once 保证单次关闭无 fd 泄漏。
+type netlinkSubConn struct {
+	f       *os.File
+	once    sync.Once
+	onClose func()
+}
+
+func newNetlinkSubConnFromFile(f *os.File) *netlinkSubConn {
+	return &netlinkSubConn{f: f}
+}
+
+func (c *netlinkSubConn) Close() error {
+	if c == nil || c.f == nil {
+		return nil
+	}
+	var err error
+	c.once.Do(func() {
+		_ = c.f.SetReadDeadline(time.Now())
+		err = c.f.Close()
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
+	return err
+}
+
+func openNetlinkSubConn(proto int, groups uint32, rcvBuf int, name string) (*netlinkSubConn, error) {
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, proto)
+	if err != nil {
+		return nil, err
+	}
+	sa := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Groups: groups}
+	if err := syscall.Bind(fd, sa); err != nil {
+		_ = syscall.Close(fd)
+		return nil, err
+	}
+	if rcvBuf > 0 {
+		if syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, rcvBuf) != nil {
+			_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, rcvBuf)
+		}
+	}
+	f := os.NewFile(uintptr(fd), name)
+	if f == nil {
+		_ = syscall.Close(fd)
+		return nil, errors.New("os.NewFile returned nil for netlink socket")
+	}
+	return newNetlinkSubConnFromFile(f), nil
+}
+
+func isNetlinkStopOrClosedErr(err error) bool {
+	return errors.Is(err, os.ErrClosed) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, syscall.EBADF)
+}
+
+// netlinkShouldSleep 死定律七: 热点关闭(lvlHotspotOff)且非仿真激活态时主动关闭 Netlink 订阅并进入零唤醒休眠。
+func (s *server) netlinkShouldSleep() bool {
+	if s != nil && s.simActive() {
+		return false
+	}
+	return activityNow().Level == lvlHotspotOff
+}
+
+// watchNetlinkSession 在订阅连接存活期间监听 stop 与活动档位切换;
+// 一旦进入待机态或进程停止立即调用 c.Close() 唤醒阻塞在 netpoll 的 Read。
+func (s *server) watchNetlinkSession(stop <-chan struct{}, sessDone <-chan struct{}, c *netlinkSubConn) {
+	for {
+		ch := activityChanged()
+		if s.netlinkShouldSleep() {
+			_ = c.Close()
+			return
+		}
+		select {
+		case <-stop:
+			_ = c.Close()
+			return
+		case <-sessDone:
+			return
+		case <-ch:
+		}
+	}
+}
+
+func waitNetlinkRetryOrWake(stop <-chan struct{}, d time.Duration) bool {
+	ch := activityChanged()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-stop:
+		return false
+	case <-ch:
+		return true
+	case <-t.C:
+		return true
+	}
+}
 
 // ctDestroy 一条连接销毁事件(原方向五元组 + 最终双向字节)
 type ctDestroy struct {
@@ -224,7 +321,7 @@ func ctEventsPush(ev ctDestroy) {
 func ctEventsSetState(active bool, errStr string) {
 	ctEvents.mu.Lock()
 	ctEvents.active = active
-	if errStr != "" {
+	if active || errStr != "" {
 		ctEvents.lastErr = errStr
 	}
 	if !active {
@@ -233,62 +330,70 @@ func ctEventsSetState(active bool, errStr string) {
 	ctEvents.mu.Unlock()
 }
 
-// openCtDestroySocket 打开并订阅 DESTROY 组; 设置 1s 接收超时以便响应 stop
-func openCtDestroySocket() (int, error) {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, nlNetfilter)
-	if err != nil {
-		return -1, err
-	}
-	sa := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Groups: 1 << (nfnlGrpConntrackDestroy - 1)}
-	if err := syscall.Bind(fd, sa); err != nil {
-		_ = syscall.Close(fd)
-		return -1, err
-	}
-	// 大接收缓冲: 下载高峰短连接销毁风暴时减少 ENOBUFS。FORCE 需 CAP_NET_ADMIN, 失败退普通。
-	if syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, ctEventRcvBuf) != nil {
-		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, ctEventRcvBuf)
-	}
-	tv := syscall.Timeval{Sec: 1}
-	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
-	return fd, nil
+var ctOpenDestroySubFn = func() (*netlinkSubConn, error) {
+	return openNetlinkSubConn(nlNetfilter, 1<<(nfnlGrpConntrackDestroy-1), ctEventRcvBuf, "netlink-ct-destroy")
 }
 
-// CtEventLoop 后台订阅 conntrack 销毁事件; 失败则每 60s 重试一次(便宜), 期间
-// app_usage 自动走纯轮询。
+// CtEventLoop 后台订阅 conntrack 销毁事件:
+//   - 热点关闭待机(lvlHotspotOff 且非仿真态)时主动关闭 socket 并阻塞在 activityChanged(), 0 唤醒;
+//   - 连接期通过 SOCK_NONBLOCK + Go runtime epoll netpoll 被动等待内核事件, 无 1s SO_RCVTIMEO 轮询。
 func (s *server) CtEventLoop(stop <-chan struct{}) {
 	buf := make([]byte, 256*1024)
 	lastErr := ""
 	for {
-		fd, err := openCtDestroySocket()
+		select {
+		case <-stop:
+			ctEventsSetState(false, "")
+			return
+		default:
+		}
+		if s.netlinkShouldSleep() {
+			ctEventsSetState(false, "")
+			ch := activityChanged()
+			if s.netlinkShouldSleep() {
+				select {
+				case <-stop:
+					return
+				case <-ch:
+					continue
+				}
+			}
+		}
+
+		conn, err := ctOpenDestroySubFn()
 		if err != nil {
 			ctEventsSetState(false, err.Error())
-			// v5.20: 老内核(无 CONFIG_NF_CONNTRACK_EVENTS / nfnetlink)每 60s 重试都失败,
-			// 只在首次与错误变化时记一行, 不再每天刷 1440 行。
 			if err.Error() != lastErr {
 				lastErr = err.Error()
 				log.Printf("app_usage: conntrack destroy events unavailable (%v), polling only (retry every %s, logged once)", err, ctEventRetryAfterFailure)
 			}
-			select {
-			case <-stop:
+			if !waitNetlinkRetryOrWake(stop, ctEventRetryAfterFailure) {
 				return
-			case <-time.After(ctEventRetryAfterFailure):
-				continue
 			}
+			continue
 		}
+
 		ctEventsSetState(true, "")
 		lastErr = ""
-		fatal := false
-		for !fatal {
-			select {
-			case <-stop:
-				_ = syscall.Close(fd)
-				ctEventsSetState(false, "")
-				return
-			default:
-			}
-			n, _, rerr := syscall.Recvfrom(fd, buf, 0)
+		sessDone := make(chan struct{})
+		go s.watchNetlinkSession(stop, sessDone, conn)
+
+		recvFailed := false
+		for {
+			n, rerr := conn.f.Read(buf)
 			now := time.Now()
 			if rerr != nil {
+				select {
+				case <-stop:
+					close(sessDone)
+					_ = conn.Close()
+					ctEventsSetState(false, "")
+					return
+				default:
+				}
+				if s.netlinkShouldSleep() || isNetlinkStopOrClosedErr(rerr) {
+					break
+				}
 				switch {
 				case errors.Is(rerr, syscall.EAGAIN), errors.Is(rerr, syscall.EINTR):
 					continue
@@ -300,9 +405,12 @@ func (s *server) CtEventLoop(stop <-chan struct{}) {
 					continue
 				default:
 					log.Printf("app_usage: conntrack event recv: %v, resubscribing", rerr)
-					fatal = true
-					continue
+					recvFailed = true
 				}
+				break
+			}
+			if n <= 0 {
+				continue
 			}
 			msgs, perr := syscall.ParseNetlinkMessage(buf[:n])
 			if perr != nil {
@@ -314,12 +422,16 @@ func (s *server) CtEventLoop(stop <-chan struct{}) {
 				}
 			}
 		}
-		_ = syscall.Close(fd)
+
+		close(sessDone)
+		_ = conn.Close()
+		if !recvFailed {
+			ctEventsSetState(false, "")
+			continue
+		}
 		ctEventsSetState(false, "recv error")
-		select {
-		case <-stop:
+		if !waitNetlinkRetryOrWake(stop, 5*time.Second) {
 			return
-		case <-time.After(5 * time.Second):
 		}
 	}
 }

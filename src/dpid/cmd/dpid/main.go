@@ -12,6 +12,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -175,6 +177,7 @@ type shmDevEntry struct {
 type shmRuntimeTracker struct {
 	// Placed at offset 0 for 32-bit ARM 64-bit atomic alignment.
 	conntrackFlows atomic.Uint64
+	sleeping       atomic.Bool
 
 	mu   sync.Mutex
 	devs map[[6]byte]*shmDevEntry
@@ -186,6 +189,29 @@ func newSHMRuntimeTracker() *shmRuntimeTracker {
 		devs: make(map[[6]byte]*shmDevEntry, shm.MaxDevices),
 		poke: make(chan struct{}, 1),
 	}
+}
+
+func (t *shmRuntimeTracker) notifyPoke() {
+	if t == nil {
+		return
+	}
+	select {
+	case t.poke <- struct{}{}:
+	default:
+	}
+}
+
+func (t *shmRuntimeTracker) resetIdle(clearDevs bool) {
+	t.conntrackFlows.Store(0)
+	t.mu.Lock()
+	if clearDevs {
+		clear(t.devs)
+	} else {
+		for _, d := range t.devs {
+			clear(d.flows)
+		}
+	}
+	t.mu.Unlock()
 }
 
 func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isUDP bool, port uint16, pktBytes int, txFromClient bool, nowUnix int64) {
@@ -208,7 +234,6 @@ func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isU
 	}
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	d := t.devs[macBytes]
 	if d == nil {
 		if len(t.devs) >= shm.MaxDevices {
@@ -260,6 +285,10 @@ func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isU
 		}
 		d.flows[fhash] = nowUnix
 	}
+	t.mu.Unlock()
+	if t.sleeping.CompareAndSwap(true, false) {
+		t.notifyPoke()
+	}
 }
 
 func (t *shmRuntimeTracker) markLeak(macRaw string) {
@@ -271,10 +300,7 @@ func (t *shmRuntimeTracker) markLeak(macRaw string) {
 		}
 		t.mu.Unlock()
 	}
-	select {
-	case t.poke <- struct{}{}:
-	default:
-	}
+	t.notifyPoke()
 }
 
 func (t *shmRuntimeTracker) snapshot(nowUnix int64) (slots []shm.DeviceSlot, activeFlows uint32) {
@@ -397,14 +423,24 @@ func main() {
 	// v5.29 T4: 流量录制(只录握手类事件包, 见 capture/recorder.go)。
 	// exports 根 = run_dir 的上两级(run/ 的父目录就是 HNC 根)。
 	_hncRoot := filepath.Dir(filepath.Clean(cfg.RunDir))
+	dataDir := filepath.Join(_hncRoot, "data")
 	resolveDpidVersion(_hncRoot)
 	capture.DefaultRecorder.Store(capture.NewRecorder(_hncRoot, cfg.RunDir))
 
-	lockFD, err := acquireLock(filepath.Join(cfg.RunDir, lockFileName))
+	lockPath := filepath.Join(cfg.RunDir, lockFileName)
+	lockFD, err := acquireLock(lockPath)
+	if err != nil && errors.Is(err, syscall.ENOSPC) {
+		rescueTmpfsRunDir(cfg.RunDir, dataDir)
+		lockFD, err = acquireLock(lockPath)
+	}
 	if err != nil {
 		log.Fatalf("lock: %v", err)
 	}
 	defer releaseLock(lockFD)
+
+	// v6.1.0-rc.4: Before writing run/dpid.pid, perform cross-filesystem (EXDEV-safe)
+	// emergency rescue of 32MB tmpfs run/ (migrate/cap legacy JSONL & caches to data/, purge stale .tmp).
+	rescueTmpfsRunDir(cfg.RunDir, dataDir)
 
 	log.Printf("hnc_dpid %s starting, pid=%d", version, os.Getpid())
 
@@ -468,19 +504,23 @@ func main() {
 	output.SetCompiledFPPath(cfg.RunDir)
 	actReader = activity.NewReader(cfg.RunDir)
 
+	shmTracker := newSHMRuntimeTracker()
+
 	wakeHistCh := make(chan struct{}, 1)
 	wakeIPMapCh := make(chan struct{}, 1)
 	wakeSelfCh := make(chan struct{}, 1)
 	wakeCaptureCh := make(chan struct{}, 1)
+	wakeAppMetaCh := make(chan struct{}, 1)
 	wakeStandbyLoops := func() {
-		for _, ch := range []chan struct{}{wakeHistCh, wakeIPMapCh, wakeSelfCh, wakeCaptureCh} {
+		for _, ch := range []chan struct{}{wakeHistCh, wakeIPMapCh, wakeSelfCh, wakeCaptureCh, wakeAppMetaCh} {
 			select {
 			case ch <- struct{}{}:
 			default:
 			}
 		}
+		shmTracker.notifyPoke()
 	}
-	startHotspotHintInotify(ctx, cfg.RunDir, wakeStandbyLoops)
+	startHotspotHintInotifyWithShm(ctx, cfg.RunDir, wakeStandbyLoops, shmTracker.notifyPoke)
 
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -502,7 +542,6 @@ func main() {
 	bumpStartCount(cfg.RunDir) // rc42: 持久 lifetime 启动计数, 供 /api/sla
 
 	// v6.0.0 Vector: LeakGuard 明文隐私嗅探引擎 + 16KB 双槽 seqcount_latch 共享内存快照。
-	shmTracker := newSHMRuntimeTracker()
 	leakEngine := leakguard.NewEngine(cfg.RunDir)
 	seedKnownARPClients(leakEngine)
 	leakEngine.SetIdleCheck(func() bool {
@@ -530,19 +569,50 @@ func main() {
 		publishSHM()
 		go func() {
 			initSnap := actReader.Get()
-			wasHotspotOff := initSnap.OK && !initSnap.Hotspot
+			wasHotspotOff := initSnap.HotspotOff()
 			cur := activity.ShmFlushEvery(initSnap)
 			tk := time.NewTicker(cur)
 			defer tk.Stop()
-			retime := func() {
+			sleeping := false
+			enterSleep := func(s activity.Snapshot) {
+				if sleeping {
+					return
+				}
+				// Final zeroed/clean flush before entering 0-wakeup standby.
+				shmTracker.resetIdle(!s.Hotspot)
+				publishSHM()
+				tk.Stop()
+				sleeping = true
+				shmTracker.sleeping.Store(true)
+			}
+			if initSnap.ShmShouldSleep() {
+				enterSleep(initSnap)
+			}
+			syncPace := func(fromPoke bool) {
 				s := actReader.Get()
-				hotspotOff := s.OK && !s.Hotspot
+				hotspotOff := s.HotspotOff()
 				if wasHotspotOff && !hotspotOff {
 					wakeStandbyLoops()
 				}
 				wasHotspotOff = hotspotOff
-				if want := activity.ShmFlushEvery(s); want != cur {
+				if s.ShmShouldSleep() {
+					if fromPoke && s.Hotspot {
+						// Packet/leak arrived while hotspot is active before activity.json updated Clients:
+						// keep one active tick before re-evaluating standby.
+						shmTracker.sleeping.Store(false)
+						cur = activity.ShmFlushEvery(s)
+						sleeping = false
+						tk.Reset(cur)
+						return
+					}
+					enterSleep(s)
+					return
+				}
+				shmTracker.sleeping.Store(false)
+				want := activity.ShmFlushEvery(s)
+				if sleeping || want != cur {
 					cur = want
+					sleeping = false
 					tk.Reset(cur)
 				}
 			}
@@ -552,11 +622,18 @@ func main() {
 					publishSHM()
 					return
 				case <-shmTracker.poke:
-					publishSHM()
-					retime()
+					s := actReader.Get()
+					if !sleeping || !s.ShmShouldSleep() || s.Hotspot {
+						publishSHM()
+					}
+					syncPace(true)
 				case <-tk.C:
+					if actReader.Get().ShmShouldSleep() {
+						syncPace(false)
+						continue
+					}
 					publishSHM()
-					retime()
+					syncPace(false)
 				}
 			}
 		}()
@@ -624,15 +701,20 @@ func main() {
 		}()
 	}
 
-	// v5.5: self-attribution sampler.
+	// v5.5 + v6.1.0-rc.4: self-attribution sampler persisted under <hnc>/data/self_studio.
 	selfAttribFlag := filepath.Join(cfg.RunDir, "self_capture.enabled")
 	selfAttribAltFlag := filepath.Join(cfg.RunDir, "self_attrib.enabled")
-	selfAttrib := output.NewSelfAttribAggregator(cfg.RunDir)
+	selfStudioDir := output.SelfStudioDir(_hncRoot)
+	if err := os.MkdirAll(selfStudioDir, 0o755); err != nil {
+		log.Printf("WARN: mkdir self_studio %s: %v", selfStudioDir, err)
+	}
+	selfAttrib := output.NewSelfAttribAggregator(selfStudioDir)
 
 	appLabelsOverride := "/data/local/hnc/etc/app_labels.json"
 	appResolver := appmeta.NewResolver(appLabelsOverride)
 	dexPath := resolveAppLabelDex()
-	appResolver.EnableLiveLabels(dexPath, filepath.Join(cfg.RunDir, "app_labels_live.json"))
+	appResolver.EnableLiveLabels(dexPath, filepath.Join(dataDir, "app_labels_live.json"))
+	appResolver.SetIdleHook(func() bool { return actReader.Get().HotspotOff() }, wakeAppMetaCh)
 	appResolver.StartLiveRefresh(ctx)
 	selfAttrib.SetAppMetaResolver(appResolver)
 	curated, overridden := appResolver.LabelCount()
@@ -771,8 +853,8 @@ func main() {
 	sw.SetDiscoverer(disc)
 	go flushEvery(ctx, 30*time.Second, "dpi_discover", disc.Flush)
 
-	// v5.15: 本机安装包域名扫描
-	apkScanner := apkscan.New(apkscan.Options{OutPath: filepath.Join(cfg.RunDir, apkDomainsFile), Label: appResolver.Display})
+	// v5.15 + v6.1.0-rc.4: 本机安装包域名扫描(持久层写 data/apk_domains.json)
+	apkScanner := apkscan.New(apkscan.Options{OutPath: filepath.Join(dataDir, apkDomainsFile), Label: appResolver.Display})
 	go apkscan.RunDaemon(ctx, apkScanner, apkscan.DaemonOptions{RequestFile: filepath.Join(cfg.RunDir, apkScanRequest)})
 
 	// RC2: Decouple true blind/disabled mode (AF_PACKET unavailable or explicit
@@ -1485,6 +1567,10 @@ func isHotspotActiveOrUnknown(runDir string) bool {
 }
 
 func startHotspotHintInotify(ctx context.Context, runDir string, onWake func()) {
+	startHotspotHintInotifyWithShm(ctx, runDir, onWake, nil)
+}
+
+func startHotspotHintInotifyWithShm(ctx context.Context, runDir string, onWake func(), onShmWake func()) {
 	if runDir == "" || onWake == nil {
 		return
 	}
@@ -1517,6 +1603,7 @@ func startHotspotHintInotify(ctx context.Context, runDir string, onWake func()) 
 			}
 			off := 0
 			woke := false
+			wokeShm := false
 			for off+syscall.SizeofInotifyEvent <= n {
 				evMask := binary.LittleEndian.Uint32(buf[off+4 : off+8])
 				evLen := binary.LittleEndian.Uint32(buf[off+12 : off+16])
@@ -1534,14 +1621,23 @@ func startHotspotHintInotify(ctx context.Context, runDir string, onWake func()) 
 				case "iface_detect.json", "hotspot_iface":
 					woke = true
 				case "activity.json":
-					if evMask&(syscall.IN_MOVED_TO|syscall.IN_CLOSE_WRITE) != 0 && isHotspotActiveOrUnknown(runDir) {
-						woke = true
+					if evMask&(syscall.IN_MOVED_TO|syscall.IN_CLOSE_WRITE) != 0 {
+						if actReader != nil {
+							actReader.Invalidate()
+						}
+						if isHotspotActiveOrUnknown(runDir) {
+							woke = true
+						} else if onShmWake != nil && actReader != nil && !actReader.Get().ShmShouldSleep() {
+							wokeShm = true
+						}
 					}
 				}
 				off = endOff
 			}
 			if woke {
 				onWake()
+			} else if wokeShm && onShmWake != nil {
+				onShmWake()
 			}
 		}
 	}()
@@ -1604,28 +1700,30 @@ func releaseLock(fd int) {
 	}
 }
 
-func atomicWriteString(path, data string) error {
-	tmp := path + ".tmp"
+var dpidAtomicSeq atomic.Uint64
+
+func atomicWriteBytes(path string, data []byte) error {
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), dpidAtomicSeq.Add(1))
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteString(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 	if d, err := os.Open(filepath.Dir(path)); err == nil {
@@ -1633,6 +1731,290 @@ func atomicWriteString(path, data string) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+func atomicWriteString(path, data string) error {
+	return atomicWriteBytes(path, []byte(data))
+}
+
+func isAllDigits8(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for i := 0; i < 8; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isDpidOwnedTmpName(name string) bool {
+	if !strings.Contains(name, ".tmp") {
+		return false
+	}
+	for _, p := range []string{
+		"dpid.", "dpi_", "self_attrib.", "label_samples.",
+		"apk_domains.json", "app_labels_live.json", "ip_app_map.json", "shm_vector.bin",
+	} {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func readTailCompleteLines(path string, maxBytes int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	sz := fi.Size()
+	if sz <= 0 || maxBytes <= 0 {
+		return nil, nil
+	}
+	var raw []byte
+	if sz <= maxBytes {
+		raw, err = io.ReadAll(f)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := f.Seek(sz-maxBytes, io.SeekStart); err != nil {
+			return nil, err
+		}
+		buf := make([]byte, maxBytes)
+		n, rerr := io.ReadFull(f, buf)
+		if rerr != nil && !errors.Is(rerr, io.ErrUnexpectedEOF) && !errors.Is(rerr, io.EOF) {
+			return nil, rerr
+		}
+		raw = buf[:n]
+		if idx := bytes.IndexByte(raw, '\n'); idx >= 0 {
+			raw = raw[idx+1:]
+		} else {
+			return nil, nil
+		}
+	}
+	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+	return raw, nil
+}
+
+func migrateCappedJSONL(srcPath, dstPath string, maxBytes int64) error {
+	srcTail, err := readTailCompleteLines(srcPath, maxBytes)
+	if err != nil {
+		return err
+	}
+	if len(srcTail) == 0 {
+		return nil
+	}
+	merged := srcTail
+	if int64(len(srcTail)) < maxBytes {
+		if dstFi, err := os.Stat(dstPath); err == nil && dstFi.Size() > 0 {
+			rem := maxBytes - int64(len(srcTail))
+			if dstTail, derr := readTailCompleteLines(dstPath, rem); derr == nil && len(dstTail) > 0 {
+				merged = make([]byte, 0, len(dstTail)+len(srcTail))
+				merged = append(merged, dstTail...)
+				merged = append(merged, srcTail...)
+			}
+		}
+	}
+	return atomicWriteBytes(dstPath, merged)
+}
+
+func migrateFileCrossFS(srcPath, dstPath string, maxBytes int64) error {
+	srcFi, err := os.Stat(srcPath)
+	if err != nil {
+		return err
+	}
+	if srcFi.Size() > maxBytes {
+		return fmt.Errorf("source %s size %d exceeds limit %d", srcPath, srcFi.Size(), maxBytes)
+	}
+	if dstFi, err := os.Stat(dstPath); err == nil && dstFi.Size() > 0 && !srcFi.ModTime().After(dstFi.ModTime()) {
+		return nil
+	}
+	b, err := os.ReadFile(srcPath)
+	if err != nil {
+		return err
+	}
+	return atomicWriteBytes(dstPath, b)
+}
+
+// rescueTmpfsRunDir performs EXDEV-safe cross-filesystem cleanup & migration of 32MB tmpfs run/
+// strictly BEFORE dpid writes run/dpid.pid:
+//   - deletes stale/dpid-owned *.tmp* files in run/
+//   - migrates self_attrib.<YYYYMMDD>.jsonl (excluding control flags like self_attrib.enabled)
+//     and label_samples.* to <hnc>/data/self_studio/ with 4MiB cap and 3d/7d retention
+//   - migrates apk_domains.json and app_labels_live.json to <hnc>/data/
+//   - immediately deletes migrated/expired files from run/ to release tmpfs space.
+func rescueTmpfsRunDir(runDir, dataDir string) {
+	cleanRun := strings.TrimSpace(runDir)
+	if cleanRun == "" {
+		return
+	}
+	cleanRun = filepath.Clean(cleanRun)
+	hncRoot := filepath.Dir(cleanRun)
+	cleanData := strings.TrimSpace(dataDir)
+	if cleanData == "" {
+		cleanData = filepath.Join(hncRoot, "data")
+	} else {
+		cleanData = filepath.Clean(cleanData)
+	}
+	studioDir := output.SelfStudioDir(hncRoot)
+
+	_ = os.MkdirAll(cleanData, 0o755)
+	_ = os.MkdirAll(studioDir, 0o755)
+
+	entries, err := os.ReadDir(cleanRun)
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	clockSane := now.Year() >= 2024
+	selfAttribCutoff := now.AddDate(0, 0, -output.SelfAttribRetainDays).Format("20060102")
+	labelSamplesCutoff := now.AddDate(0, 0, -output.SelfStudioLabelRetentionDays).Format("20060102")
+	const labelSamplesCapBytes = 4 << 20
+
+	var freedBytes int64
+	var cleanedCount int
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		srcPath := filepath.Join(cleanRun, name)
+
+		// 1. Purge dpid-owned or stale (>60s) .tmp orphan files.
+		if strings.Contains(name, ".tmp") {
+			shouldRemove := isDpidOwnedTmpName(name)
+			var sz int64
+			if info, ierr := e.Info(); ierr == nil {
+				sz = info.Size()
+				if !shouldRemove && now.Sub(info.ModTime()) > time.Minute {
+					shouldRemove = true
+				}
+			}
+			if shouldRemove {
+				if os.Remove(srcPath) == nil {
+					freedBytes += sz
+					cleanedCount++
+				}
+			}
+			continue
+		}
+
+		// 2. Migrate self_attrib.<YYYYMMDD>.jsonl (NEVER touch self_attrib.enabled!).
+		if strings.HasPrefix(name, "self_attrib.") && strings.HasSuffix(name, ".jsonl") {
+			var sz int64
+			if info, ierr := e.Info(); ierr == nil {
+				sz = info.Size()
+			}
+			ymd := strings.TrimSuffix(strings.TrimPrefix(name, "self_attrib."), ".jsonl")
+			if clockSane && isAllDigits8(ymd) && ymd < selfAttribCutoff {
+				if os.Remove(srcPath) == nil {
+					freedBytes += sz
+					cleanedCount++
+				}
+				continue
+			}
+			if err := migrateCappedJSONL(srcPath, filepath.Join(studioDir, name), output.SelfAttribMaxDailyBytes); err != nil {
+				log.Printf("WARN: tmpfs rescue migrate %s: %v", name, err)
+			}
+			if os.Remove(srcPath) == nil {
+				freedBytes += sz
+				cleanedCount++
+			}
+			continue
+		}
+
+		// 3. Migrate label_samples.* (.jsonl, .capped, label_samples.stats.json).
+		if name == "label_samples.stats.json" {
+			var sz int64
+			if info, ierr := e.Info(); ierr == nil {
+				sz = info.Size()
+			}
+			if err := migrateFileCrossFS(srcPath, filepath.Join(studioDir, name), labelSamplesCapBytes); err != nil {
+				log.Printf("WARN: tmpfs rescue migrate %s: %v", name, err)
+			}
+			if os.Remove(srcPath) == nil {
+				freedBytes += sz
+				cleanedCount++
+			}
+			continue
+		}
+		if strings.HasPrefix(name, "label_samples.") && strings.HasSuffix(name, ".jsonl") {
+			var sz int64
+			if info, ierr := e.Info(); ierr == nil {
+				sz = info.Size()
+			}
+			ymd := strings.TrimSuffix(strings.TrimPrefix(name, "label_samples."), ".jsonl")
+			if clockSane && isAllDigits8(ymd) && ymd < labelSamplesCutoff {
+				if os.Remove(srcPath) == nil {
+					freedBytes += sz
+					cleanedCount++
+				}
+				continue
+			}
+			if err := migrateCappedJSONL(srcPath, filepath.Join(studioDir, name), labelSamplesCapBytes); err != nil {
+				log.Printf("WARN: tmpfs rescue migrate %s: %v", name, err)
+			}
+			if os.Remove(srcPath) == nil {
+				freedBytes += sz
+				cleanedCount++
+			}
+			continue
+		}
+		if strings.HasPrefix(name, "label_samples.") && strings.HasSuffix(name, ".capped") {
+			var sz int64
+			if info, ierr := e.Info(); ierr == nil {
+				sz = info.Size()
+			}
+			ymd := strings.TrimSuffix(strings.TrimPrefix(name, "label_samples."), ".capped")
+			if clockSane && isAllDigits8(ymd) && ymd < labelSamplesCutoff {
+				if os.Remove(srcPath) == nil {
+					freedBytes += sz
+					cleanedCount++
+				}
+				continue
+			}
+			if err := migrateFileCrossFS(srcPath, filepath.Join(studioDir, name), labelSamplesCapBytes); err != nil {
+				log.Printf("WARN: tmpfs rescue migrate %s: %v", name, err)
+			}
+			if os.Remove(srcPath) == nil {
+				freedBytes += sz
+				cleanedCount++
+			}
+			continue
+		}
+
+		// 4. Migrate apk_domains.json and app_labels_live.json from run/ to data/.
+		if name == apkDomainsFile || name == "app_labels_live.json" {
+			var sz int64
+			if info, ierr := e.Info(); ierr == nil {
+				sz = info.Size()
+			}
+			if err := migrateFileCrossFS(srcPath, filepath.Join(cleanData, name), 16<<20); err != nil {
+				log.Printf("WARN: tmpfs rescue migrate %s: %v", name, err)
+			}
+			if os.Remove(srcPath) == nil {
+				freedBytes += sz
+				cleanedCount++
+			}
+			continue
+		}
+	}
+
+	if cleanedCount > 0 {
+		log.Printf("tmpfs-rescue: migrated/cleaned %d legacy file(s) from %s, freed %d bytes", cleanedCount, cleanRun, freedBytes)
+	}
 }
 
 func armCrashFlag(runDir string) {
@@ -1659,7 +2041,7 @@ func bumpStartCount(runDir string) {
 			n = v
 		}
 	}
-	_ = os.WriteFile(path, []byte(strconv.FormatInt(n+1, 10)), 0o644)
+	_ = atomicWriteString(path, strconv.FormatInt(n+1, 10))
 }
 
 func checkCrashLoop(runDir string) string {

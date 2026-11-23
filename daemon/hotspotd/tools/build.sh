@@ -30,7 +30,7 @@ mkdir -p "$OUTDIR"
 # 决定 compiler
 if [ "$ARCH" = "host" ]; then
     CC="${CC:-gcc}"
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Wcast-align -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
     LDFLAGS="-pie"
     echo "[build] Host build (Version: $HNC_VER)"
 else
@@ -56,7 +56,7 @@ else
         [ -x "$TOOLCHAIN/bin/llvm-strip" ] && STRIP="$TOOLCHAIN/bin/llvm-strip"
     fi
 
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Wcast-align -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
     LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
     echo "[build] Compiler: $CC  Target: $ARCH  Version: $HNC_VER"
 fi

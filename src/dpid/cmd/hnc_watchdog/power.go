@@ -19,6 +19,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -66,7 +67,7 @@ var linkWake = make(chan struct{}, 1)
 
 // startLinkWatch 后台订阅网卡事件; 失败只记日志, 主循环照旧按间隔轮询。
 func startLinkWatch() {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
 	if err != nil {
 		logf("link watch: socket: %v (fall back to polling)", err)
 		return
@@ -74,28 +75,46 @@ func startLinkWatch() {
 	sa := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Groups: rtmgrpLink | rtmgrpIPv4Ifaddr}
 	if err := syscall.Bind(fd, sa); err != nil {
 		logf("link watch: bind: %v (fall back to polling)", err)
-		syscall.Close(fd)
+		_ = syscall.Close(fd)
+		return
+	}
+	f := os.NewFile(uintptr(fd), "wdg-netlink-route")
+	if f == nil {
+		_ = syscall.Close(fd)
 		return
 	}
 	logf("link watch: subscribed to link/addr events")
+	var closeOnce sync.Once
+	closeWatch := func() {
+		closeOnce.Do(func() { _ = f.Close() })
+	}
+	done := make(chan struct{})
 	go func() {
-		<-stopCh
-		syscall.Close(fd)
+		select {
+		case <-stopCh:
+			closeWatch()
+		case <-done:
+		}
 	}()
 	go func() {
+		defer close(done)
+		defer closeWatch()
 		buf := make([]byte, 32<<10)
 		for {
-			n, _, err := syscall.Recvfrom(fd, buf, 0)
+			n, err := f.Read(buf)
 			if err != nil {
 				select {
 				case <-stopCh:
 					return
 				default:
 				}
-				if err == syscall.EINTR {
+				if errors.Is(err, os.ErrClosed) {
+					return
+				}
+				if errors.Is(err, syscall.EINTR) {
 					continue
 				}
-				if err == syscall.ENOBUFS {
+				if errors.Is(err, syscall.ENOBUFS) {
 					// ENOBUFS: 事件积压溢出 —— 有变化但丢了细节, 唤醒一次并短退避防热循环。
 					wakeMain()
 					tmr := time.NewTimer(100 * time.Millisecond)

@@ -63,9 +63,20 @@ function puBodyHtml() {
   var r = c.r || {}, cfg = r.config || {}, warn = num(cfg.warn_percent, 80), t = r.totals || {}, g = function (k) { return num(t[k] && t[k].total); };
   var h = '<div class="pu-cyc">' + (r.cycle_start ? '计费周期 ' + md(r.cycle_start) + ' – ' + md(num(r.cycle_end) - 1) + ' · 每月 ' + num(r.billing_day || cfg.billing_day, 1) + ' 号起算' : '') + (S.puPeriod !== 'cycle' && r.since ? ' · 当前查看 ' + md(r.since) + ' 起' : '') + '</div>';
   h += calHtml(r);   // 与系统统计对账
-  var sims = Array.isArray(r.by_sim) ? r.by_sim : [];
-  h += sims.length ? '<div>' + sims.map(function (sm) {
-    var slotN = num(sm.slot), lab = slotN ? '卡' + slotN + (sm.carrier ? ' · ' + sm.carrier : '') : '蜂窝（未知卡）';
+  var rawMaxSlots = num(r.max_slots || r.modem_count || (r.sources && (r.sources.max_slots || r.sources.modem_count)));
+  var maxSlots = rawMaxSlots > 0 ? rawMaxSlots : 2;
+  var sims = (Array.isArray(r.by_sim) ? r.by_sim : []).filter(function (sm) {
+    var slotN = num(sm && sm.slot);
+    return slotN >= 1 && slotN <= (maxSlots || 2);
+  });
+  var unattrBytes = num(r.unattributed_cycle_bytes) || num(r.unattributed_cell_bytes);
+  var simCardsHtml = sims.length ? '<div>' + sims.map(function (sm) {
+    var slotN = num(sm.slot);
+    var carrierStr = String(sm.carrier || '').trim();
+    var customStr = String(sm.custom_name || '').trim();
+    var lab = '卡' + slotN;
+    if (carrierStr && customStr && customStr !== carrierStr) lab += ' · ' + carrierStr + '（' + customStr + '）';
+    else if (carrierStr || customStr) lab += ' · ' + (carrierStr || customStr);
     var plan = num(sm.plan_bytes), planGB = plan ? Number(trim0(gb(plan).toFixed(2))) : 0, used = num(sm.cycle_used), pct = sm.used_pct == null ? null : num(sm.used_pct);
     var editing = slotN > 0 && S.puEditSlot === slotN;
     var ancVal = slotN === 1 ? cfg.anchor_sim1_gb : cfg.anchor_sim2_gb;
@@ -86,9 +97,15 @@ function puBodyHtml() {
     ) : '';
     return '<div class="pu-sim"><div class="h"><span class="n">' + ico('sim') + ' ' + esc(lab) + (sm.is_default_data ? '<span class="badge b-acc">上网卡</span>' : '') + editBtn + '</span><span class="v num">' + bytes(used) + (plan ? '<span style="color:var(--text-3);font-weight:500"> / ' + trim0(gb(plan).toFixed(1)) + ' GB</span>' : '<span style="color:var(--text-3);font-size:12px;font-weight:500"> · 未设套餐</span>') + '</span></div>' +
       (plan && pct != null ? '<div class="pbar' + (pct >= 100 ? ' over' : pct >= warn ? ' warn' : '') + '"><i style="width:' + clamp(pct, 0, 100).toFixed(1) + '%"></i></div><div class="note' + (pct >= 100 ? ' err' : pct >= warn ? ' warn' : '') + '">本期已用 ' + trim0(pct.toFixed(1)) + '%' + (pct >= 100 ? ' · 已超出套餐 ' + bytes(used - plan) : ' · 剩余 ' + bytes(plan - used)) + '</div>'
-        : '<div class="note">本期已用 ' + bytes(used) + (slotN ? ' · 点上方「+ 设套餐」一键配置套餐容量与免流校准' : ' · 暂未识别卡槽') + '</div>') + calSimLine(r, sm) +
+        : '<div class="note">本期已用 ' + bytes(used) + ' · 点上方「+ 设套餐」一键配置套餐容量与免流校准</div>') + calSimLine(r, sm) +
       '<div class="note">' + (S.puPeriod === 'cycle' ? '' : '所选时段 ' + bytes(sm.total) + ' · ') + '其中热点分摊 ' + bytes(sm.hotspot_total) + '</div>' + editorHtml + '</div>';
   }).join('') + '</div>' : '<div class="note">这段时间还没有蜂窝流量记录</div>';
+  h += simCardsHtml;
+  if (unattrBytes > 0) {
+    var unattrMB = Math.max(0.01, unattrBytes / 1048576);
+    var unattrMbTxt = trim0((unattrMB >= 10 ? unattrMB.toFixed(1) : unattrMB.toFixed(2)));
+    h += '<div class="note" style="margin-top:-4px">另含开机瞬态未归属卡槽蜂窝流量 ' + unattrMbTxt + ' MB（已计入总账期，不单独拆卡）</div>';
+  }
   h += '<div class="pu-tiles">' + [['蜂窝', g('cellular'), PU_C.cell], ['Wi-Fi', g('wifi'), PU_C.wifi], ['热点', g('hotspot'), PU_C.hotspot]].map(function (x) {
     return '<div class="pu-tile"><div class="l"><i style="background:' + x[2] + '"></i>' + x[0] + '</div><div class="v num">' + bytes(x[1]) + '</div></div>'; }).join('') + '</div>';
   var lo = g('local'), hs = g('hotspot'), tot = lo + hs;
@@ -111,7 +128,7 @@ function puBodyHtml() {
       '<div class="split-l" style="justify-content:flex-start;gap:12px"><span><i style="background:' + PU_C.cell + '"></i>蜂窝（本机）</span><span><i style="background:' + PU_C.wifi + '"></i>Wi-Fi（本机）</span><span><i style="background:' + PU_C.hotspot + '"></i>热点</span></div></div>';
   }
   var src = r.sources || {};
-  h += '<div class="note">本机 = 上游（蜂窝 + Wi-Fi）− 热点设备，是近似值；套餐百分比永远按计费周期算。' + (src.sim_detect && src.sim_detect !== 'ok' ? '没认出当前上网卡，蜂窝流量先记在「未知卡」下。' : '') + (src.error ? ' 采样出错：' + esc(src.error) : '') + '</div>';
+  h += '<div class="note">本机 = 上游（蜂窝 + Wi-Fi）− 热点设备，是近似值；套餐百分比永远按计费周期算。' + (src.sim_detect && src.sim_detect !== 'ok' ? '当前暂未识别上网卡槽，瞬态蜂窝流量已计入总账期。' : '') + (src.error ? ' 采样出错：' + esc(src.error) : '') + '</div>';
   return h;
 }
 function puSetSummary() { var c = S.puCfg; if (!c) return ''; var a = ['每月 ' + num(c.billing_day, 1) + ' 号']; if (num(c.plan_sim1_gb)) a.push('卡1 ' + trim0(num(c.plan_sim1_gb).toFixed(1)) + ' GB'); if (num(c.plan_sim2_gb)) a.push('卡2 ' + trim0(num(c.plan_sim2_gb).toFixed(1)) + ' GB'); if (c.use_netstats === 'prefer') a.push('以系统为准'); else if (c.use_netstats === 'off') a.push('仅 HNC'); return a.join(' · '); }
@@ -247,10 +264,21 @@ function barTip(col) {
 
 /* ═════════════════════ 分析页 · DPI ═════════════════════ */
 var MODE_T = { ok: 'AF_PACKET 旁路抓包', af_packet: 'AF_PACKET 旁路抓包', conntrack: 'conntrack 连接表旁路', waiting: '等待热点拉起', rebinding: '重新绑定网卡中', unavailable: '抓包不可用', blind: '盲区（硬件旁路或受限）' };
+function isDpiEngineAlive() {
+  var r = S.dpi;
+  if (!r || !r.available || !r.state) return false;
+  if (r.alive === false || r.stale === true) return false;
+  var st = r.state;
+  if (st.alive === false || st.stale === true) return false;
+  var h = String(st.health || 'ok');
+  if (/crash|down|dead|stopped|error/i.test(h) || st.mode === 'unavailable') return false;
+  if (!(S.sim && S.sim.enabled) && S.proc && S.proc.counts && typeof S.proc.counts.hnc_dpid === 'number' && S.proc.counts.hnc_dpid <= 0) return false;
+  return true;
+}
 function loadDpi(full) {
   var ps = [api.get('/api/dpi_state', null, { timeout: 9000 }).then(function (r) {
     S.dpi = r; S.dpiErr = '';
-    if (r && r.available && r.state) {
+    if (isDpiEngineAlive()) {
       S.self = r.state.self || S.self;
       var st = r.state.stats || {};
       ['packets', 'dns_events', 'tls_events', 'kernel_drops'].forEach(function (k) { var a = S.dpiSpark[k]; a.push(num(st[k])); if (a.length > 30) a.shift(); });
@@ -362,15 +390,16 @@ function fmtDpiRuleVersionHtml(rawVer, dfpEnabled) {
 }
 function paintDpi() {
   var hero = $('#dpi-hero'); if (!hero) return;
-  var r = S.dpi, st = r && r.available && r.state, s = (st && st.stats) || {};
-  var health = st ? (st.health || 'ok') : 'down', ok = st && !/stall|crash|down|error/i.test(health) && st.mode !== 'unavailable';
-  var badge = !r ? ['加载中', 'b-gray'] : !st ? ['不可用', 'b-red'] : ok ? ['运行中', 'b-ok'] : [health, 'b-warn'];
+  var r = S.dpi, dpiAlive = isDpiEngineAlive(), st = dpiAlive ? r.state : null, s = (st && st.stats) || {};
+  var health = st ? (st.health || 'ok') : 'down', ok = dpiAlive && !/stall|crash|down|error/i.test(health) && st.mode !== 'unavailable';
+  var badge = !r ? ['加载中', 'b-gray'] : !dpiAlive ? ['DPI 引擎未运行', 'b-gray'] : ok ? ['运行中', 'b-ok'] : [health, 'b-warn'];
+  var inactiveMsg = S.dpiErr || (r && r.error) || (r && r.stale ? 'DPI 引擎未运行（状态快照已陈旧）' : 'DPI 引擎未运行');
   hero.innerHTML = '<div class="glass dpihero">' +
     '<div class="dpihero-eyebrow"><span class="l">主力识别通道 · 五层被动感知</span><span class="badge ' + badge[1] + ' dpihero-badge">' + (badge[1] === 'b-ok' ? '<span class="breathe"></span>&nbsp;' : '') + esc(badge[0]) + '</span></div>' +
-    '<div class="top"><div class="dpihero-mode-wrap"><div class="mode">' + esc(st ? (MODE_T[st.mode] || st.mode || '—') : (S.dpiErr || (r && r.error) || 'dpid 未运行')) + '</div></div><div id="dpi-ring-slot" class="dpi-ring-slot"></div></div>' +
-    (st ? '<div class="note" style="margin-top:6px">' + esc(st.interface || '—') + ' · 运行 ' + hms(st.uptime_s) + (st.stall_seconds ? ' · 停滞 ' + st.stall_seconds + ' 秒' : '') + (st.blind_reason ? ' · ' + esc(st.blind_reason) : '') + ' · 客户端 ' + num(st.client_count) + '</div>' : '') +
+    '<div class="top"><div class="dpihero-mode-wrap"><div class="mode">' + esc(st ? (MODE_T[st.mode] || st.mode || '—') : inactiveMsg) + '</div></div><div id="dpi-ring-slot" class="dpi-ring-slot"></div></div>' +
+    (st ? '<div class="note" style="margin-top:6px">' + esc(st.interface || '—') + ' · 运行 ' + hms(st.uptime_s) + (st.stall_seconds ? ' · 停滞 ' + st.stall_seconds + ' 秒' : '') + (st.blind_reason ? ' · ' + esc(st.blind_reason) : '') + ' · 客户端 ' + num(st.client_count) + '</div>' : '<div class="note" style="margin-top:6px">DPI 引擎未运行，暂不引用陈旧快照伪造实时活跃占比</div>') +
     '<div class="grid">' + [['packets', '已抓包', 'var(--blue)'], ['dns_events', 'DNS 事件', 'var(--cyan)'], ['tls_events', 'TLS 事件', 'var(--purple)'], ['kernel_drops', '内核丢包', 'var(--red)']].map(function (x) {
-      return '<div><div class="n num">' + fmtN(s[x[0]]) + '</div><div class="l">' + x[1] + '</div>' + sparkSvg(S.dpiSpark[x[0]], x[2]) + '</div>'; }).join('') + '</div>' +
+      return '<div><div class="n num">' + (dpiAlive ? fmtN(s[x[0]]) : '—') + '</div><div class="l">' + x[1] + '</div>' + (dpiAlive ? sparkSvg(S.dpiSpark[x[0]], x[2]) : '<svg class="spark-mini"></svg>') + '</div>'; }).join('') + '</div>' +
     '<div class="dpi-algo-bar">' +
       '<span class="dpi-algo-pill"><b>零样本</b> 8跳 CNAME 穿透</span>' +
       '<span class="dpi-algo-pill"><b>零样本</b> 120ms 时间因果突发传播</span>' +
@@ -381,7 +410,8 @@ function paintDpi() {
   if (stSlot && !stSlot.contains(document.activeElement) && typeof selfStudioCardHtml === 'function') { morph(stSlot, selfStudioCardHtml()); placeSegs(stSlot); }
   // 状态
   var ur = st && st.unidentified_ratio, p = S.proc;
-  $('#dpi-status').innerHTML = !st ? stRow('dpid', esc(S.dpiErr || (r && r.error) || '未运行'), 'bad') :
+  $('#dpi-status').innerHTML = !dpiAlive ? stRow('DPI 引擎', esc(inactiveMsg), '') +
+    (p ? stRow('进程健康', esc(p.status || '—'), /ok|healthy/i.test(p.status) ? 'ok' : 'warn', p.counts ? 'dpid ' + num(p.counts.hnc_dpid) + ' · httpd ' + num(p.counts.hnc_httpd) + ' · hotspotd ' + num(p.counts.hotspotd) + ' · watchdog ' + num(p.counts.watchdog_main) + ' · launcher ' + num(p.counts.dpid_guard_main) : esc(p.detail || '')) : '') :
     stRow('健康度', esc(health), ok ? 'ok' : 'warn') + stRow('规则库', fmtDpiRuleVersionHtml(st.l3_rule_version, st.dfp_enabled), '') +
     stRow('识别覆盖', ur && ur.total_bytes ? Math.round((1 - num(ur.ratio)) * 100) + '%' : '—', '', ur && ur.total_bytes ? '已识别 ' + bytes(ur.identified_bytes) + ' / ' + bytes(ur.total_bytes) : '按字节') +
     stRow('去重域名', num(st.unique_sni) + ' SNI · ' + num(st.unique_hostnames) + ' 主机名 · ' + num(st.unique_ja4) + ' 种指纹', '') +
@@ -389,13 +419,16 @@ function paintDpi() {
     stRow('重新绑定', num(st.rebind_count) + ' 次', '', '<button class="linkish" data-act="dpi-rebind">立即重新绑定</button>') +
     (p ? stRow('进程健康', esc(p.status || '—'), /ok|healthy/i.test(p.status) ? 'ok' : 'warn', p.counts ? 'dpid ' + num(p.counts.hnc_dpid) + ' · httpd ' + num(p.counts.hnc_httpd) + ' · hotspotd ' + num(p.counts.hotspotd) + ' · watchdog ' + num(p.counts.watchdog_main) + ' · launcher ' + num(p.counts.dpid_guard_main) : esc(p.detail || '')) : '');
   // 五层抓包与流量感知矩阵探测
-  var pr = S.probe, selfOn = S.selfCfg ? S.selfCfg.enabled !== false : true;
+  var pr = S.probe, selfOn = S.selfCfg ? S.selfCfg.enabled !== false : (S.self ? S.self.enabled === true : false);
   $('#dpi-probe').innerHTML = (!pr ? '' :
-    stRow('L1 · AF_PACKET + cBPF 旁路抓头', pr.af_packet_available ? '就绪 · 零改包' : '受限 · 自动降级', pr.af_packet_available ? 'ok' : 'warn', '只抓 DNS / TLS / QUIC 握手包头（384B），不解密正文 · 接口 ' + esc(pr.ap_iface || (st && st.interface) || 'wlan2')) +
+    stRow('L1 · AF_PACKET + cBPF 旁路抓头', !dpiAlive ? 'DPI 引擎未运行' : (pr.af_packet_available ? '就绪 · 零改包' : '受限 · 自动降级'), !dpiAlive ? '' : (pr.af_packet_available ? 'ok' : 'warn'), '只抓 DNS / TLS / QUIC 握手包头（384B），不解密正文 · 接口 ' + esc(pr.ap_iface || (st && st.interface) || '未探测')) +
     stRow('L2 · nf_conntrack 内核连接对账', pr.conntrack_readable ? '可读 · 全字节' : '不可读', pr.conntrack_readable ? 'ok' : 'warn', '即使 AF_PACKET 受限仍可按连接表统计真实上下行字节 · ' + esc(pr.conntrack_path || '/proc/net/nf_conntrack')) +
     stRow('L3 · eBPF clsact 二层直通观测', pr.offload_hint ? '硬件分流活跃' : '慢路径清晰', pr.offload_hint ? 'warn' : 'ok', esc(pr.offload_evidence || 'L2 MAC 精确记账与防逃逸打标协同'))) +
-    stRow('L4 · /proc/net UID 本机真值对齐', selfOn ? '亮屏常驻' : '已手动关闭', selfOn ? 'ok' : '', '本机双网卡 Socket inode → Android 应用 UID 零误差蒸馏至热点') +
-    stRow('L5 · 被动终端栈与密文几何画像', st && st.dfp_enabled !== false ? '已启用' : '基础模式', 'ok', 'DHCP Option 55/60 + mDNS + JA4 + 8 包 SPLT 序列应对 ECH/无域名流');
+    (!dpiAlive
+      ? stRow('L4 · /proc/net UID 本机真值对齐', 'DPI 引擎未运行', '', 'DPI 引擎未运行，暂不展示陈旧 L4 实时协议分布') +
+        stRow('L5 · 被动终端栈与密文几何画像', 'DPI 引擎未运行', '', 'DPI 引擎未运行，暂不展示陈旧 L5 协议特征与活跃占比')
+      : stRow('L4 · /proc/net UID 本机真值对齐', selfOn ? '亮屏常驻' : '已手动关闭', selfOn ? 'ok' : '', '本机双网卡 Socket inode → Android 应用 UID 零误差蒸馏至热点') +
+        stRow('L5 · 被动终端栈与密文几何画像', st && st.dfp_enabled !== false ? '已启用' : '基础模式', 'ok', 'DHCP Option 55/60 + mDNS + JA4 + 8 包 SPLT 序列应对 ECH/无域名流'));
   paintDpiHist(); paintClients(); paintUnknown(); paintUnkTraffic(); paintIdent(); paintDiscEntry();
 }
 /* 未识别流量(按字节) —— 连接表里没被规则库认出来的域名 / IP */
@@ -449,6 +482,7 @@ function paintDpiHist() {
 }
 function paintClients() {
   var el = $('#dpi-clients'); if (!el) return;
+  if (!isDpiEngineAlive()) { el.innerHTML = '<div class="empty">DPI 引擎未运行</div>'; return; }
   var st = S.dpi && S.dpi.available && S.dpi.state, cl = st && st.clients ? Object.keys(st.clients).map(function (k) { return st.clients[k]; }) : [];
   var now = Date.now() / 1000;
   cl = cl.filter(function (c) {

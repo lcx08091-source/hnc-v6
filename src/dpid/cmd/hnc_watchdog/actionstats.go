@@ -26,9 +26,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -219,18 +221,44 @@ func (s *actionStats) snapshot(now time.Time) wdActionOut {
 	return out
 }
 
-// flush 原子写 run/watchdog_actions.json(tmp + rename)。
+var wdAtomicSeq atomic.Uint64
+
+// wdWriteAtomic 同目录唯一临时文件写完 fsync 再 rename, 任何一步失败(含 ENOSPC)立即删除 .tmp。
+func wdWriteAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), wdAtomicSeq.Add(1))
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// flush 原子写 run/watchdog_actions.json(tmp + fsync + rename)。
 func (s *actionStats) flush(path string, now time.Time) error {
 	out := s.snapshot(now)
 	b, err := json.Marshal(out)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return wdWriteAtomic(path, b, 0o644)
 }
 
 // actionsTotal1H 所有动作 calls_1h 之和(自检「外部进程合计」口径)。

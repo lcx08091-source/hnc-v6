@@ -67,6 +67,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -192,9 +193,10 @@ func dnsTKReasonText(r string) string {
 // ─── 封锁表 ─────────────────────────────────────────────────────────────
 
 type dnsBlockSet struct {
-	perMAC map[string]map[string]bool // mac → 域名集合
-	global map[string]bool            // 全部设备(除 exempt)
-	exempt map[string]bool            // 不受 global 影响的 MAC
+	perMAC     map[string]map[string]bool // mac → 域名集合
+	connGlobal map[string]bool            // conn_blocks 全局域名封锁(00:00:00:00:00:00, 对全体设备生效)
+	global     map[string]bool            // 全部设备(除 exempt)
+	exempt     map[string]bool            // 不受 global 影响的 MAC
 }
 
 func (b *dnsBlockSet) match(mac, qname string) bool {
@@ -202,13 +204,14 @@ func (b *dnsBlockSet) match(mac, qname string) bool {
 		return false
 	}
 	set := b.perMAC[mac]
+	useConnGlobal := len(b.connGlobal) > 0
 	useGlobal := len(b.global) > 0 && !b.exempt[mac]
-	if set == nil && !useGlobal {
+	if set == nil && !useConnGlobal && !useGlobal {
 		return false
 	}
 	n := strings.TrimSuffix(strings.ToLower(qname), ".")
 	for n != "" {
-		if set[n] || (useGlobal && b.global[n]) {
+		if set[n] || (useConnGlobal && b.connGlobal[n]) || (useGlobal && b.global[n]) {
 			return true
 		}
 		i := strings.IndexByte(n, '.')
@@ -228,7 +231,7 @@ func (b *dnsBlockSet) counts() (int, int) {
 	for _, s := range b.perMAC {
 		n += len(s)
 	}
-	return n, len(b.global)
+	return n, len(b.global) + len(b.connGlobal)
 }
 
 // dnsResolverHosts 加密 DNS 解析器主机名名单(与 encdns_sync.sh 同一份文件与查找顺序)
@@ -260,9 +263,18 @@ func dnsResolverHosts(hncDir string) []string {
 
 // buildDNSBlockSet conn_blocks(含派生项)域名 + 加密 DNS strict 的 DoH 主机名
 func buildDNSBlockSet(connDNS []string, enc encdnsConf, resolverHosts []string) *dnsBlockSet {
-	b := &dnsBlockSet{perMAC: map[string]map[string]bool{}, global: map[string]bool{}, exempt: map[string]bool{}}
+	b := &dnsBlockSet{
+		perMAC:     map[string]map[string]bool{},
+		connGlobal: map[string]bool{},
+		global:     map[string]bool{},
+		exempt:     map[string]bool{},
+	}
 	add := func(mac, d string) {
 		if dpiCtlSkipMAC(mac) {
+			return
+		}
+		if mac == "00:00:00:00:00:00" {
+			b.connGlobal[d] = true
 			return
 		}
 		s := b.perMAC[mac]
@@ -275,7 +287,7 @@ func buildDNSBlockSet(connDNS []string, enc encdnsConf, resolverHosts []string) 
 	for _, ln := range connDNS {
 		f := strings.Fields(ln)
 		if len(f) == 2 && validMAC(f[0]) {
-			add(f[0], f[1])
+			add(strings.ToLower(f[0]), strings.ToLower(f[1]))
 		}
 	}
 	if enc.Policy == "strict" {
@@ -312,12 +324,19 @@ type dnsIPNames struct {
 func newDNSIPNames() *dnsIPNames { return &dnsIPNames{m: map[string]*dnsIPName{}} }
 
 func (t *dnsIPNames) record(ev dnsAnswerEvent) {
+	if t == nil || isCaptivePortalProbeDomain(ev.QName) {
+		return
+	}
+	nonLocal := !isLocalDomainName(ev.QName)
 	now := ev.Ts.Unix()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, r := range ev.IPs {
 		ip := net.ParseIP(r.Value)
 		if ip == nil || isFakeIPAddr(ip) {
+			continue
+		}
+		if nonLocal && isCaptiveHijackIP(r.Value) {
 			continue
 		}
 		keep := int64(r.TTL)
@@ -340,6 +359,15 @@ func (t *dnsIPNames) record(ev dnsAnswerEvent) {
 		}
 		t.m[k] = &dnsIPName{name: ev.QName, cname: ev.CNAME, mac: ev.MAC, ts: now, expire: now + keep}
 	}
+}
+
+func (t *dnsIPNames) clear() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.m = map[string]*dnsIPName{}
+	t.mu.Unlock()
 }
 
 // evictLocked 先删过期, 仍满则删最旧的 1/8
@@ -692,6 +720,9 @@ type dnsTakeover struct {
 	arp   map[string]string
 	arpAt time.Time
 
+	wakeCh       chan struct{}
+	tickerActive atomic.Bool
+
 	// 可替换(测试)
 	runScript    func(args ...string) (int, string)
 	probe        func(addr string, timeout time.Duration) (time.Duration, int, error)
@@ -702,6 +733,8 @@ type dnsTakeover struct {
 	blockSources func(now time.Time) *dnsBlockSet
 	emitAlert    func(a alert.Alert)
 	now          func() time.Time
+	activityHook func() (<-chan struct{}, Activity)
+	tickInterval time.Duration
 }
 
 var dnsTKReg = struct {
@@ -721,10 +754,21 @@ func (s *server) dnsTK() *dnsTakeover {
 	return t
 }
 
+// refreshDNSTKBlocklist 供 conn_blocks / LeakGuard 封禁与撤销后秒级同步内存 DNS 拦截表。
+func (s *server) refreshDNSTKBlocklist(now time.Time) {
+	if s == nil || s.hncDir == "" {
+		return
+	}
+	if tk := s.dnsTK(); tk != nil {
+		tk.refreshBlocklist(now)
+	}
+}
+
 func newDNSTakeover(s *server) *dnsTakeover {
 	t := &dnsTakeover{s: s, hncDir: s.hncDir, port: dnsFwdDefaultPort, state: "off",
 		names: newDNSIPNames(), ring: newDNSLogRing(dnsTKRingSize), top: &dnsTopDomains{},
-		backoff: dnsTKBackoffMin, now: time.Now, v6Status: "untouched"}
+		backoff: dnsTKBackoffMin, now: time.Now, v6Status: "untouched",
+		wakeCh: make(chan struct{}, 1)}
 	t.runScript = func(args ...string) (int, string) { return runBin(s.hncDir, "dns_takeover.sh", args...) }
 	t.probe = dnsProbe
 	t.ifaceAddrs = dnsIfaceAddrs
@@ -741,6 +785,23 @@ func newDNSTakeover(s *server) *dnsTakeover {
 		}
 	}
 	return t
+}
+
+func (t *dnsTakeover) wake() {
+	if t == nil || t.wakeCh == nil {
+		return
+	}
+	select {
+	case t.wakeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (t *dnsTakeover) IsTickerActive() bool {
+	if t == nil {
+		return false
+	}
+	return t.tickerActive.Load()
 }
 
 func isHotspotOnlyIface(name string) bool {
@@ -850,8 +911,196 @@ func fastFlagUpIfacesFrom(sysNetDir string, skip map[string]bool) ([]string, boo
 	return out, len(out) > 0 || anyProbeOK
 }
 
+var procNetRoutePath = "/proc/net/route"
+
+func readSmallProcBytes(path string, buf []byte) []byte {
+	if path == "" || len(buf) == 0 {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	n, _ := f.Read(buf)
+	_ = f.Close()
+	if n <= 0 {
+		return nil
+	}
+	return buf[:n]
+}
+
+func nextProcField(line []byte, pos int) ([]byte, int) {
+	for pos < len(line) && (line[pos] == ' ' || line[pos] == '\t' || line[pos] == '\r') {
+		pos++
+	}
+	start := pos
+	for pos < len(line) && line[pos] != ' ' && line[pos] != '\t' && line[pos] != '\r' {
+		pos++
+	}
+	return line[start:pos], pos
+}
+
+func parseHexU32Fast(b []byte) (uint32, bool) {
+	if len(b) == 0 || len(b) > 8 {
+		return 0, false
+	}
+	var v uint32
+	for _, c := range b {
+		var d uint32
+		switch {
+		case c >= '0' && c <= '9':
+			d = uint32(c - '0')
+		case c >= 'a' && c <= 'f':
+			d = uint32(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			d = uint32(c-'A') + 10
+		default:
+			return 0, false
+		}
+		v = (v << 4) | d
+	}
+	return v, true
+}
+
+func parseDecIntFast(b []byte) (int, bool) {
+	if len(b) == 0 {
+		return 0, false
+	}
+	v := 0
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		v = v*10 + int(c-'0')
+	}
+	return v, true
+}
+
+// parseDefaultGatewayFromProc 从 /proc/net/route 与 /proc/net/arp 零堆开销提取当前默认网关 IP 与网关 MAC。
+// 解决两个同网段 Wi-Fi（如均为 192.168.1.x 且网关均为 192.168.1.1）切换时源 IP 与接口名均不变的盲区。
+func parseDefaultGatewayFromProc(routeRaw, arpRaw []byte, skip map[string]bool) (gwIP, gwMAC string) {
+	bestMetric := int(^uint(0) >> 1)
+	hasBest := false
+	bestHasGW := false
+	var gwIface string
+	var gwBytes [4]byte
+
+	firstLine := true
+	for off := 0; off < len(routeRaw); {
+		end := off
+		for end < len(routeRaw) && routeRaw[end] != '\n' {
+			end++
+		}
+		line := routeRaw[off:end]
+		off = end + 1
+		if firstLine {
+			firstLine = false
+			continue
+		}
+		p := 0
+		fIface, p := nextProcField(line, p)
+		fDst, p := nextProcField(line, p)
+		fGW, p := nextProcField(line, p)
+		fFlags, p := nextProcField(line, p)
+		_, p = nextProcField(line, p) // RefCnt
+		_, p = nextProcField(line, p) // Use
+		fMetric, p := nextProcField(line, p)
+		fMask, _ := nextProcField(line, p)
+		if len(fIface) == 0 || len(fMask) == 0 {
+			continue
+		}
+		dstVal, ok1 := parseHexU32Fast(fDst)
+		maskVal, ok2 := parseHexU32Fast(fMask)
+		flagsVal, ok3 := parseHexU32Fast(fFlags)
+		if !ok1 || !ok2 || !ok3 || dstVal != 0 || maskVal != 0 || flagsVal&0x1 == 0 {
+			continue
+		}
+		ifcName := string(fIface)
+		if isIgnoredUpstreamIface(ifcName, skip) {
+			continue
+		}
+		gwVal, okGW := parseHexU32Fast(fGW)
+		if !okGW {
+			continue
+		}
+		metric, okM := parseDecIntFast(fMetric)
+		if !okM {
+			metric = 0
+		}
+		hasGW := gwVal != 0
+		if !hasBest || (hasGW && !bestHasGW) || (hasGW == bestHasGW && metric < bestMetric) {
+			hasBest = true
+			bestHasGW = hasGW
+			bestMetric = metric
+			gwIface = ifcName
+			binary.NativeEndian.PutUint32(gwBytes[:], gwVal)
+		}
+	}
+
+	if !hasBest || !bestHasGW {
+		return "", ""
+	}
+	gwIP = strconv.Itoa(int(gwBytes[0])) + "." + strconv.Itoa(int(gwBytes[1])) + "." +
+		strconv.Itoa(int(gwBytes[2])) + "." + strconv.Itoa(int(gwBytes[3]))
+
+	if len(arpRaw) == 0 {
+		return gwIP, ""
+	}
+	firstArp := true
+	var fallbackMAC string
+	for off := 0; off < len(arpRaw); {
+		end := off
+		for end < len(arpRaw) && arpRaw[end] != '\n' {
+			end++
+		}
+		line := arpRaw[off:end]
+		off = end + 1
+		if firstArp {
+			firstArp = false
+			continue
+		}
+		p := 0
+		fIP, p := nextProcField(line, p)
+		_, p = nextProcField(line, p) // HW type
+		fFlags, p := nextProcField(line, p)
+		fMAC, p := nextProcField(line, p)
+		_, p = nextProcField(line, p) // Mask
+		fDev, _ := nextProcField(line, p)
+		if string(fIP) != gwIP || len(fFlags) == 0 || string(fFlags) == "0x0" || len(fMAC) != 17 {
+			continue
+		}
+		macLow := strings.ToLower(string(fMAC))
+		if macLow == "00:00:00:00:00:00" || !macRE.MatchString(macLow) {
+			continue
+		}
+		devName := string(fDev)
+		if devName != "" && isIgnoredUpstreamIface(devName, skip) {
+			continue
+		}
+		if gwIface != "" && devName == gwIface {
+			return gwIP, macLow
+		}
+		if fallbackMAC == "" {
+			fallbackMAC = macLow
+		}
+	}
+	return gwIP, fallbackMAC
+}
+
+func defaultGatewaySigFromProc(routePath, arpPath string, skip map[string]bool) (gwIP, gwMAC string) {
+	var rBuf [4096]byte
+	routeRaw := readSmallProcBytes(routePath, rBuf[:])
+	if len(routeRaw) == 0 {
+		return "", ""
+	}
+	var aBuf [4096]byte
+	arpRaw := readSmallProcBytes(arpPath, aBuf[:])
+	return parseDefaultGatewayFromProc(routeRaw, arpRaw, skip)
+}
+
 // defaultUpstreamSig 零子进程(<100us)获取当前默认上游出口签名:
-// net.Dial("udp", "223.5.5.5:53") 出口源 IP + IPv6 /64 兜底 + 非热点/非回环 FlagUp 接口签名;
+// net.Dial("udp", "223.5.5.5:53") 出口源 IP + /proc/net/route 默认网关 IP + /proc/net/arp 网关 MAC +
+// IPv6 /64 兜底 + 非热点/非回环 FlagUp 接口签名;
 // 完全断网无默认路由时返回 "", 调用方不清空 Serve-Stale 保活缓存。
 func defaultUpstreamSig(hotspotIfaces ...string) string {
 	var v4Src, v6Pfx string
@@ -898,6 +1147,11 @@ func defaultUpstreamSig(hotspotIfaces ...string) string {
 	src := v4Src
 	if src == "" {
 		src = v6Pfx
+	}
+	if v4Src != "" {
+		if gwIP, gwMAC := defaultGatewaySigFromProc(procNetRoutePath, neighArpPath, skip); gwIP != "" || gwMAC != "" {
+			src = src + "@" + gwIP + "@" + gwMAC
+		}
 	}
 	return src + "|" + strings.Join(ifs, ",")
 }
@@ -1401,6 +1655,7 @@ func (t *dnsTakeover) openForwarder(listen []string) (*dnsForwarder, []string, e
 	mk := func() *dnsForwarder {
 		nf := newDNSForwarder()
 		nf.macOf, nf.blocked, nf.onLog, nf.onAnswer = t.macOf, t.blocked, t.onLog, t.names.record
+		nf.onFlush = t.names.clear
 		nf.netSig = t.currentUpstreamSig
 		return nf
 	}
@@ -1543,17 +1798,97 @@ func (t *dnsTakeover) Shutdown() {
 	}
 }
 
-// DNSTakeoverLoop 每 10 秒对账(关闭时也只是读一次配置文件)
+func (t *dnsTakeover) effectiveTickInterval() time.Duration {
+	if t != nil && t.tickInterval > 0 {
+		return t.tickInterval
+	}
+	return dnsTKTick
+}
+
+func (t *dnsTakeover) currentActivity() (<-chan struct{}, Activity) {
+	if t != nil && t.activityHook != nil {
+		return t.activityHook()
+	}
+	return activityChanged(), activityNow()
+}
+
+func (t *dnsTakeover) shouldStandbySleep(act Activity) bool {
+	lvl := act.Level
+	if lvl == "" {
+		lvl = act.computeLevel()
+	}
+	if lvl != lvlHotspotOff {
+		return false
+	}
+	t.mu.Lock()
+	canSleep := t.booted && !t.cfg.Enabled && !t.active && t.fwd == nil
+	t.mu.Unlock()
+	return canSleep
+}
+
+// DNSTakeoverLoop 每 10 秒对账; 当 dns_takeover 未启用且处于 lvlHotspotOff 时释放 Ticker 零唤醒挂起等待活动或设置变更。
 func (s *server) DNSTakeoverLoop(stop <-chan struct{}) {
 	t := s.dnsTK()
 	t.tick()
-	tk := time.NewTicker(dnsTKTick)
-	defer tk.Stop()
+
+	var (
+		tk       *time.Ticker
+		tkCh     <-chan time.Time
+		curEvery time.Duration
+	)
+	stopTicker := func() {
+		if tk != nil {
+			tk.Stop()
+			tk = nil
+			tkCh = nil
+			curEvery = 0
+		}
+		t.tickerActive.Store(false)
+	}
+	ensureTicker := func(d time.Duration) {
+		if tk != nil && curEvery == d {
+			t.tickerActive.Store(true)
+			return
+		}
+		if tk == nil {
+			tk = time.NewTicker(d)
+			tkCh = tk.C
+		} else {
+			select {
+			case <-tk.C:
+			default:
+			}
+			tk.Reset(d)
+		}
+		curEvery = d
+		t.tickerActive.Store(true)
+	}
+	defer stopTicker()
+
 	for {
+		actCh, act := t.currentActivity()
+		if t.shouldStandbySleep(act) {
+			stopTicker()
+			select {
+			case <-stop:
+				return
+			case <-actCh:
+				t.tick()
+			case <-t.wakeCh:
+				t.tick()
+			}
+			continue
+		}
+
+		ensureTicker(t.effectiveTickInterval())
 		select {
 		case <-stop:
 			return
-		case <-tk.C:
+		case <-actCh:
+			t.tick()
+		case <-t.wakeCh:
+			t.tick()
+		case <-tkCh:
 			t.tick()
 		}
 	}
@@ -1633,11 +1968,12 @@ func actionDNSTakeoverSet(s *server, p map[string]string) actionResp {
 	if err := discoverWriteAtomic(dnsTKPath(s.hncDir), b); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
-	// 用户主动操作: 清掉 fail-open 退避与礼让冷却, 立刻重试
+	// 用户主动操作: 清掉 fail-open 退避与礼让冷却, 立刻重试并唤醒休眠对账循环
 	t.mu.Lock()
 	t.retryAt, t.yieldUntil, t.backoff = time.Time{}, time.Time{}, dnsTKBackoffMin
 	t.mu.Unlock()
 	t.tickLocked()
+	t.wake()
 	t.mu.Lock()
 	detail := "state=" + t.state
 	if t.upstream != "" {

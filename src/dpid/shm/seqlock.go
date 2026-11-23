@@ -1,16 +1,15 @@
 // Package shm implements a 16KB page-aligned dual-slot seqcount_latch shared
-// memory snapshot at /data/local/hnc/run/shm_vector.bin for HNC v6.0.0 Vector.
+// memory snapshot at /data/local/hnc/run/shm_vector.bin for HNC v6.1.0 Vector.
 //
 // Design invariants:
 //   - Fixed 16384-byte binary layout (matches Android 16 16KB page alignment):
-//     [0..64)      Top-level latch header (Magic "HNCV6SHM", active seq, summary)
-//     [64..8224)   Latch Slot 0 (64B slot header + 64*64B devices + padding + 8B EndSeq)
-//     [8224..16384) Latch Slot 1 (64B slot header + 64*64B devices + padding + 8B EndSeq)
+//     [0..64)       Top-level latch header (Magic "HNCVSHM1", Version=2, layout tags, active seq)
+//     [64..8224)    Latch Slot 0 (64B slot header + 126*64B devices + 24B pad + 8B EndSeq)
+//     [8224..16384) Latch Slot 1 (64B slot header + 126*64B devices + 24B pad + 8B EndSeq)
 //   - Linux/Android uses syscall.Mmap(MAP_SHARED); non-Linux or mmap-unsupported
 //     filesystems gracefully fall back to atomic pread/pwrite (os.File.ReadAt/WriteAt).
-//   - Uses encoding/binary.LittleEndian for payload fields and 8-byte-aligned
-//     64-bit atomics on mmap latch sequence fields, placing struct-level 64-bit
-//     atomic fields at offset 0 for 32-bit ARMv7 safety.
+//   - All 64-bit fields reside strictly at offset % 8 == 0 boundaries for 32-bit ARMv7 safety,
+//     and readers issue stack-local atomic RMW full memory barriers on ARM64/ARMv7.
 package shm
 
 import (
@@ -23,7 +22,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,21 +31,25 @@ import (
 )
 
 const (
-	Magic           = "HNCV6SHM"
-	Version  uint32 = 1
-	FileSize        = 16384
+	Magic         = "HNCVSHM1"
+	legacyMagicV1 = "HNCV6SHM"
+
+	SchemaVersion uint32 = 2
+	Version       uint32 = SchemaVersion
+	EndianTag     uint32 = 0x01020304
+
+	FileSize = 16384
 
 	HeaderSize     = 64
 	SlotSize       = (FileSize - HeaderSize) / 2 // 8160 bytes per latch slot
+	PayloadSize    = SlotSize
 	SlotHeaderSize = 64
 	DeviceSlotSize = 64
-	MaxDevices     = 64
-	slotEndSeqOff  = SlotSize - 8
+	MaxDevices     = 126
+	slotEndSeqOff  = SlotSize - 8 // 8152 (8152 % 8 == 0)
 
 	DefaultRunDir   = "/data/local/hnc/run"
 	DefaultFileName = "shm_vector.bin"
-
-	clockBoottime = 7 // Linux CLOCK_BOOTTIME (includes suspend/Doze time)
 )
 
 // Per-device bit flags stored in DeviceSlot.Flags.
@@ -59,11 +61,13 @@ const (
 )
 
 var (
-	ErrBadMagic      = errors.New("shm: invalid magic header")
-	ErrBadSize       = errors.New("shm: unexpected shared memory file size")
-	ErrClosed        = errors.New("shm: handle closed")
-	ErrUninitialized = errors.New("shm: snapshot not yet published")
-	ErrFault         = errors.New("shm: mmap bus fault")
+	ErrBadMagic       = errors.New("shm: invalid magic header")
+	ErrShortRegion    = errors.New("shm: short shared memory region")
+	ErrBadSize        = ErrShortRegion
+	ErrSchemaMismatch = errors.New("shm: schema version or layout mismatch")
+	ErrClosed         = errors.New("shm: handle closed")
+	ErrUninitialized  = errors.New("shm: snapshot not yet published")
+	ErrFault          = errors.New("shm: mmap bus fault")
 )
 
 var hostLittleEndian = func() bool {
@@ -92,47 +96,59 @@ func storeU64(buf []byte, off int, val uint64, useAtomic bool) {
 	binary.LittleEndian.PutUint64(buf[off:off+8], val)
 }
 
-var (
-	monoStart  = time.Now()
-	bootBaseNs = initBootBaseNs()
-)
-
-func initBootBaseNs() int64 {
-	b, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return 1_000_000_000
-	}
-	fields := strings.Fields(string(b))
-	if len(fields) == 0 {
-		return 1_000_000_000
-	}
-	sec, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil || sec <= 0 {
-		return 1_000_000_000
-	}
-	return int64(sec * float64(time.Second))
-}
-
-// MonotonicNs returns a monotonically non-decreasing timestamp in nanoseconds.
-// On Linux/Android it queries CLOCK_BOOTTIME directly so cross-process readers
-// stay immune to Doze/suspend drift and wall-clock jumps; non-Linux falls back
-// to time.Since.
-func MonotonicNs() int64 {
-	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
-		var ts syscall.Timespec
-		_, _, errno := syscall.Syscall(syscall.SYS_CLOCK_GETTIME, clockBoottime, uintptr(unsafe.Pointer(&ts)), 0)
-		if errno == 0 {
-			ns := int64(ts.Sec)*int64(time.Second) + int64(ts.Nsec)
-			if ns > 0 {
-				return ns
-			}
+func loadU32(buf []byte, off int, useAtomic bool) uint32 {
+	if useAtomic && hostLittleEndian && off >= 0 && off+4 <= len(buf) {
+		ptr := unsafe.Pointer(&buf[off])
+		if uintptr(ptr)&3 == 0 {
+			return atomic.LoadUint32((*uint32)(ptr))
 		}
 	}
-	d := time.Since(monoStart).Nanoseconds()
-	if d < 0 {
-		d = 0
+	return binary.LittleEndian.Uint32(buf[off : off+4])
+}
+
+func storeU32(buf []byte, off int, val uint32, useAtomic bool) {
+	if useAtomic && hostLittleEndian && off >= 0 && off+4 <= len(buf) {
+		ptr := unsafe.Pointer(&buf[off])
+		if uintptr(ptr)&3 == 0 {
+			atomic.StoreUint32((*uint32)(ptr), val)
+			return
+		}
 	}
-	return bootBaseNs + d
+	binary.LittleEndian.PutUint32(buf[off:off+4], val)
+}
+
+func validateFileHeader(hdr []byte, useAtomic bool) error {
+	if len(hdr) < HeaderSize {
+		return fmt.Errorf("%w (%w): header len %d < %d", ErrShortRegion, ErrSchemaMismatch, len(hdr), HeaderSize)
+	}
+	if hdr[0] != Magic[0] || hdr[1] != Magic[1] || hdr[2] != Magic[2] || hdr[3] != Magic[3] ||
+		hdr[4] != Magic[4] || hdr[5] != Magic[5] || hdr[6] != Magic[6] || hdr[7] != Magic[7] {
+		if string(hdr[0:8]) == legacyMagicV1 {
+			return fmt.Errorf("%w: legacy v1 magic %q", ErrSchemaMismatch, legacyMagicV1)
+		}
+		return ErrBadMagic
+	}
+	ver := loadU32(hdr, 8, useAtomic)
+	activeSlot := loadU32(hdr, 12, useAtomic)
+	devCount := loadU32(hdr, 44, useAtomic)
+	hdrSize := binary.LittleEndian.Uint16(hdr[52:54])
+	devSlotSize := binary.LittleEndian.Uint16(hdr[54:56])
+	slotSize := loadU32(hdr, 56, useAtomic)
+	endianTag := loadU32(hdr, 60, useAtomic)
+
+	if ver != SchemaVersion ||
+		hdrSize != HeaderSize ||
+		devSlotSize != DeviceSlotSize ||
+		slotSize != SlotSize ||
+		endianTag != EndianTag ||
+		activeSlot > 1 ||
+		devCount > MaxDevices {
+		return fmt.Errorf(
+			"%w: ver=%d hdr=%d devSlot=%d slot=%d endian=0x%08x active=%d devs=%d",
+			ErrSchemaMismatch, ver, hdrSize, devSlotSize, slotSize, endianTag, activeSlot, devCount,
+		)
+	}
+	return nil
 }
 
 // FilePath resolves the canonical shm_vector.bin path for a given runDir.
@@ -144,28 +160,35 @@ func FilePath(runDir string) string {
 }
 
 // Header represents the top-level metadata of a Vector shared memory snapshot.
+// All 64-bit fields sit at offset % 8 == 0 on both 64-bit and 32-bit architectures.
 type Header struct {
-	Magic         [8]byte
-	Version       uint32
-	ActiveSlot    uint32
-	Seq           uint64
-	UpdatedMonoNs int64
-	UpdatedUnixNs int64
-	ActiveFlows   uint32
-	DeviceCount   uint32
-	TotalLeaks    uint64
-	Flags         uint32
+	Magic          [8]byte
+	Seq            uint64
+	UpdatedMonoNs  int64
+	UpdatedUnixNs  int64
+	TotalLeaks     uint64
+	Version        uint32
+	SlotSize       uint32
+	EndianTag      uint32
+	ActiveSlot     uint32
+	ActiveFlows    uint32
+	DeviceCount    uint32
+	Flags          uint32
+	HeaderSize     uint16
+	DeviceSlotSize uint16
 }
 
 // DeviceSlot is one fixed-layout downstream client record in the snapshot body.
+// 64-bit byte counters sit at offset 0 and 8 so array strides stay 8-byte aligned on ARMv7.
 type DeviceSlot struct {
-	MAC         [6]byte
-	IPv4        [4]byte
-	IPv6        [16]byte
 	RxBytes     uint64
 	TxBytes     uint64
 	ActiveFlows uint32
 	Flags       uint32
+	MAC         [6]byte
+	IPv4        [4]byte
+	IPv6        [16]byte
+	_pad        [6]byte
 }
 
 // MACString formats the 6-byte hardware address as lowercase colon-separated hex.
@@ -346,10 +369,10 @@ func OpenWriterPath(path string, forceFallback bool) (*Writer, error) {
 	}
 
 	// Preserve monotonic continuity only if existing file already had exact size
-	// and a valid magic header; otherwise zero-fill all physical blocks first.
+	// and a valid SchemaVersion=2 header; otherwise zero-fill all physical blocks first.
 	if !reinit {
 		var existingHdr [HeaderSize]byte
-		if _, err := f.ReadAt(existingHdr[:], 0); err == nil && string(existingHdr[0:8]) == Magic {
+		if _, err := f.ReadAt(existingHdr[:], 0); err == nil && validateFileHeader(existingHdr[:], false) == nil {
 			w.seq = binary.LittleEndian.Uint64(existingHdr[16:24])
 		} else {
 			var zeros [FileSize]byte
@@ -371,7 +394,7 @@ func OpenWriterPath(path string, forceFallback bool) (*Writer, error) {
 		}
 	}
 
-	// Ensure magic header is immediately valid even before first traffic tick.
+	// Ensure schema v2 header is immediately valid even before first traffic tick.
 	if w.seq == 0 {
 		if err := w.Write(MonotonicNs(), 0, 0, nil); err != nil {
 			_ = w.Close()
@@ -425,10 +448,19 @@ func (w *Writer) writeToMmapLocked(slotOff int, oddLatch, evenLatch, nextSeq uin
 	storeU64(w.mmap, slotOff, evenLatch, true)
 	w.barrier.Add(1)
 
-	// Step 3: publish top-level header pointing ActiveSlot/Seq to the completed slot.
+	// Step 3: publish top-level header using aligned stores so concurrent header
+	// validation never observes byte-torn 32-bit/64-bit metadata.
 	copy(w.mmap[0:8], w.hdrBuf[0:8])
-	copy(w.mmap[8:16], w.hdrBuf[8:16])
-	copy(w.mmap[24:HeaderSize], w.hdrBuf[24:HeaderSize])
+	storeU32(w.mmap, 8, binary.LittleEndian.Uint32(w.hdrBuf[8:12]), true)
+	storeU32(w.mmap, 12, binary.LittleEndian.Uint32(w.hdrBuf[12:16]), true)
+	storeU64(w.mmap, 24, binary.LittleEndian.Uint64(w.hdrBuf[24:32]), true)
+	storeU64(w.mmap, 32, binary.LittleEndian.Uint64(w.hdrBuf[32:40]), true)
+	storeU32(w.mmap, 40, binary.LittleEndian.Uint32(w.hdrBuf[40:44]), true)
+	storeU32(w.mmap, 44, binary.LittleEndian.Uint32(w.hdrBuf[44:48]), true)
+	storeU32(w.mmap, 48, binary.LittleEndian.Uint32(w.hdrBuf[48:52]), true)
+	copy(w.mmap[52:56], w.hdrBuf[52:56])
+	storeU32(w.mmap, 56, binary.LittleEndian.Uint32(w.hdrBuf[56:60]), true)
+	storeU32(w.mmap, 60, binary.LittleEndian.Uint32(w.hdrBuf[60:64]), true)
 	w.barrier.Add(1)
 	storeU64(w.mmap, 16, nextSeq, true)
 	w.barrier.Add(1)
@@ -468,6 +500,11 @@ func (w *Writer) WriteWithFlags(updatedMonoNs int64, activeFlows uint32, totalLe
 	binary.LittleEndian.PutUint32(w.slotBuf[28:32], uint32(devCount))
 	binary.LittleEndian.PutUint64(w.slotBuf[32:40], totalLeaks)
 	binary.LittleEndian.PutUint32(w.slotBuf[40:44], flags)
+	binary.LittleEndian.PutUint32(w.slotBuf[44:48], SchemaVersion)
+	binary.LittleEndian.PutUint16(w.slotBuf[48:50], HeaderSize)
+	binary.LittleEndian.PutUint16(w.slotBuf[50:52], DeviceSlotSize)
+	binary.LittleEndian.PutUint32(w.slotBuf[52:56], SlotSize)
+	binary.LittleEndian.PutUint32(w.slotBuf[56:60], EndianTag)
 
 	for i := 0; i < devCount; i++ {
 		d := devices[i]
@@ -484,15 +521,18 @@ func (w *Writer) WriteWithFlags(updatedMonoNs int64, activeFlows uint32, totalLe
 
 	clear(w.hdrBuf[:])
 	copy(w.hdrBuf[0:8], Magic)
-	binary.LittleEndian.PutUint32(w.hdrBuf[8:12], Version)
+	binary.LittleEndian.PutUint32(w.hdrBuf[8:12], SchemaVersion)
 	binary.LittleEndian.PutUint32(w.hdrBuf[12:16], uint32(slotIdx))
 	binary.LittleEndian.PutUint64(w.hdrBuf[16:24], nextSeq)
 	binary.LittleEndian.PutUint64(w.hdrBuf[24:32], uint64(updatedMonoNs))
 	binary.LittleEndian.PutUint64(w.hdrBuf[32:40], uint64(nowUnixNs))
 	binary.LittleEndian.PutUint32(w.hdrBuf[40:44], activeFlows)
 	binary.LittleEndian.PutUint32(w.hdrBuf[44:48], uint32(devCount))
-	binary.LittleEndian.PutUint64(w.hdrBuf[48:56], totalLeaks)
-	binary.LittleEndian.PutUint32(w.hdrBuf[56:60], flags)
+	binary.LittleEndian.PutUint32(w.hdrBuf[48:52], flags)
+	binary.LittleEndian.PutUint16(w.hdrBuf[52:54], HeaderSize)
+	binary.LittleEndian.PutUint16(w.hdrBuf[54:56], DeviceSlotSize)
+	binary.LittleEndian.PutUint32(w.hdrBuf[56:60], SlotSize)
+	binary.LittleEndian.PutUint32(w.hdrBuf[60:64], EndianTag)
 
 	if w.mmapped && len(w.mmap) == FileSize {
 		if err := w.writeToMmapLocked(slotOff, oddLatch, evenLatch, nextSeq); err != nil {
@@ -547,7 +587,7 @@ func (w *Writer) Close() error {
 	return firstErr
 }
 
-// Reader provides concurrent zero-allocation reads of shm_vector.bin (<1µs on mmap).
+// Reader provides concurrent zero-allocation reads of shm_vector.bin (<1us on mmap).
 // Concurrent ReadInto calls share an RWMutex read lock while Close acquires the
 // exclusive write lock before Munmap so active readers never touch unmapped pages.
 type Reader struct {
@@ -563,7 +603,7 @@ type Reader struct {
 	forceFallback bool
 }
 
-func probeMmapMagic(buf []byte, dst *[8]byte) (err error) {
+func probeMmapHeader(buf []byte, dst *[HeaderSize]byte) (err error) {
 	old := debug.SetPanicOnFault(true)
 	defer debug.SetPanicOnFault(old)
 	defer func() {
@@ -571,7 +611,7 @@ func probeMmapMagic(buf []byte, dst *[8]byte) (err error) {
 			err = ErrFault
 		}
 	}()
-	copy(dst[:], buf[0:8])
+	copy(dst[:], buf[0:HeaderSize])
 	return nil
 }
 
@@ -593,7 +633,11 @@ func OpenReaderPath(path string, forceFallback bool) (*Reader, error) {
 	}
 	if info.Size() < FileSize {
 		_ = f.Close()
-		return nil, fmt.Errorf("%w: got %d want %d", ErrBadSize, info.Size(), FileSize)
+		return nil, fmt.Errorf("%w (%w): got %d want %d", ErrShortRegion, ErrSchemaMismatch, info.Size(), FileSize)
+	}
+	if info.Size() > FileSize {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: got %d want %d", ErrSchemaMismatch, info.Size(), FileSize)
 	}
 
 	r := &Reader{
@@ -609,19 +653,22 @@ func OpenReaderPath(path string, forceFallback bool) (*Reader, error) {
 		}
 	}
 
-	var probeHdr [8]byte
+	var probeHdr [HeaderSize]byte
 	if r.mmapped {
-		if err := probeMmapMagic(r.mmap, &probeHdr); err != nil {
+		if err := probeMmapHeader(r.mmap, &probeHdr); err != nil {
 			_ = r.Close()
 			return nil, err
 		}
-	} else if _, err := f.ReadAt(probeHdr[:], 0); err != nil {
+	} else if n, err := f.ReadAt(probeHdr[:], 0); err != nil || n < HeaderSize {
 		_ = r.Close()
+		if err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, fmt.Errorf("%w (%w): short header read %d", ErrShortRegion, ErrSchemaMismatch, n)
+		}
 		return nil, err
 	}
-	if string(probeHdr[:]) != Magic {
+	if err := validateFileHeader(probeHdr[:], false); err != nil {
 		_ = r.Close()
-		return nil, ErrBadMagic
+		return nil, err
 	}
 	return r, nil
 }
@@ -647,7 +694,8 @@ func (r *Reader) Read() (Snapshot, error) {
 
 // ReadInto populates dst with zero heap allocations using seqcount_latch
 // dual-slot validation: if the primary slot is mid-transition, it seamlessly
-// falls back to the alternate quiescent slot.
+// falls back to the alternate quiescent slot without mutating dst until a
+// complete tear-free frame passes sequence & schema verification.
 func (r *Reader) ReadInto(dst *Snapshot) error {
 	if r == nil || dst == nil {
 		return ErrClosed
@@ -671,7 +719,10 @@ func (r *Reader) ReadInto(dst *Snapshot) error {
 		return ErrClosed
 	}
 	n, err := r.file.ReadAt(raw[:], 0)
-	if err != nil && n < FileSize {
+	if n < FileSize {
+		if err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("%w (%w): got %d want %d", ErrShortRegion, ErrSchemaMismatch, n, FileSize)
+		}
 		return fmt.Errorf("shm pread: %w", err)
 	}
 	return r.readFromBuf(raw[:], dst, false)
@@ -690,16 +741,19 @@ func (r *Reader) readFromMmap(buf []byte, dst *Snapshot) (err error) {
 
 func (r *Reader) readFromBuf(buf []byte, dst *Snapshot, useAtomic bool) error {
 	if len(buf) < FileSize {
-		return ErrBadSize
+		return fmt.Errorf("%w (%w): got %d want %d", ErrShortRegion, ErrSchemaMismatch, len(buf), FileSize)
 	}
-	if buf[0] != 'H' || buf[1] != 'N' || buf[2] != 'C' || buf[3] != 'V' ||
-		buf[4] != '6' || buf[5] != 'S' || buf[6] != 'H' || buf[7] != 'M' {
-		return ErrBadMagic
+	if len(buf) > FileSize {
+		return fmt.Errorf("%w: got %d want %d", ErrSchemaMismatch, len(buf), FileSize)
+	}
+	if err := validateFileHeader(buf[0:HeaderSize], useAtomic); err != nil {
+		return err
 	}
 
 	// Try up to 4 fast iterations across primary and alternate latch slots.
 	for attempt := 0; attempt < 4; attempt++ {
-		_ = r.barrier.Load()
+		var fence atomic.Uint32
+		fence.Add(1)
 		hdrSeq := loadU64(buf, 16, useAtomic)
 		if hdrSeq == 0 {
 			if useAtomic {
@@ -708,65 +762,111 @@ func (r *Reader) readFromBuf(buf []byte, dst *Snapshot, useAtomic bool) error {
 			continue
 		}
 		primaryIdx := int(hdrSeq & 1)
-		if r.tryDecodeSlot(buf, primaryIdx, dst, useAtomic) {
+		ok, err := r.tryDecodeSlot(buf, primaryIdx, dst, useAtomic)
+		if err != nil {
+			return err
+		}
+		if ok {
 			return nil
 		}
 		// seqcount_latch fallback: while writer mutates primaryIdx, primaryIdx^1
 		// holds the previous complete quiescent snapshot.
 		altIdx := primaryIdx ^ 1
-		if r.tryDecodeSlot(buf, altIdx, dst, useAtomic) {
+		ok, err = r.tryDecodeSlot(buf, altIdx, dst, useAtomic)
+		if err != nil {
+			return err
+		}
+		if ok {
 			return nil
+		}
+		if useAtomic {
+			runtime.Gosched()
 		}
 	}
 	return ErrUninitialized
 }
 
-func (r *Reader) tryDecodeSlot(buf []byte, slotIdx int, dst *Snapshot, useAtomic bool) bool {
+func (r *Reader) tryDecodeSlot(buf []byte, slotIdx int, dst *Snapshot, useAtomic bool) (bool, error) {
 	slotOff := HeaderSize + slotIdx*SlotSize
 	slot := buf[slotOff : slotOff+SlotSize]
 
-	beginSeq := loadU64(buf, slotOff, useAtomic)
+	seq1 := loadU64(buf, slotOff, useAtomic)
 	// Uninitialized (0) or writer active on this slot (odd bit set).
-	if beginSeq == 0 || (beginSeq&1) != 0 {
-		return false
+	if seq1 == 0 || (seq1&1) != 0 {
+		return false, nil
 	}
-	_ = r.barrier.Load()
+
+	var fence atomic.Uint32
+	fence.Add(1)
 
 	devCount := binary.LittleEndian.Uint32(slot[28:32])
-	if devCount > MaxDevices {
-		return false
+	slotVer := binary.LittleEndian.Uint32(slot[44:48])
+	slotHdrSz := binary.LittleEndian.Uint16(slot[48:50])
+	slotDevSz := binary.LittleEndian.Uint16(slot[50:52])
+	slotPayloadSz := binary.LittleEndian.Uint32(slot[52:56])
+	slotEndian := binary.LittleEndian.Uint32(slot[56:60])
+
+	if slotVer != SchemaVersion ||
+		slotHdrSz != HeaderSize ||
+		slotDevSz != DeviceSlotSize ||
+		slotPayloadSz != SlotSize ||
+		slotEndian != EndianTag ||
+		devCount > MaxDevices {
+		// Issue RMW full fence before checking whether this mismatch is a sealed
+		// schema violation vs. an in-flight writer tear on this slot.
+		fence.Add(1)
+		endSeq := loadU64(buf, slotOff+slotEndSeqOff, useAtomic)
+		seq2 := loadU64(buf, slotOff, useAtomic)
+		if seq1 == endSeq && seq1 == seq2 && (seq1&1) == 0 {
+			return false, fmt.Errorf(
+				"%w: slot=%d ver=%d hdr=%d devSlot=%d payload=%d endian=0x%08x devs=%d",
+				ErrSchemaMismatch, slotIdx, slotVer, slotHdrSz, slotDevSz, slotPayloadSz, slotEndian, devCount,
+			)
+		}
+		return false, nil
 	}
 
-	copy(dst.Header.Magic[:], Magic)
-	dst.Header.Version = binary.LittleEndian.Uint32(buf[8:12])
-	dst.Header.ActiveSlot = uint32(slotIdx)
-	dst.Header.Seq = beginSeq >> 1
-	dst.Header.UpdatedMonoNs = int64(binary.LittleEndian.Uint64(slot[8:16]))
-	dst.Header.UpdatedUnixNs = int64(binary.LittleEndian.Uint64(slot[16:24]))
-	dst.Header.ActiveFlows = binary.LittleEndian.Uint32(slot[24:28])
-	dst.Header.DeviceCount = devCount
-	dst.Header.TotalLeaks = binary.LittleEndian.Uint64(slot[32:40])
-	dst.Header.Flags = binary.LittleEndian.Uint32(slot[40:44])
+	// Decode into a stack-local temporary Snapshot so a mid-read writer takeover
+	// can never pollute the caller's destination buffer with a half-torn frame.
+	var tmp Snapshot
+	copy(tmp.Header.Magic[:], Magic)
+	tmp.Header.Version = slotVer
+	tmp.Header.HeaderSize = slotHdrSz
+	tmp.Header.DeviceSlotSize = slotDevSz
+	tmp.Header.SlotSize = slotPayloadSz
+	tmp.Header.EndianTag = slotEndian
+	tmp.Header.ActiveSlot = uint32(slotIdx)
+	tmp.Header.Seq = seq1 >> 1
+	tmp.Header.UpdatedMonoNs = int64(binary.LittleEndian.Uint64(slot[8:16]))
+	tmp.Header.UpdatedUnixNs = int64(binary.LittleEndian.Uint64(slot[16:24]))
+	tmp.Header.ActiveFlows = binary.LittleEndian.Uint32(slot[24:28])
+	tmp.Header.DeviceCount = devCount
+	tmp.Header.TotalLeaks = binary.LittleEndian.Uint64(slot[32:40])
+	tmp.Header.Flags = binary.LittleEndian.Uint32(slot[40:44])
 
 	n := int(devCount)
 	for i := 0; i < n; i++ {
 		off := SlotHeaderSize + i*DeviceSlotSize
-		copy(dst.Devices[i].MAC[:], slot[off:off+6])
-		copy(dst.Devices[i].IPv4[:], slot[off+8:off+12])
-		dst.Devices[i].ActiveFlows = binary.LittleEndian.Uint32(slot[off+12 : off+16])
-		copy(dst.Devices[i].IPv6[:], slot[off+16:off+32])
-		dst.Devices[i].RxBytes = binary.LittleEndian.Uint64(slot[off+32 : off+40])
-		dst.Devices[i].TxBytes = binary.LittleEndian.Uint64(slot[off+40 : off+48])
-		dst.Devices[i].Flags = binary.LittleEndian.Uint32(slot[off+48 : off+52])
-	}
-	for i := n; i < MaxDevices; i++ {
-		dst.Devices[i] = DeviceSlot{}
+		copy(tmp.Devices[i].MAC[:], slot[off:off+6])
+		copy(tmp.Devices[i].IPv4[:], slot[off+8:off+12])
+		tmp.Devices[i].ActiveFlows = binary.LittleEndian.Uint32(slot[off+12 : off+16])
+		copy(tmp.Devices[i].IPv6[:], slot[off+16:off+32])
+		tmp.Devices[i].RxBytes = binary.LittleEndian.Uint64(slot[off+32 : off+40])
+		tmp.Devices[i].TxBytes = binary.LittleEndian.Uint64(slot[off+40 : off+48])
+		tmp.Devices[i].Flags = binary.LittleEndian.Uint32(slot[off+48 : off+52])
 	}
 
-	_ = r.barrier.Load()
+	// Bidirectional full memory barrier (atomic RMW on stack-local word) prevents
+	// ARM64 weak-memory plain mmap loads above from sinking past seq2/endSeq loads below.
+	fence.Add(1)
 	endSeq := loadU64(buf, slotOff+slotEndSeqOff, useAtomic)
-	beginVerify := loadU64(buf, slotOff, useAtomic)
-	return endSeq == beginSeq && beginVerify == beginSeq
+	seq2 := loadU64(buf, slotOff, useAtomic)
+	if seq1 != endSeq || seq1 != seq2 || (seq2&1) != 0 {
+		return false, nil
+	}
+
+	*dst = tmp
+	return true, nil
 }
 
 // Close unmaps shared memory (if mapped) and closes the underlying file.

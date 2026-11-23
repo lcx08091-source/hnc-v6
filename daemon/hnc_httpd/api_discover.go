@@ -8,7 +8,7 @@
 //
 // 线索来源(都在本机完成, 不把域名发给第三方):
 //   1. run/dpi_discover.json  —— dpid: 同设备 5 秒内共现的陌生域名聚成组 + JA4 学到的公司家族
-//   2. run/apk_domains.json   —— dpid: 本机已装 App 安装包里写死的域名 → 包名 / App 名
+//   2. data/apk_domains.json  —— dpid: 本机已装 App 安装包里写死的域名 → 包名 / App 名(回退兼容 run/)
 //   3. 证书 —— 本文件: 主动连一次组里的主机 443 端口, 读服务器证书的组织名(O=)与
 //      SAN 域名列表(TLS 1.3 下被动抓包看不到证书, 只能主动取)。结果缓存在
 //      run/cert_cache.json; 后台每 20 秒最多探测一组, 失败 6 小时后才重试。
@@ -108,18 +108,7 @@ func certPut(hncDir, id string, c certInfo) {
 var discoverWriteSeq atomic.Uint64
 
 func discoverWriteAtomic(path string, b []byte) error {
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	seq := discoverWriteSeq.Add(1)
-	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), seq)
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return writeFileAtomicWithPerm(path, b, 0o644)
 }
 
 // probeCert 连 host:443 读证书。只读取、不信任(InsecureSkipVerify): 我们要的是
@@ -250,9 +239,16 @@ type apkIndex struct {
 	apps   int
 }
 
+func apkDomainsPath(hncDir string) string {
+	return filepath.Join(hncDir, "data", "apk_domains.json")
+}
+
 func (s *server) loadAPKIndex() apkIndex {
 	ix := apkIndex{labels: map[string]string{}, suffix: map[string][]string{}, sdk: map[string]bool{}}
-	raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "apk_domains.json"))
+	raw, err := s.jsonCache.read(apkDomainsPath(s.hncDir))
+	if err != nil {
+		raw, err = s.jsonCache.read(filepath.Join(s.hncDir, "run", "apk_domains.json"))
+	}
 	if err != nil {
 		return ix
 	}

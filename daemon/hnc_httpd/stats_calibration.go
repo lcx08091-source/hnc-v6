@@ -30,19 +30,20 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
-
-	"context"
 )
 
 const (
@@ -62,7 +63,7 @@ const (
 
 // ─── SIM 映射 ─────────────────────────────────────────────────────
 
-// calSub siminfo 一行(比 puSubInfo 多 MCC/MNC/IMSI, 用于 netstats subscriberId 映射)
+// calSub siminfo / isub 一行(比 puSubInfo 多 MCC/MNC/IMSI, 用于 netstats subscriberId 映射)
 type calSub struct {
 	SubID     int
 	SlotIndex int // 0-based, -1 未插
@@ -78,6 +79,43 @@ func calIntStr(s string) string {
 		return ""
 	}
 	return s
+}
+
+// calSubsFromIsub 将原生 `dumpsys isub` 解析出的在位物理卡映射为 []calSub。
+func calSubsFromIsub(snap puIsubSnapshot) []calSub {
+	if len(snap.Subs) == 0 {
+		return nil
+	}
+	out := make([]calSub, 0, len(snap.Subs))
+	for _, e := range snap.Subs {
+		out = append(out, calSub{
+			SubID:     e.SubID,
+			SlotIndex: e.SlotIndex,
+			Name:      e.Carrier,
+			Carrier:   e.Carrier,
+			MCC:       e.MCC,
+			MNC:       e.MNC,
+			IMSI:      e.IMSI,
+		})
+	}
+	return out
+}
+
+// calQuerySubs 优先通过原生 `dumpsys isub` 获取在位物理卡槽与 subId/IMSI 前缀映射(零 app_process);
+// 当 `dumpsys isub` 返回空或无有效在位订阅时, 自动回退到原有的 `content query` 以保持全版本/单测兼容。
+func calQuerySubs(run func(time.Duration, string, ...string) (string, error)) []calSub {
+	if run == nil {
+		return nil
+	}
+	if out, err := run(5*time.Second, "dumpsys", "isub"); err == nil && strings.TrimSpace(out) != "" {
+		if subs := calSubsFromIsub(puParseIsubDump(out)); len(subs) > 0 {
+			return subs
+		}
+	}
+	if out, err := run(10*time.Second, "content", "query", "--uri", "content://telephony/siminfo"); err == nil && strings.TrimSpace(out) != "" {
+		return calParseSiminfo(out)
+	}
+	return nil
 }
 
 // calParseSiminfo `content query --uri content://telephony/siminfo`(不带 projection,
@@ -114,7 +152,7 @@ func calParseSiminfo(out string) []calSub {
 				s.MNC = v
 			}
 		}
-		s.IMSI = calIntStr(kv["imsi"])
+		s.IMSI = puCleanIMSI(kv["imsi"])
 		subs = append(subs, s)
 	}
 	return subs
@@ -212,17 +250,19 @@ func calMapSlot(id nsIdent, subs []calSub) (int, string, string) {
 // ─── 结果结构(API 契约) ──────────────────────────────────────────
 
 type calCellSim struct {
-	Slot           int      `json:"slot"`
-	Carrier        string   `json:"carrier,omitempty"`
-	SubID          int      `json:"sub_id,omitempty"`
-	Subscriber     string   `json:"subscriber,omitempty"` // scrub 后前缀(460001)
-	MapVia         string   `json:"map_via"`              // sub_id|imsi|plmn|carrier_name|none
-	Rx             uint64   `json:"rx"`                   // 本计费周期(系统统计)
-	Tx             uint64   `json:"tx"`
-	Total          uint64   `json:"total"`
-	WindowTotal    uint64   `json:"window_total"`               // 对账窗口内(系统)
-	HNCWindowTotal *uint64  `json:"hnc_window_total,omitempty"` // 对账窗口内(HNC), 窗口非整天时缺省
-	Pct            *float64 `json:"hnc_vs_netstats_pct"`
+	Slot            int      `json:"slot"`
+	Carrier         string   `json:"carrier,omitempty"`
+	SubID           int      `json:"sub_id,omitempty"`
+	Subscriber      string   `json:"subscriber,omitempty"` // scrub 后前缀(460001)
+	MapVia          string   `json:"map_via"`              // sub_id|imsi|plmn|carrier_name|none
+	Rx              uint64   `json:"rx"`                   // 本计费周期(系统统计)
+	Tx              uint64   `json:"tx"`
+	Total           uint64   `json:"total"`
+	WindowTotal     uint64   `json:"window_total"`                // 对账窗口内(系统)
+	AnchorAt        int64    `json:"anchor_at,omitempty"`         // 手动校准锚点设置时间戳(秒)
+	PostAnchorTotal uint64   `json:"post_anchor_total,omitempty"` // AnchorAt 之后的系统增量字节
+	HNCWindowTotal  *uint64  `json:"hnc_window_total,omitempty"`  // 对账窗口内(HNC), 窗口非整天时缺省
+	Pct             *float64 `json:"hnc_vs_netstats_pct"`
 }
 
 type calHotspotCmp struct {
@@ -381,9 +421,10 @@ type calInput struct {
 	Xt         *nsDump // dumpsys netstats --full
 	Uid        *nsDump // dumpsys netstats --uid(UID 段开机以来)
 	Subs       []calSub
-	Days       []*puDay // HNC cycleStart..now
-	Earliest   string   // HNC 最早的日文件(YYYYMMDD)
+	Days       []*puDay      // HNC cycleStart..now
+	Earliest   string        // HNC 最早的日文件(YYYYMMDD)
 	BootTime   int64
+	AnchorAt   map[int]int64 // slot -> 手动校准锚点设置时刻 Unix 秒(可选)
 }
 
 func calCeilHour(t time.Time) time.Time {
@@ -433,7 +474,7 @@ func calCompute(in calInput) calResult {
 	// 每卡(按卡槽合并; 未识别的按 subscriber 前缀分开)
 	type agg struct {
 		calCellSim
-		rx, tx, win float64
+		rx, tx, win, postAnchor float64
 	}
 	groups := map[string]*agg{}
 	order := []string{}
@@ -456,6 +497,9 @@ func calCompute(in calInput) calResult {
 			if id.SubID > 0 {
 				g.SubID = id.SubID
 			}
+			if slot > 0 && in.AnchorAt != nil && in.AnchorAt[slot] > 0 {
+				g.AnchorAt = in.AnchorAt[slot]
+			}
 			groups[gk] = g
 			order = append(order, gk)
 		}
@@ -465,6 +509,10 @@ func calCompute(in calInput) calResult {
 			wrx, wtx := nsWindowBytes(k, res.WindowStart, now+1, now)
 			g.win += wrx + wtx
 			nsCellWin += wrx + wtx
+		}
+		if g.AnchorAt > 0 && g.AnchorAt <= now {
+			arx, atx := nsWindowBytes(k, g.AnchorAt, now+1, now)
+			g.postAnchor += arx + atx
 		}
 	}
 	for _, k := range wifi {
@@ -492,6 +540,9 @@ func calCompute(in calInput) calResult {
 		c.Rx, c.Tx = uint64(g.rx), uint64(g.tx)
 		c.Total = c.Rx + c.Tx
 		c.WindowTotal = uint64(g.win)
+		if g.AnchorAt > 0 {
+			c.PostAnchorTotal = uint64(g.postAnchor)
+		}
 		res.NetstatsCellTotal += c.Total
 		if winOK && perSim && c.Slot > 0 {
 			h := bySlot[c.Slot]
@@ -694,26 +745,28 @@ func (w *calCapWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// calRunCmd 同 puRunCmd, 但超时/输出上限可控(dumpsys --full 可能几 MB)
+// calRunCmd 同 puRunCmd, 但超时/输出上限可控(dumpsys --full 可能几 MB);
+// 统一使用 puSanitizedAndroidEnv() 保留 BOOTCLASSPATH 等 ART 变量并启用 Setpgid + 超时 -pgid SIGKILL。
 func calRunCmd(timeout time.Duration, name string, args ...string) (string, error) {
-	path := ""
-	for _, d := range []string{"/system/bin/", "/system/xbin/", "/vendor/bin/"} {
-		if st, err := os.Stat(d + name); err == nil && !st.IsDir() {
-			path = d + name
-			break
-		}
-	}
-	if path == "" {
-		p, err := exec.LookPath(name)
-		if err != nil {
-			return "", err
-		}
-		path = p
+	path, ok := puLookupSysBin(name)
+	if !ok {
+		return "", exec.ErrNotFound
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := hardenCmd(exec.CommandContext(ctx, path, args...))
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin"}
+	cmd := puPrepareExecCmd(exec.CommandContext(ctx, path, args...))
+	cmd.Env = puSanitizedAndroidEnv()
+	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil && cmd.Process.Pid > 0 {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				return cmd.Process.Kill()
+			}
+			return nil
+		}
+	}
+	cmd.WaitDelay = 400 * time.Millisecond
 	w := &calCapWriter{max: calCmdMaxOut}
 	cmd.Stdout = w
 	err := cmd.Run()
@@ -817,7 +870,7 @@ func calGet(hncDir string) *calibrator {
 	return calReg.m[hncDir]
 }
 
-// calKick 配置变了(计费日 / use_netstats)→ 让后台尽快重算
+// calKick 配置变了(计费日 / use_netstats) -> 让后台尽快重算
 func calKick(hncDir string) {
 	if c := calGet(hncDir); c != nil {
 		select {
@@ -925,6 +978,14 @@ func (c *calibrator) check(now time.Time, pu *puEngine) {
 	c.mu.Unlock()
 
 	in := calInput{Now: now, CycleStart: cycleStart}
+	if cfg.AnchorCycle == cycleStart.Format("20060102") && len(cfg.AnchorAt) > 0 {
+		in.AnchorAt = map[int]int64{}
+		for k, ts := range cfg.AnchorAt {
+			if slot, err := strconv.Atoi(k); err == nil && slot > 0 && ts > 0 {
+				in.AnchorAt[slot] = ts
+			}
+		}
+	}
 	_, _ = c.env.run(calCmdTimeout, "dumpsys", "netstats", "--poll")
 	if out, err := c.env.run(calCmdTimeout, "dumpsys", "netstats", "--full"); err == nil || out != "" {
 		in.Xt, _ = parseNetstatsDump(strings.NewReader(out), func(sec string, uid int) bool {
@@ -936,9 +997,7 @@ func (c *calibrator) check(now time.Time, pu *puEngine) {
 			return sec == "uid" && uid == nsUIDTethering
 		})
 	}
-	if out, err := c.env.run(10*time.Second, "content", "query", "--uri", "content://telephony/siminfo"); err == nil {
-		in.Subs = calParseSiminfo(out)
-	}
+	in.Subs = calQuerySubs(c.env.run)
 	if c.env.bootTime != nil {
 		in.BootTime = c.env.bootTime()
 	}
@@ -998,7 +1057,7 @@ func (s *server) StatsCalibrationLoop(stop <-chan struct{}) {
 	}
 }
 
-// ─── 接到 /api/phone_usage ────────────────────────────────────────
+// ─── 接到 /api/phone_usage 与套餐告警闭环 ─────────────────────────
 
 // netstatsMode use_netstats 归一: auto|prefer|off
 func (c puConfig) netstatsMode() string {
@@ -1009,13 +1068,63 @@ func (c puConfig) netstatsMode() string {
 	return "auto"
 }
 
-// calUsable prefer 模式能否用该结果: 系统统计解析成功、未过期、周期一致
+// calUsable 结果是否可用: 系统统计解析成功、未过期、周期一致
 func calUsable(r *calResult, cycleStart time.Time, now time.Time) bool {
 	return r != nil && r.NetstatsOK && r.CycleStart == cycleStart.Unix() &&
 		now.Unix()-r.CheckedAt <= int64(calStaleAfter/time.Second)
 }
 
-// puCalAttach 把对账结果挂到 report 上; prefer 时替换 by_sim 的周期用量
+// calShouldAutoPromote 统一判定 auto 模式下是否自动采信系统 NetworkStats 作为该卡周期主数值:
+//  1. 实时双快照窗口确认 IPA/MDDP 硬件加速分流漏计(OffloadKind=="hw" && OffloadGapSource=="live_window"); 或
+//  2. HNC 未满整计费周期(!WindowFull)且系统统计比 HNC 多出超过 64MB。
+// 注意: 当 WindowFull == true 且仅有单次 cycle_window 历史差值时不抢切, 保持 primary_source == "hnc"。
+func calShouldAutoPromote(mode string, r *calResult, c calCellSim, hncUsed uint64) bool {
+	if mode != "auto" || r == nil {
+		return false
+	}
+	if r.OffloadKind == "hw" && r.OffloadGapSource == "live_window" {
+		return true
+	}
+	if !r.WindowFull && c.Total > hncUsed+(64<<20) {
+		return true
+	}
+	return false
+}
+
+// calApplyCarrierAnchor 计算运营商手动账单校准锚点生效后的周期用量, 消除与 autoPromote/prefer 同时开启时的重复累加:
+//   - 当本卡处于 netstats 口径时: 优先使用设置锚点时的同源 AnchorNsBase 差分, 次选 AnchorAt 之后的系统增量窗口 PostAnchorTotal,
+//     旧配置缺少系统基准时严格回退 HNC 同口径差分(hncUsed - AnchorBase), 绝不拿 netstats 总额减 HNC AnchorBase;
+//   - 当本卡处于 HNC 口径时: 使用 HNC 同口径差分(hncUsed - AnchorBase)。
+func calApplyCarrierAnchor(cfg puConfig, cycleStart time.Time, slot int, hncUsed uint64, usedNetstats bool, nsCell *calCellSim) (uint64, bool) {
+	if slot <= 0 || cfg.AnchorCycle != cycleStart.Format("20060102") || len(cfg.AnchorGB) == 0 {
+		return 0, false
+	}
+	sk := strconv.Itoa(slot)
+	agb, hasAnchor := cfg.AnchorGB[sk]
+	if !hasAnchor {
+		return 0, false
+	}
+	anchorBytes := uint64(math.Round(agb * puGiB))
+	var delta uint64
+	if usedNetstats && nsCell != nil {
+		if cfg.AnchorNsBase != nil {
+			if nsBase, ok := cfg.AnchorNsBase[sk]; ok {
+				delta = puSub(nsCell.Total, nsBase)
+				return anchorBytes + delta, true
+			}
+		}
+		if anchorAt := cfg.AnchorAt[sk]; anchorAt > 0 && nsCell.AnchorAt == anchorAt {
+			delta = nsCell.PostAnchorTotal
+			return anchorBytes + delta, true
+		}
+		delta = puSub(hncUsed, cfg.AnchorBase[sk])
+		return anchorBytes + delta, true
+	}
+	delta = puSub(hncUsed, cfg.AnchorBase[sk])
+	return anchorBytes + delta, true
+}
+
+// puCalAttach 把对账结果挂到 report 上; prefer / autoPromote / 手动校准锚点统一同口径计算
 func puCalAttach(hncDir string, cfg puConfig, cycleStart, now time.Time, resp map[string]interface{}, bySim []map[string]interface{}) {
 	mode := cfg.netstatsMode()
 	var r *calResult
@@ -1035,29 +1144,37 @@ func puCalAttach(hncDir string, cfg puConfig, cycleStart, now time.Time, resp ma
 	}
 	r.UseNetstats = mode
 	r.Primary = "hnc"
+
+	hncUsedBySlot := make(map[int]uint64, len(bySim))
+	for _, row := range bySim {
+		if slot, ok := row["slot"].(int); ok && slot > 0 {
+			u, _ := row["cycle_used"].(uint64)
+			hncUsedBySlot[slot] = u
+		}
+	}
+
+	nsBySlot := map[int]calCellSim{}
+	usedNSBySlot := map[int]bool{}
 	usable := mode != "off" && calUsable(r, cycleStart, now)
 	if usable {
-		ns := map[int]calCellSim{}
 		for _, c := range r.NetstatsCellBySim {
 			if c.Slot > 0 {
-				ns[c.Slot] = c
+				nsBySlot[c.Slot] = c
 			}
 		}
 		for _, row := range bySim {
 			slot, _ := row["slot"].(int)
-			c, ok := ns[slot]
+			c, ok := nsBySlot[slot]
 			if !ok {
 				continue
 			}
 			row["netstats_cycle_used"] = c.Total
-			hncUsed, _ := row["cycle_used"].(uint64)
-			// v5.38.0: auto 模式下若实时双快照窗口确认 IPA/MDDP 硬件加速漏计(OffloadKind=="hw" && OffloadGapSource=="live_window")
-			// 或装机未满整周期(!WindowFull 且系统统计显著更多), 自动无感切换本卡周期用量为系统 NetworkStats 权威值(无需手动切 prefer)!
-			// 注意: 仅凭单次 cycle_window 历史差值在整周期覆盖(WindowFull)时不自动抢切, 保持与 TestCalibratorCheckAndAttach 契约严格一致。
-			autoPromote := mode == "auto" && ((r.OffloadKind == "hw" && r.OffloadGapSource == "live_window") || (!r.WindowFull && c.Total > hncUsed+(64<<20)))
+			hncUsed := hncUsedBySlot[slot]
+			autoPromote := calShouldAutoPromote(mode, r, c, hncUsed)
 			if mode != "prefer" && !autoPromote {
 				continue
 			}
+			usedNSBySlot[slot] = true
 			row["hnc_cycle_used"] = hncUsed
 			row["cycle_used"] = c.Total
 			if autoPromote {
@@ -1071,24 +1188,24 @@ func puCalAttach(hncDir string, cfg puConfig, cycleStart, now time.Time, resp ma
 			r.Primary = "netstats"
 		}
 	}
-	// v5.38.0: 运营商手动账单锚点校准(应对定向免流包或半途装机)
-	cycStr := cycleStart.Format("20060102")
-	if cfg.AnchorCycle == cycStr && len(cfg.AnchorGB) > 0 {
+
+	// 运营商手动账单锚点校准(严格按同源口径或 AnchorAt 后增量累加, 防止与 autoPromote/prefer 重复加计)
+	if cfg.AnchorCycle == cycleStart.Format("20060102") && len(cfg.AnchorGB) > 0 {
 		for _, row := range bySim {
 			slot, _ := row["slot"].(int)
-			sk := strconv.Itoa(slot)
-			agb, hasAnchor := cfg.AnchorGB[sk]
-			if !hasAnchor || slot <= 0 {
+			if slot <= 0 {
 				continue
 			}
-			anchorBytes := uint64(math.Round(agb * puGiB))
-			curUsed, _ := row["cycle_used"].(uint64)
-			base := cfg.AnchorBase[sk]
-			var delta uint64
-			if curUsed > base {
-				delta = curUsed - base
+			var nsPtr *calCellSim
+			if nsVal, ok := nsBySlot[slot]; ok {
+				nsCopy := nsVal
+				nsPtr = &nsCopy
 			}
-			calibrated := anchorBytes + delta
+			calibrated, ok := calApplyCarrierAnchor(cfg, cycleStart, slot, hncUsedBySlot[slot], usedNSBySlot[slot], nsPtr)
+			if !ok {
+				continue
+			}
+			curUsed, _ := row["cycle_used"].(uint64)
 			row["raw_cycle_used"] = curUsed
 			row["cycle_used"] = calibrated
 			row["cycle_used_source"] = "carrier_anchor"
@@ -1101,37 +1218,77 @@ func puCalAttach(hncDir string, cfg puConfig, cycleStart, now time.Time, resp ma
 	resp["calibration"] = r
 }
 
-// puCalPreferUsed prefer 模式下套餐告警用系统统计的每卡周期用量
+// puCalPreferUsed 套餐告警计算每卡周期用量: 统一衔接 prefer、autoPromote 与手动校准锚点, 消除面板显示与告警判定断层。
 func puCalPreferUsed(hncDir string, cfg puConfig, cycleStart, now time.Time, used map[int]*puSimAgg) map[int]*puSimAgg {
-	if cfg.netstatsMode() != "prefer" {
+	mode := cfg.netstatsMode()
+	var r *calResult
+	if mode != "off" {
+		if c := calGet(hncDir); c != nil {
+			if cand := c.result(); calUsable(cand, cycleStart, now) {
+				r = cand
+			}
+		}
+	}
+	hasAnchor := cfg.AnchorCycle == cycleStart.Format("20060102") && len(cfg.AnchorGB) > 0
+	if r == nil && !hasAnchor {
 		return used
 	}
-	c := calGet(hncDir)
-	if c == nil {
-		return used
-	}
-	r := c.result()
-	if !calUsable(r, cycleStart, now) {
-		return used
-	}
+
 	out := map[int]*puSimAgg{}
+	hncUsedBySlot := map[int]uint64{}
 	for k, v := range used {
-		out[k] = v
+		if v != nil {
+			cp := *v
+			out[k] = &cp
+			hncUsedBySlot[k] = v.Rx + v.Tx
+		}
 	}
-	for _, s := range r.NetstatsCellBySim {
-		if s.Slot <= 0 {
-			continue
+
+	nsBySlot := map[int]calCellSim{}
+	usedNSBySlot := map[int]bool{}
+	if r != nil {
+		for _, s := range r.NetstatsCellBySim {
+			if s.Slot <= 0 {
+				continue
+			}
+			nsBySlot[s.Slot] = s
+			hncUsed := hncUsedBySlot[s.Slot]
+			if mode != "prefer" && !calShouldAutoPromote(mode, r, s, hncUsed) {
+				continue
+			}
+			usedNSBySlot[s.Slot] = true
+			a := &puSimAgg{Carriers: map[string]bool{}}
+			if old := out[s.Slot]; old != nil {
+				x := *old
+				a = &x
+			}
+			a.Rx, a.Tx = s.Rx, s.Tx
+			if a.Carrier == "" {
+				a.Carrier = s.Carrier
+			}
+			out[s.Slot] = a
 		}
-		a := &puSimAgg{Carriers: map[string]bool{}}
-		if old := used[s.Slot]; old != nil {
-			x := *old
-			a = &x
+	}
+
+	if hasAnchor {
+		for _, slot := range []int{1, 2} {
+			var nsPtr *calCellSim
+			if nsVal, ok := nsBySlot[slot]; ok {
+				nsCopy := nsVal
+				nsPtr = &nsCopy
+			}
+			calibrated, ok := calApplyCarrierAnchor(cfg, cycleStart, slot, hncUsedBySlot[slot], usedNSBySlot[slot], nsPtr)
+			if !ok {
+				continue
+			}
+			a := &puSimAgg{Carriers: map[string]bool{}}
+			if old := out[slot]; old != nil {
+				x := *old
+				a = &x
+			}
+			a.Rx, a.Tx = calibrated, 0
+			out[slot] = a
 		}
-		a.Rx, a.Tx = s.Rx, s.Tx
-		if a.Carrier == "" {
-			a.Carrier = s.Carrier
-		}
-		out[s.Slot] = a
 	}
 	return out
 }

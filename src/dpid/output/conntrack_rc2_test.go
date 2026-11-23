@@ -304,3 +304,112 @@ func TestIPNameIgnoresFakeIPRanges(t *testing.T) {
 		}
 	}
 }
+
+func TestReadConntrackNetlink_IPv4DeniedWithZeroV6ComplementsFromProcfs(t *testing.T) {
+	oldPaths := ConntrackPaths
+	oldOpen := openConntrackFileFn
+	oldFamDump := dumpCTNetlinkFamilyFn
+	t.Cleanup(func() {
+		ConntrackPaths = oldPaths
+		openConntrackFileFn = oldOpen
+		dumpCTNetlinkFamilyFn = oldFamDump
+	})
+
+	fakeProc := filepath.Join(t.TempDir(), "nf_conntrack")
+	procBody := strings.Join([]string{
+		"ipv4     2 tcp      6 431999 ESTABLISHED src=192.168.43.10 dst=93.184.216.34 sport=50001 dport=443 packets=10 bytes=1200 src=93.184.216.34 dst=10.0.0.2 sport=443 dport=50001 packets=12 bytes=8400 [ASSURED] mark=0 use=1",
+		"ipv4     2 udp     17 29 src=192.168.43.11 dst=223.5.5.5 sport=53000 dport=53 packets=1 bytes=64 [UNREPLIED] mark=0 use=1",
+		"ipv6    10 udp     17 29 src=2409:8a00::20 dst=2400:3200::1 sport=50000 dport=853 packets=1 bytes=96 [UNREPLIED] mark=0 use=1",
+	}, "\n") + "\n"
+	if err := os.WriteFile(fakeProc, []byte(procBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ConntrackPaths = []string{"/proc/net/nf_conntrack"}
+	openConntrackFileFn = func( string) (*os.File, error) {
+		return os.Open(fakeProc)
+	}
+
+	// 场景 1: AF_UNSPEC 与 AF_INET 均返回 EPERM, AF_INET6 成功但返回 0 条连接(v6OK=true, c6=0)。
+	// 此时绝不能因 v6OK 为真而跳过 IPv4 procfs 兜底, 且 procfs 必须补齐全部 2 条 IPv4 连接(不重复解析已被 v6 覆盖的 IPv6)。
+	dumpCTNetlinkFamilyFn = func(family uint8, seq uint32, maxLines int, onLine func(string)) (int, error) {
+		switch family {
+		case syscall.AF_UNSPEC:
+			return 0, syscall.EPERM
+		case syscall.AF_INET:
+			return 0, syscall.EPERM
+		case syscall.AF_INET6:
+			return 0, nil // v6OK == true 且 0 条
+		default:
+			return 0, syscall.EAFNOSUPPORT
+		}
+	}
+
+	var gotLines []string
+	count, err := readConntrackNetlink(1024, func(line string) {
+		gotLines = append(gotLines, line)
+	})
+	if err != nil {
+		t.Fatalf("readConntrackNetlink failed: %v", err)
+	}
+	if count != 2 || len(gotLines) != 2 {
+		t.Fatalf("expected 2 complemented IPv4 lines from procfs, got count=%d lines=%v", count, gotLines)
+	}
+	if ConntrackOrigDst(gotLines[0]) != "93.184.216.34" || ConntrackOrigDst(gotLines[1]) != "223.5.5.5" {
+		t.Fatalf("unexpected complemented IPv4 destinations: %v", gotLines)
+	}
+
+	// 场景 2: AF_INET 成功返回 1 条 IPv4 连接, AF_INET6 返回 EPROTONOSUPPORT 失败 -> procfs 仅补齐 1 条 IPv6 连接。
+	dumpCTNetlinkFamilyFn = func(family uint8, seq uint32, maxLines int, onLine func(string)) (int, error) {
+		switch family {
+		case syscall.AF_UNSPEC:
+			return 0, syscall.EOPNOTSUPP
+		case syscall.AF_INET:
+			if onLine != nil {
+				onLine("ipv4 2 tcp 6 120 ESTABLISHED src=192.168.43.99 dst=1.1.1.1 sport=41111 dport=443 packets=3 bytes=300 [ASSURED] mark=0 use=1")
+			}
+			return 1, nil
+		case syscall.AF_INET6:
+			return 0, syscall.EPROTONOSUPPORT
+		default:
+			return 0, syscall.EINVAL
+		}
+	}
+	gotLines = nil
+	count2, err2 := readConntrackNetlink(1024, func(line string) {
+		gotLines = append(gotLines, line)
+	})
+	if err2 != nil || count2 != 2 || len(gotLines) != 2 {
+		t.Fatalf("expected 1 v4 netlink + 1 v6 procfs = 2 flows, got count=%d err=%v lines=%v", count2, err2, gotLines)
+	}
+	if ConntrackOrigDst(gotLines[0]) != "1.1.1.1" || ConntrackOrigDst(gotLines[1]) != "2400:3200::1" {
+		t.Fatalf("unexpected hybrid v4+v6 lines: %v", gotLines)
+	}
+}
+
+func TestReadConntrackLines_NonPermOpenErrorStillFallsBackToCTNetlink(t *testing.T) {
+	oldPaths := ConntrackPaths
+	oldOpen := openConntrackFileFn
+	oldDump := ctnetlinkDumpFn
+	t.Cleanup(func() {
+		ConntrackPaths = oldPaths
+		openConntrackFileFn = oldOpen
+		ctnetlinkDumpFn = oldDump
+	})
+
+	ConntrackPaths = []string{"/proc/version"}
+	openConntrackFileFn = func(name string) (*os.File, error) {
+		return nil, syscall.EINVAL
+	}
+	ctnetlinkDumpFn = func(maxLines int, onLine func(string)) (int, error) {
+		if onLine != nil {
+			onLine("ipv4 2 udp 17 30 src=192.168.43.5 dst=8.8.8.8 sport=50000 dport=53 packets=1 bytes=60 [UNREPLIED] mark=0 use=1")
+		}
+		return 1, nil
+	}
+
+	r := ReadConntrackLines(nil)
+	if !r.Available || !r.Readable || r.Path != ConntrackNetlinkPath || r.Flows != 1 {
+		t.Fatalf("expected EINVAL open error on /proc to fall back to CTNETLINK, got %+v", r)
+	}
+}
+

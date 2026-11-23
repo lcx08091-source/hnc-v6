@@ -2,7 +2,7 @@
 //
 // 干什么: 本机(self_capture)每看到一条 TLS / QUIC ClientHello, 就把
 // 「这条连接真实的 App 包名(由 /proc/net 反查 UID 得到) + 这条连接的域名与指纹」
-// 记成一行带标签样本, 存 run/label_samples.YYYYMMDD.jsonl。
+// 记成一行带标签样本, 存 data/self_studio/label_samples.YYYYMMDD.jsonl。
 // 样本就是「标准答案」: 包名是真值, SNI/JA4 是输入。httpd(v5.24 T4)拿它给
 // 现有识别方法打分(覆盖率 / 准确率 / 最常认错的应用)。
 //
@@ -12,7 +12,7 @@
 //   - 只采本机自己(self_capture 回调)的流量, 不碰热点客户端设备。
 //   - 只存 时间 / 包名 / uid / SNI / JA4 / ALPN / 端口 / 是否 QUIC / ECH /
 //     Partial / 远端 IP + 规则库命中结果; 不存完整 URL、内容、Cookie。
-//   - 样本只写本机 run/ 下, 7 天自动过期, 不上传。
+//   - 样本只写本机持久化目录 data/self_studio/ 下, 7 天自动过期, 不上传。
 //
 // 并发与资源:
 //   - 抓包回调里绝不阻塞: Observe 只做廉价过滤 + 非阻塞入队, channel 满就丢弃计数;
@@ -41,7 +41,7 @@ import (
 )
 
 const (
-	// 文件名前缀 / 后缀: run/label_samples.20261002.jsonl(+ 同日 .capped)。
+	// 文件名前缀 / 后缀: data/self_studio/label_samples.20261002.jsonl(+ 同日 .capped)。
 	labelSamplesPrefix   = "label_samples."
 	labelSamplesJSONLEXT = ".jsonl"
 	labelSamplesCapEXT   = ".capped"
@@ -49,14 +49,16 @@ const (
 	labelSamplesChanCap      = 1024               // 队列上限, 满了直接丢
 	labelSamplesDedupWindow  = 600 * time.Second  // 同一 (pkg,sni,ja4) 10 分钟内只记一次
 	labelSamplesDedupMax     = 50000              // 去重表上限, 超过整体清空(内存有界)
-	labelSamplesDailyCapByte = int64(2 << 20)     // 单日 2 MiB(保护 32M tmpfs)
-	labelSamplesRetentionDay = 2                  // 保留 2 天
-	labelSamplesMinUID       = 10000              // 低于此 UID 视为系统, 跳过
-	labelSamplesDateLayout   = "20060102"         // 本地日期(文件名用)
-	labelSamplesFileMode     = os.FileMode(0o640) // run/ 下私有, 不放全局可读
-	labelSamplesLineMaxByte  = 4096               // 单样本上限保护(域名 + JA4 远小于此)
-	labelSamplesStatsFile    = "label_samples.stats.json"
-	labelSamplesStatsEvery   = 60 * time.Second // 计数快照落盘间隔(httpd 评估页读它显示跳过 / 丢弃数)
+	labelSamplesDailyCapByte = int64(4 << 20)     // 单日硬上限 4 MiB
+	labelSamplesRetentionDay = 2                  // 非 self_studio 临时目录默认保留期
+	// SelfStudioLabelRetentionDays 持久化目录 data/self_studio 下的保留天数(7 天)。
+	SelfStudioLabelRetentionDays = 7
+	labelSamplesMinUID           = 10000              // 低于此 UID 视为系统, 跳过
+	labelSamplesDateLayout       = "20060102"         // 本地日期(文件名用)
+	labelSamplesFileMode         = os.FileMode(0o640) // 私有权限, 不放全局可读
+	labelSamplesLineMaxByte      = 4096               // 单样本上限保护(域名 + JA4 远小于此)
+	labelSamplesStatsFile        = "label_samples.stats.json"
+	labelSamplesStatsEvery       = 60 * time.Second // 计数快照落盘间隔(httpd 评估页读它显示跳过 / 丢弃数)
 )
 
 // LabelSampleInput 是调用方(抓包回调)提供的一条原始观测。
@@ -103,7 +105,7 @@ type LabelSamplesStats struct {
 	Dropped       int64 // 队列满被丢弃的条数
 	SkippedSystem int64 // uid < 10000 被跳过的条数
 	SkippedEmpty  int64 // pkg 或 SNI 为空被跳过的条数
-	Capped        bool  // 当天是否已触到 20 MB 上限
+	Capped        bool  // 当天是否已触到 4 MiB 硬上限
 }
 
 // LabelSamplesWriter 带缓冲的本机样本写入器。零值不可用, 用 NewLabelSamplesWriter。
@@ -120,8 +122,10 @@ type LabelSamplesWriter struct {
 	loc      *time.Location
 	now      func() time.Time
 	dedupWin time.Duration
-	// dailyCap 单日字节上限, 默认 labelSamplesDailyCapByte(单测用小值)。
+	// dailyCap 单日字节上限, 默认 labelSamplesDailyCapByte(4 MiB)。
 	dailyCap int64
+	// retainDays 保留天数(data/self_studio 默认为 7 天)。
+	retainDays int
 
 	// 以下字段只由 Run goroutine(或单测里同步调用 handle)访问。
 	dedup   map[string]int64
@@ -136,19 +140,31 @@ type LabelSamplesWriter struct {
 	stats LabelSamplesStats
 }
 
-// NewLabelSamplesWriter 返回一个未启动的写入器。dir(即 cfg.RunDir)不存在也不报错:
-// 构造时不碰文件系统, 只有真的写样本时才建文件 —— 本机抓包关着就不会产生任何样本文件。
+// NewLabelSamplesWriter 返回一个未启动的写入器。dir(生产为 <hncDir>/data/self_studio)
+// 不存在也不报错: 构造时不碰文件系统, 只有真的写样本时才建文件 —— 本机抓包关着就不会产生任何样本文件。
 func NewLabelSamplesWriter(dir string) *LabelSamplesWriter {
+	ret := labelSamplesRetentionDay
+	if filepath.Base(filepath.Clean(dir)) == "self_studio" {
+		ret = SelfStudioLabelRetentionDays
+	}
 	return &LabelSamplesWriter{
-		dir:      dir,
-		ch:       make(chan LabelSample, labelSamplesChanCap),
-		flushCh:  make(chan chan struct{}, 2),
-		classify: classifyHost,
-		now:      time.Now,
-		dedupWin: labelSamplesDedupWindow,
-		dailyCap: labelSamplesDailyCapByte,
-		dedup:    make(map[string]int64),
-		swept:    make(map[string]bool),
+		dir:        dir,
+		ch:         make(chan LabelSample, labelSamplesChanCap),
+		flushCh:    make(chan chan struct{}, 2),
+		classify:   classifyHost,
+		now:        time.Now,
+		dedupWin:   labelSamplesDedupWindow,
+		dailyCap:   labelSamplesDailyCapByte,
+		retainDays: ret,
+		dedup:      make(map[string]int64),
+		swept:      make(map[string]bool),
+	}
+}
+
+// SetRetentionDays 覆盖样本保留天数(在 Run 启动前调用)。
+func (w *LabelSamplesWriter) SetRetentionDays(days int) {
+	if w != nil && days > 0 {
+		w.retainDays = days
 	}
 }
 
@@ -445,7 +461,11 @@ func (w *LabelSamplesWriter) sweepExpired(now time.Time) {
 	if loc == nil {
 		loc = tzlocal.Location()
 	}
-	cutoff := now.In(loc).AddDate(0, 0, -labelSamplesRetentionDay).Format(labelSamplesDateLayout)
+	retDays := w.retainDays
+	if retDays <= 0 {
+		retDays = labelSamplesRetentionDay
+	}
+	cutoff := now.In(loc).AddDate(0, 0, -retDays).Format(labelSamplesDateLayout)
 	entries, err := os.ReadDir(w.dir)
 	if err != nil {
 		return

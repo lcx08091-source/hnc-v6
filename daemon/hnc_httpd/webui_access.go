@@ -132,16 +132,7 @@ func saveWebUIAccess(hncDir string, c webuiAccessCfg) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return writeFileAtomicWithPerm(p, append(b, '\n'), 0o600)
 }
 
 // normalizeAllowEntries 解析逗号/空白分隔的 MAC / IP 列表: MAC 统一小写冒号格式,
@@ -224,10 +215,12 @@ var (
 )
 
 var (
-	neighMu      sync.Mutex
-	neighSnap    map[string]string // ip(规范文本) → mac
-	neighSnapAt  time.Time
-	neighSnapSrc string // 快照对应的 arp 路径(测试切换 fixture 时失效)
+	neighMu         sync.Mutex
+	neighSnap       map[string]string // ip(规范文本) → mac
+	neighSnapAt     time.Time
+	neighSnapSrc    string // 快照对应的 arp 路径(测试切换 fixture 时失效)
+	neighRefreshing bool
+	neighWaitCh     chan struct{}
 )
 
 func defaultNativeNeigh6(into map[string]string) {
@@ -305,28 +298,58 @@ func parseNeigh6(out string, into map[string]string) {
 }
 
 // neighborMAC 返回 ip 当前对应的 MAC(查不到返回 "")。
+// 缓存未命中时先释放 neighMu, 在锁外完成 /proc/net/arp 与 IPv6 邻居表查找后再加锁回填。
 func neighborMAC(ip net.IP) string {
 	if ip == nil {
 		return ""
 	}
-	neighMu.Lock()
-	defer neighMu.Unlock()
-	if neighSnap == nil || time.Since(neighSnapAt) > neighCacheTTL || neighSnapSrc != neighArpPath {
-		m := map[string]string{}
-		if f, err := os.Open(neighArpPath); err == nil {
-			parseArpTable(bufio.NewScanner(f), m)
-			f.Close()
+	key := ip.String()
+	for {
+		neighMu.Lock()
+		src := neighArpPath
+		if neighSnap != nil && time.Since(neighSnapAt) <= neighCacheTTL && neighSnapSrc == src {
+			mac := neighSnap[key]
+			neighMu.Unlock()
+			return mac
 		}
-		if neighV6Dump != nil {
-			if out, err := neighV6Dump(); err == nil {
-				parseNeigh6(out, m)
+		if neighRefreshing {
+			wait := neighWaitCh
+			neighMu.Unlock()
+			<-wait
+			continue
+		}
+		neighRefreshing = true
+		wait := make(chan struct{})
+		neighWaitCh = wait
+		dumpFn := neighV6Dump
+		nativeFn := neighV6Native
+		neighMu.Unlock()
+
+		var mac string
+		func() {
+			m := map[string]string{}
+			defer func() {
+				neighMu.Lock()
+				neighSnap, neighSnapAt, neighSnapSrc = m, time.Now(), src
+				neighRefreshing = false
+				close(wait)
+				mac = neighSnap[key]
+				neighMu.Unlock()
+			}()
+			if f, err := os.Open(src); err == nil {
+				parseArpTable(bufio.NewScanner(f), m)
+				f.Close()
 			}
-		} else {
-			neighV6Native(m)
-		}
-		neighSnap, neighSnapAt, neighSnapSrc = m, time.Now(), neighArpPath
+			if dumpFn != nil {
+				if out, err := dumpFn(); err == nil {
+					parseNeigh6(out, m)
+				}
+			} else if nativeFn != nil {
+				nativeFn(m)
+			}
+		}()
+		return mac
 	}
-	return neighSnap[ip.String()]
 }
 
 // webuiClientAllowed: ip 是否命中白名单条目(IP 直接比对; MAC 条目经邻居表反查)。

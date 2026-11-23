@@ -199,8 +199,7 @@ func appQosTick(iface string) {
 			return
 		}
 	}
-	tmp := planPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(plan), 0o644); err != nil || os.Rename(tmp, planPath) != nil {
+	if err := wdWriteAtomic(planPath, []byte(plan), 0o644); err != nil {
 		return
 	}
 	runScriptFn(filepath.Join(appQosBinDir, "apply_app_qos.sh"))

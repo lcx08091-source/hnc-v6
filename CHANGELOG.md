@@ -14,6 +14,18 @@
 
 ---
 
+## [6.1.0-rc.4] - 2026-11-23
+
+> **通道说明（候选发布通道 · 稳定版当前为 `v6.0.1`）**：本版本为 `v6.1.0` 正式封版前的第四候选深度排雷版（`versionCode=6009304`），集中完成全仓底层可靠性、双卡物理卡槽真值、内存盘防写爆、共享内存热升级安全、多自动器带宽保底仲裁、防误伤护栏、待机零唤醒与架构文档全量对齐；自动更新广播文件（`update.json`）继续锁定于 `v6.0.1`（`6000001`），不会向稳定版用户自动推送。
+
+### v6.1.0 全量收尾工程第七阶段 · 封版前全栈深度排雷、真机边界加固与架构文档闭环
+- **Fixed · 原生 `dumpsys isub` 双卡物理槽位识别、消灭「第 3 张幽灵卡」与 `BOOTCLASSPATH` 透传修复 (`daemon/hnc_httpd/sim*.go` + `daemon/hnc_httpd/phone_usage_sim.go` + `./bin/*.sh`)**: 切换至原生 `dumpsys isub` 与 `dumpsys telephony.registry` 权威链路，严格按在位物理卡槽 `simSlotIndex`（卡 1 / 卡 2）映射并优先识别 `activeDataSubId` 当前上网数据卡，剔除已拔出历史换卡遗留自增 `subId` 与虚拟漫游/副流量槽位；开机瞬态未归属蜂窝字节自动按唯一上网卡或系统 `NetworkStats` 归并校正，彻底根除双卡手机并列冒出第 3 张「未知卡」卡片；同步修复控制面调用 `content`、`settings`、`cmd`、`am` 等系统命令时清空 `BOOTCLASSPATH` / `SYSTEMSERVERCLASSPATH` 导致的静默空输出。
+- **Fixed · 本机自训练工坊迁出 `32MB tmpfs` 内存盘与 `.tmp` 孤儿文件清理 (`src/dpid/*` + `daemon/hnc_httpd/*` + `./service.sh`)**: 将本机真值自训练工作台产生的样本与蒸馏流水（`self_attrib.*.jsonl`、`label_samples.*.jsonl`、`self_fg.*.jsonl`、`apk_domains.json` 等）全量迁出 `/data/local/hnc/run`（`32MB tmpfs`）至持久化 `/data/local/hnc/data/self_studio/` 子目录并实施容量硬上限轮转；加固全仓原子写文件函数，在写入、刷盘或重命名任一步失败（含 `ENOSPC` 空间不足）时立即删除临时文件，杜绝 `0` 字节 `.tmp.*` 孤儿残留。
+- **Fixed · `shm_vector.bin` v2 热升级防乱码与 32 位 ARMv7 8 字节对齐门禁 (`src/dpid/shm/*` + `daemon/hnc_httpd/*` + `.github/workflows/build.yml`)**: 升级 `16KB` 共享内存头部为 `Magic=HNCVSHM1` + `SchemaVersion=2` + `PayloadSize` 强校验并补齐读写内存屏障，跨版本热升级或结构版本不一致时自动平滑回退 JSON 通道防错位乱码；全仓核查并锁死 64 位字段与原子计数器 8 字节边界对齐，配合 CI `GOOS=android GOARCH=arm GOARM=7` 编译与对齐测试门禁彻底消除 32 位 `armeabi-v7a` 未对齐崩溃隐患。
+- **Fixed · `RootShaperArbiter` 多自动器保底带宽仲裁与三量纲温度异常熔断 (`daemon/hnc_httpd/*` + `./bin/tc_manager.sh`)**: 新增统一根带宽仲裁器协调全局整形、`5G Autorate` 自适应带宽与 `ThermoCruise` 温控巡航对 `1:1` 根类带宽的调速请求，设立全局最低保底带宽地板（下行 `5Mbps` / 上行 `2Mbps`）与平滑恢复回差并在界面明确展示压速原因；电芯与热区温度读取升级为毫摄氏度、十分之一度与摄氏度三量纲自适应归一化，读数超出 `[-20°C, 100°C]` 合理物理区间时立即熔断跳过防误降速。
+- **Fixed · `FlowScalpel` 精准防误伤、`LeakGuard` 共享网关防连坐、门户认证逃生与高通硬件加速截流核验 (`daemon/hnc_httpd/*` + `src/dpid/*` + `./bin/connblock_sync.sh` + `./bin/hnc_offload_guard.sh`)**: 收紧连接手术台 `HNC_SCALPEL` 精确匹配条件并对本机网关、DNS 与管理端口硬豁免防误断网；`LeakGuard` 封禁严守公共 CDN 与共享云网关边界，优先阻断精确域名防连坐误伤主流正常应用；DNS 接管 `serve-stale` 弱网保活期间对酒店/校园网 Captive Portal 联网探测流量强制直通放行确保认证页正常弹出；强化高通热点硬件加速 `tether_limit_map` / IPA 快路径截流比例计算与自动压制、系统设置关闭双路径修复指引。
+- **Changed · 待机 Netlink 零唤醒、全仓零假数据收口与架构/兼容文档重写闭环 (`ARCHITECTURE.md` + `COMPATIBILITY.md` + `daemon/*` + `src/*` + `webroot/*` + `data/*`)**: 收口热点关闭与零连接空闲期的 Netlink 监听与后台轮询实现待机零无效唤醒，彻底清理生产路径残留模拟/估算兜底值并对不支持项如实返回明确原因；将 `ARCHITECTURE.md`（保留打包期版本注入占位符）重写对齐至 `v6.1` 六大核心原生组件与三级数据面真实架构，将 `COMPATIBILITY.md` 按三层实测证据边界如实校准，同步更新 34 个内置规则分包、JA4 指纹库与 CI 全套静态/双架构/单测门禁至 `v6.1.0-rc.4`（`6009304`）。
+
 ## [6.1.0-rc.3] - 2026-11-23
 
 > **通道说明（候选发布通道 · 稳定版当前为 `v6.0.1`）**：本版本为 `v6.1.0` 正式版前的第三候选封版（`versionCode=6009303`），正式将前台正在用应用识别默认切入「智能防抖」引擎并补齐长视频缓冲、语音听歌伴随轨与锁屏防推送篡位多场景体验，收口「强制 QUIC 回落 TCP」排障兜底归位与双栈数据面清理/盲态识别闭环，同时全面清除全界面研发黑话与历史实验标签；自动更新广播文件（`update.json`）继续锁定于 `v6.0.1`（`6000001`），不会向稳定版用户自动推送。

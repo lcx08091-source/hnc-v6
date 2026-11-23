@@ -288,8 +288,6 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 			continue
 		}
 
-		added := 0
-		st.mu.Lock()
 		rules := loadL3Rules().rules
 		blocklist, err := loadBlocklist()
 		if err != nil {
@@ -297,6 +295,9 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 			// fallthrough — continue with empty blocklist
 		}
 		now := time.Now().Unix()
+
+		added := 0
+		st.mu.Lock()
 		for sni, uidSet := range pending {
 			if _, already := st.confirmed[sni]; already {
 				continue
@@ -444,12 +445,11 @@ func buildExpandedRule(sni string, parent l3Rule, uid int, hits int, pkg string,
 // ID for stable diffs across runs (helps human inspection via git).
 func writeExpansions(st *autoExpandState) error {
 	st.mu.Lock()
-	defer st.mu.Unlock()
-
 	rules := make([]autoExpandedRule, 0, len(st.confirmed))
 	for _, r := range st.confirmed {
 		rules = append(rules, r)
 	}
+	st.mu.Unlock()
 	sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
 
 	file := autoExpandedFile{
@@ -464,13 +464,11 @@ func writeExpansions(st *autoExpandState) error {
 	}
 
 	dst := filepath.Join(externalRulesDir, autoExpandOutFile)
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename %s -> %s: %w", tmp, dst, err)
+	if err := atomicWrite(dst, body, 0o644); err != nil {
+		return fmt.Errorf("atomic write %s: %w", dst, err)
 	}
 	return nil
 }

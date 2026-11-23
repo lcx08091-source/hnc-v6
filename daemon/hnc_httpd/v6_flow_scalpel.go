@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -38,7 +39,9 @@ const (
 	scalpelModeCutOnce    = "cut_once"
 	scalpelModeFreeze15m  = "cut_freeze_15m"
 	scalpelResetTTL       = 5 * time.Second
+	scalpelUDPResetTTL    = 1 * time.Second
 	scalpelFreezeTTL      = 15 * time.Minute
+	scalpelMaxActiveRules = 128
 	scalpelRestoreTimeout = 2500 * time.Millisecond
 
 	// Netlink / ctnetlink 协议常量（严格对应 linux/netlink.h 与 linux/netfilter/nfnetlink_conntrack.h）
@@ -52,6 +55,21 @@ const (
 	scalpelNfNetlinkV0    = 0
 	scalpelCtDeleteMsgTyp = (nfnlSubsysCtnetlink << 8) | ipctnlMsgCtDelete // 0x0102
 )
+
+var errScalpelCtENOENT = errors.New("ctnetlink entry not found (ENOENT)")
+
+type scalpelFreezeGuardError struct {
+	ReasonCode string
+	Vendor     string
+	Detail     string
+}
+
+func (e *scalpelFreezeGuardError) Error() string {
+	if e == nil {
+		return "scalpel freeze guard blocked"
+	}
+	return e.Detail
+}
 
 // ScalpelTuple 五元组输入。
 type ScalpelTuple struct {
@@ -68,7 +86,8 @@ type ScalpelActiveRule struct {
 	Mode        string       `json:"mode"` // reset_5s | freeze_15m
 	IsIPv6      bool         `json:"v6"`
 	Tuple       ScalpelTuple `json:"tuple"`
-	MatchSport  bool         `json:"match_sport"` // reset_5s=true(精确五元组); freeze_15m=false(冻结该客户端到目标 ip:dport)
+	ClientMAC   string       `json:"client_mac,omitempty"`
+	MatchSport  bool         `json:"match_sport"` // reset_5s=true(精确五元组); freeze_15m=false(冻结该客户端到目标 ip:dport 的新建连接)
 	CreatedAt   int64        `json:"created_at"`
 	ExpiresAt   time.Time    `json:"-"`
 	ExpiresUnix int64        `json:"expires_at"`
@@ -79,26 +98,33 @@ type scalpelCtDeleteRunner func(tuple ScalpelTuple, seq uint32) error
 
 type flowScalpelEngine struct {
 	// 64 位原子字段严格置于 offset 0 (兼容 32-bit ARM)
-	seqGen   atomic.Uint64
-	cutTotal atomic.Uint64
+	seqGen       atomic.Uint64
+	cutTotal     atomic.Uint64
+	guardBlocked atomic.Uint64
 
 	tickerActive  atomic.Bool
+	loopRunning   atomic.Bool
 	wakeOnce      sync.Once
 	wakeCh        chan struct{}
 	sweepInterval time.Duration
 	ruleCountHook func() int
 	sweepHook     func(time.Time)
+	activityHook  func() (<-chan struct{}, Activity)
+	simActiveHook func() bool
 
-	srv           *server
-	applyMu       sync.Mutex
-	mu            sync.Mutex
-	rules         []ScalpelActiveRule
-	hookEnsuredV4 bool
-	hookEnsuredV6 bool
-	ctDelRunner   scalpelCtDeleteRunner
-	iptRunner     scalpelRestoreRunner
-	resetDuration time.Duration
-	freezeDur     time.Duration
+	srv             *server
+	applyMu         sync.Mutex
+	mu              sync.Mutex
+	timerMu         sync.Mutex
+	standaloneTimer *time.Timer
+	rules           []ScalpelActiveRule
+	hookEnsuredV4   bool
+	hookEnsuredV6   bool
+	forceHookCheck  bool
+	ctDelRunner     scalpelCtDeleteRunner
+	iptRunner       scalpelRestoreRunner
+	resetDuration   time.Duration
+	freezeDur       time.Duration
 }
 
 func newFlowScalpelEngine(s *server) *flowScalpelEngine {
@@ -236,16 +262,90 @@ func parseNetlinkAck(resp []byte) error {
 			return errors.New("truncated NLMSG_ERROR")
 		}
 		errnoNeg := int32(binary.LittleEndian.Uint32(resp[16:20]))
-		if errnoNeg == 0 || -errnoNeg == 2 { // 0 = ACK, ENOENT(2) = 连接已自然销毁
+		if errnoNeg == 0 {
 			return nil
+		}
+		if -errnoNeg == 2 { // ENOENT(2): 正向元组未命中，交由上层触发反向元组二次补刀或视为已自然销毁
+			return errScalpelCtENOENT
 		}
 		return fmt.Errorf("ctnetlink delete errno %d", -errnoNeg)
 	}
 	return nil
 }
 
+func isScalpelCtENOENT(err error) bool {
+	return errors.Is(err, errScalpelCtENOENT) || errors.Is(err, syscall.ENOENT)
+}
+
+func reverseScalpelTuple(t ScalpelTuple) ScalpelTuple {
+	return ScalpelTuple{
+		Proto: t.Proto,
+		SrcIP: t.DstIP,
+		Sport: t.Dport,
+		DstIP: t.SrcIP,
+		Dport: t.Sport,
+	}
+}
+
 func (e *flowScalpelEngine) defaultDeleteConntrackNetlink(tuple ScalpelTuple, seq uint32) error {
 	return sendConntrackDeleteNetlink(tuple, seq)
+}
+
+func (e *flowScalpelEngine) deleteConntrackWithReverseFallback(norm ScalpelTuple) (seq uint32, reverseRetried bool, err error) {
+	seq = uint32(e.seqGen.Add(1))
+	if e.ctDelRunner == nil {
+		return seq, false, nil
+	}
+	err1 := e.ctDelRunner(norm, seq)
+	if err1 == nil {
+		return seq, false, nil
+	}
+	if !isScalpelCtENOENT(err1) {
+		return seq, false, err1
+	}
+	// 正向五元组返回 ENOENT 时（服务端主动发起或 NAT 反向记录为 ORIG），立即交换源目地址与端口二次补刀
+	revSeq := uint32(e.seqGen.Add(1))
+	err2 := e.ctDelRunner(reverseScalpelTuple(norm), revSeq)
+	if err2 == nil || isScalpelCtENOENT(err2) {
+		return seq, true, nil
+	}
+	return seq, true, err2
+}
+
+// ── 共享 CDN 与核心基础设施 15m 端点冻结防误伤守卫 ──────────────────────────
+
+func isScalpelProtectedCorePort(port int) bool {
+	switch port {
+	case 53, 853, 123:
+		return true
+	default:
+		return false
+	}
+}
+
+func evaluateScalpelFreezeGuard(s *server, norm ScalpelTuple) *scalpelFreezeGuardError {
+	if isScalpelProtectedCorePort(norm.Dport) || isScalpelProtectedCorePort(norm.Sport) {
+		corePort := norm.Dport
+		if !isScalpelProtectedCorePort(corePort) {
+			corePort = norm.Sport
+		}
+		return &scalpelFreezeGuardError{
+			ReasonCode: "core_port_freeze_blocked",
+			Vendor:     "Core Network Port",
+			Detail:     fmt.Sprintf("目标端口 %d 属于核心网络基础设施（DNS/DoT/NTP），已拒绝 15 分钟端点冻结以防设备断网；仅允许使用 cut_once 执行一次性单流秒斩", corePort),
+		}
+	}
+	if shared, vendor := detectSharedInfraIP(s, norm.DstIP); shared {
+		if strings.TrimSpace(vendor) == "" {
+			vendor = "共享基础设施"
+		}
+		return &scalpelFreezeGuardError{
+			ReasonCode: "shared_cdn_freeze_blocked",
+			Vendor:     vendor,
+			Detail:     fmt.Sprintf("目标地址 %s 属于 %s 共享 CDN/云网关或公共基础设施节点，已拒绝 15 分钟端点冻结以免误伤共用该节点的其他正常应用新建连接；仅允许使用 cut_once 执行一次性五元组秒斩", norm.DstIP, vendor),
+		}
+	}
+	return nil
 }
 
 // ── Step 2: 双栈 iptables-restore / ip6tables-restore -w 2 --noflush 构造与提交 ──
@@ -269,15 +369,28 @@ func buildScalpelRestorePayload(isIPv6 bool, rules []ScalpelActiveRule) string {
 			}
 		}
 		if r.MatchSport {
-			// 精确五元组双向干净复位: 客户端与服务端均在 5s 窗口内收到真实序列号 RST / ICMP 不可达
-			fmt.Fprintf(&b, "-A %s -p %s -s %s -d %s --sport %d --dport %d -j REJECT --reject-with %s\n",
-				scalpelChainName, t.Proto, t.SrcIP, t.DstIP, t.Sport, t.Dport, rejectWith)
-			fmt.Fprintf(&b, "-A %s -p %s -s %s -d %s --sport %d --dport %d -j REJECT --reject-with %s\n",
-				scalpelChainName, t.Proto, t.DstIP, t.SrcIP, t.Dport, t.Sport, rejectWith)
+			if t.Proto == "tcp" {
+				// TCP 精确五元组双向复位: 严格加 ! --syn 仅对存量报文回发真实 RST, 绝不误杀同端口新建握手
+				fmt.Fprintf(&b, "-A %s -p tcp ! --syn -s %s -d %s --sport %d --dport %d -j REJECT --reject-with %s\n",
+					scalpelChainName, t.SrcIP, t.DstIP, t.Sport, t.Dport, rejectWith)
+				fmt.Fprintf(&b, "-A %s -p tcp ! --syn -s %s -d %s --sport %d --dport %d -j REJECT --reject-with %s\n",
+					scalpelChainName, t.DstIP, t.SrcIP, t.Dport, t.Sport, rejectWith)
+			} else {
+				// UDP 短暂 1s 精确五元组拦截: 快速通知双端端口不可达而避免持续 ICMP 轰炸客户端
+				fmt.Fprintf(&b, "-A %s -p %s -s %s -d %s --sport %d --dport %d -j REJECT --reject-with %s\n",
+					scalpelChainName, t.Proto, t.SrcIP, t.DstIP, t.Sport, t.Dport, rejectWith)
+				fmt.Fprintf(&b, "-A %s -p %s -s %s -d %s --sport %d --dport %d -j REJECT --reject-with %s\n",
+					scalpelChainName, t.Proto, t.DstIP, t.SrcIP, t.Dport, t.Sport, rejectWith)
+			}
 		} else {
-			// 15 分钟冻结目标端点: 仅拦截该源 IP 发往该 (dst_ip, dport, proto) 的重连尝试
-			fmt.Fprintf(&b, "-A %s -p %s -s %s -d %s --dport %d -j REJECT --reject-with %s\n",
-				scalpelChainName, t.Proto, t.SrcIP, t.DstIP, t.Dport, rejectWith)
+			// 15 分钟冻结目标端点: 优先绑定客户端 MAC 并限定 NEW,INVALID 状态, 绝不连坐同一目标 IP 上其他已建立正常连接
+			if mac := canonMAC(r.ClientMAC); mac != "" {
+				fmt.Fprintf(&b, "-A %s -m mac --mac-source %s -d %s -p %s --dport %d -m conntrack --ctstate NEW,INVALID -j REJECT --reject-with %s\n",
+					scalpelChainName, mac, t.DstIP, t.Proto, t.Dport, rejectWith)
+			} else {
+				fmt.Fprintf(&b, "-A %s -s %s -d %s -p %s --dport %d -m conntrack --ctstate NEW,INVALID -j REJECT --reject-with %s\n",
+					scalpelChainName, t.SrcIP, t.DstIP, t.Proto, t.Dport, rejectWith)
+			}
 		}
 	}
 	b.WriteString("COMMIT\n")
@@ -333,14 +446,16 @@ func runScalpelIptWithWaitFallback(binPath string, args ...string) error {
 	return err2
 }
 
+// ensureForwardJump 每次提交或对账前通过 -t filter -C FORWARD -j HNC_SCALPEL 实时核验挂载点,
+// 彻底杜绝粘滞布尔跳过导致 netd 冲刷后规则链悬空。
 func (e *flowScalpelEngine) ensureForwardJump(isIPv6 bool) {
-	if e.srv == nil || !useNativeDataplane(e.srv.hncDir) {
+	if e == nil {
 		return
 	}
 	e.mu.Lock()
-	already := (!isIPv6 && e.hookEnsuredV4) || (isIPv6 && e.hookEnsuredV6)
+	forceCheck := e.forceHookCheck
 	e.mu.Unlock()
-	if already {
+	if !forceCheck && (e.srv == nil || !useNativeDataplane(e.srv.hncDir)) {
 		return
 	}
 	iptName := "iptables"
@@ -349,17 +464,27 @@ func (e *flowScalpelEngine) ensureForwardJump(isIPv6 bool) {
 	}
 	binPath := scalpelResolveBinFn(iptName)
 	if binPath == "" {
+		e.mu.Lock()
+		if isIPv6 {
+			e.hookEnsuredV6 = false
+		} else {
+			e.hookEnsuredV4 = false
+		}
+		e.mu.Unlock()
 		return
 	}
-	_ = runScalpelIptWithWaitFallback(binPath, "-t", "filter", "-N", scalpelChainName)
+	ensured := true
 	if runScalpelIptWithWaitFallback(binPath, "-t", "filter", "-C", "FORWARD", "-j", scalpelChainName) != nil {
-		_ = runScalpelIptWithWaitFallback(binPath, "-t", "filter", "-I", "FORWARD", "1", "-j", scalpelChainName)
+		_ = runScalpelIptWithWaitFallback(binPath, "-t", "filter", "-N", scalpelChainName)
+		if insErr := runScalpelIptWithWaitFallback(binPath, "-t", "filter", "-I", "FORWARD", "1", "-j", scalpelChainName); insErr != nil {
+			ensured = false
+		}
 	}
 	e.mu.Lock()
 	if isIPv6 {
-		e.hookEnsuredV6 = true
+		e.hookEnsuredV6 = ensured
 	} else {
-		e.hookEnsuredV4 = true
+		e.hookEnsuredV4 = ensured
 	}
 	e.mu.Unlock()
 }
@@ -380,8 +505,104 @@ func (e *flowScalpelEngine) defaultPipeRestore(family int, payload string) error
 	return pipeIptablesRestoreWithTimeout(binPath, []byte(payload), scalpelRestoreTimeout)
 }
 
-// Cut 执行两步秒斩手术并启动 5s 自动清理定时器（若 mode=cut_freeze_15m 同步挂入 15m 冻结）。
+func (e *flowScalpelEngine) resolveClientMAC(srcIP string) string {
+	if e == nil || e.srv == nil || e.srv.hncDir == "" || srcIP == "" {
+		return ""
+	}
+	_, macByIP := e.srv.buildDeviceDirectory()
+	return canonMAC(macByIP[srcIP])
+}
+
+func scalpelSameBidirectionalTuple(a, b ScalpelTuple) bool {
+	if a.Proto != b.Proto {
+		return false
+	}
+	if a.SrcIP == b.SrcIP && a.Sport == b.Sport && a.DstIP == b.DstIP && a.Dport == b.Dport {
+		return true
+	}
+	return a.SrcIP == b.DstIP && a.Sport == b.Dport && a.DstIP == b.SrcIP && a.Dport == b.Sport
+}
+
+func scalpelSameFreezeTarget(a, b ScalpelActiveRule) bool {
+	if a.Mode != "freeze_15m" || b.Mode != "freeze_15m" || a.IsIPv6 != b.IsIPv6 {
+		return false
+	}
+	if a.Tuple.Proto != b.Tuple.Proto || a.Tuple.DstIP != b.Tuple.DstIP || a.Tuple.Dport != b.Tuple.Dport {
+		return false
+	}
+	macA := canonMAC(a.ClientMAC)
+	macB := canonMAC(b.ClientMAC)
+	if macA != "" && macB != "" {
+		return macA == macB
+	}
+	if macA == "" && macB == "" {
+		return a.Tuple.SrcIP == b.Tuple.SrcIP
+	}
+	return false
+}
+
+// upsertRuleLocked 对相同活跃规则原地刷新过期时间去重，并在满 128 条上限时淘汰最早过期项防内存膨胀。
+func (e *flowScalpelEngine) upsertRuleLocked(cand ScalpelActiveRule) (changedV4, changedV6 bool) {
+	for i := range e.rules {
+		ex := &e.rules[i]
+		if ex.Mode != cand.Mode || ex.IsIPv6 != cand.IsIPv6 || ex.MatchSport != cand.MatchSport {
+			continue
+		}
+		matched := false
+		if cand.MatchSport {
+			matched = scalpelSameBidirectionalTuple(ex.Tuple, cand.Tuple)
+		} else {
+			matched = scalpelSameFreezeTarget(*ex, cand)
+		}
+		if matched {
+			ex.Tuple = cand.Tuple
+			if cand.ClientMAC != "" {
+				ex.ClientMAC = cand.ClientMAC
+			}
+			ex.CreatedAt = cand.CreatedAt
+			if cand.ExpiresAt.After(ex.ExpiresAt) {
+				ex.ExpiresAt = cand.ExpiresAt
+				ex.ExpiresUnix = cand.ExpiresUnix
+			}
+			if cand.IsIPv6 {
+				return false, true
+			}
+			return true, false
+		}
+	}
+
+	for len(e.rules) >= scalpelMaxActiveRules {
+		oldestIdx := 0
+		for i := 1; i < len(e.rules); i++ {
+			if e.rules[i].ExpiresAt.Before(e.rules[oldestIdx].ExpiresAt) {
+				oldestIdx = i
+			}
+		}
+		evicted := e.rules[oldestIdx]
+		if evicted.IsIPv6 {
+			changedV6 = true
+		} else {
+			changedV4 = true
+		}
+		e.rules = append(e.rules[:oldestIdx], e.rules[oldestIdx+1:]...)
+	}
+
+	e.rules = append(e.rules, cand)
+	if cand.IsIPv6 {
+		changedV6 = true
+	} else {
+		changedV4 = true
+	}
+	return changedV4, changedV6
+}
+
+// Cut 执行两步秒斩手术并驱动单一定时器按最早过期时间回收。
 func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) (map[string]any, error) {
+	return e.CutWithMAC(now, tuple, mode, "")
+}
+
+// CutWithMAC 支持传入或自动解析客户端 MAC 并执行两步秒斩手术与 15m 共享基础设施防误伤守卫。
+func (e *flowScalpelEngine) CutWithMAC(now time.Time, tuple ScalpelTuple, mode, rawMAC string) (map[string]any, error) {
 	norm, _, isV6, err := validateScalpelTuple(tuple)
 	if err != nil {
 		return nil, err
@@ -394,17 +615,32 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 		return nil, errors.New("mode must be cut_once or cut_freeze_15m")
 	}
 
-	seq := uint32(e.seqGen.Add(1))
-	ctErrStr := ""
-	if e.ctDelRunner != nil {
-		if cerr := e.ctDelRunner(norm, seq); cerr != nil {
-			ctErrStr = cerr.Error()
+	if mode == scalpelModeFreeze15m {
+		if guardErr := evaluateScalpelFreezeGuard(e.srv, norm); guardErr != nil {
+			e.guardBlocked.Add(1)
+			resp := map[string]any{
+				"ok":            false,
+				"guard_blocked": true,
+				"reason_code":   guardErr.ReasonCode,
+				"allowed_mode":  scalpelModeCutOnce,
+				"vendor":        guardErr.Vendor,
+				"tuple":         norm,
+				"error":         "freeze_guard_blocked",
+				"detail":        guardErr.Detail,
+			}
+			return resp, guardErr
 		}
 	}
 
-	family := scalpelAfInet
-	if isV6 {
-		family = scalpelAfInet6
+	clientMAC := canonMAC(rawMAC)
+	if clientMAC == "" {
+		clientMAC = e.resolveClientMAC(norm.SrcIP)
+	}
+
+	seq, revRetried, ctErr := e.deleteConntrackWithReverseFallback(norm)
+	ctErrStr := ""
+	if ctErr != nil {
+		ctErrStr = ctErr.Error()
 	}
 
 	var resetDur time.Duration
@@ -420,6 +656,10 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 		if resetDur <= 0 {
 			resetDur = scalpelResetTTL
 		}
+		if norm.Proto == "udp" && resetDur > scalpelUDPResetTTL {
+			// UDP 短暂 1s 拦截避免 ICMP 轰炸客户端，同时兼容单测注入的毫秒级快速超时
+			resetDur = scalpelUDPResetTTL
+		}
 		freezeDur := e.freezeDur
 		if freezeDur <= 0 {
 			freezeDur = scalpelFreezeTTL
@@ -431,12 +671,15 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 			Mode:        "reset_5s",
 			IsIPv6:      isV6,
 			Tuple:       norm,
+			ClientMAC:   clientMAC,
 			MatchSport:  true,
 			CreatedAt:   now.Unix(),
 			ExpiresAt:   expReset,
 			ExpiresUnix: expReset.Unix(),
 		}
-		e.rules = append(e.rules, r5s)
+		u4, u6 := e.upsertRuleLocked(r5s)
+		ch4 = ch4 || u4
+		ch6 = ch6 || u6
 
 		if mode == scalpelModeFreeze15m {
 			expFreeze = now.Add(freezeDur)
@@ -445,12 +688,15 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 				Mode:        "freeze_15m",
 				IsIPv6:      isV6,
 				Tuple:       norm,
+				ClientMAC:   clientMAC,
 				MatchSport:  false,
 				CreatedAt:   now.Unix(),
 				ExpiresAt:   expFreeze,
 				ExpiresUnix: expFreeze.Unix(),
 			}
-			e.rules = append(e.rules, r15m)
+			f4, f6 := e.upsertRuleLocked(r15m)
+			ch4 = ch4 || f4
+			ch6 = ch6 || f6
 		}
 
 		if isV6 {
@@ -468,9 +714,14 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 		runner := e.iptRunner
 		activeCnt = len(e.rules)
 		e.mu.Unlock()
-		e.notifyRuleAdded()
 
 		e.ensureForwardJump(isV6)
+		if isV6 && ch4 {
+			e.ensureForwardJump(false)
+		} else if !isV6 && ch6 {
+			e.ensureForwardJump(true)
+		}
+
 		if runner != nil {
 			if isV6 {
 				iptErr = runner(scalpelAfInet6, p6)
@@ -485,21 +736,28 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 			}
 		}
 	}()
-	_ = family
 	e.cutTotal.Add(1)
+	e.notifyRuleAdded()
+	if !e.loopRunning.Load() {
+		e.syncStandaloneTimer()
+	}
 
-	time.AfterFunc(resetDur+50*time.Millisecond, func() {
-		e.SweepExpired(time.Now())
-	})
-
+	cleanupSec := int(resetDur / time.Second)
+	if cleanupSec <= 0 && resetDur > 0 {
+		cleanupSec = 0
+	}
 	resp := map[string]any{
 		"ok":                   iptErr == nil,
 		"mode":                 mode,
 		"tuple":                norm,
 		"v6":                   isV6,
 		"conntrack_deleted":    ctErrStr == "",
-		"reset_cleanup_in_sec": int(resetDur / time.Second),
+		"reverse_tuple_tried":  revRetried,
+		"reset_cleanup_in_sec": cleanupSec,
 		"active_scalpel_rules": activeCnt,
+	}
+	if clientMAC != "" {
+		resp["client_mac"] = clientMAC
 	}
 	if mode == scalpelModeFreeze15m {
 		resp["frozen_until"] = expFreeze.Unix()
@@ -531,19 +789,77 @@ func (e *flowScalpelEngine) pruneExpiredLocked(now time.Time) (changedV4, change
 	return changedV4, changedV6
 }
 
-// SweepExpired 清理已到期的 5s/15m 规则并同步刷新对应协议栈的 HNC_SCALPEL 子链。
+// SweepExpired 清理已到期的 1s/5s/15m 规则并同步刷新对应协议栈的 HNC_SCALPEL 子链。
 func (e *flowScalpelEngine) SweepExpired(now time.Time) {
 	e.applyMu.Lock()
 	defer e.applyMu.Unlock()
 
 	e.mu.Lock()
 	ch4, ch6 := e.pruneExpiredLocked(now)
+	hasV4, hasV6 := false, false
+	for _, r := range e.rules {
+		if r.IsIPv6 {
+			hasV6 = true
+		} else {
+			hasV4 = true
+		}
+	}
 	var p4, p6 string
 	if ch4 {
 		p4 = buildScalpelRestorePayload(false, e.rules)
 	}
 	if ch6 {
 		p6 = buildScalpelRestorePayload(true, e.rules)
+	}
+	runner := e.iptRunner
+	e.mu.Unlock()
+
+	if ch4 && hasV4 {
+		e.ensureForwardJump(false)
+	}
+	if ch6 && hasV6 {
+		e.ensureForwardJump(true)
+	}
+	if runner != nil {
+		if ch4 {
+			_ = runner(scalpelAfInet, p4)
+		}
+		if ch6 {
+			_ = runner(scalpelAfInet6, p6)
+		}
+	}
+	if !e.loopRunning.Load() {
+		e.syncStandaloneTimer()
+	}
+}
+
+func (e *flowScalpelEngine) clearAllRulesOnHotspotOff() {
+	if e == nil {
+		return
+	}
+	e.applyMu.Lock()
+	defer e.applyMu.Unlock()
+
+	e.mu.Lock()
+	if len(e.rules) == 0 {
+		e.mu.Unlock()
+		return
+	}
+	ch4, ch6 := false, false
+	for _, r := range e.rules {
+		if r.IsIPv6 {
+			ch6 = true
+		} else {
+			ch4 = true
+		}
+	}
+	e.rules = nil
+	var p4, p6 string
+	if ch4 {
+		p4 = buildScalpelRestorePayload(false, nil)
+	}
+	if ch6 {
+		p6 = buildScalpelRestorePayload(true, nil)
 	}
 	runner := e.iptRunner
 	e.mu.Unlock()
@@ -558,6 +874,57 @@ func (e *flowScalpelEngine) SweepExpired(now time.Time) {
 	}
 }
 
+func (e *flowScalpelEngine) earliestExpiry() (time.Time, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.rules) == 0 {
+		return time.Time{}, false
+	}
+	earliest := e.rules[0].ExpiresAt
+	for i := 1; i < len(e.rules); i++ {
+		if e.rules[i].ExpiresAt.Before(earliest) {
+			earliest = e.rules[i].ExpiresAt
+		}
+	}
+	return earliest, true
+}
+
+func (e *flowScalpelEngine) stopStandaloneTimer() {
+	if e == nil {
+		return
+	}
+	e.timerMu.Lock()
+	if e.standaloneTimer != nil {
+		e.standaloneTimer.Stop()
+		e.standaloneTimer = nil
+	}
+	e.timerMu.Unlock()
+}
+
+// syncStandaloneTimer 仅在 runLoop 未启动（如 HTTP 路由单测）时以单一 Timer 兜底最早过期时间，列表空则停表 0 唤醒。
+func (e *flowScalpelEngine) syncStandaloneTimer() {
+	if e == nil || e.loopRunning.Load() {
+		return
+	}
+	earliest, ok := e.earliestExpiry()
+	e.timerMu.Lock()
+	defer e.timerMu.Unlock()
+	if e.standaloneTimer != nil {
+		e.standaloneTimer.Stop()
+		e.standaloneTimer = nil
+	}
+	if !ok {
+		return
+	}
+	wait := time.Until(earliest) + 20*time.Millisecond
+	if wait < 5*time.Millisecond {
+		wait = 5 * time.Millisecond
+	}
+	e.standaloneTimer = time.AfterFunc(wait, func() {
+		e.SweepExpired(time.Now())
+	})
+}
+
 func (e *flowScalpelEngine) summary() map[string]any {
 	now := time.Now()
 	e.mu.Lock()
@@ -569,8 +936,9 @@ func (e *flowScalpelEngine) summary() map[string]any {
 	}
 	e.mu.Unlock()
 	return map[string]any{
-		"active_rules": cnt,
-		"cut_total":    e.cutTotal.Load(),
+		"active_rules":  cnt,
+		"cut_total":     e.cutTotal.Load(),
+		"guard_blocked": e.guardBlocked.Load(),
 	}
 }
 
@@ -637,45 +1005,120 @@ func (e *flowScalpelEngine) sweepOnce(now time.Time) {
 	e.SweepExpired(now)
 }
 
+func (e *flowScalpelEngine) readActivity() (<-chan struct{}, Activity, bool) {
+	if e.activityHook != nil {
+		ch, act := e.activityHook()
+		sim := false
+		if e.simActiveHook != nil {
+			sim = e.simActiveHook()
+		} else if e.srv != nil && e.srv.hncDir != "" {
+			sim = e.srv.simActive()
+		}
+		return ch, act, sim
+	}
+	ch := activityChanged()
+	act := activityNow()
+	sim := false
+	if e.simActiveHook != nil {
+		sim = e.simActiveHook()
+	} else if e.srv != nil && e.srv.hncDir != "" {
+		sim = e.srv.simActive()
+	}
+	return ch, act, sim
+}
+
+func (e *flowScalpelEngine) nextExpiryWait(now time.Time) (time.Duration, bool) {
+	if earliest, ok := e.earliestExpiry(); ok {
+		if !now.Before(earliest) {
+			return 0, true
+		}
+		wait := earliest.Sub(now) + 15*time.Millisecond
+		if wait < time.Millisecond {
+			wait = time.Millisecond
+		}
+		return wait, false
+	}
+	// 当测试仅注入 ruleCountHook 而未写 e.rules 时，回退按 effectiveSweepInterval 单次定时
+	return e.effectiveSweepInterval(), false
+}
+
+// runLoop 采用单一 time.Timer 按最早 ExpiresAt 事件驱动回收；
+// 规则列表为空或 HotspotOff 时彻底停止定时器，保持 0 次后台唤醒。
 func (e *flowScalpelEngine) runLoop(stop <-chan struct{}) {
 	if e == nil {
 		<-stop
 		return
 	}
 	wakeCh := e.ensureWakeCh()
+	e.loopRunning.Store(true)
+	e.stopStandaloneTimer()
+
 	var (
-		tk   *time.Ticker
-		tkCh <-chan time.Time
+		expTimer       *time.Timer
+		timerCh        <-chan time.Time
+		hotspotCleared bool
 	)
-	stopTicker := func() {
-		if tk != nil {
-			tk.Stop()
-			tk = nil
-			tkCh = nil
+	stopTimer := func() {
+		if expTimer != nil {
+			if !expTimer.Stop() {
+				select {
+				case <-expTimer.C:
+				default:
+				}
+			}
+			expTimer = nil
+			timerCh = nil
 		}
 		e.tickerActive.Store(false)
 	}
-	ensureTicker := func() {
-		if tk == nil {
-			tk = time.NewTicker(e.effectiveSweepInterval())
-			tkCh = tk.C
+	armTimer := func(d time.Duration) {
+		stopTimer()
+		if d <= 0 {
+			d = time.Millisecond
 		}
+		expTimer = time.NewTimer(d)
+		timerCh = expTimer.C
 		e.tickerActive.Store(true)
 	}
-	defer stopTicker()
+	defer func() {
+		stopTimer()
+		e.loopRunning.Store(false)
+	}()
 
 	for {
-		if e.ActiveRuleCount() > 0 {
-			ensureTicker()
+		actCh, act, simOn := e.readActivity()
+		if !simOn && (act.Level == lvlHotspotOff || (act.Known && !act.HotspotActive)) {
+			stopTimer()
+			if !hotspotCleared || e.ActiveRuleCount() > 0 {
+				if e.sweepHook == nil {
+					e.clearAllRulesOnHotspotOff()
+				}
+				hotspotCleared = true
+			}
 		} else {
-			stopTicker()
+			hotspotCleared = false
+			if e.ActiveRuleCount() <= 0 {
+				stopTimer()
+			} else {
+				waitDur, expiredNow := e.nextExpiryWait(time.Now())
+				if expiredNow {
+					e.sweepOnce(time.Now())
+					continue
+				}
+				armTimer(waitDur)
+			}
 		}
+
 		select {
 		case <-stop:
 			return
+		case <-actCh:
 		case <-wakeCh:
-		case now := <-tkCh:
-			e.sweepOnce(now)
+		case timerNow := <-timerCh:
+			expTimer = nil
+			timerCh = nil
+			e.tickerActive.Store(false)
+			e.sweepOnce(timerNow)
 		}
 	}
 }
@@ -729,10 +1172,14 @@ func (s *server) apiScalpelFlows(w http.ResponseWriter, r *http.Request) {
 	}
 	eng.mu.Unlock()
 
-	frozenEndpoint := func(src, dst string, dport int, proto string) int64 {
+	frozenEndpoint := func(mac, src, dst string, dport int, proto string) int64 {
+		cMac := canonMAC(mac)
 		for _, r := range activeRules {
-			if r.Mode == "freeze_15m" && r.Tuple.SrcIP == src && r.Tuple.DstIP == dst &&
-				r.Tuple.Dport == dport && r.Tuple.Proto == proto {
+			if r.Mode != "freeze_15m" || r.Tuple.DstIP != dst || r.Tuple.Dport != dport || r.Tuple.Proto != proto {
+				continue
+			}
+			rMac := canonMAC(r.ClientMAC)
+			if (rMac != "" && cMac != "" && rMac == cMac) || r.Tuple.SrcIP == src {
 				return r.ExpiresUnix
 			}
 		}
@@ -807,7 +1254,7 @@ func (s *server) apiScalpelFlows(w http.ResponseWriter, r *http.Request) {
 				row["traffic_type"] = tt
 				row["traffic_conf"] = conf
 			}
-			if frz := frozenEndpoint(ent.Src, ent.Dst, ent.Dport, ent.Proto); frz > 0 {
+			if frz := frozenEndpoint(mac, ent.Src, ent.Dst, ent.Dport, ent.Proto); frz > 0 {
 				row["frozen_until"] = frz
 			}
 			items = append(items, flowItem{
@@ -855,6 +1302,7 @@ func (s *server) apiScalpelCut(w http.ResponseWriter, r *http.Request) {
 		Sport int    `json:"sport"`
 		DstIP string `json:"dst_ip"`
 		Dport int    `json:"dport"`
+		MAC   string `json:"mac"`
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -862,16 +1310,21 @@ func (s *server) apiScalpelCut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad json", "detail": err.Error()})
 		return
 	}
-	resp, err := s.v6State().scalpel.Cut(time.Now(), ScalpelTuple{
+	resp, err := s.v6State().scalpel.CutWithMAC(time.Now(), ScalpelTuple{
 		Proto: req.Proto,
 		SrcIP: req.SrcIP,
 		Sport: req.Sport,
 		DstIP: req.DstIP,
 		Dport: req.Dport,
-	}, req.Mode)
+	}, req.Mode, req.MAC)
 	if err != nil {
 		if resp == nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": err.Error()})
+			return
+		}
+		var guardErr *scalpelFreezeGuardError
+		if errors.As(err, &guardErr) {
+			writeJSON(w, http.StatusConflict, resp)
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, resp)

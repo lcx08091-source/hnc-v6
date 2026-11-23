@@ -41,6 +41,7 @@ elif [ -f "${0%/*}/hnc_env.sh" ]; then
 fi
 CONF="$HNC_DIR/data/webui_access.json"
 STATE="$HNC_DIR/run/webui_guard.state"
+JSON_STATE="$HNC_DIR/run/webui_guard.json"
 LOG="$HNC_DIR/logs/service.log"
 CHAIN=HNC_WEBUI
 PORTS=${HNC_WEBUI_PORTS:-"8443 8080 8444"}
@@ -51,12 +52,25 @@ IP6T=${HNC_IP6T:-"ip6tables -w 2"}
 
 CMD=${1:-apply}
 DRY=0
+JSON_OUT=0
 [ "$2" = "--dry-run" ] && DRY=1
+[ "$2" = "--json" ] && JSON_OUT=1
+if [ "$CMD" = "--json" ]; then
+    CMD=status
+    JSON_OUT=1
+fi
 
+LAST_RUN_ERR=""
 log() { { echo "$(date '+%Y-%m-%d %H:%M:%S') [webui_guard] $*" >> "$LOG"; } 2>/dev/null; }
 run() {
     if [ "$DRY" = "1" ]; then echo "DRY: $*"; return 0; fi
-    "$@" 2>/dev/null
+    local _err _rc
+    _err=$("$@" 2>&1 >/dev/null)
+    _rc=$?
+    if [ "$_rc" -ne 0 ] && [ -n "$_err" ]; then
+        LAST_RUN_ERR="$_err"
+    fi
+    return $_rc
 }
 
 if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ]; then
@@ -90,7 +104,8 @@ detect_ap_iface() {
     fi
     # 若 hnc_state 存在: 非 ACTIVE:* (如 PENDING / PASSIVE) 直接认定当前无活跃热点,
     # 绝不回退读取陈旧的 iface_detect.json / hotspot_iface / data/rules.json!
-    if [ -f "$HNC_DIR/run/hnc_state" ]; then
+    if [ -e "$HNC_DIR/run/hnc_state" ]; then
+        [ -r "$HNC_DIR/run/hnc_state" ] || return 0
         _st=$(head -n 1 "$HNC_DIR/run/hnc_state" 2>/dev/null | tr -d ' \t\r\n')
         case "$_st" in
             ACTIVE:*)
@@ -103,8 +118,8 @@ detect_ap_iface() {
                 ;;
         esac
     fi
-    if [ -f "$HNC_DIR/run/iface_detect.json" ]; then
-        _idj=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null)
+    if [ -f "$HNC_DIR/run/iface_detect.json" ] && [ -r "$HNC_DIR/run/iface_detect.json" ]; then
+        _idj=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null) || _idj=""
         _ts=$(printf '%s' "$_idj" | grep -oE '"ts"[[:space:]]*:[[:space:]]*[0-9]+' | head -1 | sed 's/.*:[[:space:]]*//')
         _fresh=1
         if [ -n "$_ts" ]; then
@@ -133,7 +148,7 @@ detect_ap_iface() {
     # 无 hnc_state 时的兜底文件仅允许非 wlan0 专用 AP 接口(防持久化 rules.json / 陈旧缓存误豁免公共 Wi-Fi wlan0)
     if [ -z "$_ap" ]; then
         for _f in "$HNC_DIR/run/hotspot_iface" "$HNC_DIR/run/active_iface" "$HNC_DIR/run/iface.cache"; do
-            [ -f "$_f" ] || continue
+            [ -f "$_f" ] && [ -r "$_f" ] || continue
             _cand=$(head -n 1 "$_f" 2>/dev/null | tr -d ' \t\r\n')
             if [ -n "$_cand" ] && [ "$_cand" != "wlan0" ]; then
                 _ap="$_cand"
@@ -141,7 +156,7 @@ detect_ap_iface() {
             fi
         done
     fi
-    if [ -z "$_ap" ] && [ -f "$HNC_DIR/data/rules.json" ]; then
+    if [ -z "$_ap" ] && [ -f "$HNC_DIR/data/rules.json" ] && [ -r "$HNC_DIR/data/rules.json" ]; then
         _cand=$(tr -d '\r\n' < "$HNC_DIR/data/rules.json" 2>/dev/null | grep -oE '"hotspot_iface"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
         if [ -n "$_cand" ] && [ "$_cand" != "wlan0" ]; then
             _ap="$_cand"
@@ -150,11 +165,31 @@ detect_ap_iface() {
     valid_ifname "$_ap" && printf '%s' "$_ap"
 }
 
+STA_AP_SAME=0
+AP_IFACE_CACHE=""
+check_sta_ap_same() {
+    local _ap _idj _up="" _lup=""
+    STA_AP_SAME=0
+    _ap=$(detect_ap_iface)
+    AP_IFACE_CACHE="$_ap"
+    [ -n "$_ap" ] || return 1
+    if [ -f "$HNC_DIR/run/iface_detect.json" ] && [ -r "$HNC_DIR/run/iface_detect.json" ]; then
+        _idj=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null) || _idj=""
+        _up=$(printf '%s' "$_idj" | grep -oE '"upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        _lup=$(printf '%s' "$_idj" | grep -oE '"local_upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    fi
+    if [ "$_ap" = "wlan0" ] || [ "$_up" = "$_ap" ] || [ "$_lup" = "$_ap" ]; then
+        STA_AP_SAME=1
+        return 0
+    fi
+    return 1
+}
+
 upstream_lan_ifaces() {
     local _ap _up="" _lup="" _idj _list="" _cand
     _ap=$(detect_ap_iface)
-    if [ -f "$HNC_DIR/run/iface_detect.json" ]; then
-        _idj=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null)
+    if [ -f "$HNC_DIR/run/iface_detect.json" ] && [ -r "$HNC_DIR/run/iface_detect.json" ]; then
+        _idj=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null) || _idj=""
         _up=$(printf '%s' "$_idj" | grep -oE '"upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
         _lup=$(printf '%s' "$_idj" | grep -oE '"local_upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
     fi
@@ -186,11 +221,24 @@ upstream_lan_ifaces() {
 # ─── 配置解析 ────────────────────────────────────────────────────
 MODE=all
 ENTRIES=""
+CONF_ERR=""
 read_conf() {
     MODE=all
     ENTRIES=""
-    [ -f "$CONF" ] || return 0
-    _c=$(tr -d '\r\n' < "$CONF" 2>/dev/null)
+    CONF_ERR=""
+    [ -e "$CONF" ] || return 0
+    if [ ! -r "$CONF" ]; then
+        log "WARN: $CONF permission denied, fail-closed to local_only"
+        MODE=local_only
+        CONF_ERR="permission_denied"
+        return 0
+    fi
+    if ! _c=$(tr -d '\r\n' < "$CONF" 2>/dev/null); then
+        log "WARN: $CONF read failed, fail-closed to local_only"
+        MODE=local_only
+        CONF_ERR="permission_denied"
+        return 0
+    fi
     MODE=$(printf '%s' "$_c" | grep -oE '"mode"[[:space:]]*:[[:space:]]*"[a-z_]*"' | head -1 \
            | sed 's/.*"\([a-z_]*\)"$/\1/')
     case "$MODE" in
@@ -243,6 +291,7 @@ teardown() {  # $1=iptables 命令
 
 build() {  # $1=iptables 命令  $2=4|6
     _T=$1
+    LAST_RUN_ERR=""
     _wan_lan=$(upstream_lan_ifaces)
     run $_T -N $CHAIN          # 已存在时失败, 无妨
     run $_T -F $CHAIN || return 1
@@ -281,10 +330,45 @@ build() {  # $1=iptables 命令  $2=4|6
     return 0
 }
 
+classify_ipt_err() {
+    local _bin="${1%% *}"
+    if [ "$DRY" != "1" ] && [ "$_bin" != "sh" ] && ! command -v "$_bin" >/dev/null 2>&1 && [ ! -x "$_bin" ]; then
+        echo "node_missing"
+        return 0
+    fi
+    case "$(printf '%s' "$LAST_RUN_ERR" | tr 'A-Z' 'a-z')" in
+        *no\ such\ file*|*not\ found*|*does\ not\ exist*|*can\'t\ initialize*)
+            echo "node_missing"
+            ;;
+        *)
+            echo "permission_denied"
+            ;;
+    esac
+}
+
 write_state() {
     [ "$DRY" = 1 ] && return 0
-    mkdir -p "$HNC_DIR/run" 2>/dev/null
-    { printf '%s\n' "$1" > "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"; } 2>/dev/null
+    mkdir -p "$HNC_DIR/run" 2>/dev/null || true
+    local _stmp="$STATE.tmp.$$"
+    if printf '%s\n' "$1" > "$_stmp" 2>/dev/null && [ -s "$_stmp" ]; then
+        mv -f "$_stmp" "$STATE" 2>/dev/null || rm -f "$_stmp" 2>/dev/null || true
+    else
+        rm -f "$_stmp" 2>/dev/null || true
+    fi
+}
+
+write_json_state() {  # $1=state $2=mode $3=entries $4=v4 $5=v6 $6=reason_code $7=detail
+    [ "$DRY" = 1 ] && return 0
+    mkdir -p "$HNC_DIR/run" 2>/dev/null || true
+    local _jtmp="$JSON_STATE.tmp.$$" _ts _det
+    _ts=$(date +%s 2>/dev/null || echo 0)
+    _det=$(printf '%s' "$7" | tr -d '"\\\r\n')
+    if printf '{"state":"%s","mode":"%s","entries":%s,"ap_iface":"%s","v4":"%s","v6":"%s","reason_code":"%s","detail":"%s","ts":%s}\n' \
+        "$1" "$2" "${3:-0}" "${AP_IFACE_CACHE:-}" "$4" "$5" "$6" "$_det" "$_ts" > "$_jtmp" 2>/dev/null && [ -s "$_jtmp" ]; then
+        mv -f "$_jtmp" "$JSON_STATE" 2>/dev/null || rm -f "$_jtmp" 2>/dev/null || true
+    else
+        rm -f "$_jtmp" 2>/dev/null || true
+    fi
 }
 
 count_entries() { set -- $ENTRIES; echo $#; }
@@ -292,10 +376,13 @@ count_entries() { set -- $ENTRIES; echo $#; }
 case "$CMD" in
     apply)
         read_conf
+        check_sta_ap_same || true
         n=$(count_entries)
         if ! build "$IPT" 4; then
-            log "ERROR: v4 apply failed (mode=$MODE)"
-            write_state "failed mode=$MODE v4=fail ts=$(date +%s)"
+            _f_rc=$(classify_ipt_err "$IPT")
+            log "ERROR: v4 apply failed (mode=$MODE reason=$_f_rc)"
+            write_state "failed mode=$MODE v4=fail reason_code=$_f_rc ts=$(date +%s 2>/dev/null || echo 0)"
+            write_json_state "failed" "$MODE" "$n" "fail" "skip" "$_f_rc" "iptables v4 apply failed"
             echo "WEBUI_GUARD=failed v4"
             exit 1
         fi
@@ -303,24 +390,50 @@ case "$CMD" in
         if [ "$v6" = 1 ]; then
             if build "$IP6T" 6; then v6s=ok; else v6s=fail; log "WARN: v6 apply failed (mode=$MODE)"; fi
         fi
-        log "applied mode=$MODE entries=$n v6=$v6s ports=$PORTS"
-        write_state "applied mode=$MODE entries=$n v4=ok v6=$v6s ts=$(date +%s)"
+        _ok_rc="ok"
+        _ok_det="webui firewall guard active"
+        if [ -n "$CONF_ERR" ]; then
+            _ok_rc="$CONF_ERR"
+            _ok_det="config unreadable, fail-closed to local_only"
+        elif [ "$STA_AP_SAME" = "1" ]; then
+            _ok_rc="sta_ap_same_iface"
+            _ok_det="single-iface AP detected (${AP_IFACE_CACHE}), preserved AP access on shared interface"
+        fi
+        log "applied mode=$MODE entries=$n v6=$v6s reason_code=$_ok_rc ports=$PORTS"
+        write_state "applied mode=$MODE entries=$n v4=ok v6=$v6s reason_code=$_ok_rc ts=$(date +%s 2>/dev/null || echo 0)"
+        write_json_state "applied" "$MODE" "$n" "ok" "$v6s" "$_ok_rc" "$_ok_det"
         echo "WEBUI_GUARD=applied mode=$MODE entries=$n v6=$v6"
         ;;
     remove)
+        AP_IFACE_CACHE=""
         teardown "$IPT"
         [ "$v6" = 1 ] && teardown "$IP6T"
         log "removed"
-        write_state "removed ts=$(date +%s)"
+        write_state "removed reason_code=ok ts=$(date +%s 2>/dev/null || echo 0)"
+        write_json_state "removed" "all" "0" "removed" "removed" "ok" "webui firewall guard removed"
         echo "WEBUI_GUARD=removed"
         ;;
     status)
         read_conf
-        echo "mode=$MODE entries=$(count_entries) ports=$PORTS v6=$v6"
-        [ -f "$STATE" ] && cat "$STATE"
+        check_sta_ap_same || true
+        _sn=$(count_entries)
+        if [ "$JSON_OUT" = "1" ]; then
+            if [ -r "$JSON_STATE" ] && [ -s "$JSON_STATE" ]; then
+                cat "$JSON_STATE" 2>/dev/null
+            else
+                _s_rc="ok"
+                [ -n "$CONF_ERR" ] && _s_rc="$CONF_ERR"
+                [ -z "$CONF_ERR" ] && [ "$STA_AP_SAME" = "1" ] && _s_rc="sta_ap_same_iface"
+                printf '{"state":"unknown","mode":"%s","entries":%s,"ap_iface":"%s","v4":"unknown","v6":"%s","reason_code":"%s","detail":"not applied yet","ts":0}\n' \
+                    "$MODE" "$_sn" "${AP_IFACE_CACHE:-}" "$v6" "$_s_rc"
+            fi
+        else
+            echo "mode=$MODE entries=$_sn ports=$PORTS v6=$v6"
+            [ -f "$STATE" ] && [ -r "$STATE" ] && cat "$STATE" 2>/dev/null
+        fi
         ;;
     *)
-        echo "usage: webui_guard.sh apply|remove|status [--dry-run]" >&2
+        echo "usage: webui_guard.sh apply|remove|status [--dry-run|--json]" >&2
         exit 2
         ;;
 esac

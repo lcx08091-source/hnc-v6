@@ -394,15 +394,17 @@ var QH_FIX_LABELS = {
   self_attrib_purge: '一键清理运行空间',
   json_doctor_repair: '一键修复损坏配置',
   refresh: '一键恢复网关转发',
-  clsact_mode_set: '开启自动防旁路',
+  clsact_mode_set: '一键切为始终兜底',
   cache_clear: '一键释放运行空间'
 };
 function qhNormStatus(raw) {
   var s = String(raw || '').toLowerCase().trim();
   if (s === 'fail' || s === 'error' || s === 'bad' || s === 'critical') return 'fail';
-  if (s === 'warn' || s === 'warning' || s === 'degraded') return 'warn';
-  if (s === 'info') return 'info';
-  return 'ok';
+  if (s === 'warn' || s === 'warning' || s === 'degraded' || s === 'bypass' || s === 'bypass_offload') return 'warn';
+  if (s === 'unavailable' || s === 'unknown' || s === 'pending' || s === 'skipped' || s === 'n/a' || !s) return 'unavailable';
+  if (s === 'info' || s === 'idle') return 'info';
+  if (s === 'ok' || s === 'pass' || s === 'healthy' || s === 'good') return 'ok';
+  return 'info';
 }
 function qhPickCards(r) {
   if (!r || typeof r !== 'object') return [];
@@ -428,8 +430,12 @@ function qhParseActionSpec(specStr, extraParams) {
     var tok = parts[i], eqIdx = tok.indexOf('=');
     if (eqIdx > 0) p[tok.slice(0, eqIdx)] = tok.slice(eqIdx + 1);
     else if (act === 'self_studio_start' && !p.mode) p.mode = tok;
+    else if (act === 'clsact_mode_set' && !p.mode) p.mode = tok;
   }
   if (act === 'self_studio_start' && !p.mode) p.mode = 'off';
+  if (act === 'clsact_mode_set') {
+    if (!p.mode || p.mode === 'always') p.mode = 'on';
+  }
   if (act === 'dataplane_verify_run' && !p.resync) { p.resync = '1'; p.check_goroutineleak = '0'; }
   return { name: act, params: p };
 }
@@ -456,19 +462,31 @@ function renderQuickHealthSheet(raw, keepScroll) {
       '<div class="btns" style="margin-top:12px"><button type="button" class="btn sec press" data-act="qh-refresh">' + ico('refresh') + '<span>重试体检</span></button><button type="button" class="btn pri press" data-close>关闭</button></div>';
   } else {
     var cards = qhPickCards(raw);
-    var worst = qhNormStatus(raw.overall || raw.status || raw.overall_status || raw.level || raw.grade);
-    if (!raw.overall && !raw.status && !raw.overall_status && cards.length) {
+    var hasExplicitOverall = Boolean(raw.overall || raw.status || raw.overall_status || raw.level || raw.grade);
+    var worst = hasExplicitOverall ? qhNormStatus(raw.overall || raw.status || raw.overall_status || raw.level || raw.grade) : (cards.length ? 'ok' : 'unavailable');
+    var rankOf = function (st) {
+      return st === 'fail' ? 4 : (st === 'warn' ? 3 : (st === 'unavailable' ? 2 : (st === 'info' ? 1 : 0)));
+    };
+    if (!hasExplicitOverall && cards.length) {
       cards.forEach(function (c) {
         var cs = qhNormStatus(c && (c.status || c.level || c.state));
-        if (cs === 'fail') worst = 'fail';
-        else if (cs === 'warn' && worst !== 'fail') worst = 'warn';
+        if (rankOf(cs) > rankOf(worst)) worst = cs;
       });
     }
     var sumObj = raw.summary && typeof raw.summary === 'object' ? raw.summary : null;
-    var headline = String(raw.headline || raw.one_liner || raw.summary_text || (typeof raw.summary === 'string' ? raw.summary : '') || (sumObj && (sumObj.headline || sumObj.text)) || (worst === 'ok' ? '热点省电与限速状态一切健康，空闲自动零唤醒休眠' : worst === 'fail' ? '发现影响上网或限速的异常项，可点击下方按钮一键修复' : '热点运行正常，有部分省电或加速项可一键优化'));
+    var defaultHeadline = worst === 'ok'
+      ? '热点省电与限速状态一切健康，空闲自动零唤醒休眠'
+      : (worst === 'fail'
+        ? '发现影响上网或限速的异常项，可点击下方按钮一键修复'
+        : (worst === 'warn'
+          ? '热点运行正常，有部分省电或加速项可一键优化'
+          : (worst === 'unavailable'
+            ? '部分内核或系统状态暂不可读，已按中性提示如实展示'
+            : '当前体检快照已就绪，可按提示查看各分项状态')));
+    var headline = String(raw.headline || raw.one_liner || raw.summary_text || (typeof raw.summary === 'string' ? raw.summary : '') || (sumObj && (sumObj.headline || sumObj.text)) || defaultHeadline);
     var subline = String(raw.subline || raw.subtitle || raw.detail || (sumObj && sumObj.detail) || ('本机按需快照检测 · 平时后台 0 额外轮询' + (raw.checked_at ? ' · ' + ago(raw.checked_at) : '')));
     var heroCls = worst === 'fail' ? ' is-fail' : (worst === 'warn' ? ' is-warn' : '');
-    var heroIc = worst === 'fail' ? 'warn' : (worst === 'warn' ? 'info' : 'shield');
+    var heroIc = worst === 'fail' ? 'warn' : (worst === 'warn' || worst === 'unavailable' || worst === 'info' ? 'info' : 'shield');
     var shownPowerBtn = false;
 
     var cardsHtml = cards.map(function (c, idx) {
@@ -478,8 +496,8 @@ function renderQuickHealthSheet(raw, keepScroll) {
       var st = qhNormStatus(c.status || c.level || c.state);
       var isPowerCard = cid === 'zero_wakeup_power' || /省电|唤醒|功耗/.test(String(c.title || c.label || meta.title));
       if (isPowerCard && S.refreshMode === 'realtime' && st === 'ok') st = 'warn';
-      var bdgCls = st === 'fail' ? 'b-red' : (st === 'warn' ? 'b-warn' : (st === 'info' ? 'b-acc' : 'b-ok'));
-      var bdgTxt = String(c.status_label || c.badge || c.state_cn || (st === 'fail' ? '需修复' : st === 'warn' ? '可优化' : st === 'info' ? '提示' : '健康'));
+      var bdgCls = st === 'fail' ? 'b-red' : (st === 'warn' ? 'b-warn' : (st === 'unavailable' ? 'b-gray' : (st === 'info' ? 'b-acc' : 'b-ok')));
+      var bdgTxt = String(c.status_label || c.badge || c.state_cn || (st === 'fail' ? '需修复' : st === 'warn' ? '可优化' : st === 'unavailable' ? '暂不可读' : st === 'info' ? '提示' : '健康'));
       var cTitle = String(c.title || c.label || c.name || meta.title);
       var cSum = String(c.verdict || c.summary || c.headline || c.value || c.text_cn || '');
       var cDet = String(c.detail || c.desc || c.message || c.reason || '');
@@ -500,9 +518,10 @@ function renderQuickHealthSheet(raw, keepScroll) {
       if (jumpTo) {
         acts += '<button type="button" class="btn sec press" data-qh-jump="' + esc(jumpTo) + '"><span>' + esc(jumpLbl) + '</span>' + ico('right') + '</button>';
       }
-      var giCol = st === 'fail' ? 'red' : (st === 'warn' ? 'orange' : (st === 'ok' ? 'green' : meta.color));
+      var giCol = st === 'fail' ? 'red' : (st === 'warn' ? 'orange' : (st === 'unavailable' ? 'gray' : (st === 'ok' ? 'green' : meta.color)));
+      var iconKey = st === 'unavailable' ? 'info' : meta.icon;
       return '<div class="qh-card' + (st === 'fail' ? ' is-fail' : st === 'warn' ? ' is-warn' : '') + '" data-qh-id="' + esc(cid) + '">' +
-        '<div class="qh-card-top"><span class="qh-card-l">' + gi(giCol, meta.icon) + '<span>' + esc(cTitle) + '</span></span><span class="badge ' + bdgCls + '">' + esc(bdgTxt) + '</span></div>' +
+        '<div class="qh-card-top"><span class="qh-card-l">' + gi(giCol, iconKey) + '<span>' + esc(cTitle) + '</span></span><span class="badge ' + bdgCls + '">' + esc(bdgTxt) + '</span></div>' +
         (cSum ? '<div class="qh-card-sum">' + esc(cSum) + '</div>' : '') +
         (cDet ? '<div class="qh-card-det">' + esc(cDet) + '</div>' : '') +
         (isPowerCard && S.refreshMode === 'realtime' ? '<div class="qh-card-det" style="color:var(--badge-warn)">当前前台处于「实时刷新」档位，切回「均衡刷新」可进一步降低亮屏轮询开销。</div>' : '') +
@@ -525,7 +544,7 @@ function renderQuickHealthSheet(raw, keepScroll) {
         '<span class="qh-hero-ic">' + ico(heroIc) + '</span>' +
         '<div class="qh-hero-txt"><div class="qh-hero-t">' + esc(headline) + '</div><div class="qh-hero-s">' + esc(subline) + '</div></div>' +
       '</div>' +
-      '<div class="qh-list">' + (cardsHtml || '<div class="empty">' + uiSvg('check') + ' 各项核心指标均处于健康状态</div>') + '</div>' +
+      '<div class="qh-list">' + (cardsHtml || '<div class="empty">暂无体检分项明细</div>') + '</div>' +
       '<div class="btns" style="margin-top:12px"><button type="button" class="btn sec press" data-act="qh-refresh">' + ico('refresh') + '<span>重新体检</span></button><button type="button" class="btn pri press" data-close>完成</button></div>';
   }
 

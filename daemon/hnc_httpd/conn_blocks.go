@@ -18,6 +18,7 @@ package main
 import (
 	"encoding/json"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,6 +53,35 @@ var connBlockMu sync.Mutex // 串行化读改写 + 展开/同步
 func connBlocksPath(hncDir string) string { return filepath.Join(hncDir, "data", "conn_blocks.json") }
 func connBlocksFlat(hncDir string) string { return filepath.Join(hncDir, "run", "conn_blocks.flat") }
 func connBlocksDNS(hncDir string) string  { return filepath.Join(hncDir, "run", "conn_blocks.dns") }
+
+// isNonExpandableBlockIP 检查是否属于严禁展开进防火墙封锁链的私网、回环、链路本地、多播、
+// 运营商级 NAT(CGNAT 100.64.0.0/10)或透明代理 Fake-IP(198.18.0.0/15, fc00::/18)地址。
+func isNonExpandableBlockIP(ipStr string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil {
+		return true
+	}
+	addr = addr.Unmap()
+	if !addr.IsValid() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsPrivate() ||
+		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() {
+		return true
+	}
+	if addr.Is4() {
+		b := addr.As4()
+		if b[0] == 0 || (b[0] == 255 && b[1] == 255 && b[2] == 255 && b[3] == 255) {
+			return true
+		}
+		// RFC 6598 CGNAT: 100.64.0.0/10
+		if b[0] == 100 && (b[1]&0xc0) == 64 {
+			return true
+		}
+		// RFC 2544 / 透明代理 Fake-IP: 198.18.0.0/15
+		if b[0] == 198 && (b[1]&0xfe) == 18 {
+			return true
+		}
+	}
+	return false
+}
 
 // expandConnBlockDomains 域名封锁项 → 排好序的 "mac domain" 行(DNS 层用)
 func expandConnBlockDomains(f connBlockFile) []string {
@@ -107,30 +137,78 @@ func readConnBlocks(hncDir string) connBlockFile {
 	return f
 }
 
-// expandConnBlocks 把封锁项展开成排好序的 "mac ip" 行
+// expandConnBlocks 把封锁项展开成排好序的 "mac ip" 行。
+// 死定律五: 域名规则反查出的候选 IP 若属于私网/CGNAT/Fake-IP 或共享 CDN/大厂云网关,
+// 仅保留精确 DNS/SNI 域名阻断, 严禁自动展开进 HNC_CONNBLK 防火墙链导致连坐断流!
 func (s *server) expandConnBlocks(f connBlockFile) []string {
 	var names map[string]ipName
+	var globalMACs []string
+	var globalMACsLoaded bool
+	targetMACsFor := func(mac string) []string {
+		m := strings.ToLower(strings.TrimSpace(mac))
+		if m != "00:00:00:00:00:00" {
+			return []string{m}
+		}
+		if !globalMACsLoaded {
+			globalMACsLoaded = true
+			if s != nil {
+				for dm := range s.deviceIPsByMAC() {
+					dm = strings.ToLower(strings.TrimSpace(dm))
+					if validMAC(dm) && dm != "00:00:00:00:00:00" && !isProtectedMAC(s.hncDir, dm) {
+						globalMACs = append(globalMACs, dm)
+					}
+				}
+				sort.Strings(globalMACs)
+			}
+		}
+		return globalMACs
+	}
+
 	set := map[string]bool{}
 	for _, it := range f.Items {
+		macList := targetMACsFor(it.MAC)
+		if len(macList) == 0 {
+			continue
+		}
 		switch it.Kind {
 		case "ip":
-			if ip := net.ParseIP(it.Value); ip != nil {
-				set[it.MAC+" "+ip.String()] = true
+			if ip := net.ParseIP(it.Value); ip != nil && !isNonExpandableBlockIP(it.Value) {
+				ipCanon := ip.String()
+				for _, m := range macList {
+					set[m+" "+ipCanon] = true
+				}
 			}
 		case "domain":
 			if names == nil {
 				names = s.loadIPNames()
 			}
-			d := strings.ToLower(it.Value)
+			d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(it.Value)), ".")
+			if d == "" {
+				continue
+			}
 			type ipCand struct {
 				ip string
 				ts int64
 			}
 			var cands []ipCand
 			for ip, nm := range names {
-				h := strings.ToLower(nm.Name)
-				if h == d || strings.HasSuffix(h, "."+d) {
-					cands = append(cands, ipCand{ip: ip, ts: nm.Ts})
+				h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(nm.Name)), ".")
+				if h != d && !strings.HasSuffix(h, "."+d) {
+					continue
+				}
+				if isNonExpandableBlockIP(ip) {
+					continue
+				}
+				if shared, _ := detectSharedInfraTarget(s, h, ip); shared {
+					continue
+				}
+				if h != d {
+					if shared, _ := detectSharedInfraTarget(s, d, ip); shared {
+						continue
+					}
+				}
+				if parsed := net.ParseIP(ip); parsed != nil {
+					cands = append(cands, ipCand{ip: parsed.String(), ts: nm.Ts})
 				}
 			}
 			sort.Slice(cands, func(i, j int) bool {
@@ -143,7 +221,9 @@ func (s *server) expandConnBlocks(f connBlockFile) []string {
 				cands = cands[:connBlockMaxIPsPerDomain]
 			}
 			for _, c := range cands {
-				set[it.MAC+" "+c.ip] = true
+				for _, m := range macList {
+					set[m+" "+c.ip] = true
+				}
 			}
 		}
 	}
@@ -183,15 +263,17 @@ func (s *server) connBlockSyncLocked(force bool) (string, error) {
 // connBlockRefresh 后台调用: 反查表变了就重新同步
 func (s *server) connBlockRefresh() {
 	connBlockMu.Lock()
-	defer connBlockMu.Unlock()
 	if len(s.connBlocksEffective(time.Now()).Items) == 0 {
 		st, err := os.Stat(connBlocksFlat(s.hncDir))
 		st2, err2 := os.Stat(connBlocksDNS(s.hncDir))
 		if (err != nil || st.Size() == 0) && (err2 != nil || st2.Size() == 0) {
+			connBlockMu.Unlock()
 			return
 		}
 	}
 	_, _ = s.connBlockSyncLocked(false)
+	connBlockMu.Unlock()
+	s.refreshDNSTKBlocklist(time.Now())
 }
 
 var domainRe = suffixRe
@@ -209,8 +291,8 @@ func actionConnBlockAdd(s *server, p map[string]string) actionResp {
 		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
 			return actionResp{OK: false, Error: "bad params", Detail: "invalid ip"}
 		}
-		if isPrivateIP(val) {
-			return actionResp{OK: false, Error: "bad params", Detail: "不能封锁局域网地址"}
+		if isPrivateIP(val) || isNonExpandableBlockIP(val) {
+			return actionResp{OK: false, Error: "bad params", Detail: "不能封锁局域网或保留地址"}
 		}
 		val = ip.String()
 	case "domain":
@@ -226,22 +308,27 @@ func actionConnBlockAdd(s *server, p map[string]string) actionResp {
 		label = string([]rune(label)[:40])
 	}
 	connBlockMu.Lock()
-	defer connBlockMu.Unlock()
 	f := readConnBlocks(s.hncDir)
 	for _, it := range f.Items {
 		if it.MAC == mac && it.Kind == kind && it.Value == val {
+			connBlockMu.Unlock()
+			s.refreshDNSTKBlocklist(time.Now())
 			return actionResp{OK: true, Detail: "已经封锁过了"}
 		}
 	}
 	if len(f.Items) >= connBlockMaxItems {
+		connBlockMu.Unlock()
 		return actionResp{OK: false, Error: "too many", Detail: "封锁项已达上限 200"}
 	}
 	f.Items = append(f.Items, connBlock{MAC: mac, Kind: kind, Value: val, Label: label, Ts: time.Now().Unix()})
 	b, _ := json.MarshalIndent(f, "", "  ")
 	if err := discoverWriteAtomic(connBlocksPath(s.hncDir), b); err != nil {
+		connBlockMu.Unlock()
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
 	out, err := s.connBlockSyncLocked(true)
+	connBlockMu.Unlock()
+	s.refreshDNSTKBlocklist(time.Now())
 	if err != nil {
 		return actionResp{OK: false, Error: "sync failed", Detail: out}
 	}
@@ -253,7 +340,6 @@ func actionConnBlockDel(s *server, p map[string]string) actionResp {
 	kind := strings.TrimSpace(p["kind"])
 	val := strings.ToLower(strings.TrimSpace(p["value"]))
 	connBlockMu.Lock()
-	defer connBlockMu.Unlock()
 	f := readConnBlocks(s.hncDir)
 	kept := f.Items[:0]
 	found := false
@@ -265,14 +351,18 @@ func actionConnBlockDel(s *server, p map[string]string) actionResp {
 		kept = append(kept, it)
 	}
 	if !found {
+		connBlockMu.Unlock()
 		return actionResp{OK: false, Error: "not found"}
 	}
 	f.Items = kept
 	b, _ := json.MarshalIndent(f, "", "  ")
 	if err := discoverWriteAtomic(connBlocksPath(s.hncDir), b); err != nil {
+		connBlockMu.Unlock()
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
 	out, err := s.connBlockSyncLocked(true)
+	connBlockMu.Unlock()
+	s.refreshDNSTKBlocklist(time.Now())
 	if err != nil {
 		return actionResp{OK: false, Error: "sync failed", Detail: out}
 	}

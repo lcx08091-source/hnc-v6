@@ -26,8 +26,10 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,6 +46,7 @@ const (
 	dnsCacheMaxBytes     = 4 << 20
 	dnsCacheMaxTTL       = 3600
 	dnsCacheMaxNegTTL    = 300
+	dnsCaptiveMaxTTL     = 2
 	dnsRateDefaultPerSec = 50
 	dnsRateDefaultBurst  = 200
 	dnsRateMaxClients    = 1024
@@ -97,12 +100,13 @@ type dnsFwdStats struct {
 }
 
 type dnsForwarder struct {
-	// st 必须位于结构体偏移 0 处: 32 位 armeabi-v7a (GOARCH=arm) 下 64 位原子字段保证 8 字节对齐。
+	// st 与 wg 必须紧邻位于结构体顶部: 32 位 armeabi-v7a (GOARCH=arm) 下所有 64 位原子字段(含 sync.WaitGroup 内部 state)严格 8 字节对齐。
 	st struct {
 		queries, cached, blocked, errors, limited, dropped atomic.Int64
 		upstream, upErrs, upTCP, servfail                  atomic.Int64
 		stale, staleFlush, netCheckNs                      atomic.Int64
 	}
+	wg sync.WaitGroup
 
 	upstream  atomic.Value // string "ip:port"
 	blockMode atomic.Value // string
@@ -114,6 +118,7 @@ type dnsForwarder struct {
 	onAnswer func(ev dnsAnswerEvent)
 	onLog    func(e dnsLogEntry)
 	netSig   func() string
+	onFlush  func()
 
 	cache   *dnsCache
 	limiter *dnsRateLimiter
@@ -127,7 +132,6 @@ type dnsForwarder struct {
 	local    map[string]bool // 本机地址(自检来源, 不计统计/不限速/不封锁)
 	listen   []string
 	closed   bool
-	wg       sync.WaitGroup
 	sem      chan struct{}
 	tcpSem   chan struct{}
 	bgSem    chan struct{}
@@ -158,6 +162,9 @@ func newDNSForwarder() *dnsForwarder {
 func (f *dnsForwarder) FlushCache() {
 	f.cache.Flush()
 	f.st.staleFlush.Add(1)
+	if f.onFlush != nil {
+		f.onFlush()
+	}
 }
 
 func (f *dnsForwarder) SetUpstream(addr string) {
@@ -483,6 +490,7 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 	}
 	opcode := (q.Flags >> 11) & 0xF
 	cacheable := opcode == 0 && q.QClass == 1 && q.OptLen == 0
+	isProbe := isCaptivePortalProbeDomain(q.QName)
 	key := ""
 	if cacheable {
 		key = dnsCacheKey(q)
@@ -494,8 +502,8 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 			return finish(resp)
 		}
 	}
-	// Serve-Stale 严格排在 limiter.allow 与 blocked 之后, 且本机自检(internal)绝不走保活
-	if cacheable && !internal && f.cache.hasStale(key, t0) {
+	// Serve-Stale 严格排在 limiter.allow 与 blocked 之后; 本机自检(internal)与 Captive Portal 探测域彻底禁用保活!
+	if cacheable && !internal && !isProbe && f.cache.hasStale(key, t0) {
 		return f.handleWithStale(query, q, proto, key, mac, t0, logIt, finish)
 	}
 	seq := f.cache.seq()
@@ -517,10 +525,16 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 	if m.Rcode == dnsRcodeServFail {
 		f.st.servfail.Add(1)
 	}
+	captiveHijack := dnsHasCaptiveHijackAnswer(m)
+	if (isProbe || captiveHijack) && m.Rcode == dnsRcodeNoError && m.ANCount > 0 {
+		resp = append([]byte(nil), resp...)
+		clampDNSWireTTLs(resp, m.TTLOffsets, dnsCaptiveMaxTTL)
+		m = clampDNSMsgInfoTTLs(m, dnsCaptiveMaxTTL)
+	}
 	if cacheable && m.Flags&dnsFlagTC == 0 {
 		f.cache.putIfSeq(seq, key, resp, m, t0)
 	}
-	if !internal && f.onAnswer != nil && m.Rcode == dnsRcodeNoError {
+	if !internal && !isProbe && !captiveHijack && f.onAnswer != nil && m.Rcode == dnsRcodeNoError {
 		if ips, cn := dnsAnswerIPs(q.QName, m.Answers); len(ips) > 0 {
 			f.onAnswer(dnsAnswerEvent{MAC: mac, QName: q.QName, CNAME: cn, IPs: ips, Ts: t0})
 		}
@@ -634,17 +648,24 @@ func (f *dnsForwarder) handleWithStale(
 		f.st.servfail.Add(1)
 		return fallback()
 	}
+	outResp := res.resp
+	captiveHijack := dnsHasCaptiveHijackAnswer(m)
+	if (isCaptivePortalProbeDomain(q.QName) || captiveHijack) && m.Rcode == dnsRcodeNoError && m.ANCount > 0 {
+		outResp = append([]byte(nil), outResp...)
+		clampDNSWireTTLs(outResp, m.TTLOffsets, dnsCaptiveMaxTTL)
+		m = clampDNSMsgInfoTTLs(m, dnsCaptiveMaxTTL)
+	}
 	now := time.Now()
 	if m.Flags&dnsFlagTC == 0 {
-		f.cache.putIfSeq(seq, key, res.resp, m, now)
+		f.cache.putIfSeq(seq, key, outResp, m, now)
 	}
-	if f.onAnswer != nil && m.Rcode == dnsRcodeNoError {
+	if !captiveHijack && !isCaptivePortalProbeDomain(q.QName) && f.onAnswer != nil && m.Rcode == dnsRcodeNoError {
 		if ips, cn := dnsAnswerIPs(q.QName, m.Answers); len(ips) > 0 {
 			f.onAnswer(dnsAnswerEvent{MAC: mac, QName: q.QName, CNAME: cn, IPs: ips, Ts: now})
 		}
 	}
-	logIt(res.resp, dnsLogEntry{Answers: dnsLogAnswers(m)})
-	return finish(res.resp)
+	logIt(outResp, dnsLogEntry{Answers: dnsLogAnswers(m)})
+	return finish(outResp)
 }
 
 func dnsLogAnswers(m dnsMsgInfo) []string {
@@ -949,6 +970,141 @@ func dnsHasZeroAnswer(m dnsMsgInfo) bool {
 	return false
 }
 
+var captivePortalExactDomains = map[string]bool{
+	// Android / Google
+	"connectivitycheck.gstatic.com": true,
+	"connectivitycheck.android.com": true,
+	"clients3.google.com":           true,
+	"clients1.google.com":           true,
+	"clients4.google.com":           true,
+	"www.google.com":                true,
+	"play.googleapis.com":           true,
+	// Apple iOS / macOS
+	"captive.apple.com":     true,
+	"captive.g.aaplimg.com": true,
+	"www.apple.com":         true,
+	// MIUI / 澎湃 OS
+	"connect.rom.miui.com": true,
+	// vivo / OriginOS
+	"wifi.vivo.com.cn":              true,
+	"connectivitycheck.vivo.com.cn": true,
+	// ColorOS / OPPO / realme
+	"conn1.oppomobile.com":            true,
+	"conn2.oppomobile.com":            true,
+	"conn-service-cn.allawntech.com":  true,
+	// 华为 / HarmonyOS
+	"connectivitycheck.platform.hicloud.com": true,
+	// Windows / Firefox / Linux / Cloudflare
+	"www.msftconnecttest.com":       true,
+	"msftconnecttest.com":           true,
+	"dns.msftncsi.com":              true,
+	"msftncsi.com":                  true,
+	"detectportal.firefox.com":      true,
+	"connectivity-check.ubuntu.com": true,
+	"nmcheck.gnome.org":             true,
+	"networkcheck.kde.org":          true,
+	"cp.cloudflare.com":             true,
+}
+
+// isCaptivePortalProbeDomain 判定查询域名是否属于主流操作系统的 Captive Portal（酒店/校园网认证页）连通性探测域名。
+// 命中时彻底禁用 serve-stale, 正向缓存 TTL 硬夹紧 <= 2s, 且绝不写入 dnsIPNames 反查表。
+func isCaptivePortalProbeDomain(qname string) bool {
+	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(qname)), ".")
+	for cur := h; cur != ""; {
+		if captivePortalExactDomains[cur] {
+			return true
+		}
+		dot := strings.IndexByte(cur, '.')
+		if dot < 0 || dot+1 >= len(cur) {
+			break
+		}
+		cur = cur[dot+1:]
+	}
+	return false
+}
+
+// isLocalDomainName 判定是否属于局域网/本地域名后缀（如 .lan / .local / .home.arpa）。
+func isLocalDomainName(qname string) bool {
+	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(qname)), ".")
+	if h == "" || !strings.Contains(h, ".") || h == "localhost" {
+		return true
+	}
+	for _, sfx := range []string{".lan", ".local", ".home.arpa", ".localhost", ".internal", ".localdomain", ".arpa"} {
+		if strings.HasSuffix(h, sfx) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCaptiveHijackIP 检查 IP 是否属于私网 RFC1918(10/8, 172.16/12, 192.168/16)、CGNAT(100.64.0.0/10)或链路本地地址(保留合法 fd00::/8 ULA)。
+func isCaptiveHijackIP(ipStr string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	if !addr.IsValid() || isFakeIPAddr(net.ParseIP(addr.String())) {
+		return false
+	}
+	if addr.IsLinkLocalUnicast() {
+		return true
+	}
+	if addr.Is4() {
+		if addr.IsPrivate() {
+			return true
+		}
+		b := addr.As4()
+		if b[0] == 100 && (b[1]&0xc0) == 64 {
+			return true
+		}
+	}
+	return false
+}
+
+// dnsHasCaptiveHijackAnswer 检测公网普通域名（非 .lan/.local/.home.arpa）是否被上游门户劫持返回了私网/CGNAT/链路本地 IP。
+func dnsHasCaptiveHijackAnswer(m dnsMsgInfo) bool {
+	if isLocalDomainName(m.Q.QName) {
+		return false
+	}
+	for _, r := range m.Answers {
+		if r.Type == dnsTypeA || r.Type == dnsTypeAAAA {
+			if isCaptiveHijackIP(r.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func clampDNSWireTTLs(msg []byte, offsets []int, maxTTL uint32) {
+	for _, off := range offsets {
+		if off >= 0 && off+4 <= len(msg) {
+			cur := binary.BigEndian.Uint32(msg[off : off+4])
+			if cur > maxTTL {
+				binary.BigEndian.PutUint32(msg[off:off+4], maxTTL)
+			}
+		}
+	}
+}
+
+func clampDNSMsgInfoTTLs(m dnsMsgInfo, maxTTL uint32) dnsMsgInfo {
+	if m.HaveTTL && m.MinTTL > maxTTL {
+		m.MinTTL = maxTTL
+	}
+	if len(m.Answers) > 0 {
+		ans := make([]dnsRR, len(m.Answers))
+		copy(ans, m.Answers)
+		for i := range ans {
+			if ans[i].TTL > maxTTL {
+				ans[i].TTL = maxTTL
+			}
+		}
+		m.Answers = ans
+	}
+	return m
+}
+
 func (c *dnsCache) seq() uint64 {
 	c.mu.Lock()
 	s := c.flushSeq
@@ -997,20 +1153,35 @@ func (c *dnsCache) putInternal(seq uint64, checkSeq bool, key string, msg []byte
 		}
 		return
 	}
+	isProbe := isCaptivePortalProbeDomain(m.Q.QName)
+	captiveHijack := dnsHasCaptiveHijackAnswer(m)
+	clampPortal := isProbe || captiveHijack
+	if clampPortal && ttl > dnsCaptiveMaxTTL {
+		ttl = dnsCaptiveMaxTTL
+	}
 	expire := now.Add(time.Duration(ttl) * time.Second)
 	staleUntil := expire
-	// 仅对正向非截断且不含 0.0.0.0/:: 黑洞与 Fake-IP 的应答赋予 180s Serve-Stale 宽限; NXDOMAIN/NODATA 一律 0s 宽限
-	if m.Rcode == dnsRcodeNoError && m.ANCount > 0 && m.Flags&dnsFlagTC == 0 && !dnsHasZeroAnswer(m) {
+	// 仅对正向非截断且不含 0.0.0.0/:: 黑洞、Fake-IP、门户探测域及门户私网劫持的应答赋予 180s Serve-Stale 宽限
+	if m.Rcode == dnsRcodeNoError && m.ANCount > 0 && m.Flags&dnsFlagTC == 0 && !dnsHasZeroAnswer(m) && !clampPortal {
 		staleUntil = expire.Add(dnsStaleMaxAge)
 	}
+	storedMsg := append([]byte(nil), msg...)
+	storedInfo := m
+	if clampPortal {
+		clampDNSWireTTLs(storedMsg, m.TTLOffsets, dnsCaptiveMaxTTL)
+		storedInfo = clampDNSMsgInfoTTLs(m, dnsCaptiveMaxTTL)
+	}
 	e := &dnsCacheEnt{
-		key: key, msg: append([]byte(nil), msg...), ttlOffs: m.TTLOffsets,
-		stored: now, expire: expire, staleUntil: staleUntil, info: m,
+		key: key, msg: storedMsg, ttlOffs: m.TTLOffsets,
+		stored: now, expire: expire, staleUntil: staleUntil, info: storedInfo,
 	}
 	for _, off := range m.TTLOffsets {
-		t := binary.BigEndian.Uint32(msg[off : off+4])
+		t := binary.BigEndian.Uint32(storedMsg[off : off+4])
 		if t > 0x7FFFFFFF {
 			t = 0
+		}
+		if clampPortal && t > dnsCaptiveMaxTTL {
+			t = dnsCaptiveMaxTTL
 		}
 		e.ttls = append(e.ttls, t)
 	}

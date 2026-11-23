@@ -99,16 +99,7 @@ func selfcheckRun(hncDir string, opts scOptions) (*scReport, error) {
 }
 
 func scWriteFile0600(path string, b []byte) error {
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return writeFileAtomicWithPerm(path, b, 0o600)
 }
 
 type scAPIResp struct {

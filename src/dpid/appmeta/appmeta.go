@@ -45,7 +45,9 @@ type Resolver struct {
 	// live is the optional PackageManager-resolved label cache. nil unless
 	// EnableLiveLabels was called. When present and it has a label for a
 	// package, that real system label wins over the curated map.
-	live *liveLabels
+	live       *liveLabels
+	isIdleFn   func() bool
+	idleWakeCh <-chan struct{}
 }
 
 // NewResolver constructs a Resolver. overrideFile is the path to the
@@ -63,11 +65,11 @@ func NewResolver(overrideFile string) *Resolver {
 
 // Display returns the user-facing label for a package name. Resolution
 // order (first hit wins):
-//   - user override file (e.g. user customized "QQ" → "Tencent QQ")
+//   - user override file (e.g. user customized "QQ" -> "Tencent QQ")
 //   - live PackageManager label (the real localized system name), if enabled
-//   - curated map (e.g. "com.tencent.mm" → "微信")
-//   - cleaned-up package name (e.g. "com.example.foo" → "Foo")
-//   - Empty pkg → empty string (caller decides display, usually "uid=N")
+//   - curated map (e.g. "com.tencent.mm" -> "微信")
+//   - cleaned-up package name (e.g. "com.example.foo" -> "Foo")
+//   - Empty pkg -> empty string (caller decides display, usually "uid=N")
 func (r *Resolver) Display(pkg string) string {
 	if pkg == "" {
 		return ""
@@ -105,25 +107,84 @@ func (r *Resolver) EnableLiveLabels(dexPath, persistTo string) {
 	r.mu.Unlock()
 }
 
-// StartLiveRefresh kicks an initial label refresh and then re-runs the
-// helper every liveLabelTTL until ctx is cancelled. No-op if live labels
-// were not enabled.
+// SetIdleHook configures standby suspension when hotspot is off. When isIdle()
+// returns true, StartLiveRefresh stops its ticker completely (zero background
+// wakeups and zero app_process forks) until wakeCh fires.
+func (r *Resolver) SetIdleHook(isIdle func() bool, wakeCh <-chan struct{}) {
+	r.mu.Lock()
+	r.isIdleFn = isIdle
+	r.idleWakeCh = wakeCh
+	r.mu.Unlock()
+}
+
+// StartLiveRefresh kicks an initial label refresh (unless hotspot is off) and
+// then re-runs the helper every liveLabelTTL while active, suspending completely
+// when hotspot is off until woken or ctx is cancelled.
 func (r *Resolver) StartLiveRefresh(ctx context.Context) {
 	r.mu.RLock()
 	live := r.live
+	isIdle := r.isIdleFn
+	wakeCh := r.idleWakeCh
 	r.mu.RUnlock()
 	if live == nil {
 		return
 	}
 	go func() {
+		idleNow := func() bool {
+			return isIdle != nil && isIdle()
+		}
+		waitUntilActive := func() bool {
+			for idleNow() {
+				if wakeCh != nil {
+					select {
+					case <-ctx.Done():
+						return false
+					case <-wakeCh:
+					}
+				} else {
+					tmr := time.NewTimer(liveLabelTTL)
+					select {
+					case <-ctx.Done():
+						tmr.Stop()
+						return false
+					case <-tmr.C:
+					}
+				}
+			}
+			return ctx.Err() == nil
+		}
+
+		if !waitUntilActive() {
+			return
+		}
 		live.refresh(ctx)
+
 		t := time.NewTicker(liveLabelTTL)
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-wakeCh:
+				if !idleNow() {
+					live.mu.RLock()
+					stale := live.loadedAt.IsZero() || time.Since(live.loadedAt) >= liveLabelTTL
+					live.mu.RUnlock()
+					if stale {
+						live.refresh(ctx)
+						t.Reset(liveLabelTTL)
+					}
+				}
 			case <-t.C:
+				if idleNow() {
+					t.Stop()
+					if !waitUntilActive() {
+						return
+					}
+					live.refresh(ctx)
+					t.Reset(liveLabelTTL)
+					continue
+				}
 				live.refresh(ctx)
 			}
 		}

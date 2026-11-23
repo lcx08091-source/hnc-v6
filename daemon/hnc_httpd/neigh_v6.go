@@ -427,6 +427,13 @@ func runV6SyncScript(hncDir string, full bool, macs []string) {
 	v6NeighStatWrite(hncDir, false)
 }
 
+func (f *v6NeighFilter) ResetKnown() {
+	f.mu.Lock()
+	f.known = map[string]time.Time{}
+	f.ifAt = time.Time{}
+	f.mu.Unlock()
+}
+
 func v6NeighSetState(hncDir string, active bool, errStr string) {
 	v6NeighStat.mu.Lock()
 	changed := v6NeighStat.Active != active || v6NeighStat.Err != errStr
@@ -435,24 +442,24 @@ func v6NeighSetState(hncDir string, active bool, errStr string) {
 	v6NeighStatWrite(hncDir, changed)
 }
 
-func openNeighSocket() (int, error) {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
-	if err != nil {
-		return -1, err
+func v6NeighEnterStandby(hncDir string) {
+	v6NeighStat.mu.Lock()
+	v6NeighStat.Active = false
+	v6NeighStat.Err = ""
+	v6NeighStat.writtenAt = time.Time{}
+	v6NeighStat.mu.Unlock()
+	if hncDir != "" {
+		_ = os.Remove(filepath.Join(hncDir, "run", "v6_neigh.json"))
 	}
-	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Groups: rtmgrpNeigh}); err != nil {
-		_ = syscall.Close(fd)
-		return -1, err
-	}
-	if syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, v6NeighRcvBuf) != nil {
-		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, v6NeighRcvBuf)
-	}
-	tv := syscall.Timeval{Sec: 1}
-	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
-	return fd, nil
 }
 
-// V6NeighLoop 订阅邻居事件并驱动 v6 同步; 订阅失败每 60s 重试, 期间只有周期同步。
+var v6OpenNeighSubFn = func() (*netlinkSubConn, error) {
+	return openNetlinkSubConn(syscall.NETLINK_ROUTE, rtmgrpNeigh, v6NeighRcvBuf, "netlink-rtm-neigh")
+}
+
+// V6NeighLoop 订阅邻居事件并驱动 v6 同步:
+//   - 热点关闭待机(lvlHotspotOff 且非仿真态)时主动关闭 socket 并阻塞在 activityChanged(), 0 唤醒;
+//   - 连接期走 SOCK_NONBLOCK + Go runtime epoll netpoll, 移除 1s SO_RCVTIMEO 轮询。
 func (s *server) V6NeighLoop(stop <-chan struct{}) {
 	if os.Getenv("HNC_V6_NEIGH_DISABLE") == "1" {
 		v6NeighSetState(s.hncDir, false, "disabled by HNC_V6_NEIGH_DISABLE")
@@ -462,44 +469,79 @@ func (s *server) V6NeighLoop(stop <-chan struct{}) {
 	go q.Loop(stop)
 	filter := newV6NeighFilter(s.hncDir, s.currentHotspotIface)
 	buf := make([]byte, 64*1024)
+	lastErr := ""
 	for {
-		fd, err := openNeighSocket()
-		if err != nil {
-			v6NeighSetState(s.hncDir, false, err.Error())
-			log.Printf("v6neigh: neighbor events unavailable (%v), periodic v6 sync only", err)
-			select {
-			case <-stop:
-				return
-			case <-time.After(v6NeighRetry):
-				continue
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		if s.netlinkShouldSleep() {
+			filter.ResetKnown()
+			v6NeighEnterStandby(s.hncDir)
+			ch := activityChanged()
+			if s.netlinkShouldSleep() {
+				select {
+				case <-stop:
+					return
+				case <-ch:
+					continue
+				}
 			}
 		}
+
+		conn, err := v6OpenNeighSubFn()
+		if err != nil {
+			v6NeighSetState(s.hncDir, false, err.Error())
+			if err.Error() != lastErr {
+				lastErr = err.Error()
+				log.Printf("v6neigh: neighbor events unavailable (%v), periodic v6 sync only", err)
+			}
+			if !waitNetlinkRetryOrWake(stop, v6NeighRetry) {
+				return
+			}
+			continue
+		}
+
+		lastErr = ""
 		v6NeighSetState(s.hncDir, true, "")
 		log.Printf("v6neigh: subscribed to RTMGRP_NEIGH (event-driven IPv6 filter sync, debounce %s)", v6Debounce)
-		failed := false
-		for !failed {
-			select {
-			case <-stop:
-				_ = syscall.Close(fd)
-				return
-			default:
-			}
-			n, _, rerr := syscall.Recvfrom(fd, buf, 0)
+		sessDone := make(chan struct{})
+		go s.watchNetlinkSession(stop, sessDone, conn)
+
+		recvFailed := false
+		for {
+			n, rerr := conn.f.Read(buf)
 			if rerr != nil {
-				switch rerr {
-				case syscall.EAGAIN, syscall.EINTR:
+				select {
+				case <-stop:
+					close(sessDone)
+					_ = conn.Close()
+					return
+				default:
+				}
+				if s.netlinkShouldSleep() || isNetlinkStopOrClosedErr(rerr) {
+					break
+				}
+				switch {
+				case errors.Is(rerr, syscall.EAGAIN), errors.Is(rerr, syscall.EINTR):
 					continue
-				case syscall.ENOBUFS:
-					// 内核丢了事件: 不知道漏了哪些地址 → 全量同步一次
+				case errors.Is(rerr, syscall.ENOBUFS):
+					// 内核丢了事件: 不知道漏了哪些地址 -> 重置已知表并全量同步一次
 					v6NeighStat.mu.Lock()
 					v6NeighStat.Lost++
 					v6NeighStat.mu.Unlock()
+					filter.ResetKnown()
 					q.AddFull()
 					continue
+				default:
+					v6NeighSetState(s.hncDir, false, rerr.Error())
+					log.Printf("v6neigh: recv: %v, resubscribing in %s", rerr, v6NeighRetry)
+					recvFailed = true
 				}
-				v6NeighSetState(s.hncDir, false, rerr.Error())
-				log.Printf("v6neigh: recv: %v, resubscribing in %s", rerr, v6NeighRetry)
-				failed = true
+				break
+			}
+			if n <= 0 {
 				continue
 			}
 			msgs, perr := syscall.ParseNetlinkMessage(buf[:n])
@@ -522,11 +564,15 @@ func (s *server) V6NeighLoop(stop <-chan struct{}) {
 				}
 			}
 		}
-		_ = syscall.Close(fd)
-		select {
-		case <-stop:
+
+		close(sessDone)
+		_ = conn.Close()
+		if !recvFailed {
+			filter.ResetKnown()
+			continue
+		}
+		if !waitNetlinkRetryOrWake(stop, v6NeighRetry) {
 			return
-		case <-time.After(v6NeighRetry):
 		}
 	}
 }

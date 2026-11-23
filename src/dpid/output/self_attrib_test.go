@@ -12,26 +12,78 @@ import (
 // 误判"变了"导致写放大修复失效。
 func TestConnsSignatureOrderIndependent(t *testing.T) {
 	a := []SelfAttribConnRow{
-		{Proto: "tcp", Local: "10.0.0.1:44444", Remote: "93.0.0.1:443", UID: 10100},
-		{Proto: "udp", Local: "10.0.0.1:5353", Remote: "8.8.8.8:53", UID: 10200},
+		{Proto: "tcp", Local: "10.0.0.1:44444", Remote: "93.0.0.1:443", UID: 10100, Pkg: "com.example.app"},
+		{Proto: "udp", Local: "10.0.0.1:5353", Remote: "8.8.8.8:53", UID: 10200, Pkg: "com.example.dns"},
 	}
 	b := []SelfAttribConnRow{
-		{Proto: "udp", Local: "10.0.0.1:5353", Remote: "8.8.8.8:53", UID: 10200},
-		{Proto: "tcp", Local: "10.0.0.1:44444", Remote: "93.0.0.1:443", UID: 10100},
+		{Proto: "udp", Local: "10.0.0.1:5353", Remote: "8.8.8.8:53", UID: 10200, Pkg: "com.example.dns"},
+		{Proto: "tcp", Local: "10.0.0.1:44444", Remote: "93.0.0.1:443", UID: 10100, Pkg: "com.example.app"},
 	}
 	if connsSignature(a) != connsSignature(b) {
 		t.Fatal("same conn set in different order must produce the same signature")
 	}
 
-	c := append(b[:1:1], SelfAttribConnRow{Proto: "tcp", Local: "10.0.0.2:55555", Remote: "1.1.1.1:443", UID: 10100})
-	if connsSignature(a) == connsSignature(c) {
-		t.Fatal("different conn sets must produce different signatures")
+	// 短连接本地临时随机端口变化(如 44444 -> 55555)以及并发同远端多端口不应改变签名,
+	// 彻底消除 90%+ 短连接端口轮转造成的重复 JSONL 写盘放大。
+	ephemRotated := []SelfAttribConnRow{
+		{Proto: "tcp", Local: "10.0.0.1:55555", Remote: "93.0.0.1:443", UID: 10100, Pkg: "com.example.app", State: "SYN_SENT"},
+		{Proto: "tcp", Local: "10.0.0.1:55556", Remote: "93.0.0.1:443", UID: 10100, Pkg: "com.example.app", State: "ESTABLISHED"},
+		{Proto: "udp", Local: "10.0.0.1:61234", Remote: "8.8.8.8:53", UID: 10200, Pkg: "com.example.dns"},
+	}
+	if connsSignature(a) != connsSignature(ephemRotated) {
+		t.Fatalf("ephemeral local port changes must NOT alter signature: %q vs %q", connsSignature(a), connsSignature(ephemRotated))
 	}
 
-	// Pkg/State 等非 key 字段不参与签名 (连接集相同即跳过 append 的依据)。
+	// 远端地址、协议、UID 或归属包名变化时必须生成不同签名。
+	c := append(b[:1:1], SelfAttribConnRow{Proto: "tcp", Local: "10.0.0.2:55555", Remote: "1.1.1.1:443", UID: 10100, Pkg: "com.example.app"})
+	if connsSignature(a) == connsSignature(c) {
+		t.Fatal("different remote endpoints must produce different signatures")
+	}
 	a[0].Pkg = "com.example.changed"
-	if connsSignature(a) != connsSignature(b) {
-		t.Fatal("non-key fields must not affect the signature")
+	if connsSignature(a) == connsSignature(b) {
+		t.Fatal("app package attribution change should update signature")
+	}
+}
+
+func TestSelfStudioQuotasAndRetention(t *testing.T) {
+	if SelfAttribMaxDailyBytes != 4<<20 {
+		t.Fatalf("SelfAttribMaxDailyBytes = %d, want 4 MiB", SelfAttribMaxDailyBytes)
+	}
+	if SelfAttribRetainDays != 3 {
+		t.Fatalf("SelfAttribRetainDays = %d, want 3", SelfAttribRetainDays)
+	}
+	if labelSamplesDailyCapByte != 4<<20 {
+		t.Fatalf("labelSamplesDailyCapByte = %d, want 4 MiB", labelSamplesDailyCapByte)
+	}
+	if SelfStudioLabelRetentionDays != 7 {
+		t.Fatalf("SelfStudioLabelRetentionDays = %d, want 7", SelfStudioLabelRetentionDays)
+	}
+
+	hncDir := t.TempDir()
+	studioDir := SelfStudioDir(hncDir)
+	agg := NewSelfAttribAggregator(studioDir)
+	if _, err := os.Stat(studioDir); err != nil {
+		t.Fatalf("NewSelfAttribAggregator must auto-mkdir %s: %v", studioDir, err)
+	}
+	_ = agg
+
+	w := NewLabelSamplesWriter(studioDir)
+	w.loc = time.UTC
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	day6 := filepath.Join(studioDir, "label_samples.20261114.jsonl") // 6 天前: 保留
+	day8 := filepath.Join(studioDir, "label_samples.20261112.jsonl") // 8 天前: 清理
+	if err := os.WriteFile(day6, []byte("{}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(day8, []byte("{}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	w.sweepExpired(now)
+	if _, err := os.Stat(day6); err != nil {
+		t.Fatalf("6-day-old label_samples in self_studio must survive 7-day retention: %v", err)
+	}
+	if _, err := os.Stat(day8); !os.IsNotExist(err) {
+		t.Fatalf("8-day-old label_samples in self_studio must be swept: %v", err)
 	}
 }
 

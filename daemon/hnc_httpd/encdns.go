@@ -82,52 +82,59 @@ func actionEncdnsSet(s *server, p map[string]string) actionResp {
 			scope = "device"
 		}
 	}
-	encdnsMu.Lock()
-	defer encdnsMu.Unlock()
-	c := loadEncdns(s.hncDir)
-	switch scope {
-	case "global":
-		if !validEncdnsPolicy(policy) {
-			return actionResp{OK: false, Error: "bad params", Detail: "policy must be off|dot|strict"}
-		}
-		if c.Policy == policy {
-			return actionResp{OK: true, Detail: "no change"}
-		}
-		c.Policy = policy
-	case "device":
-		if !validMAC(mac) {
-			return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
-		}
-		if dpiCtlSkipMAC(mac) {
-			return actionResp{OK: false, Error: "bad params", Detail: "模拟设备不下发 iptables"}
-		}
-		switch {
-		case policy == "inherit" || policy == "":
-			if _, ok := c.Devices[mac]; !ok {
-				return actionResp{OK: true, Detail: "no change"}
+	resp, needSync := func() (actionResp, bool) {
+		encdnsMu.Lock()
+		defer encdnsMu.Unlock()
+		c := loadEncdns(s.hncDir)
+		switch scope {
+		case "global":
+			if !validEncdnsPolicy(policy) {
+				return actionResp{OK: false, Error: "bad params", Detail: "policy must be off|dot|strict"}, false
 			}
-			delete(c.Devices, mac)
-		case validEncdnsPolicy(policy):
-			if c.Devices[mac] == policy {
-				return actionResp{OK: true, Detail: "no change"}
+			if c.Policy == policy {
+				return actionResp{OK: true, Detail: "no change"}, false
 			}
-			if _, ok := c.Devices[mac]; !ok && len(c.Devices) >= encdnsMaxDevices {
-				return actionResp{OK: false, Error: "too many", Detail: "按设备覆盖已达上限 64"}
+			c.Policy = policy
+		case "device":
+			if !validMAC(mac) {
+				return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}, false
 			}
-			c.Devices[mac] = policy
+			if dpiCtlSkipMAC(mac) {
+				return actionResp{OK: false, Error: "bad params", Detail: "模拟设备不下发 iptables"}, false
+			}
+			switch {
+			case policy == "inherit" || policy == "":
+				if _, ok := c.Devices[mac]; !ok {
+					return actionResp{OK: true, Detail: "no change"}, false
+				}
+				delete(c.Devices, mac)
+			case validEncdnsPolicy(policy):
+				if c.Devices[mac] == policy {
+					return actionResp{OK: true, Detail: "no change"}, false
+				}
+				if _, ok := c.Devices[mac]; !ok && len(c.Devices) >= encdnsMaxDevices {
+					return actionResp{OK: false, Error: "too many", Detail: "按设备覆盖已达上限 64"}, false
+				}
+				c.Devices[mac] = policy
+			default:
+				return actionResp{OK: false, Error: "bad params", Detail: "policy must be off|dot|strict|inherit"}, false
+			}
 		default:
-			return actionResp{OK: false, Error: "bad params", Detail: "policy must be off|dot|strict|inherit"}
+			return actionResp{OK: false, Error: "bad params", Detail: "scope must be global|device"}, false
 		}
-	default:
-		return actionResp{OK: false, Error: "bad params", Detail: "scope must be global|device"}
-	}
-	c.Ts = time.Now().Unix()
-	b, _ := json.Marshal(c)
-	if err := discoverWriteAtomic(encdnsPath(s.hncDir), b); err != nil {
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+		c.Ts = time.Now().Unix()
+		b, _ := json.Marshal(c)
+		if err := discoverWriteAtomic(encdnsPath(s.hncDir), b); err != nil {
+			return actionResp{OK: false, Error: "write failed", Detail: err.Error()}, false
+		}
+		return actionResp{OK: true}, true
+	}()
+	if !needSync {
+		return resp
 	}
 	encdnsCountersInvalidate()
 	rc, out := runBin(s.hncDir, "encdns_sync.sh")
+	encdnsCountersInvalidate()
 	out = lastLine(strings.TrimSpace(out))
 	if rc != 0 {
 		return actionResp{OK: false, Error: "encdns sync failed", Detail: out}
@@ -138,39 +145,71 @@ func actionEncdnsSet(s *server, p map[string]string) actionResp {
 // ─── 计数(iptables -nvxL, 2 秒缓存)──────────────────────────────────
 
 var encdnsCnt struct {
-	mu  sync.Mutex
-	at  time.Time
-	v   map[string]interface{}
-	err string
+	mu         sync.Mutex
+	at         time.Time
+	v          map[string]interface{}
+	err        string
+	refreshing bool
+	waitCh     chan struct{}
+	gen        uint64
 }
 
 func encdnsCountersInvalidate() {
 	encdnsCnt.mu.Lock()
 	encdnsCnt.at = time.Time{}
+	encdnsCnt.gen++
 	encdnsCnt.mu.Unlock()
 }
 
 func (s *server) encdnsCounters() (map[string]interface{}, string) {
-	encdnsCnt.mu.Lock()
-	defer encdnsCnt.mu.Unlock()
-	if !encdnsCnt.at.IsZero() && time.Since(encdnsCnt.at) < 2*time.Second {
-		return encdnsCnt.v, encdnsCnt.err
+	for {
+		encdnsCnt.mu.Lock()
+		if !encdnsCnt.at.IsZero() && time.Since(encdnsCnt.at) < 2*time.Second {
+			v, errStr := encdnsCnt.v, encdnsCnt.err
+			encdnsCnt.mu.Unlock()
+			return v, errStr
+		}
+		if encdnsCnt.refreshing {
+			wait := encdnsCnt.waitCh
+			encdnsCnt.mu.Unlock()
+			<-wait
+			continue
+		}
+		encdnsCnt.refreshing = true
+		wait := make(chan struct{})
+		encdnsCnt.waitCh = wait
+		startGen := encdnsCnt.gen
+		encdnsCnt.mu.Unlock()
+
+		var (
+			m      map[string]interface{}
+			errStr string
+		)
+		func() {
+			defer func() {
+				encdnsCnt.mu.Lock()
+				if encdnsCnt.gen == startGen {
+					encdnsCnt.at = time.Now()
+					encdnsCnt.v = m
+					encdnsCnt.err = errStr
+				}
+				encdnsCnt.refreshing = false
+				close(wait)
+				encdnsCnt.mu.Unlock()
+			}()
+			rc, out := runBin(s.hncDir, "encdns_sync.sh", "--counters")
+			line := lastLine(strings.TrimSpace(out))
+			if rc != 0 {
+				errStr = line
+				return
+			}
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
+				m = nil
+				errStr = "bad counters output"
+			}
+		}()
+		return m, errStr
 	}
-	encdnsCnt.at = time.Now()
-	encdnsCnt.v, encdnsCnt.err = nil, ""
-	rc, out := runBin(s.hncDir, "encdns_sync.sh", "--counters")
-	line := lastLine(strings.TrimSpace(out))
-	if rc != 0 {
-		encdnsCnt.err = line
-		return nil, line
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal([]byte(line), &m); err != nil {
-		encdnsCnt.err = "bad counters output"
-		return nil, encdnsCnt.err
-	}
-	encdnsCnt.v = m
-	return m, ""
 }
 
 // encdnsStringLayer xt_string 能力(strict 的 SNI/DNS 名字层): available | unavailable | unknown

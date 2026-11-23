@@ -82,7 +82,12 @@ func startLabelSamples(ctx context.Context, cfg Config) {
 		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	w := output.NewLabelSamplesWriter(cfg.RunDir)
+	studioDir := output.SelfStudioDir(filepath.Dir(filepath.Clean(cfg.RunDir)))
+	if err := os.MkdirAll(studioDir, 0o755); err != nil {
+		log.Printf("self-capture: mkdir %s: %v", studioDir, err)
+	}
+	w := output.NewLabelSamplesWriter(studioDir)
+	w.SetRetentionDays(output.SelfStudioLabelRetentionDays)
 	h := &labelSamplesHolder{w: w, cancel: cancel, done: make(chan struct{})}
 	labelSamples.Store(h)
 	go func() {
@@ -90,7 +95,7 @@ func startLabelSamples(ctx context.Context, cfg Config) {
 		close(h.done)
 		cancel()
 	}()
-	log.Printf("self-capture: 本机样本工厂已启动(%s/label_samples.<日期>.jsonl)", cfg.RunDir)
+	log.Printf("self-capture: 本机样本工厂已启动(%s/label_samples.<日期>.jsonl)", studioDir)
 }
 
 // stopLabelSamples 幂等: 没在跑直接返回。只在 reconcile(持 liveMu)里调用。

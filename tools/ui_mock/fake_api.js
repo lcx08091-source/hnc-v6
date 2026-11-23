@@ -12,8 +12,12 @@
 (function () {
   'use strict';
 
+  if (typeof window === 'undefined' || window.__HNC_MOCK_PREVIEW__ !== true) {
+    return;
+  }
+
   var META = window.__HNC_MOCK_META || {};
-  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.3', VCODE = String(META.versionCode || '6009303');
+  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.4', VCODE = String(META.versionCode || '6009304');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 
@@ -304,7 +308,7 @@
   var ENC = { policy: 'dot', devices: {} };
   var MOCK_SIGNAL = {
     available: true, mode: 'cellular', rat: '5G SA', display_rat: '5G-A', is_5ga: true,
-    slot: 1, sub_id: 1, carrier: '中国移动', carrier_short: '移动', mcc_mnc: '46000',
+    slot: 2, sub_id: 2, carrier: '中国移动', custom_name: '中国移不动', carrier_short: '移动', mcc_mnc: '46000',
     sharing_mode: '2.6GHz+700MHz 移广双载波共享', upstream_iface: 'rmnet_data2',
     band: 'n41', bandwidth_mhz: 100, band_combo: 'n41+n28', total_bw_mhz: 130, ca_count: 2,
     arfcn: 504990, freq_mhz: 2600,
@@ -340,6 +344,7 @@
     var cur = h[h.length - 1];
     MOCK_SIGNAL.rsrp_dbm = cur.rsrp_dbm;
     MOCK_SIGNAL.sinr_db = cur.sinr_db;
+    MOCK_SIGNAL.has_sinr = true;
     MOCK_SIGNAL.rsrq_db = cur.rsrq_db;
     MOCK_SIGNAL.pci = cur.pci;
     MOCK_SIGNAL.rssi_dbm = cur.rsrp_dbm + 28;
@@ -356,10 +361,10 @@
     var pBh = lim(round(Math.max(0, cur.rtt_ms - 18) * 2.2), 6, 92);
     var lvlOf = function (p) { return p >= 75 ? 'severe' : (p >= 50 ? 'moderate' : (p >= 25 ? 'mild' : 'clean')); };
     MOCK_SIGNAL.interference_sources = [
-      { id: 'co_channel', name: '同频与邻区电磁干扰', pct: pEm, level: lvlOf(pEm), value: 'SINR ' + cur.sinr_db + ' dB', summary: cur.sinr_db >= 13 ? '同频邻区底噪干净，256QAM 高阶调制稳定' : '存在邻区同频重叠干扰，建议移近窗边' },
-      { id: 'air_load', name: '基站空口信道负载', pct: pLoad, level: lvlOf(pLoad), value: 'RSRQ ' + cur.rsrq_db + ' dB', summary: 'n41+n28 双载波资源块充裕，下行调度响应及时' },
-      { id: 'multipath_handover', name: '多径衰落与乒乓切换', pct: pFade, level: lvlOf(pFade), value: 'Δ' + MOCK_SIGNAL.jitter_db + ' dB' + (ho > 0 ? ' · ' + ho + '次切换' : ''), summary: ho > 0 ? '近期完成 1 次更优扇区切换，当前驻留 PCI ' + cur.pci + ' 稳定' : '驻留主服务小区锁频稳定，无乒乓切换' },
-      { id: 'backhaul_jitter', name: '回程排队延迟抖动', pct: pBh, level: lvlOf(pBh), value: 'RTT ' + cur.rtt_ms.toFixed(1) + ' ms', summary: '上游 rmnet_data2 回程延迟平稳，零缓冲区膨胀' }
+      { id: 'co_channel', name: '同频与邻区电磁干扰', available: true, pct: pEm, level: lvlOf(pEm), value: 'SINR ' + cur.sinr_db + ' dB', summary: cur.sinr_db >= 13 ? '同频邻区底噪干净，256QAM 高阶调制稳定' : '存在邻区同频重叠干扰，建议移近窗边' },
+      { id: 'air_load', name: '基站空口信道负载', available: true, pct: pLoad, level: lvlOf(pLoad), value: 'RSRQ ' + cur.rsrq_db + ' dB', summary: 'n41+n28 双载波资源块充裕，下行调度响应及时' },
+      { id: 'multipath_handover', name: '多径衰落与乒乓切换', available: true, pct: pFade, level: lvlOf(pFade), value: 'Δ' + MOCK_SIGNAL.jitter_db + ' dB' + (ho > 0 ? ' · ' + ho + '次切换' : ''), summary: ho > 0 ? '近期完成 1 次更优扇区切换，当前驻留 PCI ' + cur.pci + ' 稳定' : '驻留主服务小区锁频稳定，无乒乓切换' },
+      { id: 'backhaul_jitter', name: '回程排队延迟抖动', available: true, pct: pBh, level: lvlOf(pBh), value: 'RTT ' + cur.rtt_ms.toFixed(1) + ' ms', summary: '上游 rmnet_data2 回程延迟平稳，零缓冲区膨胀' }
     ];
     MOCK_SIGNAL.interference_pct = round(pEm * 0.38 + pLoad * 0.26 + pFade * 0.20 + pBh * 0.16);
     MOCK_SIGNAL.interference_level = lvlOf(MOCK_SIGNAL.interference_pct);
@@ -413,7 +418,7 @@
     if (h.length > 60) h.splice(0, h.length - 60);
     _recalcMockSignalMeta();
   }
-  var PU_CFG = { billing_day: 1, warn_percent: 80, plan_sim1_gb: 100, plan_sim2_gb: 0, anchor_sim1_gb: 0, anchor_sim2_gb: 0, use_netstats: 'auto' };
+  var PU_CFG = { billing_day: 1, warn_percent: 80, plan_sim1_gb: 30, plan_sim2_gb: 100, anchor_sim1_gb: 0, anchor_sim2_gb: 0, use_netstats: 'auto' };
   var SELF_ON = { toggle: true, auto_expand: true, auto_promote: false };
   var DNS = { enabled: false, block_mode: 'nxdomain', log_queries: false };
   var FG_ENGINE = 'hmm';
@@ -566,24 +571,27 @@
     for (i = n - 1; i >= 0; i--) { var s = dayStat(i); days.push(s); tot.hs += s.hs; tot.lc += s.lc; tot.lw += s.lw; }
     for (i = 0; i < cycDays; i++) { var s2 = dayStat(i); cyc += s2.hs + s2.lc; }
     var trio = function (v, up) { return { rx: round(v * (1 - up)), tx: round(v * up), total: round(v) }; };
-    var cell = tot.hs + tot.lc, sim2c = 0.31 * GB * Math.min(1, cycDays / 3), plan1 = PU_CFG.plan_sim1_gb * GB, plan2 = PU_CFG.plan_sim2_gb * GB;
+    var cell = tot.hs + tot.lc, sim1c = 0.36 * GB * Math.min(1, cycDays / 3), plan1 = PU_CFG.plan_sim1_gb * GB, plan2 = PU_CFG.plan_sim2_gb * GB;
+    var unattrBytes = round(14.6 * MB);
     var r = {
       period: period, since: Math.floor((period === 'cycle' || period === 'month' ? cs : dayAt(n - 1)).getTime() / 1000), until: now(),
       billing_day: PU_CFG.billing_day, cycle_start: Math.floor(cs.getTime() / 1000), cycle_end: Math.floor(ce.getTime() / 1000), config: clone(PU_CFG),
-      totals: { cellular: trio(cell, 0.08), wifi: trio(tot.lw, 0.1), hotspot: trio(tot.hs, 0.07), local: trio(tot.lc + tot.lw, 0.1) },
+      max_slots: 2,
+      unattributed_cycle_bytes: unattrBytes,
+      totals: { cellular: trio(cell + (period === 'today' ? 0 : sim1c), 0.08), wifi: trio(tot.lw, 0.1), hotspot: trio(tot.hs, 0.07), local: trio(tot.lc + tot.lw, 0.1) },
       hotspot_via: { cell: trio(tot.hs, 0.07), wifi: trio(0, 0), unknown: trio(0, 0) },
       by_sim: [
-        { slot: 1, carrier: '中国移动', carriers: ['中国移动'], total: round(cell), rx: round(cell * 0.92), tx: round(cell * 0.08), local_rx: round(tot.lc * 0.9), local_tx: round(tot.lc * 0.1),
-          hotspot_total: round(tot.hs), cycle_used: round(cyc), netstats_cycle_used: round(cyc * 1.013), plan_bytes: plan1, used_pct: plan1 ? cyc / plan1 * 100 : null, is_default_data: true },
-        { slot: 2, carrier: '中国联通', carriers: ['中国联通'], total: period === 'today' ? 0 : round(sim2c), rx: round(sim2c * 0.9), tx: round(sim2c * 0.1), local_rx: 0, local_tx: 0,
-          hotspot_total: 0, cycle_used: round(sim2c), netstats_cycle_used: round(sim2c * 1.02), plan_bytes: plan2, used_pct: plan2 ? sim2c / plan2 * 100 : null, is_default_data: false }
+        { slot: 1, sub_id: 1, carrier: '中国联通', custom_name: '', carriers: ['中国联通'], total: period === 'today' ? 0 : round(sim1c), rx: round(sim1c * 0.9), tx: round(sim1c * 0.1), local_rx: round(sim1c * 0.9), local_tx: round(sim1c * 0.1),
+          hotspot_total: 0, cycle_used: round(sim1c), netstats_cycle_used: round(sim1c * 1.018), plan_bytes: plan1, used_pct: plan1 ? sim1c / plan1 * 100 : null, is_default_data: false },
+        { slot: 2, sub_id: 2, carrier: '中国移动', custom_name: '中国移不动', carriers: ['中国移动'], total: round(cell), rx: round(cell * 0.92), tx: round(cell * 0.08), local_rx: round(tot.lc * 0.9), local_tx: round(tot.lc * 0.1),
+          hotspot_total: round(tot.hs), cycle_used: round(cyc), netstats_cycle_used: round(cyc * 1.013), plan_bytes: plan2, used_pct: plan2 ? cyc / plan2 * 100 : null, is_default_data: true }
       ],
       by_day: days.map(function (s) { return { date: ymdDash(s.d), cell: round(s.hs + s.lc), wifi: round(s.lw), hotspot: round(s.hs), local: round(s.lc + s.lw) }; }),
-      default_sim: { slot: 1, carrier: '中国移动', sub_id: 1 },
-      sources: { sim_detect: 'ok', sim_source: 'settings', hotspot_iface: IFACE, upstream: 'cell', counters: '/proc/net/dev', last_sample: now() - 37 },
+      default_sim: { slot: 2, carrier: '中国移动', custom_name: '中国移不动', sub_id: 2 },
+      sources: { sim_detect: 'ok', sim_source: 'isub', max_slots: 2, hotspot_iface: IFACE, upstream: 'cell', counters: '/proc/net/dev', last_sample: now() - 37 },
       primary_source: PU_CFG.use_netstats === 'prefer' ? 'netstats' : 'hnc',
       calibration: PU_CFG.use_netstats === 'off' ? { status: 'unavailable', reason: 'disabled' } :
-        { status: 'ok', hnc_vs_netstats_pct: -1.3, checked_at: now() - 1500, netstats_cell_by_sim: [{ slot: 1, hnc_vs_netstats_pct: -1.3 }, { slot: 2, hnc_vs_netstats_pct: -2 }], text_cn: [] }
+        { status: 'ok', hnc_vs_netstats_pct: -1.3, checked_at: now() - 1500, netstats_cell_by_sim: [{ slot: 1, hnc_vs_netstats_pct: -1.8 }, { slot: 2, hnc_vs_netstats_pct: -1.3 }], text_cn: [] }
     };
     if (period === 'today') r.by_hour = dayStat(0).h.map(function (x, h) { return { h: h, cell: round(x.hs + x.lc), wifi: round(x.lw), hotspot: round(x.hs), local: round(x.lc + x.lw) }; });
     return r;
@@ -694,19 +702,19 @@
     });
     var idb = 0.89;
     var MOCK_L3_SUBS = [
-      'hnc-curated-v6.1.0-rc.3-dedup#00-core-meta',
-      'hnc-curated-v6.1.0-rc.3#01-short-video', 'hnc-curated-v6.1.0-rc.3#02-video-live', 'hnc-curated-v6.1.0-rc.3#03-social-im',
-      'hnc-curated-v6.1.0-rc.3#04-games-cn', 'hnc-curated-v6.1.0-rc.3#05-games-global', 'hnc-curated-v6.1.0-rc.3#06-shopping-life',
-      'hnc-curated-v6.1.0-rc.3#07-music-audio', 'hnc-curated-v6.1.0-rc.3#08-reading-news', 'hnc-curated-v6.1.0-rc.3#09-office-edu',
-      'hnc-curated-v6.1.0-rc.3#10-cloud-drive', 'hnc-curated-v6.1.0-rc.3#11-finance-bank', 'hnc-curated-v6.1.0-rc.3#12-travel-map',
-      'hnc-curated-v6.1.0-rc.3#13-ai-tools', 'hnc-curated-v6.1.0-rc.3#14-dev-tech', 'hnc-curated-v6.1.0-rc.3#15-app-stores',
-      'hnc-curated-v6.1.0-rc.3#16-oem-vendors', 'hnc-curated-v6.1.0-rc.3#17-iot-smart', 'hnc-curated-v6.1.0-rc.3#18-tv-ott',
-      'hnc-curated-v6.1.0-rc.3#19-carrier-isp', 'hnc-curated-v6.1.0-rc.3#20-gov-public', 'hnc-curated-v6.1.0-rc.3#21-auto-ev',
-      'hnc-curated-v6.1.0-rc.3#22-health-sport', 'hnc-curated-v6.1.0-rc.3#23-food-retail', 'hnc-curated-v6.1.0-rc.3#24-social-global',
-      'hnc-curated-v6.1.0-rc.3#25-stream-global', 'hnc-curated-v6.1.0-rc.3#26-browser-search', 'hnc-curated-v6.1.0-rc.3#27-mail-collab',
-      'hnc-curated-v6.1.0-rc.3#28-security-dns', 'hnc-curated-v6.1.0-rc.3#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.3#30-cdn-infra',
-      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.3#47-v2fly-b',
-      'hnc-curated-v6.1.0-rc.3#95-system-updates', 'hnc-curated-v6.1.0-rc.3#96-system-updates-v6'
+      'hnc-curated-v6.1.0-rc.4-dedup#00-core-meta',
+      'hnc-curated-v6.1.0-rc.4#01-short-video', 'hnc-curated-v6.1.0-rc.4#02-video-live', 'hnc-curated-v6.1.0-rc.4#03-social-im',
+      'hnc-curated-v6.1.0-rc.4#04-games-cn', 'hnc-curated-v6.1.0-rc.4#05-games-global', 'hnc-curated-v6.1.0-rc.4#06-shopping-life',
+      'hnc-curated-v6.1.0-rc.4#07-music-audio', 'hnc-curated-v6.1.0-rc.4#08-reading-news', 'hnc-curated-v6.1.0-rc.4#09-office-edu',
+      'hnc-curated-v6.1.0-rc.4#10-cloud-drive', 'hnc-curated-v6.1.0-rc.4#11-finance-bank', 'hnc-curated-v6.1.0-rc.4#12-travel-map',
+      'hnc-curated-v6.1.0-rc.4#13-ai-tools', 'hnc-curated-v6.1.0-rc.4#14-dev-tech', 'hnc-curated-v6.1.0-rc.4#15-app-stores',
+      'hnc-curated-v6.1.0-rc.4#16-oem-vendors', 'hnc-curated-v6.1.0-rc.4#17-iot-smart', 'hnc-curated-v6.1.0-rc.4#18-tv-ott',
+      'hnc-curated-v6.1.0-rc.4#19-carrier-isp', 'hnc-curated-v6.1.0-rc.4#20-gov-public', 'hnc-curated-v6.1.0-rc.4#21-auto-ev',
+      'hnc-curated-v6.1.0-rc.4#22-health-sport', 'hnc-curated-v6.1.0-rc.4#23-food-retail', 'hnc-curated-v6.1.0-rc.4#24-social-global',
+      'hnc-curated-v6.1.0-rc.4#25-stream-global', 'hnc-curated-v6.1.0-rc.4#26-browser-search', 'hnc-curated-v6.1.0-rc.4#27-mail-collab',
+      'hnc-curated-v6.1.0-rc.4#28-security-dns', 'hnc-curated-v6.1.0-rc.4#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.4#30-cdn-infra',
+      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.4#47-v2fly-b',
+      'hnc-curated-v6.1.0-rc.4#95-system-updates', 'hnc-curated-v6.1.0-rc.4#96-system-updates-v6'
     ];
     return {
       available: true,
@@ -1158,7 +1166,20 @@
       };
     },
     '/api/signal': function (q) { stepMockSignal(bool(q && q.refresh)); return clone(MOCK_SIGNAL); },
-    '/api/live': function (q) { stepMockSignal(false); var l = liveSummary(); l.signal = clone(MOCK_SIGNAL); if (q.devices) { var p = devicesPayload(); l.devices = p.devices; l.whitelist_mode = p.whitelist_mode; l.remote_enabled = p.remote_enabled; } return l; },
+    '/api/live': function (q) {
+      stepMockSignal(false);
+      var l = liveSummary();
+      l.signal = clone(MOCK_SIGNAL);
+      if (typeof v6ArbiterPayload === 'function') {
+        var arb = v6ArbiterPayload();
+        l.arbiter = arb;
+        l.active_limiter_source = arb.active_source;
+        l.active_limiter_reason = arb.active_limiter_reason;
+        l.throttle_sources = arb.sources;
+      }
+      if (q.devices) { var p = devicesPayload(); l.devices = p.devices; l.whitelist_mode = p.whitelist_mode; l.remote_enabled = p.remote_enabled; }
+      return l;
+    },
     '/api/devices': function () { return devicesPayload(); },
     '/api/config': function () { return Object.assign({}, CFG, { sim_enabled: SIM.enabled, autorate: AUTORATE, rmac_policy: RMAC_POL, client_isolation_enabled: RMAC_POL.client_isolation }); },
     '/api/capabilities': function () {
@@ -1541,7 +1562,16 @@
       if (CFG.global_shaper_enabled) { CFG.global_shaper_down = p.rate_down || ''; CFG.global_shaper_up = p.rate_up || ''; return 'global shaper on down=' + (p.rate_down || '0') + ' up=' + (p.rate_up || '0'); }
       return 'global shaper off';
     },
-    clsact_mode_set: function (p) { CFG.clsact_bpf_mode = p.mode; CFG.offload_guard.mode = p.mode; CFG.offload_guard.offload_state = p.mode === 'off' ? 'SKIPPED' : 'IDLE'; CFG.offload_guard.last_check = now(); return J(CFG.offload_guard); },
+    clsact_mode_set: function (p) {
+      var md = String((p && p.mode) || 'auto').toLowerCase();
+      if (md === 'always') md = 'on';
+      CFG.clsact_bpf_mode = md;
+      CFG.offload_guard.mode = md;
+      CFG.offload_guard.offload_state = md === 'off' ? 'SKIPPED' : 'IDLE';
+      CFG.offload_guard.fallback_active = md === 'on';
+      CFG.offload_guard.last_check = now();
+      return J(CFG.offload_guard);
+    },
     clsact_check: function () { return J({ ok: true, clsact: true, bpf_filter: true, map: true, watchdog: true, iface: IFACE }); },
     tc_leaf_aqm_set: function (p) { CFG.tc_leaf_aqm = p.mode; return ''; },
     qos_set: function (p) { if (p.mode) CFG.tc_qos_mode = p.mode; if (p.scale) CFG.tc_qos_scale = +p.scale; return ''; },
@@ -1700,7 +1730,7 @@
   };
 
 
-  /* ═════════════ HNC v6.1.0-rc.3 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
+  /* ═════════════ HNC v6.1.0-rc.4 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
   function v6MockInfraGuard(host) {
     var h = String(host || '').trim().toLowerCase();
     if (!h) return null;
@@ -2228,13 +2258,67 @@
   function v6BlackboxPayload() {
     V6_BB_STATE.total_ticks += 3;
     V6_BB_STATE.latest_jitter_ms = round((4.2 + Math.abs(Math.sin(Date.now() / 9000)) * 3.6) * 10) / 10;
+    var rttActive = !!(AUTORATE && AUTORATE.enabled);
+    var latestRtt = rttActive ? round((21.5 + Math.sin(Date.now() / 11000) * 2.4) * 10) / 10 : 0;
     return {
       ok: true,
+      rtt_probe_active: true,
+      latest_rtt_ms: rttActive ? latestRtt : 21.8,
       granularity_ms: V6_BB_STATE.granularity_ms,
       total_ticks: V6_BB_STATE.total_ticks,
       incident_count: V6_BB_STATE.incidents.length,
       latest_jitter_ms: V6_BB_STATE.latest_jitter_ms,
       incidents: V6_BB_STATE.incidents
+    };
+  }
+
+  function v6ArbiterPayload() {
+    var th = v6ThermoPayload();
+    var sources = [];
+    if (th.enabled && th.stage2_shaper_enabled && th.effective_stage >= 2) {
+      sources.push({
+        source: 'thermo_cruise',
+        label: '发热温控巡航',
+        down_mbps: 40,
+        up_mbps: 15,
+        reason_zh: '电芯 ' + th.battery.temp_c.toFixed(1) + '°C 温控巡航保护（压速至 40 Mbps 降温）',
+        active: true
+      });
+    }
+    if (AUTORATE.enabled && AUTORATE.state !== 'disabled') {
+      sources.push({
+        source: '5g_autorate',
+        label: '5G 自适应总带宽',
+        down_mbps: AUTORATE.cur_down_mbps,
+        up_mbps: AUTORATE.cur_up_mbps,
+        reason_zh: '5G 基站防抖巡航（当前上限 ↓' + AUTORATE.cur_down_mbps + ' / ↑' + AUTORATE.cur_up_mbps + ' Mbps，ΔRTT ' + AUTORATE.delta_rtt_ms + ' ms）',
+        active: true
+      });
+    }
+    if (CFG.global_shaper_enabled && !AUTORATE.enabled) {
+      var gsDn = parseRate(CFG.global_shaper_down);
+      var gsUp = parseRate(CFG.global_shaper_up);
+      if (gsDn > 0 || gsUp > 0) {
+        sources.push({
+          source: 'global_shaper',
+          label: '热点总网速上限',
+          down_mbps: gsDn,
+          up_mbps: gsUp,
+          reason_zh: '手动全局带宽上限（↓' + (gsDn || '不限') + ' / ↑' + (gsUp || '不限') + ' Mbps）',
+          active: true
+        });
+      }
+    }
+    sources.sort(function (a, b) { return (a.down_mbps || 999999) - (b.down_mbps || 999999); });
+    var win = sources[0] || null;
+    return {
+      active: !!win,
+      active_source: win ? win.source : 'none',
+      effective_down_mbps: win ? win.down_mbps : 0,
+      effective_up_mbps: win ? win.up_mbps : 0,
+      active_limiter_reason: win ? win.reason_zh : '',
+      sources: sources,
+      throttle_sources: sources
     };
   }
 
@@ -2272,6 +2356,7 @@
   GET['/api/vector_sync'] = function () {
     var lv = GET['/api/live']({});
     var dv = GET['/api/devices']();
+    var arb = v6ArbiterPayload();
     return {
       ok: true,
       version: VER,
@@ -2305,10 +2390,15 @@
       update_leash: v6LeashPayload(),
       thermo: v6ThermoPayload(),
       scalpel: v6ScalpelPayload({}),
+      arbiter: arb,
+      extensions: {
+        arbiter: arb
+      },
       v6_pack: {
         blackbox: v6BlackboxPayload(),
         multi_iface: v6MultiIfacePayload(),
-        native_subtrees: v6SubtreesPayload()
+        native_subtrees: v6SubtreesPayload(),
+        arbiter: arb
       }
     };
   };

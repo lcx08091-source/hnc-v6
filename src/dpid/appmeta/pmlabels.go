@@ -19,8 +19,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -31,7 +34,9 @@ const liveLabelTTL = 10 * time.Minute
 // liveLabelTimeout caps a single helper invocation.
 const liveLabelTimeout = 30 * time.Second
 
-// liveLabels holds PackageManager-resolved labels (pkg → label).
+var pmLabelTmpSeq atomic.Uint64
+
+// liveLabels holds PackageManager-resolved labels (pkg -> label).
 type liveLabels struct {
 	mu        sync.RWMutex
 	byPkg     map[string]string
@@ -106,9 +111,20 @@ func runAppLabelHelper(ctx context.Context, dexPath string) (map[string]string, 
 	defer cancel()
 
 	// "app_process" resolves to the 32/64-bit wrapper via PATH on device.
-	// The "/" arg is the (unused) command directory app_process expects.
+	// Preserve BOOTCLASSPATH / SYSTEMSERVERCLASSPATH / ANDROID_* from os.Environ().
 	cmd := exec.CommandContext(cctx, "app_process", "/", "io.hnc.applabel.AppLabel")
 	cmd.Env = append(os.Environ(), "CLASSPATH="+dexPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+				return nil
+			}
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -147,11 +163,40 @@ func (l *liveLabels) persist(m map[string]string) {
 	if err != nil {
 		return
 	}
-	tmp := l.persistTo + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Dir(l.persistTo), 0o755); err != nil {
 		return
 	}
-	_ = os.Rename(tmp, l.persistTo)
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", l.persistTo, os.Getpid(), pmLabelTmpSeq.Add(1))
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := os.Rename(tmp, l.persistTo); err != nil {
+		_ = os.Remove(tmp)
+	}
+}
+
+func legacyRunPath(dataPath string) string {
+	clean := filepath.Clean(dataPath)
+	dir := filepath.Dir(clean)
+	if filepath.Base(dir) == "data" {
+		return filepath.Join(filepath.Dir(dir), "run", filepath.Base(clean))
+	}
+	return ""
 }
 
 func (l *liveLabels) loadPersisted() {
@@ -159,6 +204,11 @@ func (l *liveLabels) loadPersisted() {
 		return
 	}
 	data, err := os.ReadFile(l.persistTo)
+	if err != nil && os.IsNotExist(err) {
+		if fb := legacyRunPath(l.persistTo); fb != "" {
+			data, err = os.ReadFile(fb)
+		}
+	}
 	if err != nil {
 		return
 	}

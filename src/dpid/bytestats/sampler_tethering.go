@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -34,7 +35,8 @@ var tetheringMapCandidates = []string{
 
 // TetheringStatsSampler reads AOSP Mainline tethering stats from a pinned BPF map.
 type TetheringStatsSampler struct {
-	// Placed at offset 0 for 8-byte alignment of uint64 counters on 32-bit ARM.
+	// Placed at offset 0 with atomic.Uint64 8-byte alignment guarantee on 32-bit ARM.
+	_   [0]atomic.Uint64
 	val tetheringStatsValue
 
 	// Heap-resident bpf(2) key buffers sized to max 24B key variant (v5.12 + v6.0.0).
@@ -204,6 +206,7 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 
 // bpfMapInfo is the struct returned by BPF_OBJ_GET_INFO_BY_FD for maps.
 type bpfMapInfo struct {
+	_                 [0]atomic.Uint64
 	Type              uint32
 	ID                uint32
 	KeySize           uint32
@@ -220,6 +223,14 @@ type bpfMapInfo struct {
 	BtfValueTypeID    uint32
 }
 
+var (
+	_ [0 - int(unsafe.Offsetof(TetheringStatsSampler{}.val))]byte
+	_ [8 - int(unsafe.Alignof(TetheringStatsSampler{}))]byte
+	_ [int(unsafe.Alignof(TetheringStatsSampler{})) - 8]byte
+	_ [8 - int(unsafe.Alignof(bpfMapInfo{}))]byte
+	_ [int(unsafe.Alignof(bpfMapInfo{})) - 8]byte
+)
+
 // bpfObjGetInfoCall wraps BPF_OBJ_GET_INFO_BY_FD (cmd 15).
 func bpfObjGetInfoCall(fd int) (*bpfMapInfo, error) {
 	info := new(bpfMapInfo)
@@ -228,19 +239,19 @@ func bpfObjGetInfoCall(fd int) (*bpfMapInfo, error) {
 		InfoLen uint32
 		InfoPtr uint64
 	}{BPFFD: uint32(fd), InfoLen: uint32(unsafe.Sizeof(*info)), InfoPtr: uint64(uintptr(unsafe.Pointer(info)))}
-	var pad [128]byte
-	binary.NativeEndian.PutUint32(pad[0:4], attrBuf.BPFFD)
-	binary.NativeEndian.PutUint32(pad[4:8], attrBuf.InfoLen)
-	binary.NativeEndian.PutUint64(pad[8:16], attrBuf.InfoPtr)
+	var buf bpfAttrBuf
+	binary.NativeEndian.PutUint32(buf.pad[0:4], attrBuf.BPFFD)
+	binary.NativeEndian.PutUint32(buf.pad[4:8], attrBuf.InfoLen)
+	binary.NativeEndian.PutUint64(buf.pad[8:16], attrBuf.InfoPtr)
 
 	_, _, errno := syscall.Syscall(
 		sysBPF,
 		bpfObjGetInfoByFD,
-		uintptr(unsafe.Pointer(&pad)),
+		uintptr(unsafe.Pointer(&buf.pad[0])),
 		unsafe.Sizeof(attrBuf),
 	)
 	runtime.KeepAlive(info)
-	runtime.KeepAlive(&pad)
+	runtime.KeepAlive(&buf)
 	if errno != 0 {
 		return nil, errno
 	}

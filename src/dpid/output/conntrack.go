@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -32,8 +33,9 @@ var ConntrackPaths = []string{
 // Hooks for unit testing /proc permission errors and netlink fallback without
 // touching the host kernel when custom non-/proc paths are configured.
 var (
-	openConntrackFileFn = os.Open
-	ctnetlinkDumpFn     = readConntrackNetlink
+	openConntrackFileFn   = os.Open
+	ctnetlinkDumpFn       = readConntrackNetlink
+	dumpCTNetlinkFamilyFn = dumpCTNetlinkFamily
 )
 
 type ConntrackReport struct {
@@ -61,20 +63,113 @@ func isConntrackPermErr(err error) bool {
 		errors.Is(err, syscall.EPERM)
 }
 
+// parseProcConntrackFamily 识别一行 /proc/net/{nf,ip}_conntrack 所属协议族("ipv4" 或 "ipv6")。
+// 兼容现代 nf_conntrack("ipv4 2 tcp ..." / "ipv6 10 udp ...")与旧版 ip_conntrack("tcp 6 ...")。
+func parseProcConntrackFamily(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || line[0] == '#' {
+		return "", false
+	}
+	end := 0
+	for end < len(line) && line[end] != ' ' && line[end] != '\t' {
+		end++
+	}
+	tok := strings.ToLower(line[:end])
+	switch tok {
+	case "ipv4":
+		return "ipv4", true
+	case "ipv6":
+		return "ipv6", true
+	case "tcp", "udp", "icmp", "gre", "sctp", "udplite", "unknown":
+		// 旧式 /proc/net/ip_conntrack 仅含 IPv4 记录且省略首列协议族。
+		return "ipv4", true
+	default:
+		if strings.Contains(line, " src=") && strings.Contains(line, " dst=") {
+			if dst := conntrackOrigDst(line); dst != "" {
+				if ip := net.ParseIP(dst); ip != nil {
+					if ip.To4() != nil {
+						return "ipv4", true
+					}
+					return "ipv6", true
+				}
+			}
+		}
+		return "", false
+	}
+}
+
+// parseProcConntrack 扫描 procfs 连接表并按 wantV4 / wantV6 过滤协议族(两者皆真时全量解析)。
+func parseProcConntrack(r io.Reader, wantV4, wantV6 bool, maxLines int, onLine func(string)) (int, error) {
+	if !wantV4 && !wantV6 {
+		return 0, nil
+	}
+	if maxLines <= 0 {
+		maxLines = 1 << 16
+	}
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 4096), 1024*1024)
+	count := 0
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		if !wantV4 || !wantV6 {
+			fam, ok := parseProcConntrackFamily(line)
+			if !ok {
+				continue
+			}
+			if fam == "ipv4" && !wantV4 {
+				continue
+			}
+			if fam == "ipv6" && !wantV6 {
+				continue
+			}
+		}
+		count++
+		if onLine != nil {
+			onLine(line)
+		}
+		if count >= maxLines {
+			break
+		}
+	}
+	return count, sc.Err()
+}
+
+// readProcConntrackFamilies 在部分协议族 CTNETLINK 受限时回退读取 procfs 补齐缺失协议族。
+func readProcConntrackFamilies(paths []string, wantV4, wantV6 bool, maxLines int, onLine func(string)) (int, bool) {
+	if (!wantV4 && !wantV6) || maxLines <= 0 {
+		return 0, false
+	}
+	for _, p := range paths {
+		f, err := openConntrackFileFn(p)
+		if err != nil {
+			continue
+		}
+		n, scanErr := parseProcConntrack(f, wantV4, wantV6, maxLines, onLine)
+		_ = f.Close()
+		if scanErr == nil || n > 0 {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
 // ReadConntrackLines scans the first available conntrack export and returns
 // the entry count (capped at maxConntrackLines); when onLine != nil, invokes
 // it on each non-empty non-comment conntrack line.
 //
-// When default /proc/net/*_conntrack paths are missing or blocked with
-// EACCES/EPERM, automatically falls back to pure-Go AF_NETLINK
-// (NETLINK_NETFILTER, IPCTNL_MSG_CT_GET | NLM_F_DUMP). Custom non-/proc paths
-// passed by tests never touch the host kernel.
+// When default /proc/net/*_conntrack paths are missing or fail on open/read,
+// automatically falls back to pure-Go AF_NETLINK (NETLINK_NETFILTER,
+// IPCTNL_MSG_CT_GET | NLM_F_DUMP). Custom non-/proc paths passed by tests
+// never touch the host kernel.
 func ReadConntrackLines(onLine func(line string)) ConntrackReport {
 	const maxConntrackLines = 1 << 16 // 65536 flows ought to be enough
 
 	allowNetlink := usesDefaultProcPaths(ConntrackPaths)
 	var r ConntrackReport
-	needFallback := true
+	var partialCount int
 
 	for _, p := range ConntrackPaths {
 		if _, err := os.Stat(p); err != nil {
@@ -90,34 +185,27 @@ func ReadConntrackLines(onLine func(line string)) ConntrackReport {
 
 		f, err := openConntrackFileFn(p)
 		if err != nil {
-			if !isConntrackPermErr(err) {
-				needFallback = false
-				return r
-			}
-			// EACCES / EPERM: try next /proc path or fall through to CTNETLINK.
+			// 无论返回 EACCES/EPERM 还是 ENOENT/EINVAL/ENOSYS, 继续尝试备选路径并在循环后回退 CTNETLINK。
 			continue
 		}
 
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 4096), 1024*1024)
-		count := 0
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" || line[0] == '#' {
-				continue
-			}
-			count++
-			if onLine != nil {
-				onLine(line)
-			}
-			if count >= maxConntrackLines {
-				break
-			}
-		}
+		count, scanErr := parseProcConntrack(f, true, true, maxConntrackLines, onLine)
 		_ = f.Close()
 
-		if err := sc.Err(); err != nil {
-			r.Readable = count > 0
+		if scanErr != nil {
+			if count > partialCount {
+				partialCount = count
+			}
+			if !allowNetlink {
+				r.Readable = count > 0
+				r.Flows = count
+				return r
+			}
+			// 读取中途或首口即遇 SELinux/权限报错(如 open 成功但 read EACCES): 继续尝试兜底。
+			if count == 0 {
+				continue
+			}
+			r.Readable = true
 			r.Flows = count
 			return r
 		}
@@ -126,7 +214,7 @@ func ReadConntrackLines(onLine func(line string)) ConntrackReport {
 		return r
 	}
 
-	if allowNetlink && needFallback && ctnetlinkDumpFn != nil {
+	if allowNetlink && ctnetlinkDumpFn != nil {
 		if count, err := ctnetlinkDumpFn(maxConntrackLines, onLine); err == nil {
 			return ConntrackReport{
 				Available: true,
@@ -135,6 +223,10 @@ func ReadConntrackLines(onLine func(line string)) ConntrackReport {
 				Flows:     count,
 			}
 		}
+	}
+	if partialCount > 0 {
+		r.Readable = true
+		r.Flows = partialCount
 	}
 	return r
 }
@@ -235,25 +327,53 @@ func readConntrackNetlink(maxLines int, onLine func(string)) (int, error) {
 	if maxLines <= 0 {
 		maxLines = 1 << 16
 	}
-	count, err := dumpCTNetlinkFamily(syscall.AF_UNSPEC, 1, maxLines, onLine)
+	count, err := dumpCTNetlinkFamilyFn(syscall.AF_UNSPEC, 1, maxLines, onLine)
 	if err == nil {
 		return count, nil
 	}
-	// Fallback to separate AF_INET + AF_INET6 dumps if an older kernel rejects AF_UNSPEC.
-	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EOPNOTSUPP) {
-		c4, err4 := dumpCTNetlinkFamily(syscall.AF_INET, 2, maxLines, onLine)
-		if err4 != nil {
-			return 0, err4
+
+	// AF_UNSPEC 失败(如旧内核不支持 AF_UNSPEC 或部分协议族模块/SELinux 受限)时,
+	// 分别独立尝试 AF_INET 与 AF_INET6; 若任一协议族失败(即使另一族成功但仅返回 0 条),
+	// 必须回退读取 procfs 解析补齐缺失的协议族, 严禁静默丢弃全部 IPv4 或 IPv6 连接。
+	c4, err4 := dumpCTNetlinkFamilyFn(syscall.AF_INET, 2, maxLines, onLine)
+	v4OK := err4 == nil
+	if !v4OK {
+		c4 = 0
+	}
+
+	var c6 int
+	v6OK := false
+	rem := maxLines - c4
+	if rem > 0 {
+		var err6 error
+		c6, err6 = dumpCTNetlinkFamilyFn(syscall.AF_INET6, 3, rem, onLine)
+		v6OK = err6 == nil
+		if !v6OK {
+			c6 = 0
 		}
-		rem := maxLines - c4
-		if rem <= 0 {
-			return c4, nil
+	} else {
+		v6OK = true
+	}
+
+	total := c4 + c6
+	if (!v4OK || !v6OK) && total < maxLines {
+		procCount, procOK := readProcConntrackFamilies(ConntrackPaths, !v4OK, !v6OK, maxLines-total, onLine)
+		if procOK {
+			total += procCount
+			if !v4OK {
+				v4OK = true
+			}
+			if !v6OK {
+				v6OK = true
+			}
 		}
-		c6, err6 := dumpCTNetlinkFamily(syscall.AF_INET6, 3, rem, onLine)
-		if err6 != nil {
-			return c4, nil
-		}
-		return c4 + c6, nil
+	}
+
+	if v4OK || v6OK {
+		return total, nil
+	}
+	if err4 != nil {
+		return 0, err4
 	}
 	return 0, err
 }

@@ -900,6 +900,111 @@ func simUnknownKey(p map[string]string, allowed map[string]bool) string {
 
 // ─── sim_* 动作 ───────────────────────────────────────────────────────
 
+// purgeSimRuntimeState 立即清除内存中的 02:5e:00:* 模拟残留状态(targetMAC 为空时清除全部模拟 MAC)。
+func (s *server) purgeSimRuntimeState(targetMAC string) {
+	if s == nil {
+		return
+	}
+	matchSim := func(mac string) bool {
+		m := strings.ToLower(strings.TrimSpace(mac))
+		if !isSimMAC(m) {
+			return false
+		}
+		return targetMAC == "" || m == targetMAC
+	}
+
+	s.rateMu.Lock()
+	for k := range s.rates {
+		if matchSim(k) {
+			delete(s.rates, k)
+		}
+	}
+	for k := range s.lastSamples {
+		if matchSim(k) {
+			delete(s.lastSamples, k)
+		}
+	}
+	s.rateMu.Unlock()
+
+	liveAppState.mu.Lock()
+	for k := range liveAppState.m {
+		if matchSim(k) {
+			delete(liveAppState.m, k)
+		}
+	}
+	for k := range liveAppState.calls {
+		if matchSim(k) {
+			delete(liveAppState.calls, k)
+		}
+	}
+	liveAppState.mu.Unlock()
+
+	fgSt.mu.Lock()
+	for k := range fgSt.devs {
+		if matchSim(k) {
+			delete(fgSt.devs, k)
+		}
+	}
+	if fgSt.day != nil {
+		for k := range fgSt.day.Devices {
+			if matchSim(k) {
+				delete(fgSt.day.Devices, k)
+			}
+		}
+	}
+	fgSt.mu.Unlock()
+
+	if s.hncDir != "" {
+		sfp := startupFor(s.hncDir)
+		sfp.mu.Lock()
+		if sfp.rec != nil {
+			for k := range sfp.rec.devs {
+				if matchSim(k) {
+					delete(sfp.rec.devs, k)
+				}
+			}
+			for k := range sfp.rec.lastEvt {
+				if idx := strings.IndexByte(k, '|'); idx > 0 && matchSim(k[:idx]) {
+					delete(sfp.rec.lastEvt, k)
+				}
+			}
+		}
+		if len(sfp.events) > 0 {
+			kept := sfp.events[:0]
+			for _, ev := range sfp.events {
+				if !matchSim(ev.MAC) {
+					kept = append(kept, ev)
+				}
+			}
+			sfp.events = kept
+		}
+		sfp.mu.Unlock()
+	}
+
+	if s.jsonCache != nil && s.hncDir != "" {
+		s.jsonCache.mu.Lock()
+		delete(s.jsonCache.entries, filepath.Join(s.hncDir, "run", "dpi_state.json"))
+		delete(s.jsonCache.entries, filepath.Join(s.hncDir, "data", "devices.json"))
+		s.jsonCache.mu.Unlock()
+	}
+}
+
+// syncSimSnapshotNow 在释放 simStore.mu 后同步清理残留内存态、唤醒活动监听并强制刷新 CoreHub WorldSnapshot,
+// 确保 /api/vector_sync 瞬间剔除或同步 02:5e:00:* 模拟设备。
+func (s *server) syncSimSnapshotNow(purgeAll bool, deletedMAC string) {
+	if s == nil {
+		return
+	}
+	if purgeAll {
+		s.purgeSimRuntimeState("")
+	} else if deletedMAC != "" {
+		s.purgeSimRuntimeState(deletedMAC)
+	}
+	activityPoke()
+	activityNotifySubscribers()
+	s.CoreHub().RefreshSnapshotNow()
+}
+
 func actionSimSet(s *server, p map[string]string) actionResp {
 	v, ok := simParseBool(p["enabled"])
 	if !ok {
@@ -907,13 +1012,19 @@ func actionSimSet(s *server, p map[string]string) actionResp {
 	}
 	st := simFor(s.hncDir)
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	st.f.Enabled = v
-	if err := st.saveLocked(); err != nil {
+	if !v {
+		st.acc = map[string]*simAcc{}
+	}
+	devCount := len(st.f.Devices)
+	err := st.saveLocked()
+	st.mu.Unlock()
+	if err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
+	s.syncSimSnapshotNow(!v, "")
 	if v {
-		return actionResp{OK: true, Detail: fmt.Sprintf("模拟环境已开启(%d 台模拟设备)", len(st.f.Devices))}
+		return actionResp{OK: true, Detail: fmt.Sprintf("模拟环境已开启(%d 台模拟设备)", devCount)}
 	}
 	return actionResp{OK: true, Detail: "模拟环境已关闭"}
 }
@@ -930,12 +1041,13 @@ func actionSimDeviceAdd(s *server, p map[string]string) actionResp {
 	}
 	st := simFor(s.hncDir)
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	if len(st.f.Devices) >= simMaxDevices {
+		st.mu.Unlock()
 		return actionResp{OK: false, Error: "too many", Detail: fmt.Sprintf("最多 %d 台模拟设备", simMaxDevices)}
 	}
 	d, err := st.newDeviceLocked(typ, simRNG())
 	if err != nil {
+		st.mu.Unlock()
 		return actionResp{OK: false, Error: "sim add failed", Detail: err.Error()}
 	}
 	q := map[string]string{}
@@ -945,11 +1057,18 @@ func actionSimDeviceAdd(s *server, p map[string]string) actionResp {
 		}
 	}
 	if r := simApplyFields(s.hncDir, &d, q); r != nil {
+		st.mu.Unlock()
 		return *r
 	}
 	st.f.Devices = append(st.f.Devices, d)
-	if err := st.saveLocked(); err != nil {
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	saveErr := st.saveLocked()
+	enabled := st.f.Enabled
+	st.mu.Unlock()
+	if saveErr != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}
+	}
+	if enabled {
+		s.syncSimSnapshotNow(false, "")
 	}
 	b, _ := json.Marshal(map[string]string{"mac": d.MAC, "name": d.Name})
 	return actionResp{OK: true, Detail: string(b)}
@@ -965,9 +1084,9 @@ func actionSimDeviceUpdate(s *server, p map[string]string) actionResp {
 	}
 	st := simFor(s.hncDir)
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	d := st.findLocked(mac)
 	if d == nil {
+		st.mu.Unlock()
 		return actionResp{OK: false, Error: "not found", Detail: "sim device not found"}
 	}
 	q := map[string]string{}
@@ -977,10 +1096,17 @@ func actionSimDeviceUpdate(s *server, p map[string]string) actionResp {
 		}
 	}
 	if r := simApplyFields(s.hncDir, d, q); r != nil {
+		st.mu.Unlock()
 		return *r
 	}
-	if err := st.saveLocked(); err != nil {
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	saveErr := st.saveLocked()
+	enabled := st.f.Enabled
+	st.mu.Unlock()
+	if saveErr != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}
+	}
+	if enabled {
+		s.syncSimSnapshotNow(false, "")
 	}
 	return actionResp{OK: true, Detail: "updated " + mac}
 }
@@ -992,7 +1118,6 @@ func actionSimDeviceDel(s *server, p map[string]string) actionResp {
 	}
 	st := simFor(s.hncDir)
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	kept := st.f.Devices[:0]
 	found := false
 	for _, d := range st.f.Devices {
@@ -1003,26 +1128,32 @@ func actionSimDeviceDel(s *server, p map[string]string) actionResp {
 		kept = append(kept, d)
 	}
 	if !found {
+		st.mu.Unlock()
 		return actionResp{OK: false, Error: "not found", Detail: "sim device not found"}
 	}
 	st.f.Devices = kept
 	delete(st.acc, mac)
-	if err := st.saveLocked(); err != nil {
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	saveErr := st.saveLocked()
+	st.mu.Unlock()
+	if saveErr != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}
 	}
+	s.syncSimSnapshotNow(false, mac)
 	return actionResp{OK: true, Detail: "deleted " + mac}
 }
 
 func actionSimClear(s *server) actionResp {
 	st := simFor(s.hncDir)
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	n := len(st.f.Devices)
 	st.f.Devices = nil
 	st.acc = map[string]*simAcc{}
-	if err := st.saveLocked(); err != nil {
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	saveErr := st.saveLocked()
+	st.mu.Unlock()
+	if saveErr != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}
 	}
+	s.syncSimSnapshotNow(true, "")
 	return actionResp{OK: true, Detail: fmt.Sprintf("cleared %d sim device(s)", n)}
 }
 
@@ -1070,24 +1201,29 @@ func actionSimPreset(s *server, p map[string]string) actionResp {
 	}
 	st := simFor(s.hncDir)
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	rng := simRNG()
-	st.f.Devices = nil
-	st.acc = map[string]*simAcc{}
+	var built []simDevice
 	for _, it := range items {
 		d, err := st.newDeviceLocked(it.typ, rng)
 		if err != nil {
+			st.mu.Unlock()
 			return actionResp{OK: false, Error: "sim preset failed", Detail: err.Error()}
 		}
 		if r := simApplyFields(s.hncDir, &d, it.p); r != nil {
+			st.mu.Unlock()
 			return *r
 		}
-		st.f.Devices = append(st.f.Devices, d)
+		built = append(built, d)
 	}
+	st.f.Devices = built
+	st.acc = map[string]*simAcc{}
 	st.f.Enabled = true
-	if err := st.saveLocked(); err != nil {
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	saveErr := st.saveLocked()
+	st.mu.Unlock()
+	if saveErr != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}
 	}
+	s.syncSimSnapshotNow(true, "")
 	return actionResp{OK: true, Detail: fmt.Sprintf("已载入预设 %s(%d 台), 模拟环境已开启", name, len(items))}
 }
 
@@ -1108,10 +1244,11 @@ func simInterceptAction(s *server, action string, p map[string]string) (actionRe
 	}
 	st := simFor(s.hncDir)
 	st.mu.Lock()
-	defer st.mu.Unlock()
 	d := st.findLocked(mac)
 	if d == nil {
-		if !st.f.Enabled {
+		enabled := st.f.Enabled
+		st.mu.Unlock()
+		if !enabled {
 			return actionResp{}, false // 模拟环境从未登记过它 & 已关闭: 行为与无此功能时一致
 		}
 		return actionResp{OK: false, Error: "not found", Detail: "sim device not found: " + mac}, true
@@ -1120,19 +1257,27 @@ func simInterceptAction(s *server, action string, p map[string]string) (actionRe
 		// 纯配置类动作: 只写策略文件; 执行层(limitCtl 的 apply、connBlocksEffective、
 		// 时长上限的派生封锁)对模拟 MAC 一律跳过, 所以放行给原处理函数 —— 界面才能
 		// 看到模拟设备的配额/时段/时长上限视图。原函数对模拟 MAC 不跑任何脚本。
+		st.mu.Unlock()
 		return actionResp{}, false
 	}
 	n := simCloneDevice(*d)
 	r := simDeviceAction(&n, action, p)
 	if !r.OK || r.Detail == simNoChange {
+		st.mu.Unlock()
 		if r.Detail == simNoChange {
 			r.Detail = "模拟设备: 该动作不影响模拟状态(未触达系统)"
 		}
 		return r, true
 	}
 	*d = n
-	if err := st.saveLocked(); err != nil {
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}, true
+	saveErr := st.saveLocked()
+	enabled := st.f.Enabled
+	st.mu.Unlock()
+	if saveErr != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}, true
+	}
+	if enabled {
+		s.syncSimSnapshotNow(false, "")
 	}
 	if r.Detail == "" {
 		r.Detail = "模拟设备: 已更新(未触达 tc/iptables)"

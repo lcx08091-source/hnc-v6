@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -458,3 +459,109 @@ func TestSignalWifiSTANeverFallsBackToCellular(t *testing.T) {
 		t.Fatalf("sampleHostSignal on broken wifi_sta wlan9 must return Mode='wifi_sta' Available=false alpha=1.0, got %+v", stHost)
 	}
 }
+
+func TestSignalMissingSINRNeverDowngradesFullBarsAndJSONTags(t *testing.T) {
+	// 基带仅上报 RSRP=-82, RSRQ=-8, 未上报 rssnr/ssSinr (2147483647 -> HasSINR=false, SINRdB=0)
+	dumpNoSINR := `
+mActiveDataSubId=1
+  Phone Id=0
+    mSubId=1
+    mServiceState={mOperatorAlphaLong=China Mobile, mOperatorAlphaShort=CMCC, mOperatorNumeric=46000, accessNetworkTechnology=NR, isEnDcAvailable=false}
+    mSignalStrength={mNr=CellSignalStrengthNr:{ csiRsrp = 2147483647 ssRsrp = -82 ssRsrq = -8 ssSinr = 2147483647 level = 4 }}
+    mPhysicalChannelConfigList=[{mConnectionStatus=PrimaryServing,mNetworkType=NR,mBand=41,mCellBandwidthDownlinkKhz=100000}]
+    mPreciseDataConnectionStates={InterfaceName: rmnet_data0}
+`
+	st := parseTelephonyRegistryDump(dumpNoSINR, "rmnet_data0", 1763560000)
+	if !st.Available || st.HasSINR || st.SINRdB != 0 {
+		t.Fatalf("expected Available=true HasSINR=false SINRdB=0, got avail=%v hasSINR=%v sinr=%d",
+			st.Available, st.HasSINR, st.SINRdB)
+	}
+	if st.Bars != 4 || st.Quality != "excellent" || st.RFCeilingFactor != 1.0 {
+		t.Fatalf("missing SINR must NEVER downgrade full RSRP=-82/RSRQ=-8 to 2 bars: got bars=%d quality=%q alpha=%v",
+			st.Bars, st.Quality, st.RFCeilingFactor)
+	}
+	if st.SINRLabel == "干扰明显" || st.SINRLabel == "嘈杂易跳Ping" || st.SINRLabel != "基带未上报" {
+		t.Fatalf("missing SINR must report '基带未上报' instead of interference label, got %q", st.SINRLabel)
+	}
+
+	// 验证真实 0 dB (ssSinr = 0, HasSINR = true) 与缺失 0 严格区分
+	dumpRealZero := strings.Replace(dumpNoSINR, "ssSinr = 2147483647", "ssSinr = 0", 1)
+	stZero := parseTelephonyRegistryDump(dumpRealZero, "rmnet_data0", 1763560010)
+	if !stZero.HasSINR || stZero.SINRdB != 0 || stZero.Bars != 2 || stZero.SINRLabel != "干扰明显" {
+		t.Fatalf("real 0 dB SINR must set HasSINR=true and downgrade to 2 bars / '干扰明显', got hasSINR=%v bars=%d label=%q",
+			stZero.HasSINR, stZero.Bars, stZero.SINRLabel)
+	}
+
+	// 验证 SignalSnapshot 与 SignalHistoryPoint JSON 显式输出 has_sinr 与 sinr_db (无 omitempty 吞零值)
+	s, _, dir := newV6TestMux(t)
+	mon := newSignalMonitor(dir)
+	mon.sampleFn = func(_ *server) SignalSnapshot { return st }
+	refreshed := mon.Refresh(s)
+	jb, err := json.Marshal(refreshed)
+	if err != nil {
+		t.Fatalf("marshal SignalSnapshot: %v", err)
+	}
+	rawJSON := string(jb)
+	if !strings.Contains(rawJSON, `"has_sinr":false`) {
+		t.Fatalf("expected explicit \"has_sinr\":false in JSON, got %s", rawJSON)
+	}
+	if !strings.Contains(rawJSON, `"sinr_db":0`) {
+		t.Fatalf("expected explicit \"sinr_db\":0 in SignalHistoryPoint JSON, got %s", rawJSON)
+	}
+}
+
+func TestSignalInterferenceSourcesZeroFakePercentages(t *testing.T) {
+	// 1. 蜂窝未上报 SINR / RSRQ 且 Autorate 未开启 -> 对应干扰源必须返回 Available=false, Pct=0 与明确 reason_code
+	stCell := hostSignalStatus{
+		Available:       true,
+		Mode:            "cellular",
+		RAT:             "4G LTE",
+		RSRPdBm:         -85,
+		HasSINR:         false,
+		HasRSRQ:         false,
+		Bars:            4,
+		Quality:         "excellent",
+		RFCeilingFactor: 1.0,
+	}
+	computeInterference4D(&stCell, autorateStatus{Enabled: false})
+	if len(stCell.InterferenceSources) != 4 {
+		t.Fatalf("expected 4 sources, got %d", len(stCell.InterferenceSources))
+	}
+	byID := map[string]SignalInterferenceSource{}
+	for _, src := range stCell.InterferenceSources {
+		byID[src.ID] = src
+	}
+	if c := byID["co_channel"]; c.Available || c.Pct != 0 || c.ReasonCode != "metric_unavailable" {
+		t.Fatalf("co_channel without SINR must be unavailable with pct=0, got %+v", c)
+	}
+	if l := byID["cell_load"]; l.Available || l.Pct != 0 || l.ReasonCode != "metric_unavailable" {
+		t.Fatalf("cell_load without RSRQ must be unavailable with pct=0, got %+v", l)
+	}
+	if m := byID["multipath_fading"]; m.Available || m.Pct != 0 || m.ReasonCode != "metric_unavailable" {
+		t.Fatalf("single-point multipath_fading without fading must be unavailable with pct=0, got %+v", m)
+	}
+	if b := byID["bufferbloat"]; b.Available || b.Pct != 0 || b.ReasonCode != "probe_disabled" {
+		t.Fatalf("bufferbloat with disabled Autorate must be unavailable with probe_disabled, got %+v", b)
+	}
+	if stCell.InterferencePct != 0 || stCell.InterferenceLevel != "unavailable" {
+		t.Fatalf("expected overall InterferencePct=0 Level='unavailable', got pct=%d level=%q",
+			stCell.InterferencePct, stCell.InterferenceLevel)
+	}
+
+	// 2. Wi-Fi STA 未上报 Noise 与 Link speed -> 严禁伪造 56/28/10/12 等固定百分比
+	stWifi := parseWifiStatusOutput("Wifi is connected\nRSSI: -74\nFrequency: 2437 MHz\n", "wlan1", 1763560100)
+	if !stWifi.Available || stWifi.HasSINR {
+		t.Fatalf("unexpected wifi status: %+v", stWifi)
+	}
+	wByID := map[string]SignalInterferenceSource{}
+	for _, src := range stWifi.InterferenceSources {
+		wByID[src.ID] = src
+	}
+	if wc := wByID["co_channel"]; wc.Available || wc.Pct != 0 || wc.ReasonCode != "metric_unavailable" {
+		t.Fatalf("wifi co_channel without Noise must NOT fake 56/28%%, got %+v", wc)
+	}
+	if wl := wByID["cell_load"]; wl.Available || wl.Pct != 0 || wl.ReasonCode != "metric_unavailable" {
+		t.Fatalf("wifi cell_load without Link speed must NOT fake 12%%, got %+v", wl)
+	}
+}
+

@@ -306,15 +306,18 @@ func TestConnBlocks(t *testing.T) {
 	// 假脚本: 把收到的 flat 复制一份, 输出最后一行
 	_ = os.WriteFile(filepath.Join(dir, "bin", "connblock_sync.sh"), []byte("cp \"$HNC_DIR/run/conn_blocks.flat\" \"$HNC_DIR/run/synced\" 2>/dev/null; echo CONN_BLOCK=on rules=$(wc -l < \"$HNC_DIR/run/conn_blocks.flat\")\n"), 0o755)
 	t.Setenv("HNC_DIR", dir)
-	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{"1.1.1.1":{"name":"v26.douyinvod.com"},"2.2.2.2":{"name":"douyinvod.com"},"3.3.3.3":{"name":"notdouyinvod.com"}}}`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{"198.51.100.11":{"name":"v26.solo-stream.example.net"},"198.51.100.22":{"name":"solo-stream.example.net"},"1.1.1.1":{"name":"dns1.solo-stream.example.net"},"8.8.4.4":{"name":"dns2.solo-stream.example.net"},"3.3.3.3":{"name":"notsolo-stream.example.net"}}}`), 0o644)
 	s := newServer(dir)
 	mac := "aa:bb:cc:00:00:01"
-	if r := actionConnBlockAdd(s, map[string]string{"mac": mac, "kind": "domain", "value": "douyinvod.com", "label": "抖音"}); !r.OK {
+	if r := actionConnBlockAdd(s, map[string]string{"mac": mac, "kind": "domain", "value": "solo-stream.example.net", "label": "独立视频源"}); !r.OK {
 		t.Fatalf("add domain: %+v", r)
 	}
 	b, _ := os.ReadFile(connBlocksFlat(dir))
-	if string(b) != mac+" 1.1.1.1\n"+mac+" 2.2.2.2\n" {
+	if string(b) != mac+" 198.51.100.11\n"+mac+" 198.51.100.22\n" {
 		t.Fatalf("flat = %q", b)
+	}
+	if strings.Contains(string(b), "1.1.1.1") || strings.Contains(string(b), "8.8.4.4") {
+		t.Fatalf("Law 5 violated: public DNS 1.1.1.1/8.8.4.4 must not expand into conn_blocks.flat: %q", b)
 	}
 	if r := actionConnBlockAdd(s, map[string]string{"mac": mac, "kind": "ip", "value": "192.168.43.1"}); r.OK {
 		t.Fatal("LAN ip must be rejected")
@@ -322,15 +325,16 @@ func TestConnBlocks(t *testing.T) {
 	if r := actionConnBlockAdd(s, map[string]string{"mac": mac, "kind": "domain", "value": "x.com; rm -rf /"}); r.OK {
 		t.Fatal("bad domain accepted")
 	}
-	// 反查表出现新 IP → 后台刷新后跟上
-	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{"1.1.1.1":{"name":"v26.douyinvod.com"},"4.4.4.4":{"name":"v9.douyinvod.com"}}}`), 0o644)
+	// 反查表出现新 IP → 后台刷新后跟上, 且公共 DNS 1.1.1.1/8.8.4.4 依然受死定律五保护不展开
+	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{"198.51.100.11":{"name":"v26.solo-stream.example.net"},"198.51.100.44":{"name":"v9.solo-stream.example.net"},"1.1.1.1":{"name":"dns1.solo-stream.example.net"},"8.8.4.4":{"name":"dns2.solo-stream.example.net"}}}`), 0o644)
 	s.jsonCache = newJSONFileCache()
 	s.connBlockRefresh()
 	b, _ = os.ReadFile(connBlocksFlat(dir))
-	if !strings.Contains(string(b), "4.4.4.4") || strings.Contains(string(b), "2.2.2.2") {
-		t.Fatalf("refresh did not follow ipname: %q", b)
+	if !strings.Contains(string(b), "198.51.100.44") || strings.Contains(string(b), "198.51.100.22") ||
+		strings.Contains(string(b), "1.1.1.1") || strings.Contains(string(b), "8.8.4.4") {
+		t.Fatalf("refresh did not follow ipname or leaked public DNS: %q", b)
 	}
-	if r := actionConnBlockDel(s, map[string]string{"mac": mac, "kind": "domain", "value": "douyinvod.com"}); !r.OK {
+	if r := actionConnBlockDel(s, map[string]string{"mac": mac, "kind": "domain", "value": "solo-stream.example.net"}); !r.OK {
 		t.Fatal(r)
 	}
 	if b, _ := os.ReadFile(connBlocksFlat(dir)); len(b) != 0 {

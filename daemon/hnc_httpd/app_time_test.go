@@ -198,7 +198,7 @@ func setupAppCtlDir(t *testing.T) (string, *server) {
 		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
 	}
 	_ = os.WriteFile(filepath.Join(dir, "etc", "dpi_rules.d", "30-video.json"), []byte(`{"rules":[
-	 {"id":"douyin","app":"抖音","category":"video","suffixes":["douyin.com","douyinvod.com","*.amemv.com"]},
+	 {"id":"douyin","app":"抖音","category":"video","suffixes":["douyin.com","douyinvod.com","*.amemv.com","solo-stream.example.net"]},
 	 {"id":"kuaishou","app":"快手","category":"video","suffixes":["kuaishou.com"]},
 	 {"id":"ads_x","app":"广告","category":"ads","suffixes":["adx.com"]},
 	 {"id":"oppo_sys","app":"系统","category":"system","suffixes":["heytapmobi.com"]},
@@ -207,8 +207,10 @@ func setupAppCtlDir(t *testing.T) (string, *server) {
 	_ = os.WriteFile(filepath.Join(dir, "etc", "dpi_rules.d", "99-user-custom.json"), []byte(`[
 	 {"id":"kuaishou","app":"快手","category":"video","suffixes":["kuaishou.com","gifshow.com"]}]`), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{
+	 "198.51.100.11":{"name":"v26.solo-stream.example.net","app":"douyin","category":"video"},
+	 "198.51.100.22":{"name":"p3.dy-cname-cdn.net","app":"douyin","category":"video"},
 	 "1.1.1.1":{"name":"v26.douyinvod.com","app":"douyin","category":"video"},
-	 "2.2.2.2":{"name":"p3.dy-cname-cdn.net","app":"douyin","category":"video"},
+	 "8.8.4.4":{"name":"dns.solo-stream.example.net","app":"douyin","category":"video"},
 	 "3.3.3.3":{"name":"api.kuaishou.com","app":"kuaishou","category":"video"},
 	 "4.4.4.4":{"name":"notdouyin.com"}}}`), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "run", "ip_app_map.json"), []byte(`{"entries":[{"ip":"7.7.7.7","app_id":"douyin","category":"video"},{"ip":"10.0.0.9","app_id":"douyin","category":"video"}]}`), 0o644)
@@ -260,16 +262,17 @@ func TestAppTimeLimitExhaustAndMidnightExpiry(t *testing.T) {
 	setTodayActive(now, mac+"|douyin", 60*60)
 	s.connBlockRefresh()
 	flat := readFileStr(connBlocksFlat(dir))
-	for _, want := range []string{mac + " 1.1.1.1", mac + " 2.2.2.2", mac + " 7.7.7.7"} {
+	for _, want := range []string{mac + " 198.51.100.11", mac + " 198.51.100.22", mac + " 7.7.7.7"} {
 		if !strings.Contains(flat, want) {
 			t.Fatalf("flat missing %q: %q", want, flat)
 		}
 	}
-	if strings.Contains(flat, "3.3.3.3") || strings.Contains(flat, "4.4.4.4") || strings.Contains(flat, "10.0.0.9") {
-		t.Fatalf("flat over-blocks: %q", flat)
+	if strings.Contains(flat, "3.3.3.3") || strings.Contains(flat, "4.4.4.4") || strings.Contains(flat, "10.0.0.9") ||
+		strings.Contains(flat, "1.1.1.1") || strings.Contains(flat, "8.8.4.4") {
+		t.Fatalf("flat over-blocks or leaked Law-5 protected shared/DNS IPs: %q", flat)
 	}
 	dns := readFileStr(connBlocksDNS(dir))
-	for _, want := range []string{mac + " douyin.com", mac + " douyinvod.com", mac + " amemv.com", mac + " p3.dy-cname-cdn.net"} {
+	for _, want := range []string{mac + " douyin.com", mac + " douyinvod.com", mac + " amemv.com", mac + " solo-stream.example.net", mac + " p3.dy-cname-cdn.net"} {
 		if !strings.Contains(dns, want+"\n") {
 			t.Fatalf("dns missing %q: %q", want, dns)
 		}
@@ -347,7 +350,7 @@ func TestCategoryBlockExpansion(t *testing.T) {
 		t.Fatalf("fake set: %+v", r)
 	}
 	dns := readFileStr(connBlocksDNS(dir))
-	for _, want := range []string{"douyin.com", "kuaishou.com", "gifshow.com", "p3.dy-cname-cdn.net"} {
+	for _, want := range []string{"douyin.com", "solo-stream.example.net", "kuaishou.com", "gifshow.com", "p3.dy-cname-cdn.net"} {
 		if !strings.Contains(dns, mac+" "+want+"\n") {
 			t.Fatalf("dns missing %q: %q", want, dns)
 		}
@@ -356,8 +359,11 @@ func TestCategoryBlockExpansion(t *testing.T) {
 		t.Fatalf("category over-blocks: %q", dns)
 	}
 	flat := readFileStr(connBlocksFlat(dir))
-	if !strings.Contains(flat, mac+" 3.3.3.3") || !strings.Contains(flat, mac+" 1.1.1.1") {
+	if !strings.Contains(flat, mac+" 3.3.3.3") || !strings.Contains(flat, mac+" 198.51.100.11") {
 		t.Fatalf("flat: %q", flat)
+	}
+	if strings.Contains(flat, "1.1.1.1") || strings.Contains(flat, "8.8.4.4") {
+		t.Fatalf("Law 5 violated in category block flat: %q", flat)
 	}
 	// 模拟设备: 配置保留, 但不下发
 	if strings.Contains(flat, fake) || strings.Contains(dns, fake) {
@@ -376,12 +382,13 @@ func TestCategoryBlockExpansion(t *testing.T) {
 	if ctl[fake]["category_blocks"].([]map[string]interface{})[0]["enforced"] != false {
 		t.Fatal("fake enforced flag")
 	}
-	// 反查表长出新名字 → 下次刷新跟上
-	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{"8.8.4.4":{"name":"x.newvideo-cdn.org","app":"kuaishou","category":"video"}}}`), 0o644)
+	// 反查表长出新名字 → 下次刷新跟上, 且 8.8.4.4 依然受死定律五保护不展开
+	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{"198.51.100.88":{"name":"x.newvideo-cdn.org","app":"kuaishou","category":"video"},"8.8.4.4":{"name":"dns.newvideo-cdn.org","app":"kuaishou","category":"video"}}}`), 0o644)
 	s.jsonCache = newJSONFileCache()
 	s.connBlockRefresh()
-	if !strings.Contains(readFileStr(connBlocksFlat(dir)), mac+" 8.8.4.4") {
-		t.Fatalf("refresh: %q", readFileStr(connBlocksFlat(dir)))
+	refreshedFlat := readFileStr(connBlocksFlat(dir))
+	if !strings.Contains(refreshedFlat, mac+" 198.51.100.88") || strings.Contains(refreshedFlat, "8.8.4.4") {
+		t.Fatalf("refresh: %q", refreshedFlat)
 	}
 	// 关闭
 	if r := actionCategoryBlockSet(s, map[string]string{"mac": mac, "category": "video", "enabled": "false"}); !r.OK {

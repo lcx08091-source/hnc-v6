@@ -170,24 +170,31 @@ static int detect_via_netlink_getroute(const char *hs_iface,
         return -1;
     }
 
-    char req_buf[128] __attribute__((aligned(NLMSG_ALIGNTO)));
-    memset(req_buf, 0, sizeof(req_buf));
-    struct nlmsghdr *nlh = (struct nlmsghdr *)req_buf;
-    nlh->nlmsg_len   = NLMSG_LENGTH(sizeof(struct rtmsg));
-    nlh->nlmsg_type  = RTM_GETROUTE;
-    nlh->nlmsg_flags = NLM_F_REQUEST;
-    nlh->nlmsg_seq   = 1U;
+    struct {
+        struct nlmsghdr nlh;
+        struct rtmsg    rtm;
+        uint8_t         attr_buf[64];
+    } __attribute__((aligned(8))) req;
+    _Static_assert(__builtin_offsetof(__typeof__(req), attr_buf) == NLMSG_LENGTH(sizeof(struct rtmsg)),
+                   "getroute req attr_buf offset mismatch");
 
-    struct rtmsg *rtm = (struct rtmsg *)NLMSG_DATA(nlh);
-    rtm->rtm_family  = AF_INET;
-    rtm->rtm_dst_len = 32;
+    memset(&req, 0, sizeof(req));
+    req.nlh.nlmsg_len   = NLMSG_LENGTH(sizeof(struct rtmsg));
+    req.nlh.nlmsg_type  = RTM_GETROUTE;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST;
+    req.nlh.nlmsg_seq   = 1U;
+
+    req.rtm.rtm_family  = AF_INET;
+    req.rtm.rtm_dst_len = 32;
 
     uint32_t dst_ip = htonl(0x08080808U); /* 8.8.8.8 */
-    struct rtattr *rta = (struct rtattr *)(req_buf + NLMSG_ALIGN(nlh->nlmsg_len));
-    rta->rta_type = RTA_DST;
-    rta->rta_len  = (unsigned short)RTA_LENGTH(sizeof(dst_ip));
-    memcpy(RTA_DATA(rta), &dst_ip, sizeof(dst_ip));
-    nlh->nlmsg_len = (uint32_t)(NLMSG_ALIGN(nlh->nlmsg_len) + RTA_ALIGN(rta->rta_len));
+    struct rtattr dst_rta = {
+        .rta_len  = (unsigned short)RTA_LENGTH(sizeof(dst_ip)),
+        .rta_type = RTA_DST,
+    };
+    memcpy(req.attr_buf, &dst_rta, sizeof(dst_rta));
+    memcpy(req.attr_buf + RTA_LENGTH(0), &dst_ip, sizeof(dst_ip));
+    req.nlh.nlmsg_len = (uint32_t)(NLMSG_ALIGN(req.nlh.nlmsg_len) + RTA_ALIGN(dst_rta.rta_len));
 
     struct sockaddr_nl kern_nl;
     memset(&kern_nl, 0, sizeof(kern_nl));
@@ -195,7 +202,7 @@ static int detect_via_netlink_getroute(const char *hs_iface,
 
     ssize_t sent;
     do {
-        sent = sendto(fd, req_buf, nlh->nlmsg_len, MSG_NOSIGNAL,
+        sent = sendto(fd, &req, req.nlh.nlmsg_len, MSG_NOSIGNAL,
                       (struct sockaddr *)&kern_nl, sizeof(kern_nl));
     } while (sent < 0 && errno == EINTR);
     if (sent < 0) {
@@ -203,7 +210,7 @@ static int detect_via_netlink_getroute(const char *hs_iface,
         return -1;
     }
 
-    char resp_buf[4096] __attribute__((aligned(NLMSG_ALIGNTO)));
+    _Alignas(8) uint8_t resp_buf[4096];
     ssize_t n;
     do {
         n = recv(fd, resp_buf, sizeof(resp_buf), 0);
@@ -213,29 +220,31 @@ static int detect_via_netlink_getroute(const char *hs_iface,
 
     size_t rem = (size_t)n;
     for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
-        struct nlmsghdr *h = (struct nlmsghdr *)(resp_buf + off);
-        if (h->nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h->nlmsg_len > rem)
+        struct nlmsghdr h;
+        memcpy(&h, resp_buf + off, sizeof(h));
+        if (h.nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h.nlmsg_len > rem)
             break;
-        size_t step = NLMSG_ALIGN(h->nlmsg_len);
+        size_t step = NLMSG_ALIGN(h.nlmsg_len);
         if (step > rem) step = rem;
 
-        if (h->nlmsg_type == NLMSG_ERROR)
+        if (h.nlmsg_type == NLMSG_ERROR)
             return -1;
 
-        if (h->nlmsg_type == RTM_NEWROUTE &&
-            h->nlmsg_len >= NLMSG_LENGTH(sizeof(struct rtmsg))) {
+        if (h.nlmsg_type == RTM_NEWROUTE &&
+            h.nlmsg_len >= NLMSG_LENGTH(sizeof(struct rtmsg))) {
             size_t attr_off = NLMSG_SPACE(sizeof(struct rtmsg));
-            if ((size_t)h->nlmsg_len > attr_off) {
-                size_t attr_rem = (size_t)h->nlmsg_len - attr_off;
-                const char *ap = (const char *)h + attr_off;
+            if ((size_t)h.nlmsg_len > attr_off) {
+                size_t attr_rem = (size_t)h.nlmsg_len - attr_off;
+                const uint8_t *ap = resp_buf + off + attr_off;
                 while (attr_rem >= sizeof(struct rtattr)) {
-                    const struct rtattr *a = (const struct rtattr *)ap;
-                    if (a->rta_len < sizeof(struct rtattr) || (size_t)a->rta_len > attr_rem)
+                    struct rtattr a;
+                    memcpy(&a, ap, sizeof(a));
+                    if (a.rta_len < sizeof(struct rtattr) || (size_t)a.rta_len > attr_rem)
                         break;
-                    if (a->rta_type == RTA_OIF &&
-                        (size_t)a->rta_len >= RTA_LENGTH(sizeof(uint32_t))) {
+                    if (a.rta_type == RTA_OIF &&
+                        (size_t)a.rta_len >= RTA_LENGTH(sizeof(uint32_t))) {
                         uint32_t oif = 0;
-                        memcpy(&oif, RTA_DATA(a), sizeof(oif));
+                        memcpy(&oif, ap + RTA_LENGTH(0), sizeof(oif));
                         if (oif > 0U && oif <= 65535U) {
                             char iface[IFNAMSIZ] = {0};
                             if (if_indextoname(oif, iface) != NULL) {
@@ -251,7 +260,7 @@ static int detect_via_netlink_getroute(const char *hs_iface,
                             }
                         }
                     }
-                    size_t astep = RTA_ALIGN(a->rta_len);
+                    size_t astep = RTA_ALIGN(a.rta_len);
                     if (astep > attr_rem) break;
                     ap += astep;
                     attr_rem -= astep;

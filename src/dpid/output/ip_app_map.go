@@ -177,18 +177,14 @@ func (m *IPAppMap) Flush(now time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicWrite(path, b, 0o644); err != nil {
 		return err
 	}
 
 	// Flat companion file (ip app_id, one per line). Used by
 	// apply_app_limits.sh — no JSON parser dependency.
 	// Path: same dir, ".flat" replacing ".json" suffix
-	// (e.g. /run/ip_app_map.json → /run/ip_app_map.flat).
+	// (e.g. /run/ip_app_map.json -> /run/ip_app_map.flat).
 	flatPath := path
 	if l := len(flatPath); l > 5 && flatPath[l-5:] == ".json" {
 		flatPath = flatPath[:l-5] + ".flat"
@@ -199,11 +195,10 @@ func (m *IPAppMap) Flush(now time.Time) error {
 	for _, e := range out {
 		flat = append(flat, []byte(e.IP+" "+e.AppID+"\n")...)
 	}
-	tmpFlat := flatPath + ".tmp"
-	if err := os.WriteFile(tmpFlat, flat, 0o644); err != nil {
-		return nil // best-effort
+	if err := atomicWrite(flatPath, flat, 0o644); err != nil {
+		return nil // best-effort, atomicWrite already cleaned up its temp file
 	}
-	return os.Rename(tmpFlat, flatPath)
+	return nil
 }
 
 // Size returns the current map cardinality. Used for stats.

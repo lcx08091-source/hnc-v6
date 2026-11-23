@@ -48,11 +48,13 @@ const (
 	v6BlackboxMinHogBps        = int64(500_000)   // >= 500 KB/s (4 Mbps) 才可能判定为抢网大户, 绝不冤枉 30KB/s 游戏流
 	v6BlackboxIncidentCooldown = int64(1000)      // 同一波突刺 1000ms 内合并去重
 
-	// 四维卡顿成因标准枚举 (复合优先级: thermal_throttle > uplink_saturated > device_hog > cell_jitter)
+	// 卡顿成因标准枚举 (复合优先级: thermal_throttle > uplink_saturated > device_hog > cell_jitter/wifi_jitter/upstream_jitter)
 	BlackboxDimThermalThrottle = "thermal_throttle"
 	BlackboxDimUplinkSaturated = "uplink_saturated"
 	BlackboxDimDeviceHog       = "device_hog"
 	BlackboxDimCellJitter      = "cell_jitter"
+	BlackboxDimWifiJitter      = "wifi_jitter"
+	BlackboxDimUpstreamJitter  = "upstream_jitter"
 
 	// /api/backup 整机备份参数
 	v6BackupSchemaVersion = "hnc.backup.v6"
@@ -77,6 +79,7 @@ type BlackboxDeviceSample struct {
 type BlackboxFrame struct {
 	Seq              uint64   `json:"seq"`
 	TsUnixMs         int64    `json:"ts_unix_ms"`
+	RTTProbeActive   bool     `json:"rtt_probe_active"`
 	RTTMs            float64  `json:"rtt_ms"`
 	BaseRTTMs        float64  `json:"base_rtt_ms"`
 	DeltaRTTMs       float64  `json:"delta_rtt_ms"`
@@ -142,6 +145,7 @@ type BlackboxIncident struct {
 // BlackboxTickInput 封装一次 200ms 采样的原始输入。
 type BlackboxTickInput struct {
 	Now             time.Time
+	RTTProbeActive  bool
 	RTTMs           float64
 	BaseRTTMs       float64
 	CapacityBps     int64 // 当前总下行可用带宽上限 (Bytes/sec, <=0 时按活跃峰值估计)
@@ -213,6 +217,10 @@ func blackboxDimLabelZh(dim string) string {
 		return "设备抢网"
 	case BlackboxDimCellJitter:
 		return "基站抖动"
+	case BlackboxDimWifiJitter:
+		return "上游Wi-Fi抖动"
+	case BlackboxDimUpstreamJitter:
+		return "上游链路抖动"
 	default:
 		return ""
 	}
@@ -269,12 +277,21 @@ func attributeBlackboxSpike(
 		}
 	}
 
-	rfDegraded := in.SignalAvailable && (in.SignalQuality == "weak" ||
-		in.SignalQuality == "critical" ||
-		(in.SignalMode == "cellular" && validRSRQ(in.SignalRSRQdB) && in.SignalRSRQdB <= -17))
-	hitCell := rttSpike && (rfDegraded || (!hitThermal && !hitUplink && !hitHog))
+	// 严格区分蜂窝上游、Wi-Fi STA 中继上游与无信号遥测上游，绝不在 wifi_sta 或 !SignalAvailable 时误判为 5G/蜂窝基站抖动
+	sigMode := strings.ToLower(strings.TrimSpace(in.SignalMode))
+	isCellular := in.SignalAvailable && sigMode == "cellular"
+	isWifiSta := sigMode == "wifi_sta"
 
-	// 复合故障严格优先级: 发热降速 > 上行占满 > 设备抢网 > 基站抖动
+	rfDegraded := isCellular && (in.SignalQuality == "weak" ||
+		in.SignalQuality == "critical" ||
+		(validRSRQ(in.SignalRSRQdB) && in.SignalRSRQdB <= -17))
+	hitCell := isCellular && rttSpike && (rfDegraded || (!hitThermal && !hitUplink && !hitHog))
+
+	wifiWeak := isWifiSta && in.SignalAvailable && (in.SignalQuality == "weak" || in.SignalQuality == "critical")
+	hitWifi := isWifiSta && rttSpike && (wifiWeak || (!hitThermal && !hitUplink && !hitHog))
+	hitUpstream := !isCellular && !isWifiSta && rttSpike && !hitThermal && !hitUplink && !hitHog
+
+	// 复合故障严格优先级: 发热降速 > 上行占满 > 设备抢网 > 上游无线/外网抖动
 	var dims []string
 	if hitThermal {
 		dims = append(dims, BlackboxDimThermalThrottle)
@@ -287,6 +304,10 @@ func attributeBlackboxSpike(
 	}
 	if hitCell {
 		dims = append(dims, BlackboxDimCellJitter)
+	} else if hitWifi {
+		dims = append(dims, BlackboxDimWifiJitter)
+	} else if hitUpstream {
+		dims = append(dims, BlackboxDimUpstreamJitter)
 	}
 	if len(dims) == 0 {
 		if bwSpike {
@@ -295,8 +316,12 @@ func attributeBlackboxSpike(
 			} else {
 				dims = append(dims, BlackboxDimDeviceHog)
 			}
-		} else {
+		} else if isCellular {
 			dims = append(dims, BlackboxDimCellJitter)
+		} else if isWifiSta {
+			dims = append(dims, BlackboxDimWifiJitter)
+		} else {
+			dims = append(dims, BlackboxDimUpstreamJitter)
 		}
 	}
 
@@ -306,11 +331,11 @@ func attributeBlackboxSpike(
 		secondary = append([]string(nil), dims[1:]...)
 	}
 
-	// 判断是否存在真实抢网设备: 纯 cell_jitter 或纯 thermal_throttle 强制 CulpritIsHog=false!
+	// 判断是否存在真实抢网设备: 纯上游抖动(cell/wifi/upstream)或纯 thermal_throttle 强制 CulpritIsHog=false!
 	uploaderIsHog := hitUplink && culprit.TxBps >= v6BlackboxMinHogBps &&
 		(effUpBps <= 0 || float64(culprit.TxBps)/float64(effUpBps) >= 0.45)
 	culpritIsHog := culpritTotal >= v6BlackboxMinHogBps && (hitHog || uploaderIsHog)
-	if causeDim == BlackboxDimCellJitter {
+	if causeDim == BlackboxDimCellJitter || causeDim == BlackboxDimWifiJitter || causeDim == BlackboxDimUpstreamJitter {
 		culpritIsHog = false
 	}
 	if causeDim == BlackboxDimThermalThrottle && !hitHog && !uploaderIsHog {
@@ -361,10 +386,20 @@ func attributeBlackboxSpike(
 			verdict = "局域网内多台设备同时高负载用网，跑满热点总带宽引起排队延迟"
 			rootCause = "热点下行总带宽瞬时跑满，多台设备叠加吞吐触及上限引起缓冲延迟"
 		}
-	default: // BlackboxDimCellJitter
-		if in.SignalAvailable && (in.SignalQuality == "weak" || in.SignalQuality == "critical") {
+	case BlackboxDimWifiJitter:
+		if wifiWeak {
+			verdict = "热点手机连接的上游 Wi-Fi 信号偏弱，无线重传引起跳 Ping"
+		} else {
+			verdict = "上游 Wi-Fi 中继链路瞬时抖动，并非热点内设备抢网"
+		}
+		rootCause = "热点下挂设备流量正常平稳（无抢网行为），本次跳 Ping 来自上游 Wi-Fi 路由器或上级宽带波动"
+	case BlackboxDimUpstreamJitter:
+		verdict = "上游外网链路出现瞬时延迟抖动，并非热点内设备抢网"
+		rootCause = "热点下挂设备流量正常平稳（无抢网行为），本次跳 Ping 来自上级路由或外网传输波动"
+	default: // BlackboxDimCellJitter (仅 isCellular 时进入)
+		if in.SignalQuality == "weak" || in.SignalQuality == "critical" {
 			verdict = "热点手机当前蜂窝信号偏弱，空口重传引起延迟跳变"
-		} else if in.SignalAvailable && in.SignalMode == "cellular" && validRSRQ(in.SignalRSRQdB) && in.SignalRSRQdB <= -17 {
+		} else if validRSRQ(in.SignalRSRQdB) && in.SignalRSRQdB <= -17 {
 			verdict = "手机信号格数尚可但周边基站繁忙拥塞，空口排队引起跳 Ping"
 		} else {
 			verdict = "上游移动网络基站空口瞬时抖动，并非热点内设备抢网"
@@ -516,6 +551,7 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 	frame := BlackboxFrame{
 		Seq:              seq,
 		TsUnixMs:         tsMs,
+		RTTProbeActive:   in.RTTProbeActive || in.RTTMs > 0,
 		RTTMs:            math.Round(in.RTTMs*100) / 100,
 		BaseRTTMs:        math.Round(in.BaseRTTMs*100) / 100,
 		DeltaRTTMs:       math.Round(deltaRTT*100) / 100,
@@ -564,6 +600,15 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 		if effTotal := effDownBps + effUpBps; effTotal > reportedTotalBps {
 			reportedTotalBps = effTotal
 		}
+		var rsrp, sinr int
+		if in.SignalAvailable && strings.EqualFold(strings.TrimSpace(in.SignalMode), "cellular") {
+			if in.SignalRSRPdBm != sigUnavailable {
+				rsrp = in.SignalRSRPdBm
+			}
+			if in.SignalSINRdB != sigUnavailable {
+				sinr = in.SignalSINRdB
+			}
+		}
 		inc := BlackboxIncident{
 			IncidentID:       incID,
 			TsUnixMs:         tsMs,
@@ -590,8 +635,8 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 			ActiveAppName:    frame.ActiveAppName,
 			TempC:            math.Round(in.TempC*10) / 10,
 			ThermalStage:     in.ThermalStage,
-			RSRPdBm:          in.SignalRSRPdBm,
-			SINRdB:           in.SignalSINRdB,
+			RSRPdBm:          rsrp,
+			SINRdB:           sinr,
 		}
 		jb.incidents[jb.incHead] = inc
 		jb.incHead = (jb.incHead + 1) % len(jb.incidents)
@@ -618,6 +663,24 @@ func (jb *JitterBlackbox) Clear() {
 	jb.lastIncidentMs = 0
 	jb.mu.Unlock()
 	jb.latestJitterBits.Store(0)
+}
+
+// LatestFrameAndIncident 只读读取最近一帧飞行记录与最近一次定格事件，绝不推入空帧或冲刷环形现场(Law 7)。
+func (jb *JitterBlackbox) LatestFrameAndIncident() (BlackboxFrame, *BlackboxIncident) {
+	jb.mu.RLock()
+	defer jb.mu.RUnlock()
+	var fr BlackboxFrame
+	if jb.count > 0 {
+		lastIdx := (jb.head - 1 + len(jb.ring)) % len(jb.ring)
+		fr = jb.ring[lastIdx]
+	}
+	var inc *BlackboxIncident
+	if jb.incCount > 0 {
+		lastIncIdx := (jb.incHead - 1 + len(jb.incidents)) % len(jb.incidents)
+		cp := jb.incidents[lastIncIdx]
+		inc = &cp
+	}
+	return fr, inc
 }
 
 // Snapshot 按时间正序导出最近 limit 帧飞行记录与按时间倒序排列的定格事件列表。
@@ -952,6 +1015,22 @@ func (s *server) readBlackboxAutorate() (blackboxAutorateReading, bool) {
 	return out, true
 }
 
+func isBlackboxIdleActivity(act Activity) bool {
+	lvl := act.Level
+	if lvl == "" {
+		lvl = act.computeLevel()
+	}
+	return lvl == lvlHotspotOff || lvl == lvlNoClients
+}
+
+func (s *server) isBlackboxRTTProbeActive() bool {
+	if s == nil {
+		return false
+	}
+	ar, ok := s.readBlackboxAutorate()
+	return ok && ar.RTTMs > 0
+}
+
 // SampleBlackboxOnce 从 server 的内存速率表、DPI 活跃应用缓存与 Autorate 实时指标采集一帧写入黑匣子。
 // v6.1.0-beta.1: 零流量且无 RTT 突刺时提前短路(即使处于抓包录制窗口也不写空帧冲刷 300 帧卡顿现场),
 // 空载突刺路径零 jsonCache Stat、零 ratesCopy 堆分配。
@@ -966,6 +1045,12 @@ func (s *server) sampleBlackbox(now time.Time, force bool) (BlackboxFrame, *Blac
 		return globalJitterBlackbox.RecordSample(in)
 	}
 
+	// Law 7: 处于 lvlHotspotOff 或 lvlNoClients 空闲态时(含手动 sample_now 强制刷新)，绝不推入空帧冲刷 300 帧卡顿现场
+	if _, act := s.currentBlackboxActivity(); isBlackboxIdleActivity(act) {
+		s.blackboxShortCircuits.Add(1)
+		return globalJitterBlackbox.LatestFrameAndIncident()
+	}
+
 	checkNow := now
 	if checkNow.IsZero() {
 		checkNow = time.Now()
@@ -973,6 +1058,7 @@ func (s *server) sampleBlackbox(now time.Time, force bool) (BlackboxFrame, *Blac
 
 	hasSpike := false
 	if ar, ok := s.readBlackboxAutorate(); ok {
+		in.RTTProbeActive = ar.RTTMs > 0
 		in.RTTMs = ar.RTTMs
 		in.BaseRTTMs = ar.BaseRTTMs
 		in.CapacityBps = ar.CapacityBps
@@ -1225,6 +1311,7 @@ func (s *server) apiV6BlackboxGet(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                true,
+		"rtt_probe_active":  s.isBlackboxRTTProbeActive(),
 		"granularity_ms":    v6BlackboxIntervalMs,
 		"ring_capacity":     v6BlackboxRingCapacity,
 		"total_ticks":       globalJitterBlackbox.totalTicks.Load(),
@@ -1248,10 +1335,36 @@ func (s *server) apiV6BlackboxPost(w http.ResponseWriter, r *http.Request) {
 	switch strings.TrimSpace(req.Action) {
 	case "clear":
 		globalJitterBlackbox.Clear()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "detail": "blackbox cleared"})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":               true,
+			"rtt_probe_active": s.isBlackboxRTTProbeActive(),
+			"detail":           "blackbox cleared",
+		})
 	case "sample_now", "trigger_snapshot":
+		probeActive := s.isBlackboxRTTProbeActive()
+		if s != nil {
+			if _, act := s.currentBlackboxActivity(); isBlackboxIdleActivity(act) {
+				fr, inc := globalJitterBlackbox.LatestFrameAndIncident()
+				if fr.Seq == 0 {
+					fr.RTTProbeActive = probeActive
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"ok":               true,
+					"idle_skipped":     true,
+					"rtt_probe_active": probeActive,
+					"frame":            fr,
+					"incident":         inc,
+				})
+				return
+			}
+		}
 		fr, inc := s.sampleBlackbox(time.Now(), true)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "frame": fr, "incident": inc})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":               true,
+			"rtt_probe_active": probeActive || fr.RTTProbeActive,
+			"frame":            fr,
+			"incident":         inc,
+		})
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "unknown action"})
 	}
@@ -1688,6 +1801,8 @@ func (s *server) reloadAfterBackupRestore() {
 		connBlockMu.Lock()
 		_, _ = s.connBlockSyncLocked(true)
 		connBlockMu.Unlock()
+		s.refreshDNSTKBlocklist(time.Now())
+		s.dnsTK().wake()
 	}
 	if s.autorate != nil {
 		cfg := s.autorate.loadConfigFromDisk()
@@ -2049,6 +2164,7 @@ func (s *server) v6ScreenshotPackSummary() map[string]any {
 			"v6_neigh_syncs":  globalV6Subtrees.v6NeighSyncs.Load(),
 		},
 		"blackbox": map[string]any{
+			"rtt_probe_active": s.isBlackboxRTTProbeActive(),
 			"granularity_ms":   v6BlackboxIntervalMs,
 			"ring_capacity":    v6BlackboxRingCapacity,
 			"total_ticks":      globalJitterBlackbox.totalTicks.Load(),

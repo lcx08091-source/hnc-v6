@@ -137,11 +137,12 @@ type shSample struct {
 }
 
 type shState struct {
-	refreshMu sync.Mutex
-	mu        sync.Mutex
-	at        time.Time
-	body      map[string]interface{}
-	samples   []shSample // 最近 15 分钟
+	mu         sync.Mutex
+	at         time.Time
+	body       map[string]interface{}
+	samples    []shSample // 最近 15 分钟
+	refreshing bool
+	waitCh     chan struct{}
 }
 
 var shStates = struct {
@@ -373,27 +374,45 @@ func (s *server) apiStatsHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := shFor(s.hncDir)
-	now := time.Now()
-	st.mu.Lock()
-	body, at := st.body, st.at
-	st.mu.Unlock()
-	if body != nil && now.Sub(at) < shCacheTTL && !now.Before(at) {
+	for {
+		now := time.Now()
+		st.mu.Lock()
+		if st.body != nil && now.Sub(st.at) < shCacheTTL && !now.Before(st.at) {
+			body := st.body
+			st.mu.Unlock()
+			writeJSON(w, http.StatusOK, body)
+			return
+		}
+		if st.refreshing {
+			wait := st.waitCh
+			st.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-r.Context().Done():
+				return
+			}
+		}
+		st.refreshing = true
+		wait := make(chan struct{})
+		st.waitCh = wait
+		st.mu.Unlock()
+
+		var body map[string]interface{}
+		func() {
+			defer func() {
+				st.mu.Lock()
+				if body != nil {
+					st.body, st.at = body, now
+				}
+				st.refreshing = false
+				close(wait)
+				st.mu.Unlock()
+			}()
+			now = time.Now()
+			body = statsHealth(s.hncDir, s.shEnvDefault(), st, now)
+		}()
 		writeJSON(w, http.StatusOK, body)
 		return
 	}
-	st.refreshMu.Lock()
-	defer st.refreshMu.Unlock()
-	now = time.Now()
-	st.mu.Lock()
-	body, at = st.body, st.at
-	st.mu.Unlock()
-	if body != nil && now.Sub(at) < shCacheTTL && !now.Before(at) {
-		writeJSON(w, http.StatusOK, body)
-		return
-	}
-	body = statsHealth(s.hncDir, s.shEnvDefault(), st, now)
-	st.mu.Lock()
-	st.body, st.at = body, now
-	st.mu.Unlock()
-	writeJSON(w, http.StatusOK, body)
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"hnc.io/dpid/alert"
 )
 
 // 夹具由 AOSP NetworkStatsService.dump 格式手写生成(见 netstats_parse.go 文件头):
@@ -701,4 +703,230 @@ func TestStatsCalRC2EarliestDayAndIptFallback(t *testing.T) {
 		t.Fatalf("unexpected fallback sequence: %v", attempts)
 	}
 }
+
+func TestCalibratorIsubPriorityAndFallback(t *testing.T) {
+	// 1. 优先走原生 dumpsys isub(RMX5010 真机样本: id=2 联通卡1, id=9 移动卡2, id=1,3..8 拔出历史卡, id=10 逍遥游云卡), 零 content query 调用
+	contentCalled := false
+	subs := calQuerySubs(func(_ time.Duration, name string, args ...string) (string, error) {
+		if name == "dumpsys" && len(args) == 1 && args[0] == "isub" {
+			return rmx5010IsubSample, nil
+		}
+		if name == "content" {
+			contentCalled = true
+			return calSiminfo, nil
+		}
+		return "", os.ErrNotExist
+	})
+	if contentCalled {
+		t.Fatal("calQuerySubs must not invoke content query when dumpsys isub returns valid physical SIMs")
+	}
+	if len(subs) != 2 {
+		t.Fatalf("expected 2 physical SIMs from RMX5010 isub, got %d: %+v", len(subs), subs)
+	}
+
+	// subId=9 / IMSI 前缀 460001 -> 物理卡槽 2(中国移动); subId=2 / IMSI 前缀 460011 -> 物理卡槽 1(中国联通); 拔出卡 id=5 不命中
+	if slot, via, lbl := calMapSlot(nsIdent{SubID: 9, Subscriber: "460001"}, subs); slot != 2 || via != "sub_id" || lbl != "中国移动" {
+		t.Errorf("subId=9 map got slot=%d via=%s lbl=%s", slot, via, lbl)
+	}
+	if slot, via, lbl := calMapSlot(nsIdent{SubID: -1, Subscriber: "460011"}, subs); slot != 1 || via != "imsi" || lbl != "中国联通" {
+		t.Errorf("imsi 460011 map got slot=%d via=%s lbl=%s", slot, via, lbl)
+	}
+	if slot, via, lbl := calMapSlot(nsIdent{SubID: -1, Subscriber: "460001"}, subs); slot != 2 || via != "imsi" || lbl != "中国移动" {
+		t.Errorf("imsi 460001 map got slot=%d via=%s lbl=%s", slot, via, lbl)
+	}
+	if slot, via, _ := calMapSlot(nsIdent{SubID: 5, Subscriber: "460150"}, subs); slot != 0 || via != "none" {
+		t.Errorf("removed historical subId=5 should not map to active slot, got slot=%d via=%s", slot, via)
+	}
+
+	// 2. 当 dumpsys isub 返回空或无在位订阅时, 自动回退到原有的 content query
+	onlyRemovedIsub := "SubscriptionManagerService:\n  Active modem count=2\nAll subscriptions:\n" +
+		"  [SubscriptionInfoInternal: id=1 simSlotIndex=-1 displayName=CMCC carrierName=中国移动 mccmnc=46000 imsi=460001391[****]]\n"
+	fbSubs := calQuerySubs(func(_ time.Duration, name string, args ...string) (string, error) {
+		if name == "dumpsys" {
+			return onlyRemovedIsub, nil
+		}
+		if name == "content" {
+			contentCalled = true
+			return calSiminfo, nil
+		}
+		return "", os.ErrNotExist
+	})
+	if !contentCalled || len(fbSubs) != 3 {
+		t.Fatalf("expected fallback to content query when isub has no active SIMs: called=%v len=%d", contentCalled, len(fbSubs))
+	}
+}
+
+func TestCalibrationZeroSlotNetstatsReconcile(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "data"), 0o755)
+	defer clockForget(dir)
+
+	// 双卡均在位(卡1 联通 + 卡2 移动 "中国移不动"), 开机瞬间留下了 50MB 的 "0|蜂窝(未知卡)"
+	d := newPuDay("20260925")
+	d.Cell["0|"+puUnknownSIM] = [2]uint64{40 * mib, 10 * mib}
+	d.Cell["2|中国移动"] = [2]uint64{400 * mib, 50 * mib}
+	if err := puSaveDay(dir, d); err != nil {
+		t.Fatal(err)
+	}
+	if ar := actionPhoneUsageSetAt(dir, map[string]string{"plan_sim2_gb": "0.48", "warn_percent": "90"}, calNow); !ar.OK {
+		t.Fatal(ar)
+	}
+
+	// 系统 netstats 证明本账期内卡2 耗流 500MB, 而卡1 仅有 12KB (< 65536 字节) 待机信令噪声
+	c := calInstall(dir, calEnv{})
+	defer func() { calReg.mu.Lock(); delete(calReg.m, dir); calReg.mu.Unlock() }()
+	c.last = &calResult{
+		Source:      "netstats",
+		Status:      "ok",
+		CheckedAt:   calNow.Unix(),
+		CycleStart:  calCycle.Unix(),
+		WindowStart: calCycle.Unix(),
+		WindowFull:  true,
+		NetstatsOK:  true,
+		NetstatsCellBySim: []calCellSim{
+			{Slot: 1, Carrier: "中国联通", Total: 12000, WindowTotal: 12000},
+			{Slot: 2, Carrier: "中国移动", Total: 500 * mib, WindowTotal: 500 * mib},
+		},
+	}
+
+	var alerts []alert.Alert
+	snap := puParseIsubDump(rmx5010IsubSample)
+	probe, _ := puResolveProbeFromIsub(snap, puRegistryDataState{ActiveDataSubID: 9})
+	eng := newPuEngine(dir, puEnv{
+		readNetDev:   func() ([]byte, error) { return []byte(""), nil },
+		hotspotIface: func() string { return "wlan2" },
+		simProbe:     func() puSIMProbe { return probe },
+		bootID:       func() string { return "boot-z" },
+		emitAlert:    func(a alert.Alert) error { alerts = append(alerts, a); return nil },
+		alertsOn:     func() bool { return true },
+	})
+	eng.tick(calNow)
+
+	rep := eng.report("cycle", calNow)
+	bySim := rep["by_sim"].([]map[string]interface{})
+	if len(bySim) != 2 {
+		t.Fatalf("expected strictly 2 cards, got %d: %+v", len(bySim), bySim)
+	}
+	// 50MB 的 "0|蜂窝(未知卡)" 确定性归并进卡2 -> HNC 周期用量从 450MB 变为 500MB, 未归属字节归 0
+	if bySim[1]["slot"] != 2 || bySim[1]["cycle_used"] != uint64(500*mib) || bySim[1]["custom_name"] != "中国移不动" {
+		t.Fatalf("slot2 reconciled report mismatch: %+v", bySim[1])
+	}
+	if rep["unattributed_cycle_bytes"] != uint64(0) || rep["unattributed_cell_bytes"] != uint64(0) {
+		t.Fatalf("expected 0 unattributed bytes after netstats unique-slot reconcile, got %v/%v",
+			rep["unattributed_cell_bytes"], rep["unattributed_cycle_bytes"])
+	}
+
+	// 告警同样包含归并后的 500MB(> 0.48 GiB = 491.52 MiB) -> 触发 over 超限告警
+	if n := eng.checkAlerts(calNow); n != 1 || len(alerts) != 1 || alerts[0].Extra["level"] != "over" {
+		t.Fatalf("expected 1 over alert after zero-slot reconcile, got n=%d alerts=%+v", n, alerts)
+	}
+}
+
+func TestCalibrationCarrierAnchorNoDoubleCountAndAutoPromoteAlert(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "data"), 0o755)
+	defer clockForget(dir)
+
+	// 半途装机场景(!WindowFull): HNC 自 9/20 起仅采集到 200MB, 而系统 netstats 本周期已累计 3000MB
+	anchorTime := time.Date(2026, 9, 25, 12, 0, 0, 0, calTZ)
+	d := newPuDay("20260925")
+	d.Cell["1|中国联通"] = [2]uint64{180 * mib, 20 * mib}
+	if err := puSaveDay(dir, d); err != nil {
+		t.Fatal(err)
+	}
+
+	c := calInstall(dir, calEnv{})
+	defer func() { calReg.mu.Lock(); delete(calReg.m, dir); calReg.mu.Unlock() }()
+	c.last = &calResult{
+		Source:      "netstats",
+		Status:      "ok",
+		CheckedAt:   anchorTime.Unix(),
+		CycleStart:  calCycle.Unix(),
+		WindowStart: anchorTime.Add(-24 * time.Hour).Unix(),
+		WindowFull:  false, // 半途装机 -> 满足 calShouldAutoPromote!
+		NetstatsOK:  true,
+		NetstatsCellBySim: []calCellSim{
+			{Slot: 1, Carrier: "中国联通", Rx: 2700 * mib, Tx: 300 * mib, Total: 3000 * mib, WindowTotal: 200 * mib},
+		},
+	}
+
+	// 1. 用户在 anchorTime 对照运营商掌厅设置手动校准锚点 3.5 GB(记录 HNC AnchorBase=200MB 与系统 AnchorNsBase=3000MB)
+	if ar := actionPhoneUsageSetAt(dir, map[string]string{
+		"plan_sim1_gb":   "4.0",
+		"warn_percent":   "80",
+		"anchor_sim1_gb": "3.5",
+	}, anchorTime); !ar.OK {
+		t.Fatal(ar)
+	}
+
+	// 随后到 calNow(9/30), 用户又真实消耗了 150MB(HNC 变为 350MB, 系统 netstats 变为 3150MB)
+	d2 := newPuDay("20260930")
+	d2.Cell["1|中国联通"] = [2]uint64{130 * mib, 20 * mib}
+	if err := puSaveDay(dir, d2); err != nil {
+		t.Fatal(err)
+	}
+	c.last = &calResult{
+		Source:      "netstats",
+		Status:      "ok",
+		CheckedAt:   calNow.Unix(),
+		CycleStart:  calCycle.Unix(),
+		WindowStart: anchorTime.Add(-24 * time.Hour).Unix(),
+		WindowFull:  false,
+		NetstatsOK:  true,
+		NetstatsCellBySim: []calCellSim{
+			{Slot: 1, Carrier: "中国联通", Rx: 2830 * mib, Tx: 320 * mib, Total: 3150 * mib, WindowTotal: 350 * mib},
+		},
+	}
+
+	cfg := puLoadConfig(dir)
+	resp := map[string]interface{}{}
+	rows := []map[string]interface{}{
+		{"slot": 1, "cycle_used": uint64(350 * mib), "plan_bytes": uint64(4 * puGiB), "used_pct": 0.0},
+	}
+	puCalAttach(dir, cfg, calCycle, calNow, resp, rows)
+
+	// 期望值: 3.5 GiB + 150 MiB, 绝不能把 autoPromote 的 3150MB 减去 HNC AnchorBase 200MB 重复累加出 6.38 GiB!
+	wantCalibrated := uint64(math.Round(3.5*puGiB)) + uint64(150*mib)
+	if rows[0]["cycle_used"] != wantCalibrated || rows[0]["cycle_used_source"] != "carrier_anchor" {
+		t.Fatalf("carrier anchor double-counted! got=%v (%.2f GiB), want=%d (%.2f GiB), row=%+v",
+			rows[0]["cycle_used"], float64(rows[0]["cycle_used"].(uint64))/puGiB,
+			wantCalibrated, float64(wantCalibrated)/puGiB, rows[0])
+	}
+
+	// 2. 验证设置锚点时首次 netstats 尚未完成(无 AnchorNsBase, 仅有 AnchorAt), 之后通过 PostAnchorTotal 精确只加 AnchorAt 后增量
+	cfgNoNsBase := cfg
+	cfgNoNsBase.AnchorNsBase = nil
+	c.last.NetstatsCellBySim[0].AnchorAt = cfg.AnchorAt["1"]
+	c.last.NetstatsCellBySim[0].PostAnchorTotal = 160 * mib
+	rows2 := []map[string]interface{}{
+		{"slot": 1, "cycle_used": uint64(350 * mib), "plan_bytes": uint64(4 * puGiB), "used_pct": 0.0},
+	}
+	puCalAttach(dir, cfgNoNsBase, calCycle, calNow, map[string]interface{}{}, rows2)
+	wantPostAnchor := uint64(math.Round(3.5*puGiB)) + uint64(160*mib)
+	if rows2[0]["cycle_used"] != wantPostAnchor {
+		t.Fatalf("PostAnchorTotal fallback mismatch: got %v, want %d", rows2[0]["cycle_used"], wantPostAnchor)
+	}
+
+	// 3. 验证清除手动锚点后, 默认 auto 模式下触发 calShouldAutoPromote 时 puCalPreferUsed 同步触发套餐预警(消除告警断层)
+	if ar := actionPhoneUsageSetAt(dir, map[string]string{"anchor_sim1_gb": "clear"}, calNow); !ar.OK {
+		t.Fatal(ar)
+	}
+	// 系统统计 3500 MiB (~3.42 GiB) >= 4.0 GiB * 80% (3276.8 MiB), 而 HNC 本地只有 350MB: autoPromote 必须让 checkAlerts 发出 warn 告警!
+	c.last.NetstatsCellBySim[0].Rx = 3500 * mib
+	c.last.NetstatsCellBySim[0].Tx = 0
+	c.last.NetstatsCellBySim[0].Total = 3500 * mib
+
+	var firedAlerts []alert.Alert
+	eng := newPuEngine(dir, puEnv{
+		bootID:    func() string { return "boot-anchor" },
+		emitAlert: func(a alert.Alert) error { firedAlerts = append(firedAlerts, a); return nil },
+		alertsOn:  func() bool { return true },
+	})
+	if n := eng.checkAlerts(calNow); n != 1 || len(firedAlerts) != 1 || firedAlerts[0].Extra["level"] != "warn" {
+		t.Fatalf("autoPromote alert gap not fixed: got n=%d alerts=%+v", n, firedAlerts)
+	}
+}
+
 

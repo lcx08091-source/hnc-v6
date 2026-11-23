@@ -26,11 +26,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -46,6 +48,8 @@ const (
 // rate-limiting bookkeeping.
 type DumpsysSampler struct {
 	mu           sync.Mutex
+	inFlight     bool
+	waitCh       chan struct{}
 	lastSampleAt time.Time
 	lastResult   map[int]ByteCounts
 }
@@ -63,6 +67,8 @@ func NewDumpsysSampler() (*DumpsysSampler, error) {
 	if len(result) == 0 {
 		return nil, fmt.Errorf("dumpsys netstats produced no uid stats — likely permission denied or unexpected format")
 	}
+	s.lastSampleAt = time.Now()
+	s.lastResult = result
 	return s, nil
 }
 
@@ -70,22 +76,44 @@ func (s *DumpsysSampler) Source() string { return "dumpsys" }
 
 func (s *DumpsysSampler) Close() error { return nil }
 
-// Sample runs dumpsys if enough time has passed since the last call,
-// otherwise returns the cached result. This keeps the per-sample cost
-// low when the caller polls faster than dumpsysMinInterval.
+// Sample runs dumpsys outside s.mu if enough time has passed since the last call,
+// otherwise returns the cached result. Concurrent callers coalesce onto a single
+// in-flight subprocess without holding s.mu across fork/exec.
 func (s *DumpsysSampler) Sample() (map[int]ByteCounts, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.lastSampleAt.IsZero() && time.Since(s.lastSampleAt) < dumpsysMinInterval {
-		return s.lastResult, nil
+	for {
+		s.mu.Lock()
+		if !s.lastSampleAt.IsZero() && time.Since(s.lastSampleAt) < dumpsysMinInterval {
+			cached := s.lastResult
+			s.mu.Unlock()
+			return cached, nil
+		}
+		if s.inFlight {
+			ch := s.waitCh
+			s.mu.Unlock()
+			<-ch
+			continue
+		}
+		s.inFlight = true
+		ch := make(chan struct{})
+		s.waitCh = ch
+		prev := s.lastResult
+		s.mu.Unlock()
+
+		result, err := s.runOnce()
+
+		s.mu.Lock()
+		s.inFlight = false
+		s.waitCh = nil
+		close(ch)
+		if err != nil {
+			s.mu.Unlock()
+			return prev, err
+		}
+		s.lastSampleAt = time.Now()
+		s.lastResult = result
+		s.mu.Unlock()
+		return result, nil
 	}
-	result, err := s.runOnce()
-	if err != nil {
-		return s.lastResult, err
-	}
-	s.lastSampleAt = time.Now()
-	s.lastResult = result
-	return result, nil
 }
 
 // uidRE matches the per-section header line:
@@ -106,6 +134,19 @@ func (s *DumpsysSampler) runOnce() (map[int]ByteCounts, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, dumpsysCmd, dumpsysArg, dumpsysArgDetail)
+	// 完整保留宿主环境变量(BOOTCLASSPATH / SYSTEMSERVERCLASSPATH / ANDROID_*), 严禁清空。
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+				return nil
+			}
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("dumpsys exec: %w", err)

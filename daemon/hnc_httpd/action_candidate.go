@@ -140,18 +140,11 @@ func readJSONInto(path string, out interface{}) error {
 }
 
 func writeJSONAtomic(path string, v interface{}) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeFileAtomic(path, data)
 }
 
 func contains(ss []string, s string) bool {

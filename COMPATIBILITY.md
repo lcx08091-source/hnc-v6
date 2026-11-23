@@ -1,238 +1,86 @@
-# HNC 兼容性矩阵
+# HNC 兼容性矩阵与实测边界说明
 
-**当前版本**: v5.3.0-rc30.12.30 <!-- rc30.12.30: 文档版本号统一同步 module.prop -->
-**最后更新**: 2026-05-19
+**当前版本**: v6.1.0-rc.4
+**最后更新**: 2026-11-23
 
-**图例**:
-- [OK] 工作
-- [WARN] 工作但有限制(见备注)
-- [FIX] 需要 rc30.12.3+ 才能工作
-- [FAIL] 不工作
-- [?] 未测试
+本文件遵循「实测一分说一分，未实测绝不夸大承诺」的工程原则，将 HNC `v6.1.0-rc.4` 的平台兼容性严格划分为**基准真机实测验证**、**源码级防御护栏（待对应真机回报）**与**明确不支持或受宿主内核硬限制**三层证据边界。当任何底层能力在当前设备上不可用时，后端与 WebUI 均如实返回 `supported: false` / `available: false` 与具体原因码，绝不伪造成功状态。
 
----
+## 一、已在基准真机完整实测验证（Tier 1 实证基线）
 
-## 一、确认工作
+### 1.1 基准测试环境
 
-| ROM | 设备 | Android | 内核 | Root | 限速 | DPI | SQM | 关键备注 |
-|---|---|---|---|---|---|---|---|---|
-| **ColorOS 16** | realme GT 7 Pro (RMX5010) | 16 | 6.6.102-android15-9 | SukiSU Ultra | [OK] | [FIX] | [OK] | **主测设备**. **必须 rc30.12.3+** 才能用 — 早期版本 Go fork EPERM 必现, dpid 一直 blind. 详见第三节. |
+| 维度 | 实测配置详情 |
+|---|---|
+| 机型与 SoC | realme GT 7 Pro (`RMX5010`) · 高通骁龙 8 至尊版 (`SM8750`) |
+| 系统与内核 | ColorOS 16 (Android 16) · Linux `6.6.x` GKI (`arm64-v8a`, `16KB` 页对齐兼容) |
+| Root 与挂载环境 | SukiSU Ultra (`magic_mount_rs`, `umount=false`) + SuSFS |
+| 热点与蜂窝接口 | Wi-Fi 热点口 `wlan2`（及双频桥接态）· 蜂窝上游 `rmnet_dataN`（双物理 Nano-SIM 卡槽） |
 
----
+### 1.2 已在该基准真机逐项跑透并闭环的兼容能力
 
-## 二、待测 / 待报告
+1. **C 原生守护启动器绕过 `CLONE_VFORK EPERM`**：
+   - ColorOS 16 + SukiSU 内核钩子会拦截 Go runtime 的 `clone(CLONE_VM | CLONE_VFORK)` 并固定返回 `EPERM`。
+   - `./service.sh` 启动期通过 `bin/fork_probe` 自动实测，由 C11 编写的 `bin/hnc_launcher` 使用不带 `CLONE_VM` 的 Bionic `fork() + execv()` 稳定拉起并按指数退避守护 `hnc_dpid`。
+2. **`/system/bin` 间歇卸载耐受与 `/data` 备份工具链垫片**：
+   - 针对运行期挂载命名空间切换或间歇卸载，高频流控与邻居感知优先走纯 Go 原生 `AF_NETLINK` 直连与 `/proc`、`/sys` 直读；外部命令调用统一经 `./bin/hnc_env.sh` 的 `/data` 备份工具链垫片解析，并配 `Setpgid` 独立进程组 2 秒硬超时连根清理与连续超时熔断保护。
+3. **缺省无 `sch_cake` / `sch_fq_codel` 内核的自动无感降级**：
+   - 基准 GKI 6.6 内核未编译 `sch_cake` 与 `sch_fq_codel`。`./bin/capability_probe.sh` 与原生 RTNetlink 引擎实测探测后，自动按五级叶子队列回退链降级至可用调度器（直至按限速值动态缩放队列深度的 `pfifo(16..256)` 配合 `HTB` 令牌桶）；无 `ifb` 模块时上行限速自动切换至双栈 `clsact` / `ingress police`。
+4. **高通热点硬件加速（`tether_limit_map` / IPA 快路径）截流检测与双路径修复**：
+   - 开启系统级热点硬件加速时，Android `tether_limit_map` / `tether_downstream4_map` / `tether_downstream6_map` 与高通 IPA 快路径会旁路软件 `tc` 队列。
+   - 已实测验证两套闭环方案：一是 `hotspotd` 与 `./bin/hnc_offload_guard.sh` 在设备纳入管控时 `T+0` 置位压制并动态驱逐加速表项，同时在 `/api/dataplane_verify` 中交叉对比真实转发流量与 HTB 命中字节计算截流比例；二是当固件锁死 IPA 硬旁路时，WebUI 自检卡片直接给出前往「系统设置 -> 连接与共享 -> 个人热点」关闭热点硬件加速的明确指引。
+5. **原生 `dumpsys isub` 双卡物理槽位识别与 `BOOTCLASSPATH` 环境保护**：
+   - 摒弃易将历史换卡自增 `subId`（如 `subId=9`）误判为新卡或渲染出「第 3 张未知卡」的旧逻辑，实测打通原生 C++ Binder 服务 `dumpsys isub` + `dumpsys telephony.registry` 权威链路，严格按在位物理卡槽 `simSlotIndex`（`0` 为卡 1，`1` 为卡 2）映射并识别 `activeDataSubId` 当前上网卡。
+   - 所有需经 `app_process` 执行的系统命令（`content`、`settings`、`cmd`、`am`）均完整保留宿主 `BOOTCLASSPATH`、`SYSTEMSERVERCLASSPATH` 与 `ANDROID_*` 环境变量，根除空环境导致的静默空输出。
+6. **`32MB tmpfs` 瞬态内存盘与持久化目录物理隔离**：
+   - 实测验证 `/data/local/hnc/run` 挂载 `32MB tmpfs` 零闪存磨损运行，跨月 SIM 流量账单与本机真值自训练样本已全量迁入持久化 `/data/local/hnc/data/stats/` 与 `/data/local/hnc/data/self_studio/`，配齐硬配额轮转与原子写失败即删 `.tmp` 孤儿清理。
 
-按"撞 Go fork EPERM 概率"从高到低排:
+## 二、已按 AOSP / 内核源码实现防御护栏、待对应机型实机反馈验证（Tier 2 防御适配）
 
-| ROM | 设备示例 | Android | 风险 | 备注 |
-|---|---|---|---|---|
-| **OxygenOS 15** | OnePlus 13 | 15 | [HIGH] 高 | 跟 ColorOS 共享内核, 大概率同样的 Go fork EPERM. 仍需 rc30.12.3+. |
-| **MIUI 14+ / HyperOS 2** | 小米/红米 | 14-16 | [MED] 中 | 小米可能有不同 kernel hook, 需真机验证 |
-| **ColorOS 14/15** | realme/OPPO 老机型 | 13-15 | [MED] 中 | 旧 ColorOS 不一定有 CLONE_VM hook |
-| **OriginOS 5** | vivo/iQOO | 14-16 | [LOW] 低 | vivo 历史上 root 兼容性更好 |
-| **OneUI 7** | Samsung Galaxy | 15-16 | [LOW] 低 | 三星生态相对独立, 未知 |
-| **Pixel 原生 16** | Pixel 8/9 | 16 | [MIN] 极低 | KernelSU 主测平台, Go fork 应该 OK (但仍建议 rc30.12+ 兜底) |
-| **LineageOS 22** | 通用 | 15 | [MIN] 极低 | AOSP 衍生, 大概率 Go fork OK |
-| **APatch** | 通用 | 13-16 | [?] | 不同 root 框架, 行为可能不同 |
+以下芯片平台、定制 ROM 与特殊硬件拓扑已依据 AOSP 源码、内核公开接口与离线夹具单元测试编写了非破坏性防御护栏（所有 `sysfs` / `procfs` / 命令调用均严格校验存在性与返回码，失败即安全退避），但**尚未在对应实体手机上逐台跑完完整长稳测试，欢迎持有对应机型的用户反馈诊断日志**：
 
----
+| 适配领域 | 目标平台 / 场景示例 | 已落地的代码防御护栏 | 待实机核验重点 |
+|---|---|---|---|
+| **联发科天玑硬件加速** | 天玑 8000 / 9000 系列 (`ccmniN` 上游、`ap0` 热点口) | `./bin/hnc_mtk_hwnat.sh` 与 `./bin/hnc_offload_guard.sh` 按需探测 `/proc/hnat`、`/sys/kernel/debug/hnat`、`mtk_ppe` 与 `mddp` 节点；仅在节点可写时压制并在恢复时写回原值，高通机型绝不触碰 | 不同厂商天玑内核下 `mddp` / `hnat` 开关节点的实际权限与命名差异 |
+| **三星 / 谷歌 / 展锐平台** | Samsung Exynos (`DIT`, `swlan0`)、Google Pixel Tensor (`wlan1`/`ap0`/`gti*`)、紫光展锐 (`seth_lteN`/`sipa_ethN`) | `./bin/hnc_iface.sh` 与 `iface_patterns.go` 同步维护多芯片蜂窝口与 AP 接口匹配表；Exynos `DIT` 状态仅在对应节点存在时执行探测与压制 | Exynos `DIT` 旁路压制深度、Pixel 新一代 `gti*` 热点桥接计数及展锐网卡命名完整性 |
+| **小米 MIUI / 澎湃 OS 规则共存** | 小米 / 红米 MIUI 14+、HyperOS 1/2 | 防火墙与 `tc` 操作严格限定在 `HNC_*` 独立子链与归属标记内，绝不清空系统 `miui_net_*` 规则；`hnc_watchdog` 巡检发现外部守护清理挂载钩子时自动幂等补挂 | `miui_netd` 在省电模式切换或网络重连时是否周期冲刷 `mangle` 高位 `CONNMARK` |
+| **单芯片同名 `wlan0` 热点门控** | 部分老旧或入门单路 Wi-Fi 芯片机型（开热点自动断开 Wi-Fi，复用 `wlan0` 做 AP） | `./bin/hnc_iface.sh` 仅在 `dumpsys tethering` 或 `softap` 权威源明确报告且无默认路由时标记 `wlan0_ap: true`，守护层保留严格安全门控防止向正在充当本机上游 STA 的 `wlan0` 误挂限速 | 单接口 `wlan0` AP 机型在开关热点瞬间的状态切换时序与防自锁边界 |
+| **异构电芯与热区三量纲换算** | 双电芯串联、第三方内核或特殊 BMS 驱动机型 | `ThermoCruise` 读取温度节点时自动区分毫摄氏度（如 `42000`）、十分之一度（如 `420`）与摄氏度（如 `42`），并对超出 `[-20°C, 100°C]` 的离群读数立即熔断跳过 | 个别厂商私有 `thermal_zone` 虚拟标定值与真实电池包温度的偏差幅度 |
+| **多 Root 框架与跨端浏览器** | KernelSU / KernelSU-Next / APatch (`SuperKey`) / Magisk 26+ / 32 位 `armeabi-v7a` Magisk | `./bin/hnc_compat.sh` 自动识别四大 Root 框架与各自 `busybox`；`./action.sh` 与 `./bin/pair_gen.sh` 支持免输配对进入；CSS 补齐 Chromium 83–110 回退，TLS 证书有效期 `<=397` 天兼容 iOS Safari | 不同 APatch 版本 WebView 桥接差异及老旧 32 位 ARMv7 机型的内核 Netlink 特性裁剪情况 |
 
-## 三、已知重要问题:Go fork+exec EPERM(rc30.12 之前)
+## 三、明确不支持或受宿主内核硬限制的场景（Tier 3 硬边界）
 
-### 症状
+遇到以下宿主环境硬限制时，HNC 无法绕过物理与内核边界，界面与 API 将如实展示不支持原因：
 
-在 ColorOS 16 + SukiSU 上, 模块装上后 WebUI 显示:
+1. **无 Root 权限设备（含纯 ADB / Shizuku 环境）**：
+   - **不支持**。HNC 依赖 `CAP_NET_ADMIN`、`CAP_NET_RAW`、`CAP_BPF` 与 `/data/adb/modules` 系统级挂载，未获取完整 Root 权限（KernelSU / SukiSU / APatch / Magisk）的设备无法运行。
+2. **宿主内核彻底裁除 `CONFIG_NET_SCH_HTB`（`tc_htb: false`）**：
+   - 当极少数深度精简内核连基础 `HTB` 队列调度器都未编译时，分级带宽限速、单应用限速、`VectorExpress` 与 `RootShaperArbiter` 全局整形均**无法生效**（返回 `supported: false`）。此时 HNC 仅保留在线设备发现、流量统计、DPI 应用识别以及基于 `iptables/ip6tables` 的设备拉黑与域名/连接阻断能力。
+3. **宿主内核禁用 `AF_PACKET` 或硬拦截原始抓包套接字**：
+   - 若内核未开启 `CONFIG_PACKET` 或被安全模块阻止打开抓包套接字，`hnc_dpid` 将如实报告 `mode: "blind"` 与具体 `blind_reason`。DPI 应用级识别与 `LeakGuard` 明文检测停用，但基于 IP/MAC 的设备发现与上下行总带宽限速不受影响。
+4. **内核缺失部分可选子模块时的局部能力边界**：
+   - 缺失 `CONFIG_IFB` 或 `act_mirred`：无法构建 `ifb0` 上行二级 HTB 树，自动回退为双栈 `ingress police` 单级上行限速（不支持上行多级子类借用带宽）。
+   - 缺失 `clsact` 或 eBPF 加载受限：无法启用 Tier-A（`clsact eBPF`），自动运行于 Tier-B（原生 Netlink HTB）或 Tier-C（批量管道模式）。
+   - 缺失 Netfilter `xt_string` 模块：`./bin/connblock_sync.sh` 首次探测后缓存状态，基于报文特征串的辅助连接阻断跳过，仅保留 IP/端口与 DNS 级阻断。
+5. **非 Wi-Fi 共享方式（USB / 蓝牙 / 以太网共享）**：
+   - USB 网络共享（`rndis0`/`usb0`/`ncm0`）、蓝牙共享（`bt-pan`）与以太网共享仅在状态栏与 `/api/live` 中作为连接态势展示，**设备限速、战术舱调度与阻断规则仅作用于 Wi-Fi 热点接口**。
+6. **Android 10 及以下系统的命令行自动开热点**：
+   - Android 10 及更早版本系统无 `cmd wifi start-softap` 接口，定时热点与开机自动开热点无法通过命令行拉起，需用户在系统设置中手动开启热点（开启后限速与识别功能正常）。
+7. **架构包混刷拦截**：
+   - 64 位设备必须刷入 `HNC-*-arm64.zip`，纯 32 位 ARMv7 系统必须刷入 `HNC-*-armv7.zip`。刷错架构包时 `./customize.sh` 会调用 `./bin/hnc_arch.sh` 当场提示并中止安装，防止写入无法执行的二进制文件。
 
-```
-HTTP fetch failed; bridge auto disabled
-hnc_httpd 未运行
-DPI 状态: 盲模式·未抓包
-```
+## 四、如何查看本机兼容性与提交真机反馈
 
-日志显示:
-```
-[WDG-GO] hnc_dpid: launch failed: 
-fork/exec /data/local/hnc/bin/hnc_dpid_supervisor: operation not permitted
-```
+### 4.1 在 WebUI 内一键查看
 
-### 根因
+打开 HNC 管理界面，进入 **「设置 -> 运行自检 / 兼容性能力」**：
+- 可实时查看 `./bin/capability_probe.sh` 与守护进程实测得出的内核队列支持项（`HTB`、`fq_codel`、`ifb`、`clsact`、双栈 `iptables` 扩展等）、当前激活的数据面层级（Tier-A / Tier-B / Tier-C）、`fork_probe` 启动路径与硬件加速截流核验结果。
 
-Go runtime 用 `clone(CLONE_VM | CLONE_VFORK | SIGCHLD)` 的 vfork-style 路径**被内核 hook 拦截**.
+### 4.2 导出脱敏诊断包协助适配
 
-**不是 SELinux 问题**(无 AVC denied), **不是 seccomp**(Seccomp=0), **不是 capability 问题**(full caps). 系统层面没任何限制, 但 Go fork+exec 必报 EPERM.
-
-C bionic `fork()+execv()` 不带 `CLONE_VM`, 完全工作.
-
-### 修复
-
-**rc30.12+** 引入两层修复:
-
-1. **C launcher 替代 Go supervisor** (`bin/hnc_launcher`)
-   - 用 bionic fork+execv 绕开 Go vfork 路径
-   - 由 `bin/fork_probe` 启动时探测自动选择
-   - 探测失败自动降级 shell guard
-
-2. **dpid 内部 retry 修复** (rc30.12.3)
-   - 接口未就绪时 dpid 自动每 2 秒重试 bind, 不再需要手动点"重新绑定"
-
-### 影响版本
-
-- rc30.0 - rc30.11: [FAIL] 在 ColorOS 16 + SukiSU 上整条后端起不来
-- rc30.11: [WARN] shell pre-launch 临时绕过, 系统能用但不优雅
-- **rc30.12.3+**: [OK] **完整修复**, 装上即用
-
-### 详细文档
-
-- `PATCH-NOTES-v5.3.0-rc30.12.3.md` — 完整诊断链 + 修复
-- `go-fork-eperm-coloros-sukisu-diagnosis.md` — 公开技术笔记
-- `ARCHITECTURE.md` 第三章 — 在项目里的位置
-- `EVOLUTION.md` 第七到第九章 — 这条修复链怎么走过来的
-
----
-
-## 四、其他已知限制
-
-| ROM 系 | 问题 | 缓解措施 |
-|---|---|---|
-| **ColorOS / OxygenOS** | `oplus_netd` 主动清外部 tc 规则 | HNC 自愈已覆盖, watchdog 检测到清除后自动重建 |
-| **ColorOS 16 + Snapdragon 8 Elite** | Android BPF fast path (tether_limit_map) 截胡 tethered 流量, 部分绕开 tc 限速 | 当前未修, 但实战极少触发(只在系统级 tethering offload 开启时) |
-| **MIUI 14+** | (待确认) `miui_net_*` 服务可能类似 oplus_netd | 需真机验证, 大概率自愈机制能应付 |
-| **老旧 AOSP (Android < 13)** | 无 BPF tethering offload | 上行限速走兜底路径, 精度下降 |
-| **iOS 客户端连接** | "私有 WiFi 地址"每次随机 MAC | 客户端关掉此功能; 或接受每次重新配规则 |
-
----
-
-## 四·五、跨机型适配层(v5.20)
-
-> 以下逻辑只在 RMX5010 / ColorOS 16 上真机验证过; 其他机型的行为来自 AOSP 源码与 fixture 单测, **需真机回报**。
-
-### 热点接口探测 —— `bin/hnc_iface.sh`(唯一权威)
-
-顺序: 用户偏好(rules.json `hotspot_iface`, 接口存在且有 IPv4 才生效)→ `dumpsys tethering`
-(Android 8–10 为 `dumpsys connectivity tethering`)的 `TetheredState` → netd `tetherctrl_FORWARD`
-→ `dumpsys wifi` 的 `mApInterfaceName` → AP 名扫描(`ap0` / `ap_br_*` / `swlan0` / `softap0`, 次选
-`wlan1+` / `wigig0`; 须 UP、RFC1918 IPv4、**没有任何 default route**、不是上游)。非权威来源绝不返回 `wlan0`。
-热点关着时只跑一次 `ip addr` + `ip route`, 不跑 dumpsys。结果写 `run/iface_detect.json`(字段见脚本头),
-`device_detect.sh iface` / `hotspot_autostart.sh` / httpd `currentHotspotIface` 都读它。
-
-| 机型(预期) | 热点口 | 蜂窝上游 |
-|---|---|---|
-| ColorOS / realme / OnePlus(高通) | `wlan2` | `rmnet_dataN` |
-| Pixel(Tensor) | `wlan1` 或 `ap0` | `rmnetN` |
-| Samsung One UI | `swlan0` | `rmnet_dataN`(高通)/ `rmnetN`(Exynos) |
-| 联发科(天玑) | `ap0` | `ccmniN` |
-| 展锐(Unisoc) | `wlan1` / `ap0`(待确认) | `seth_lteN` / `sipa_ethN` |
-| Android 12+ 双频桥接热点 | `ap_br_wlanN` | — |
-
-- **USB(`rndis0`/`usb0`/`ncm0`)/ 蓝牙(`bt-pan`)/ 以太网共享**: 只探测并在 `iface_detect.json`
-  (`usb_tether` / `bt_tether` / `eth_tether`)与 `/api/live` 里上报; **限速、封锁、统计只作用于 Wi-Fi 热点口**,
-  这些共享方式的客户端不在管控范围内。
-- **`wlan0` 本身做 AP 的老机型**(单接口, 开热点时断开 Wi-Fi): 探测器能从 tethering / softap 权威来源
-  认出(`wlan0_ap:true`), 但 watchdog 仍按历史事故保护拒绝在 `wlan0` 上挂规则 —— 此类机型目前不受管控。
-- 蜂窝名字表 shell(`HNC_CELL_IFACE_ERE`)与 Go(`iface_patterns.go`)逐字一致, `go test` 校验。
-
-### 开热点命令(定时热点 / 开机自启)—— `bin/hnc_compat.sh hnc_softap_probe`
-
-先读 `cmd wifi help` / `cmd -l` / `svc wifi` 帮助文本, 再按可用性尝试:
-`start-softap … -b any`(Android 12+)→ `start-softap`(Android 11)→ `cmd tethering tether wifi`(仅个别 ROM)
-→ `svc wifi hotspot enable`(仅个别定制 ROM)。加密类型只试帮助里列出的。**Android 10 及以下没有
-`start-softap`, 命令行无法开热点, 请从系统设置开**。`start-softap` 起的热点不带系统 NAT, HNC 自建 NAT。
-探测与最近一次结果写 `run/softap_method.json`。
-
-### root 方案 —— `bin/hnc_compat.sh root`(service.sh 启动时调用)
-
-识别 KernelSU / SukiSU-Ultra / KernelSU-Next / APatch / Magisk, 选对应 busybox
-(`/data/adb/ksu/bin/busybox` / `/data/adb/ap/bin/busybox` / `/data/adb/magisk/busybox`)作为
-`/system/bin` 被卸时的 applet 兜底源, 写 `run/root_env.json`(含 SoC 厂商、SDK、PATH 审计)。
-**Magisk 没有模块 WebUI**: 用手机浏览器打开 `run/webui_url`(`http://127.0.0.1:8444`), 用登录密码 / 配对码登录。
-注意: `ip` / `iptables` / `tc` / `cmd` / `dumpsys` 是动态链接程序, 依赖 `/system/bin/linker64`, `/system/bin`
-被卸期间任何副本都跑不起来(`root_env.json` 的 `path_dynamic_only` 列出缺失项), 只能等挂载恢复。
-
-### 联发科 HWNAT(实验性)—— `bin/hnc_mtk_hwnat.sh`
-
-仅在 offload 兜底为 **on 模式**时调用; 检测 `/sys/kernel/debug/hnat`、`/proc/hnat`、`/sys/module/*hnat*`、
-`mtk_ppe`、MDDP; 有可写 `hook_toggle` 等开关才写 0, 撤销兜底 / 切回 auto 时写回原值。**高通平台绝不动作**。
-状态见 `run/mtk_hwnat.json` 与 `run/offload_guard.json` 的 `hwnat` 字段。
-
-### 老内核(4.x)降级
-
-cake / fq_codel / IFB / mirred / netem 由 `capability_probe.sh` 探测后按能力跳过; `xt_string`(连接封锁)
-在 `connblock_sync.sh` 首次探测并缓存; clsact BPF 无产物时静默; conntrack 事件订阅失败时 httpd 退纯轮询,
-**只记一次日志**(v5.20 起, 此前每 60 秒一行)。
-
----
-
-## 五、报告兼容性的方法
-
-### 1. 装最新版
-
-下载 `HNC-v5_3_0-rc30.12.8-arm64.zip` 或更新版本.
-
-### 2. 跑诊断脚本
+若在未实测机型上遇到接口未识别、限速被硬件加速旁路或双卡显示异常，可在 WebUI 点击导出诊断包，或在终端以 Root 权限执行：
 
 ```sh
-su -c '/data/local/hnc/bin/diag/diag.sh' > /sdcard/hnc_diag.txt
+su -c 'sh /data/local/hnc/bin/diag/diag.sh' > /sdcard/hnc_diag.txt
 ```
 
-这个脚本会一键收集:
-- 系统/内核版本
-- Root 框架
-- 进程清单
-- 所有 daemon 二进制版本
-- **fork+exec 兼容性测试** (C 和 Go 都测)
-- /proc/self/status (Seccomp / NoNewPrivs / CapEff)
-- AVC denied 历史
-- 热点接口状态
-- capabilities.json
-- dpid 状态
-- 关键日志尾部
-
-报告**不包含任何个人数据**(IP / MAC / 设备名), 只有技术信息.
-
-### 3. 提交报告
-
-如果项目有 GitHub Issue, 开 issue 标题:
-```
-[Compatibility] <ROM 名> <Android 版本> <设备型号>
-```
-附上 `hnc_diag.txt` 全文.
-
-如果是自用项目, 把 diag.txt 存档自己看就行.
-
----
-
-## 六、WebUI 内查兼容性
-
-装上后, 在 WebUI:
-
-1. **设置页 → 兼容性能力** 卡片
-   - 自动读 `run/capabilities.json`
-   - 显示 51+ tc/iptables/内核能力字段
-   - **rc30.12.8+ 新增** fork / launcher / SELinux 探测字段
-
-2. 关键新字段 (rc30.12.8+):
-   - `c_fork_supported`: C fork+execv 是否工作 (由 fork_probe 测)
-   - `go_fork_supported`: Go fork+exec 是否工作
-   - `kernel_blocks_clone_vm`: 是否推断内核拦截 CLONE_VM
-   - `selected_launcher`: 当前用 c_launcher / shell_guard / go_supervisor 哪个
-   - `dpid_has_iface_retry`: dpid 二进制是否含 rc30.12.3 字符串匹配修复
-   - `selinux_avc_denied_recent`: 最近 AVC denied 计数
-   - `seccomp_active` / `no_new_privs` / `cap_eff_full`: 进程安全机制状态
-
-如果你发现 `kernel_blocks_clone_vm=true` 且 `selected_launcher=c_launcher`, **你的设备就是这套修复救场的设备**.
-
----
-
-## 七、给模块开发者的兼容性建议
-
-如果你想 fork 这套架构做自己的模块, 记住:
-
-1. **不要假设 Go fork 能工作**. 即使在自己开发机能跑, 国产 ROM 上很可能挂.
-2. **必须有 C/shell fallback**. 至少保留一条不依赖 Go runtime fork 的启动路径.
-3. **用 fork_probe 做自动路径选择**. 这是核心抗风险设计.
-4. **在 ColorOS / MIUI / OneUI 至少一台上真测**. AOSP/Pixel 上的成功不代表国产 ROM 也行.
-5. **任何 Go std lib 的网络错误判断, 不要只看 syscall errno**. `net.InterfaceByName()` 返回字符串错误, `errors.Is(syscall.ENODEV)` 不工作.
-
----
-
-*本矩阵会随真机测试结果更新. 如果你测了一台没列在这里的设备, 欢迎补充.*
+该脚本会自动采集内核版本、SoC 与 Root 环境、`run/capabilities.json`、`run/iface_detect.json`、守护进程状态与关键日志尾部，并对设备 MAC、IP 等个人隐私信息做脱敏处理，便于快速定位跨机型兼容差异。

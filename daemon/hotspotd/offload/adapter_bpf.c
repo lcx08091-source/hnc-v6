@@ -146,6 +146,12 @@ static offload_err_t errno_to_offload(int e)
 {
     switch (e) {
     case 0:           return OFFLOAD_OK;
+    case ENOSYS:
+    case EOPNOTSUPP:
+#if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
+    case ENOTSUP:
+#endif
+                      return OFFLOAD_ENOTSUP;
     case EPERM:
     case EACCES:      return OFFLOAD_EPERM;
     case ENOENT:      return OFFLOAD_ENOENT;
@@ -697,7 +703,20 @@ static uint64_t stats_total_bytes(void)
 static int bpf_probe(void)
 {
     struct stat st;
-    if (stat(BPF_LIMIT_MAP, &st) != 0) return -1;
+    if (stat(BPF_LIMIT_MAP, &st) != 0)
+        return -1;
+    int fd = hnc_bpf_obj_get(BPF_LIMIT_MAP);
+    if (fd >= 0) {
+        close(fd);
+        return 0;
+    }
+    if (errno == ENOSYS || errno == EOPNOTSUPP ||
+#if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
+        errno == ENOTSUP ||
+#endif
+        errno == ENOENT) {
+        return -1;
+    }
     return 0;
 }
 
@@ -743,19 +762,32 @@ static offload_err_t bpf_self_check(void)
 {
     offload_err_t ret = OFFLOAD_OK;
     BPF_LOCK();
-    if (ensure_limit_fd() != 0) {
-        ret = errno_to_offload(errno);
-        BPF_UNLOCK();
-        return ret;
+    int fd_lim = s.fd_limit;
+    if (fd_lim < 0) {
+        fd_lim = hnc_bpf_obj_get(BPF_LIMIT_MAP);
+        if (fd_lim < 0) {
+            ret = errno_to_offload(errno);
+            goto cleanup;
+        }
     }
 
     struct bpf_map_info info;
     uint32_t info_len = sizeof(info);
 
-    if (hnc_bpf_obj_get_info_by_fd(s.fd_limit, &info, &info_len) != 0) {
-        fprintf(stderr, "[bpf] self_check: get_info_by_fd errno=%d\n", errno);
-        BPF_UNLOCK();
-        return OFFLOAD_EINTERNAL;
+    if (hnc_bpf_obj_get_info_by_fd(fd_lim, &info, &info_len) != 0) {
+        int err = errno;
+        fprintf(stderr, "[bpf] self_check: get_info_by_fd errno=%d\n", err);
+        if (err == ENOSYS || err == EOPNOTSUPP
+#if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
+            || err == ENOTSUP
+#endif
+           ) {
+            ret = OFFLOAD_ENOTSUP;
+        } else {
+            ret = OFFLOAD_EINTERNAL;
+        }
+        s.fd_limit = fd_lim;
+        goto cleanup;
     }
 
     if (info.key_size != sizeof(uint32_t) ||
@@ -765,19 +797,23 @@ static offload_err_t bpf_self_check(void)
             "[bpf] self_check FAIL: limit_map schema drift "
             "(type=%u key_size=%u expected 4, value_size=%u expected 8)\n",
             info.type, info.key_size, info.value_size);
-        BPF_UNLOCK();
-        return OFFLOAD_EINTERNAL;
+        ret = OFFLOAD_EINTERNAL;
+        s.fd_limit = fd_lim;
+        goto cleanup;
     }
+
+    s.fd_limit = fd_lim;
 
     if (s.fd_stats < 0)
         s.fd_stats = hnc_bpf_obj_get(BPF_STATS_MAP);
     if (s.fd_stats >= 0 && validate_stats_map_fd(s.fd_stats) != 0) {
         close(s.fd_stats);
         s.fd_stats = -1;
-        BPF_UNLOCK();
-        return OFFLOAD_EINTERNAL;
+        ret = OFFLOAD_EINTERNAL;
+        goto cleanup;
     }
 
+cleanup:
     BPF_UNLOCK();
     return ret;
 }

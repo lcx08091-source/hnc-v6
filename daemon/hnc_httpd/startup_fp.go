@@ -743,6 +743,20 @@ func startupSampleFiles(runDir string) map[string]string {
 	return out
 }
 
+// selfStudioLabelSampleFiles 优先扫描 data/self_studio/ 下的 label_samples.YYYYMMDD.jsonl,
+// 同日期缺失时回退兼容旧版 run/ 目录。
+func selfStudioLabelSampleFiles(hncDir string) map[string]string {
+	out := map[string]string{}
+	for _, dir := range selfStudioScanDirs(hncDir) {
+		for d, p := range startupSampleFiles(dir) {
+			if _, exists := out[d]; !exists {
+				out[d] = p
+			}
+		}
+	}
+	return out
+}
+
 // startupReadFrom 从 off 开始读完整的行(最后一行没写完不算), 最多 maxLines 行。
 // 返回解析出的样本、读到的新偏移、读了几行。
 func startupReadFrom(path string, off int64, maxLines int) ([]startupSample, int64, int) {
@@ -826,7 +840,7 @@ func (st *startupStore) learnOnce(now time.Time) {
 
 	pmap := pkgAppMap(st.hncDir)
 	names := ruleNameMap(st.hncDir)
-	files := startupSampleFiles(filepath.Join(st.hncDir, "run"))
+	files := selfStudioLabelSampleFiles(st.hncDir)
 	dates := make([]string, 0, len(files))
 	for d := range files {
 		if d >= cur.Date {
@@ -1103,7 +1117,7 @@ type startupFGRec struct {
 
 // startupLoadDays 读全部(≤ 7 天)样本, 按本地日期分组、组内按时间排序。
 func startupLoadDays(hncDir string) map[string][]startupSample {
-	files := startupSampleFiles(filepath.Join(hncDir, "run"))
+	files := selfStudioLabelSampleFiles(hncDir)
 	out := map[string][]startupSample{}
 	total := 0
 	dates := make([]string, 0, len(files))
@@ -1125,21 +1139,14 @@ func startupLoadDays(hncDir string) map[string][]startupSample {
 	return out
 }
 
-// startupLoadFG 读某天的前台真值(包名映射到应用 id, 映射不到的跳过)。
+// startupLoadFG 读某天的前台真值(优先 data/self_studio/, 兼容合并旧版 run/)。
 func startupLoadFG(hncDir, date string, pmap map[string]string) []startupFGRec {
-	f, err := os.Open(filepath.Join(hncDir, "run", "self_fg."+date+".jsonl"))
-	if err != nil {
+	recs := readSelfFGRecordsForDay(hncDir, date)
+	if len(recs) == 0 {
 		return nil
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(io.LimitReader(f, 8<<20))
-	sc.Buffer(make([]byte, 0, 4096), 64<<10)
-	var out []startupFGRec
-	for sc.Scan() {
-		var r selfFGRecord
-		if json.Unmarshal(sc.Bytes(), &r) != nil || r.Pkg == "" {
-			continue
-		}
+	out := make([]startupFGRec, 0, len(recs))
+	for _, r := range recs {
 		app := pmap[r.Pkg]
 		if app == "" {
 			app = "pkg:" + r.Pkg // 仍然记下, 让「当时前台不是某应用」可判断

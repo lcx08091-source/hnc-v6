@@ -422,13 +422,11 @@ func writePromotedRules(promoted map[string]autoExpandedRule) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	dst := filepath.Join(externalRulesDir, autoPromotedOutFile)
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename %s -> %s: %w", tmp, dst, err)
+	if err := atomicWrite(dst, body, 0o644); err != nil {
+		return fmt.Errorf("atomic write %s: %w", dst, err)
 	}
 	return nil
 }
@@ -448,18 +446,14 @@ type candidateAccumData struct {
 
 // saveCandidateAccum atomically persists the accumulator so it survives dpid
 // restarts. Best-effort: any error is silently ignored (we just lose this
-// snapshot, next tick retries).
+// snapshot, next tick retries), while atomicWrite guarantees no 0-byte .tmp orphan.
 func saveCandidateAccum(acc *candidateAccumulator) {
 	data := candidateAccumData{SavedAt: time.Now().Unix(), ByApex: acc.byApex}
 	body, err := json.Marshal(&data)
 	if err != nil {
 		return
 	}
-	tmp := candidateAccumFile + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, candidateAccumFile)
+	_ = atomicWrite(candidateAccumFile, body, 0o644)
 }
 
 // loadCandidateAccum repopulates acc.byApex from the on-disk snapshot at

@@ -343,47 +343,83 @@ func parseProcNetRouteDefaultIfaces(r io.Reader) map[string]bool {
 	return out
 }
 
-func dumpDefaultRouteIfindicesNetlink() map[int]bool {
+func recvNetlinkRoutePacket(fd int, buf []byte) ([]byte, int, error) {
+	const maxNetlinkPkt = 1 << 20
+	for {
+		peekLen, _, perr := syscall.Recvfrom(fd, buf[:1], syscall.MSG_PEEK|syscall.MSG_TRUNC)
+		if errors.Is(perr, syscall.EINTR) {
+			continue
+		}
+		if perr == nil && peekLen > len(buf) {
+			alloc := peekLen
+			if alloc > maxNetlinkPkt {
+				alloc = maxNetlinkPkt
+			}
+			buf = make([]byte, alloc)
+		}
+		break
+	}
+	for {
+		n, _, rerr := syscall.Recvfrom(fd, buf, 0)
+		if errors.Is(rerr, syscall.EINTR) {
+			continue
+		}
+		return buf, n, rerr
+	}
+}
+
+func dumpDefaultRouteIfindicesForFamily(fam uint8, seq uint32, buf []byte, out map[int]bool) []byte {
 	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
 	if err != nil {
-		return nil
+		return buf
 	}
 	defer syscall.Close(fd)
 
 	tv := syscall.Timeval{Sec: 1}
 	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
+	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 256<<10)
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		return nil
+		return buf
 	}
 
+	req := make([]byte, rtNlHdrLen+rtMsgHdrLen)
+	native := binary.LittleEndian
+	native.PutUint32(req[0:4], uint32(len(req)))
+	native.PutUint16(req[4:6], syscall.RTM_GETROUTE)
+	native.PutUint16(req[6:8], syscall.NLM_F_REQUEST|syscall.NLM_F_DUMP)
+	native.PutUint32(req[8:12], seq)
+	req[rtNlHdrLen] = fam
+
+	if err := sendNetlinkRouteReq(fd, req); err != nil {
+		return buf
+	}
+	for {
+		var n int
+		var rerr error
+		buf, n, rerr = recvNetlinkRoutePacket(fd, buf)
+		if rerr != nil {
+			if errors.Is(rerr, syscall.ENOBUFS) {
+				continue
+			}
+			break
+		}
+		if n <= 0 {
+			break
+		}
+		done, perr := parseRouteMsgsDefaultIfindicesSeq(buf[:n], seq, out)
+		if perr != nil || done {
+			break
+		}
+	}
+	return buf
+}
+
+func dumpDefaultRouteIfindicesNetlink() map[int]bool {
 	out := make(map[int]bool, 4)
 	buf := make([]byte, 1<<16)
 	for i, fam := range []uint8{syscall.AF_INET, syscall.AF_INET6} {
-		req := make([]byte, rtNlHdrLen+rtMsgHdrLen)
-		native := binary.LittleEndian
-		native.PutUint32(req[0:4], uint32(len(req)))
-		native.PutUint16(req[4:6], syscall.RTM_GETROUTE)
-		native.PutUint16(req[6:8], syscall.NLM_F_REQUEST|syscall.NLM_F_DUMP)
-		native.PutUint32(req[8:12], uint32(i+1))
-		req[rtNlHdrLen] = fam
-
-		if err := sendNetlinkRouteReq(fd, req); err != nil {
-			continue
-		}
-		for {
-			n, _, rerr := syscall.Recvfrom(fd, buf, 0)
-			if errors.Is(rerr, syscall.EINTR) {
-				continue
-			}
-			if rerr != nil || n <= 0 {
-				break
-			}
-			done, perr := parseRouteMsgsDefaultIfindices(buf[:n], out)
-			if perr != nil || done {
-				break
-			}
-		}
+		buf = dumpDefaultRouteIfindicesForFamily(fam, uint32(i+1), buf, out)
 	}
 	return out
 }
@@ -403,7 +439,12 @@ func rtAlign4(n int) int {
 }
 
 func parseRouteMsgsDefaultIfindices(b []byte, out map[int]bool) (done bool, err error) {
+	return parseRouteMsgsDefaultIfindicesSeq(b, 0, out)
+}
+
+func parseRouteMsgsDefaultIfindicesSeq(b []byte, wantSeq uint32, out map[int]bool) (done bool, err error) {
 	native := binary.LittleEndian
+	sawNonMulti := false
 	for off := 0; off < len(b); {
 		rest := len(b) - off
 		if rest < rtNlHdrLen {
@@ -411,6 +452,8 @@ func parseRouteMsgsDefaultIfindices(b []byte, out map[int]bool) (done bool, err 
 		}
 		msgLen := int(native.Uint32(b[off : off+4]))
 		msgType := native.Uint16(b[off+4 : off+6])
+		msgFlags := native.Uint16(b[off+6 : off+8])
+		msgSeq := native.Uint32(b[off+8 : off+12])
 		if msgLen < rtNlHdrLen || msgLen > rest {
 			return false, errors.New("rtnetlink: bad nlmsg_len")
 		}
@@ -422,7 +465,13 @@ func parseRouteMsgsDefaultIfindices(b []byte, out map[int]bool) (done bool, err 
 			off += step
 		}
 
+		if wantSeq != 0 && msgSeq != 0 && msgSeq != wantSeq {
+			continue
+		}
+
 		switch msgType {
+		case syscall.NLMSG_NOOP:
+			continue
 		case syscall.NLMSG_DONE:
 			return true, nil
 		case syscall.NLMSG_ERROR:
@@ -431,12 +480,19 @@ func parseRouteMsgsDefaultIfindices(b []byte, out map[int]bool) (done bool, err 
 			}
 			code := int32(native.Uint32(msg[rtNlHdrLen : rtNlHdrLen+4]))
 			if code == 0 {
+				if msgFlags&syscall.NLM_F_MULTI == 0 {
+					sawNonMulti = true
+				}
 				continue
 			}
 			if code < 0 {
 				return false, syscall.Errno(-code)
 			}
 			return false, syscall.Errno(code)
+		}
+
+		if msgFlags&syscall.NLM_F_MULTI == 0 {
+			sawNonMulti = true
 		}
 
 		if msgType != syscall.RTM_NEWROUTE || len(msg) < rtNlHdrLen+rtMsgHdrLen {
@@ -496,7 +552,7 @@ func parseRouteMsgsDefaultIfindices(b []byte, out map[int]bool) (done bool, err 
 			}
 		}
 	}
-	return false, nil
+	return sawNonMulti, nil
 }
 
 // InterfaceNets returns every IP+mask configured on the named interface.

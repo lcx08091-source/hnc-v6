@@ -3313,10 +3313,10 @@ func scRealRunner(hncDir string) func(ctx context.Context, name string, args ...
 			}
 		}
 		cmd := hardenCmd(exec.CommandContext(ctx, path, args...))
-		cmd.Env = []string{
-			"HNC_DIR=" + hncDir, "HNC=" + hncDir,
-			"PATH=/system/bin:/system/xbin:/vendor/bin:" + hncDir + "/bin:/data/adb/ksu/bin:/data/adb/magisk:/data/adb/ap/bin",
-		}
+		cmd.Env = hubAppendAndroidEnv(
+			"HNC_DIR="+hncDir, "HNC="+hncDir,
+			"PATH=/system/bin:/system/xbin:/vendor/bin:"+hncDir+"/bin:/data/adb/ksu/bin:/data/adb/magisk:/data/adb/ap/bin",
+		)
 		var out bytes.Buffer
 		cmd.Stdout = &scLimitWriter{w: &out, n: 4 << 20}
 		err := cmd.Run()

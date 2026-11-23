@@ -493,9 +493,7 @@ func (s *server) writePowerStats(now time.Time) {
 		return
 	}
 	p := filepath.Join(s.hncDir, "run", "power_stats.json")
-	if os.WriteFile(p+".tmp", b, 0o644) == nil {
-		_ = os.Rename(p+".tmp", p)
-	}
+	_ = writeFileAtomic(p, b)
 }
 
 // PowerSamplerLoop 每 5 分钟采样; 活动档位变化时(间隔 ≥60s)也采, 让 by_level 分得清。

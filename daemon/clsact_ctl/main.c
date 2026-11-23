@@ -121,42 +121,57 @@ static int sys_bpf(int cmd, union bpf_attr_pad *a)
     return (int)syscall(SYS_BPF_NO, cmd, a, sizeof(union bpf_attr));
 }
 
-#define NLMSG_TAIL(nmsg) \
-    ((struct rtattr *)(((char *)(nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
+struct nl_tc_req {
+    struct nlmsghdr n;
+    struct tcmsg    t;
+    uint8_t         attr_buf[512];
+} __attribute__((aligned(NLMSG_ALIGNTO)));
+
+_Static_assert(__builtin_offsetof(struct nl_tc_req, attr_buf) == NLMSG_LENGTH(sizeof(struct tcmsg)),
+               "nl_tc_req header/payload offset mismatch");
 
 static int addattr_l(struct nlmsghdr *n, size_t maxlen, int type,
                      const void *data, size_t alen)
 {
+    size_t off = NLMSG_ALIGN(n->nlmsg_len);
     size_t len = RTA_LENGTH(alen);
-    if (NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len) > maxlen)
+    if (off + RTA_ALIGN(len) > maxlen)
         return -1;
-    struct rtattr *rta = NLMSG_TAIL(n);
-    rta->rta_type = (unsigned short)type;
-    rta->rta_len  = (unsigned short)len;
+    struct rtattr hdr = {
+        .rta_len  = (unsigned short)len,
+        .rta_type = (unsigned short)type,
+    };
+    uint8_t *base = (uint8_t *)n;
+    memcpy(base + off, &hdr, sizeof(hdr));
     if (alen && data)
-        memcpy(RTA_DATA(rta), data, alen);
-    n->nlmsg_len = (uint32_t)(NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len));
+        memcpy(base + off + RTA_LENGTH(0), data, alen);
+    n->nlmsg_len = (uint32_t)(off + RTA_ALIGN(len));
     return 0;
 }
 
-static struct rtattr *addattr_nest(struct nlmsghdr *n, size_t maxlen, int type)
+static int addattr_nest(struct nlmsghdr *n, size_t maxlen, int type, size_t *nest_off_out)
 {
-    struct rtattr *nest = NLMSG_TAIL(n);
+    size_t off = NLMSG_ALIGN(n->nlmsg_len);
     if (addattr_l(n, maxlen, type, NULL, 0) < 0)
-        return NULL;
-    return nest;
+        return -1;
+    *nest_off_out = off;
+    return 0;
 }
 
-static void addattr_nest_end(struct nlmsghdr *n, struct rtattr *nest)
+static void addattr_nest_end(struct nlmsghdr *n, size_t nest_off)
 {
-    nest->rta_len = (unsigned short)((char *)NLMSG_TAIL(n) - (char *)nest);
+    uint8_t *base = (uint8_t *)n;
+    struct rtattr hdr;
+    memcpy(&hdr, base + nest_off, sizeof(hdr));
+    hdr.rta_len = (unsigned short)(NLMSG_ALIGN(n->nlmsg_len) - nest_off);
+    memcpy(base + nest_off, &hdr, sizeof(hdr));
 }
 
 static uint32_t g_seq;
 
 static int rtnl_talk(int fd, struct nlmsghdr *req)
 {
-    char buf[8192] __attribute__((aligned(NLMSG_ALIGNTO)));
+    uint8_t buf[8192] __attribute__((aligned(NLMSG_ALIGNTO)));
     struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
     struct iovec iov = { .iov_base = req, .iov_len = req->nlmsg_len };
     struct msghdr msg = { .msg_name = &sa, .msg_namelen = sizeof(sa),
@@ -183,25 +198,28 @@ static int rtnl_talk(int fd, struct nlmsghdr *req)
 
         size_t rem = (size_t)n;
         for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
-            struct nlmsghdr *h = (struct nlmsghdr *)(buf + off);
-            if (h->nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h->nlmsg_len > rem)
+            struct nlmsghdr h;
+            memcpy(&h, buf + off, sizeof(h));
+            if (h.nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h.nlmsg_len > rem)
                 break;
-            size_t step = NLMSG_ALIGN(h->nlmsg_len);
+            size_t msg_off = off;
+            size_t step = NLMSG_ALIGN(h.nlmsg_len);
             if (step > rem)
                 step = rem;
             off += step;
             rem -= step;
-            if (h->nlmsg_seq != g_seq)
+            if (h.nlmsg_seq != g_seq)
                 continue;
-            if (h->nlmsg_type == NLMSG_ERROR) {
-                if (h->nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr)))
+            if (h.nlmsg_type == NLMSG_ERROR) {
+                if (h.nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr)))
                     return -EBADMSG;
-                struct nlmsgerr *e = (struct nlmsgerr *)NLMSG_DATA(h);
-                if (e->error == 0 || e->error == -EEXIST)
+                struct nlmsgerr e;
+                memcpy(&e, buf + msg_off + NLMSG_LENGTH(0), sizeof(e));
+                if (e.error == 0 || e.error == -EEXIST)
                     return 0;
-                return e->error;
+                return e.error;
             }
-            if (h->nlmsg_type == NLMSG_DONE)
+            if (h.nlmsg_type == NLMSG_DONE)
                 return 0;
         }
     }
@@ -226,25 +244,21 @@ static int rtnl_open(void)
 
 static int clsact_qdisc_ensure(int nlfd, unsigned ifindex)
 {
-    char buf[512] __attribute__((aligned(NLMSG_ALIGNTO)));
-    struct nlmsghdr *n = (struct nlmsghdr *)buf;
-    struct tcmsg *t;
+    struct nl_tc_req req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len   = NLMSG_LENGTH(sizeof(req.t));
+    req.n.nlmsg_type  = RTM_NEWQDISC;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+    req.n.nlmsg_seq   = ++g_seq;
+    req.t.tcm_family  = AF_UNSPEC;
+    req.t.tcm_ifindex = (int)ifindex;
+    req.t.tcm_parent  = TC_H_CLSACT_PARENT;
+    req.t.tcm_handle  = TC_H_CLSACT_HANDLE;
 
-    memset(buf, 0, sizeof(buf));
-    n->nlmsg_len   = NLMSG_LENGTH(sizeof(*t));
-    n->nlmsg_type  = RTM_NEWQDISC;
-    n->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
-    n->nlmsg_seq   = ++g_seq;
-    t = NLMSG_DATA(n);
-    t->tcm_family  = AF_UNSPEC;
-    t->tcm_ifindex = (int)ifindex;
-    t->tcm_parent  = TC_H_CLSACT_PARENT;
-    t->tcm_handle  = TC_H_CLSACT_HANDLE;
-
-    if (addattr_l(n, sizeof(buf), TCA_KIND, "clsact", strlen("clsact") + 1) < 0)
+    if (addattr_l(&req.n, sizeof(req), TCA_KIND, "clsact", strlen("clsact") + 1) < 0)
         return -EMSGSIZE;
 
-    int rc = rtnl_talk(nlfd, n);
+    int rc = rtnl_talk(nlfd, &req.n);
     if (rc == 0)
         LOGI("clsact qdisc present/added (ifindex=%u)", ifindex);
     else
@@ -255,44 +269,40 @@ static int clsact_qdisc_ensure(int nlfd, unsigned ifindex)
 static int bpf_filter_attach_dir(int nlfd, unsigned ifindex, uint32_t parent,
                                  int prog_fd, const char *prog_name)
 {
-    char buf[512] __attribute__((aligned(NLMSG_ALIGNTO)));
-    struct nlmsghdr *n = (struct nlmsghdr *)buf;
-    struct tcmsg *t;
-    struct rtattr *opt;
+    struct nl_tc_req req;
+    size_t opt_off = 0;
 
-    memset(buf, 0, sizeof(buf));
-    n->nlmsg_len   = NLMSG_LENGTH(sizeof(*t));
-    n->nlmsg_type  = RTM_NEWTFILTER;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len   = NLMSG_LENGTH(sizeof(req.t));
+    req.n.nlmsg_type  = RTM_NEWTFILTER;
     /* NLM_F_REPLACE is required so install/repair atomically swaps upgraded BPF
      * programs on handle 1 instead of silently leaving stale programs behind. */
-    n->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
-    n->nlmsg_seq   = ++g_seq;
-    t = NLMSG_DATA(n);
-    t->tcm_family  = AF_UNSPEC;
-    t->tcm_ifindex = (int)ifindex;
-    t->tcm_parent  = parent;
-    t->tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
-    t->tcm_handle  = HNC_FILTER_HANDLE;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+    req.n.nlmsg_seq   = ++g_seq;
+    req.t.tcm_family  = AF_UNSPEC;
+    req.t.tcm_ifindex = (int)ifindex;
+    req.t.tcm_parent  = parent;
+    req.t.tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
+    req.t.tcm_handle  = HNC_FILTER_HANDLE;
 
-    if (addattr_l(n, sizeof(buf), TCA_KIND, HNC_FILTER_KIND,
+    if (addattr_l(&req.n, sizeof(req), TCA_KIND, HNC_FILTER_KIND,
                   strlen(HNC_FILTER_KIND) + 1) < 0)
         return -EMSGSIZE;
 
-    opt = addattr_nest(n, sizeof(buf), TCA_OPTIONS);
-    if (!opt)
+    if (addattr_nest(&req.n, sizeof(req), TCA_OPTIONS, &opt_off) < 0)
         return -EMSGSIZE;
     uint32_t fd32 = (uint32_t)prog_fd;
-    if (addattr_l(n, sizeof(buf), TCA_BPF_FD, &fd32, sizeof(fd32)) < 0)
+    if (addattr_l(&req.n, sizeof(req), TCA_BPF_FD, &fd32, sizeof(fd32)) < 0)
         return -EMSGSIZE;
-    if (addattr_l(n, sizeof(buf), TCA_BPF_NAME, prog_name,
+    if (addattr_l(&req.n, sizeof(req), TCA_BPF_NAME, prog_name,
                   strlen(prog_name) + 1) < 0)
         return -EMSGSIZE;
     uint32_t flags = TCA_BPF_FLAG_ACT_DIRECT;
-    if (addattr_l(n, sizeof(buf), TCA_BPF_FLAGS, &flags, sizeof(flags)) < 0)
+    if (addattr_l(&req.n, sizeof(req), TCA_BPF_FLAGS, &flags, sizeof(flags)) < 0)
         return -EMSGSIZE;
-    addattr_nest_end(n, opt);
+    addattr_nest_end(&req.n, opt_off);
 
-    int rc = rtnl_talk(nlfd, n);
+    int rc = rtnl_talk(nlfd, &req.n);
     if (rc == 0)
         LOGI("bpf filter (%s) attached at parent=0x%x pref=%d (fd=%d)",
              prog_name, parent, HNC_FILTER_PREF, prog_fd);
@@ -303,67 +313,55 @@ static int bpf_filter_attach_dir(int nlfd, unsigned ifindex, uint32_t parent,
 
 static int bpf_filter_exists_dir(int nlfd, unsigned ifindex, uint32_t parent)
 {
-    char buf[256] __attribute__((aligned(NLMSG_ALIGNTO)));
-    struct nlmsghdr *n = (struct nlmsghdr *)buf;
-    struct tcmsg *t;
-
-    memset(buf, 0, sizeof(buf));
-    n->nlmsg_len   = NLMSG_LENGTH(sizeof(*t));
-    n->nlmsg_type  = RTM_GETTFILTER;
-    n->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-    n->nlmsg_seq   = ++g_seq;
-    t = NLMSG_DATA(n);
-    t->tcm_family  = AF_UNSPEC;
-    t->tcm_ifindex = (int)ifindex;
-    t->tcm_parent  = parent;
-    t->tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
-    t->tcm_handle  = HNC_FILTER_HANDLE;
-    if (addattr_l(n, sizeof(buf), TCA_KIND, HNC_FILTER_KIND,
+    struct nl_tc_req req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len   = NLMSG_LENGTH(sizeof(req.t));
+    req.n.nlmsg_type  = RTM_GETTFILTER;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    req.n.nlmsg_seq   = ++g_seq;
+    req.t.tcm_family  = AF_UNSPEC;
+    req.t.tcm_ifindex = (int)ifindex;
+    req.t.tcm_parent  = parent;
+    req.t.tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
+    req.t.tcm_handle  = HNC_FILTER_HANDLE;
+    if (addattr_l(&req.n, sizeof(req), TCA_KIND, HNC_FILTER_KIND,
                   strlen(HNC_FILTER_KIND) + 1) < 0)
         return 0;
-    return rtnl_talk(nlfd, n) == 0;
+    return rtnl_talk(nlfd, &req.n) == 0;
 }
 
 static int bpf_filter_detach_dir(int nlfd, unsigned ifindex, uint32_t parent)
 {
-    char buf[256] __attribute__((aligned(NLMSG_ALIGNTO)));
-    struct nlmsghdr *n = (struct nlmsghdr *)buf;
-    struct tcmsg *t;
-
-    memset(buf, 0, sizeof(buf));
-    n->nlmsg_len   = NLMSG_LENGTH(sizeof(*t));
-    n->nlmsg_type  = RTM_DELTFILTER;
-    n->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-    n->nlmsg_seq   = ++g_seq;
-    t = NLMSG_DATA(n);
-    t->tcm_family  = AF_UNSPEC;
-    t->tcm_ifindex = (int)ifindex;
-    t->tcm_parent  = parent;
-    t->tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
-    t->tcm_handle  = HNC_FILTER_HANDLE;
-    if (addattr_l(n, sizeof(buf), TCA_KIND, HNC_FILTER_KIND,
+    struct nl_tc_req req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len   = NLMSG_LENGTH(sizeof(req.t));
+    req.n.nlmsg_type  = RTM_DELTFILTER;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    req.n.nlmsg_seq   = ++g_seq;
+    req.t.tcm_family  = AF_UNSPEC;
+    req.t.tcm_ifindex = (int)ifindex;
+    req.t.tcm_parent  = parent;
+    req.t.tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
+    req.t.tcm_handle  = HNC_FILTER_HANDLE;
+    if (addattr_l(&req.n, sizeof(req), TCA_KIND, HNC_FILTER_KIND,
                   strlen(HNC_FILTER_KIND) + 1) < 0)
         return -EMSGSIZE;
-    return rtnl_talk(nlfd, n);
+    return rtnl_talk(nlfd, &req.n);
 }
 
 static int clsact_qdisc_exists(int nlfd, unsigned ifindex)
 {
-    char buf[256] __attribute__((aligned(NLMSG_ALIGNTO)));
-    struct nlmsghdr *n = (struct nlmsghdr *)buf;
-    struct tcmsg *t;
-
-    memset(buf, 0, sizeof(buf));
-    n->nlmsg_len   = NLMSG_LENGTH(sizeof(*t));
-    n->nlmsg_type  = RTM_GETQDISC;
-    n->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-    n->nlmsg_seq   = ++g_seq;
-    t = NLMSG_DATA(n);
-    t->tcm_family  = AF_UNSPEC;
-    t->tcm_ifindex = (int)ifindex;
-    t->tcm_parent  = TC_H_CLSACT_PARENT;
-    t->tcm_handle  = TC_H_CLSACT_HANDLE;
-    return rtnl_talk(nlfd, n) == 0;
+    struct nl_tc_req req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len   = NLMSG_LENGTH(sizeof(req.t));
+    req.n.nlmsg_type  = RTM_GETQDISC;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    req.n.nlmsg_seq   = ++g_seq;
+    req.t.tcm_family  = AF_UNSPEC;
+    req.t.tcm_ifindex = (int)ifindex;
+    req.t.tcm_parent  = TC_H_CLSACT_PARENT;
+    req.t.tcm_handle  = TC_H_CLSACT_HANDLE;
+    return rtnl_talk(nlfd, &req.n) == 0;
 }
 
 /* ── Mini ELF Loader (Overflow & Alignment Hardened) ─────────────────── */
@@ -371,7 +369,7 @@ static int clsact_qdisc_exists(int nlfd, unsigned ifindex)
 struct elf_ctx {
     uint8_t    *data;
     size_t      size;
-    Elf64_Ehdr *eh;
+    Elf64_Ehdr  eh;
     Elf64_Shdr *sh;
     const char *shstr;
     size_t      shstr_sz;
@@ -429,20 +427,20 @@ static int elf_load(struct elf_ctx *c, const char *path)
     }
     fclose(f);
 
-    c->eh = (Elf64_Ehdr *)c->data;
-    if (memcmp(c->eh->e_ident, ELFMAG, SELFMAG) != 0 ||
-        c->eh->e_ident[EI_CLASS] != ELFCLASS64 ||
-        c->eh->e_machine != EM_BPF) {
+    memcpy(&c->eh, c->data, sizeof(c->eh));
+    if (memcmp(c->eh.e_ident, ELFMAG, SELFMAG) != 0 ||
+        c->eh.e_ident[EI_CLASS] != ELFCLASS64 ||
+        c->eh.e_machine != EM_BPF) {
         LOGE("not an eBPF ELF object: %s", path);
         free(c->data);
         c->data = NULL;
         return -1;
     }
-    uint64_t sh_bytes = (uint64_t)c->eh->e_shnum * sizeof(Elf64_Shdr);
-    if (c->eh->e_shoff == 0 || c->eh->e_shnum == 0 ||
-        c->eh->e_shentsize != sizeof(Elf64_Shdr) ||
-        c->eh->e_shstrndx >= c->eh->e_shnum ||
-        !range_valid(c->eh->e_shoff, sh_bytes, c->size)) {
+    uint64_t sh_bytes = (uint64_t)c->eh.e_shnum * sizeof(Elf64_Shdr);
+    if (c->eh.e_shoff == 0 || c->eh.e_shnum == 0 ||
+        c->eh.e_shentsize != sizeof(Elf64_Shdr) ||
+        c->eh.e_shstrndx >= c->eh.e_shnum ||
+        !range_valid(c->eh.e_shoff, sh_bytes, c->size)) {
         LOGE("bad section table");
         elf_free(c);
         return -1;
@@ -453,8 +451,8 @@ static int elf_load(struct elf_ctx *c, const char *path)
         elf_free(c);
         return -1;
     }
-    memcpy(c->sh, c->data + c->eh->e_shoff, (size_t)sh_bytes);
-    Elf64_Shdr *shstr_sh = &c->sh[c->eh->e_shstrndx];
+    memcpy(c->sh, c->data + c->eh.e_shoff, (size_t)sh_bytes);
+    Elf64_Shdr *shstr_sh = &c->sh[c->eh.e_shstrndx];
     if (shstr_sh->sh_size == 0 ||
         !range_valid(shstr_sh->sh_offset, shstr_sh->sh_size, c->size)) {
         elf_free(c);
@@ -467,7 +465,7 @@ static int elf_load(struct elf_ctx *c, const char *path)
         elf_free(c);
         return -1;
     }
-    for (int i = 0; i < c->eh->e_shnum; i++) {
+    for (int i = 0; i < c->eh.e_shnum; i++) {
         uint64_t so = c->sh[i].sh_offset, ss = c->sh[i].sh_size;
         if (c->sh[i].sh_name >= c->shstr_sz ||
             (sh_type_needs_data(c->sh[i].sh_type) && !range_valid(so, ss, c->size))) {
@@ -481,7 +479,7 @@ static int elf_load(struct elf_ctx *c, const char *path)
 
 static int sec_index(struct elf_ctx *c, const char *name)
 {
-    for (int i = 0; i < c->eh->e_shnum; i++) {
+    for (int i = 0; i < c->eh.e_shnum; i++) {
         if (c->sh[i].sh_name >= c->shstr_sz)
             continue;
         const char *n = c->shstr + c->sh[i].sh_name;
@@ -495,10 +493,10 @@ static int get_sym_strtab(struct elf_ctx *c, int symi,
                           const uint8_t **out_sym_base, size_t *out_nsym,
                           const char **out_str, size_t *out_strsz)
 {
-    if (symi < 0 || symi >= c->eh->e_shnum)
+    if (symi < 0 || symi >= c->eh.e_shnum)
         return -1;
     Elf64_Shdr *symsh = &c->sh[symi];
-    if (symsh->sh_type != SHT_SYMTAB || symsh->sh_link >= (uint32_t)c->eh->e_shnum)
+    if (symsh->sh_type != SHT_SYMTAB || symsh->sh_link >= (uint32_t)c->eh.e_shnum)
         return -1;
     Elf64_Shdr *strsh = &c->sh[symsh->sh_link];
     if (strsh->sh_type != SHT_STRTAB || strsh->sh_size == 0)
@@ -523,7 +521,7 @@ static int create_named_map(struct elf_ctx *c, const char *want_sym,
         return -1;
     }
     int symi = -1;
-    for (int i = 0; i < c->eh->e_shnum; i++)
+    for (int i = 0; i < c->eh.e_shnum; i++)
         if (c->sh[i].sh_type == SHT_SYMTAB) { symi = i; break; }
 
     const uint8_t *sym_base = NULL;
@@ -598,7 +596,7 @@ static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
         return -1;
     memcpy(insns, c->data + c->sh[pi].sh_offset, insnsz);
 
-    for (int i = 0; i < c->eh->e_shnum; i++) {
+    for (int i = 0; i < c->eh.e_shnum; i++) {
         if (c->sh[i].sh_type != SHT_REL || c->sh[i].sh_info != (uint32_t)pi)
             continue;
         const uint8_t *sym_base = NULL;
@@ -645,11 +643,14 @@ static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
                 free(insns);
                 return -1;
             }
-            uint32_t *w = (uint32_t *)&insns[insn_idx];
-            w[0] = (w[0] & 0xFFFF0F00u) | BPF_LD_DW_IMM | (BPF_PSEUDO_MAP_FD << 12);
-            w[1] = (uint32_t)target_fd;
-            uint32_t *w2 = (uint32_t *)&insns[insn_idx + 1];
-            w2[1] = 0;
+            uint32_t w0[2], w1[2];
+            memcpy(w0, &insns[insn_idx], sizeof(w0));
+            memcpy(w1, &insns[insn_idx + 1], sizeof(w1));
+            w0[0] = (w0[0] & 0xFFFF0F00u) | BPF_LD_DW_IMM | (BPF_PSEUDO_MAP_FD << 12);
+            w0[1] = (uint32_t)target_fd;
+            w1[1] = 0;
+            memcpy(&insns[insn_idx], w0, sizeof(w0));
+            memcpy(&insns[insn_idx + 1], w1, sizeof(w1));
         }
     }
 
@@ -877,6 +878,189 @@ static int bpf_map_delete_any(int fd, const void *key)
     return sys_bpf(BPF_MAP_DELETE_ELEM, &a) < 0 ? -errno : 0;
 }
 
+static int bpf_map_lookup_any(int fd, const void *key, void *val)
+{
+    union bpf_attr_pad a;
+    memset(&a, 0, sizeof(a));
+    a.attr.map_fd = (uint32_t)fd;
+    a.attr.key    = (uint64_t)(uintptr_t)key;
+    a.attr.value  = (uint64_t)(uintptr_t)val;
+    return sys_bpf(BPF_MAP_LOOKUP_ELEM, &a) < 0 ? -errno : 0;
+}
+
+#define HNC_CHECK_MAX_KEY_SZ 256U
+#define HNC_CHECK_MAX_ITERS  65536U
+
+/* Traverse a pinned kernel BPF map via BPF_MAP_GET_NEXT_KEY (or non-zero slot
+ * scan for small ARRAY policy maps) to obtain real live entry counts.
+ * Returns >= 0 entry count on success, or -1 if the map cannot be read. */
+static int count_pinned_map_entries(const char *pin_path, uint32_t fallback_ksz,
+                                    int *opened_out)
+{
+    if (opened_out)
+        *opened_out = 0;
+    int fd = open_pinned_path(pin_path, 1);
+    if (fd < 0)
+        return -1;
+    if (opened_out)
+        *opened_out = 1;
+
+    struct bpf_map_info info;
+    uint32_t ksz = fallback_ksz;
+    uint32_t max_iters = 4096U;
+    if (bpf_map_get_info_by_fd(fd, &info) == 0) {
+        if (info.type == BPF_MAP_TYPE_ARRAY) {
+            if (info.key_size != 4U || info.value_size == 0U ||
+                info.value_size > 64U || info.max_entries > 4096U) {
+                close(fd);
+                return -1;
+            }
+            uint8_t val_buf[64];
+            int nz = 0;
+            for (uint32_t idx = 0U; idx < info.max_entries; idx++) {
+                memset(val_buf, 0, sizeof(val_buf));
+                if (bpf_map_lookup_any(fd, &idx, val_buf) != 0)
+                    continue;
+                for (uint32_t b = 0U; b < info.value_size; b++) {
+                    if (val_buf[b] != 0U) {
+                        nz++;
+                        break;
+                    }
+                }
+            }
+            close(fd);
+            return nz;
+        }
+        if (info.type == BPF_MAP_TYPE_PERCPU_ARRAY) {
+            close(fd);
+            return -1;
+        }
+        if (info.key_size == 0U || info.key_size > HNC_CHECK_MAX_KEY_SZ) {
+            close(fd);
+            return -1;
+        }
+        ksz = info.key_size;
+        if (info.max_entries > 0U && info.max_entries <= 32768U)
+            max_iters = info.max_entries * 2U + 64U;
+        else
+            max_iters = HNC_CHECK_MAX_ITERS;
+    } else if (ksz == 0U || ksz > HNC_CHECK_MAX_KEY_SZ) {
+        close(fd);
+        return -1;
+    }
+
+    uint8_t cur_key[HNC_CHECK_MAX_KEY_SZ];
+    uint8_t next_key[HNC_CHECK_MAX_KEY_SZ];
+    memset(cur_key, 0, sizeof(cur_key));
+    memset(next_key, 0, sizeof(next_key));
+
+    int rc = bpf_map_get_next_any(fd, NULL, cur_key);
+    if (rc == -ENOENT) {
+        close(fd);
+        return 0;
+    }
+    if (rc < 0) {
+        close(fd);
+        return -1;
+    }
+
+    int count = 1;
+    for (uint32_t iter = 1U; iter < max_iters; iter++) {
+        rc = bpf_map_get_next_any(fd, cur_key, next_key);
+        if (rc == -ENOENT)
+            break;
+        if (rc < 0) {
+            close(fd);
+            return -1;
+        }
+        count++;
+        memcpy(cur_key, next_key, ksz);
+    }
+    close(fd);
+    return count;
+}
+
+static int count_first_readable_map(const char *const *paths, size_t npaths,
+                                    uint32_t fallback_ksz, int *any_present_out)
+{
+    for (size_t i = 0U; i < npaths; i++) {
+        struct stat st;
+        if (any_present_out && stat(paths[i], &st) == 0)
+            *any_present_out = 1;
+        int opened = 0;
+        int cnt = count_pinned_map_entries(paths[i], fallback_ksz, &opened);
+        if (opened && any_present_out)
+            *any_present_out = 1;
+        if (cnt >= 0)
+            return cnt;
+    }
+    return -1;
+}
+
+static void probe_tether_limit_state(int *present_out, int *readable_out,
+                                     int *entries_out, int *nonzero_out)
+{
+    static const char *const kLimitPaths[] = {
+        "/sys/fs/bpf/tether_limit_map",
+        "/sys/fs/bpf/tethering/map_offload_tether_limit_map",
+    };
+
+    *readable_out = 0;
+    *entries_out  = 0;
+    *nonzero_out  = 0;
+
+    for (size_t i = 0U; i < sizeof(kLimitPaths) / sizeof(kLimitPaths[0]); i++) {
+        struct stat st;
+        if (stat(kLimitPaths[i], &st) == 0)
+            *present_out = 1;
+        int fd = open_pinned_path(kLimitPaths[i], 1);
+        if (fd < 0)
+            continue;
+        *present_out = 1;
+
+        struct bpf_map_info info;
+        if (bpf_map_get_info_by_fd(fd, &info) == 0) {
+            if (info.key_size != sizeof(uint32_t) || info.value_size != sizeof(uint64_t)) {
+                close(fd);
+                continue;
+            }
+        }
+
+        uint32_t cur_k = 0U, next_k = 0U;
+        int rc = bpf_map_get_next_any(fd, NULL, &cur_k);
+        if (rc == -ENOENT) {
+            *readable_out = 1;
+            close(fd);
+            return;
+        }
+        if (rc < 0) {
+            close(fd);
+            continue;
+        }
+
+        int entries = 0, nonzero = 0;
+        for (int guard = 0; guard < 256; guard++) {
+            int nrc = bpf_map_get_next_any(fd, &cur_k, &next_k);
+            uint64_t quota = 0ULL;
+            entries++;
+            if (bpf_map_lookup_any(fd, &cur_k, &quota) != 0 || quota != 0ULL)
+                nonzero++;
+            if (nrc == -ENOENT)
+                break;
+            if (nrc < 0) {
+                close(fd);
+                return;
+            }
+            cur_k = next_k;
+        }
+        *readable_out = 1;
+        *entries_out  = entries;
+        *nonzero_out  = nonzero;
+        close(fd);
+        return;
+    }
+}
+
 static void json_escape_str(const char *src, char *dst, size_t cap)
 {
     size_t j = 0;
@@ -1088,6 +1272,29 @@ static int cmd_install(const char *iface, const char *obj)
 
 static int cmd_check(const char *iface)
 {
+    static const char *const kAppPolicyPaths[] = {
+        "/sys/fs/bpf/hnc_app_policy",
+        PIN_DIR "/hnc_app_policy",
+        PIN_DIR "/app_policy_map",
+    };
+    static const char *const kDown6Paths[] = {
+        "/sys/fs/bpf/tether_downstream6_map",
+        "/sys/fs/bpf/tethering/map_offload_tether_downstream6_map",
+        "/sys/fs/bpf/map_offload_tether_downstream6_map",
+    };
+    static const char *const kDown4Paths[] = {
+        "/sys/fs/bpf/tether_downstream4_map",
+        "/sys/fs/bpf/tethering/map_offload_tether_downstream4_map",
+    };
+    static const char *const kUp6Paths[] = {
+        "/sys/fs/bpf/tether_upstream6_map",
+        "/sys/fs/bpf/tethering/map_offload_tether_upstream6_map",
+    };
+    static const char *const kUp4Paths[] = {
+        "/sys/fs/bpf/tether_upstream4_map",
+        "/sys/fs/bpf/tethering/map_offload_tether_upstream4_map",
+    };
+
     unsigned ifindex = if_nametoindex(iface);
     int nlfd = rtnl_open();
     int qd = 0, fl = 0, eg = 0;
@@ -1098,21 +1305,65 @@ static int cmd_check(const char *iface)
     }
     if (nlfd >= 0)
         close(nlfd);
-    int mp = 0, mmp = 0;
-    int mfd = open_pinned_path(MAP_PIN, 1);
-    if (mfd >= 0) { mp = 1; close(mfd); }
-    int mmfd = open_pinned_path(MAC_MAP_PIN, 1);
-    if (mmfd >= 0) { mmp = 1; close(mmfd); }
+
+    int mp = 0, mmp = 0, app_present = 0;
+    int ip_cnt  = count_pinned_map_entries(MAP_PIN, 4U, &mp);
+    int mac_cnt = count_pinned_map_entries(MAC_MAP_PIN, (uint32_t)sizeof(struct mac_key), &mmp);
+    int app_cnt = count_first_readable_map(kAppPolicyPaths,
+                                           sizeof(kAppPolicyPaths) / sizeof(kAppPolicyPaths[0]),
+                                           4U, &app_present);
+    int bpf_readable = (ip_cnt >= 0 || mac_cnt >= 0 || app_cnt >= 0) ? 1 : 0;
+
+    int tether_present = 0, tether_lim_readable = 0;
+    int tether_lim_entries = 0, tether_lim_nonzero = 0;
+    probe_tether_limit_state(&tether_present, &tether_lim_readable,
+                             &tether_lim_entries, &tether_lim_nonzero);
+
+    int down6_cnt = count_first_readable_map(kDown6Paths, sizeof(kDown6Paths) / sizeof(kDown6Paths[0]),
+                                             24U, &tether_present);
+    int down4_cnt = count_first_readable_map(kDown4Paths, sizeof(kDown4Paths) / sizeof(kDown4Paths[0]),
+                                             16U, &tether_present);
+    int up6_cnt   = count_first_readable_map(kUp6Paths, sizeof(kUp6Paths) / sizeof(kUp6Paths[0]),
+                                             24U, &tether_present);
+    int up4_cnt   = count_first_readable_map(kUp4Paths, sizeof(kUp4Paths) / sizeof(kUp4Paths[0]),
+                                             16U, &tether_present);
+
+    int flow_total = 0;
+    if (down6_cnt > 0) flow_total += down6_cnt;
+    if (down4_cnt > 0) flow_total += down4_cnt;
+    if (up6_cnt > 0)   flow_total += up6_cnt;
+    if (up4_cnt > 0)   flow_total += up4_cnt;
+    int tether_active = (flow_total > 0 || tether_lim_nonzero > 0) ? 1 : 0;
+
     char safe_iface[IFNAMSIZ * 2];
     json_escape_str(iface, safe_iface, sizeof(safe_iface));
-    printf("{\"iface\":\"%s\",\"ok\":%s,\"qdisc\":%s,\"bpf_filter\":%s,\"map\":%s,\"mac_map\":%s,\"egress_filter\":%s}\n",
+    printf("{\"iface\":\"%s\",\"ok\":%s,\"qdisc\":%s,\"bpf_filter\":%s,\"map\":%s,\"mac_map\":%s,\"egress_filter\":%s,\"bpf_map_readable\":%s",
            safe_iface,
            (qd && fl && mp) ? "true" : "false",
            qd ? "true" : "false",
            fl ? "true" : "false",
            mp ? "true" : "false",
            mmp ? "true" : "false",
-           eg ? "true" : "false");
+           eg ? "true" : "false",
+           bpf_readable ? "true" : "false");
+    if (ip_cnt >= 0)
+        printf(",\"ip_entries\":%d", ip_cnt);
+    if (mac_cnt >= 0)
+        printf(",\"mac_entries\":%d", mac_cnt);
+    printf(",\"app_policy_map\":%s,\"app_policy_entries\":%d,\"tether_bpf_present\":%s",
+           app_present ? "true" : "false",
+           app_cnt >= 0 ? app_cnt : 0,
+           tether_present ? "true" : "false");
+    if (tether_lim_readable) {
+        printf(",\"tether_limit_zeroed\":%s,\"tether_limit_entries\":%d,\"tether_limit_nonzero\":%d",
+               (tether_lim_nonzero == 0) ? "true" : "false",
+               tether_lim_entries,
+               tether_lim_nonzero);
+    }
+    printf(",\"tether_downstream6_entries\":%d,\"tether_flow_entries\":%d,\"tether_offload_active\":%s}\n",
+           down6_cnt >= 0 ? down6_cnt : 0,
+           flow_total,
+           tether_active ? "true" : "false");
     return RC_OK;
 }
 

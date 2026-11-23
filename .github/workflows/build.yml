@@ -206,35 +206,102 @@ jobs:
           fi
           echo "All shell scripts passed sh -n"
 
+      - name: Frontend JS & HTML inline script syntax check (node --check)
+        run: |
+          command -v node >/dev/null 2>&1 || { echo "ERROR: node not found in PATH"; exit 1; }
+          python3 - <<'PY'
+          import glob, os, re, subprocess, sys, tempfile
+
+          js_files = sorted(glob.glob("webroot/js/*.js") + glob.glob("tools/ui_mock/*.js"))
+          if not js_files:
+              sys.stderr.write("ERROR: no standalone JS files found under webroot/js/\n")
+              sys.exit(1)
+          for jf in js_files:
+              r = subprocess.run(["node", "--check", jf], capture_output=True, text=True)
+              if r.returncode != 0:
+                  sys.stderr.write(f"ERROR: node --check failed on {jf}:\n{r.stderr}\n")
+                  sys.exit(1)
+
+          html_files = sorted(glob.glob("webroot/*.html") + glob.glob("daemon/hnc_httpd/web/*.html"))
+          script_re = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+          src_re = re.compile(r"""\bsrc\s*=\s*(?:"[^"]+"|'[^']+'|[^\s>]+)""", re.IGNORECASE)
+          type_re = re.compile(r"""\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
+
+          inline_cnt = 0
+          with tempfile.TemporaryDirectory() as td:
+              for hf in html_files:
+                  raw = open(hf, encoding="utf-8").read()
+                  for idx, m in enumerate(script_re.finditer(raw), 1):
+                      attrs, body = m.group(1), m.group(2)
+                      if src_re.search(attrs) or not body.strip():
+                          continue
+                      tm = type_re.search(attrs)
+                      stype = (tm.group(1) or tm.group(2) or tm.group(3) or "").strip().lower() if tm else ""
+                      if stype not in ("", "text/javascript", "application/javascript", "module"):
+                          continue
+                      ext = ".mjs" if stype == "module" else ".js"
+                      tf = os.path.join(td, f"inline_{idx}{ext}")
+                      with open(tf, "w", encoding="utf-8") as out:
+                          out.write(body)
+                      r = subprocess.run(["node", "--check", tf], capture_output=True, text=True)
+                      if r.returncode != 0:
+                          sys.stderr.write(f"ERROR: HTML inline <script> #{idx} failed node --check in {hf}:\n{r.stderr}\n")
+                          sys.exit(1)
+                      inline_cnt += 1
+
+          print(f"OK: node --check passed ({len(js_files)} standalone JS files, {inline_cnt} HTML inline script blocks)")
+          PY
+
       - name: Version consistency check
-        run: sh bin/version_consistency_check.sh
+        run: sh ./bin/version_consistency_check.sh
+
+      - name: Pitfall lint
+        run: sh ./bin/pitfall_lint.sh
 
       - name: Source preflight
         # v5.9.0: 去掉 continue-on-error。此前唯一的常态 fail 源是
         # "bin/hnc_dpid missing"(CI 构建期产物,preflight 跑在构建前),
         # 该项已在 ci_preflight.sh 内降为 warn —— 现在 fail 就是真问题,
         # 必须拦住构建。
-        run: sh bin/ci_preflight.sh
+        run: sh ./bin/ci_preflight.sh
 
-      # v5.9.0: Go 静态检查与单元测试(此前 CI 完全没有 go vet/test,
-      # 唯一 Go 质量关卡是 preflight 的二进制 strings 检查)。host GOOS 跑。
+      # v5.9.0: Go 静态检查与单元测试(含 64 位原子字段 8 字节对齐断言与 shm 测试)。host GOOS 跑。
       - name: Go vet + test (hnc_httpd + dpid)
         run: |
           (cd daemon/hnc_httpd && go vet ./... && go test ./...)
           (cd src/dpid && go vet ./... && go test ./...)
 
-      # v5.22: 32 位类型检查(armeabi-v7a)。用 GOOS=linux 而非 android:
-      # android/arm 不支持内部链接, 无 NDK 时 vet 会报 "requires external (cgo)
-      # linking"; 32 位的 int 溢出常量 / 平台相关代码在 linux/arm 上一样能抓到。
-      - name: Go vet 32-bit (GOARCH=arm)
+      # v5.22 / v6.1.0-rc.4: 32 位 ARMv7 静态检查 + 真实 GOOS=android GOARCH=arm GOARM=7
+      # 全包及测试二进制交叉编译门禁(触发全部 32 位类型尺寸、Bionic 链接与编译期 8 字节对齐断言)。
+      - name: Go 32-bit Android ARMv7 compile & alignment gate (GOOS=android GOARCH=arm GOARM=7)
         env:
-          CGO_ENABLED: '0'
-          GOOS: linux
-          GOARCH: arm
-          GOARM: '7'
+          ANDROID_NDK: ${{ steps.ndk.outputs.path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
         run: |
-          (cd daemon/hnc_httpd && go vet ./...)
-          (cd src/dpid && go vet ./...)
+          set -e
+          (cd daemon/hnc_httpd && CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go vet ./...)
+          (cd src/dpid && CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go vet ./...)
+
+          CC7="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang"
+          test -x "$CC7" || { echo "ERROR: NDK armv7a clang missing: $CC7"; exit 1; }
+          ARM7_TMP="$RUNNER_TEMP/go_armv7_gate"
+          rm -rf "$ARM7_TMP"; mkdir -p "$ARM7_TMP"
+
+          (cd daemon/hnc_httpd
+           GOFLAGS="-mod=mod" CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 go vet ./...
+           GOFLAGS="-mod=mod" CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 go test -c -o "$ARM7_TMP/hnc_httpd_armv7.test" .
+           file "$ARM7_TMP/hnc_httpd_armv7.test" | grep -q "ELF 32-bit LSB .*ARM, EABI5")
+
+          (cd src/dpid
+           GOFLAGS="-mod=mod" CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 go vet ./...
+           for pkg in $(GOFLAGS="-mod=mod" go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...); do
+             out="$ARM7_TMP/$(printf '%s' "$pkg" | tr '/.' '__').test"
+             GOFLAGS="-mod=mod" CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 go test -c -o "$out" "$pkg"
+             file "$out" | grep -q "ELF 32-bit LSB .*ARM, EABI5"
+           done)
+
+          rm -rf "$ARM7_TMP"
+          echo "OK: GOOS=android GOARCH=arm GOARM=7 vet & test binary compilation passed"
 
       # ─── Build Go components ──────────────────────────────
       - name: Build hnc_httpd (Go)
@@ -440,8 +507,8 @@ jobs:
       - name: Fix file permissions
         run: |
           chmod 755 bin/*.sh 2>/dev/null || true
-          chmod 755 bin/hotspotd bin/hnc_ipc bin/hnc_tc_ingress 2>/dev/null || true
-          chmod 755 bin/hnc_dpid bin/hnc_launcher bin/fork_probe 2>/dev/null || true
+          chmod 755 bin/hotspotd bin/hnc_ipc bin/hnc_tc_ingress bin/hnc_clsact_ctl 2>/dev/null || true
+          chmod 755 bin/hnc_dpid bin/hnc_watchdog bin/hnc_launcher bin/fork_probe 2>/dev/null || true
           chmod 755 bin/mdns_resolve 2>/dev/null || true
           chmod 755 daemon/hnc_httpd/hnc_httpd 2>/dev/null || true
           chmod 755 bin/armeabi-v7a/* 2>/dev/null || true
@@ -461,6 +528,10 @@ jobs:
             echo "OK: $b contains $VERSION"
           done
 
+      # ─── Shell & integration unit test suite ──────────────
+      - name: Run shell unit test suite (test/run_all.sh)
+        run: sh ./test/run_all.sh
+
       # ─── v5.9.3 · BUG-015 B: 文档版本占位符注入 ────────────
       # bin/inject_version_to_docs.sh 从 rc30.12.34 就写好了, 但从来没被任何
       # 地方调用过 → README.md 又不在下面 zip 的排除列表里 → 用户装机后看到的
@@ -476,9 +547,9 @@ jobs:
       # 成 fail, 拦住任何带占位符的包出门)。
       - name: Inject version into docs (README/ARCHITECTURE)
         run: |
-          sh bin/inject_version_to_docs.sh
-          sh bin/inject_version_to_docs.sh --check
-          HNC_RELEASE_CHECK=1 sh bin/version_consistency_check.sh
+          sh ./bin/inject_version_to_docs.sh
+          sh ./bin/inject_version_to_docs.sh --check
+          HNC_RELEASE_CHECK=1 sh ./bin/version_consistency_check.sh
           echo "--- README 版本行 (注入后) ---"
           grep -n '^- \*\*版本\*\*' README.md || true
 
@@ -607,12 +678,33 @@ jobs:
           sha256sum dpi-rules.zip > dpi-rules.zip.sha256
           echo "DPI_RULES_VERSION=rules-${{ steps.version.outputs.version }}" >> $GITHUB_ENV
 
-      # v5.22: 成品 zip 严格校验(按包 ABI 校验每个原生二进制的 ELF 架构,
-      # 防止混架构; 同时覆盖必需文件 / 版本内嵌 / customize.sh)。
+      # v5.22 / v6.1.0-rc.4: 成品 zip 严格校验(强制校验全部 6 大原生组件与辅助工具均已进包,
+      # 并按包 ABI 校验每个原生二进制的 ELF 架构、16KB 页对齐与版本内嵌)。
       - name: Artifact sanity (arm64 + armv7 zips)
         run: |
-          HNC_EXPECT_ABI=arm64-v8a sh bin/artifact_sanity_check.sh "${{ env.OUT_ZIP }}"
-          HNC_EXPECT_ABI=armeabi-v7a sh bin/artifact_sanity_check.sh "${{ env.OUT_ZIP_ARMV7 }}"
+          set -e
+          for z in "${{ env.OUT_ZIP }}" "${{ env.OUT_ZIP_ARMV7 }}"; do
+            entries="$(unzip -Z1 "$z")"
+            for req_bin in \
+              daemon/hnc_httpd/hnc_httpd \
+              bin/hnc_dpid \
+              bin/hnc_watchdog \
+              bin/hnc_launcher \
+              bin/fork_probe \
+              bin/hotspotd \
+              bin/hnc_ipc \
+              bin/mdns_resolve \
+              bin/hnc_clsact_ctl \
+              bin/hnc_tc_ingress \
+              bin/hnc_clsact.o \
+              bin/hnc_applabel.dex
+            do
+              printf '%s\n' "$entries" | grep -qxF "$req_bin" \
+                || { echo "ERROR: $z missing required compiled component: $req_bin" >&2; exit 1; }
+            done
+          done
+          HNC_EXPECT_ABI=arm64-v8a sh ./bin/artifact_sanity_check.sh "${{ env.OUT_ZIP }}"
+          HNC_EXPECT_ABI=armeabi-v7a sh ./bin/artifact_sanity_check.sh "${{ env.OUT_ZIP_ARMV7 }}"
 
       - name: Compute SHA256 of zips
         run: |

@@ -897,7 +897,7 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 		}
 
 		digestKey := "express:" + hncDir + ":" + iface
-		digestVal := fmt.Sprintf("%d:%d:%t:0x%08x:%d:%d", downIdx, ifbIdx, enable, gameMark&gameMask, bgCeilKbps, effUpBgCeilKbps)
+		digestVal := fmt.Sprintf("%d:%d:%t:0x%08x:%d:%d:%d:%d", downIdx, ifbIdx, enable, gameMark&gameMask, bgCeilKbps, effUpBgCeilKbps, downRootKbps, upKbps)
 		if prev, ok := a.reconcileMap[digestKey]; ok && prev == digestVal {
 			a.dedupHits.Add(1)
 			a.savedForks.Add(1)
@@ -988,10 +988,24 @@ func resolveActiveVectorExpressParamsFull(s *server, hncDir string) (active bool
 	gameMark = v6ExpressDefaultMark
 	var globalDownKbps, globalUpKbps int
 
+	if s != nil {
+		arbDown, arbUp := s.shaperArbiter().EffectiveRateKbps()
+		if arbDown > 0 {
+			globalDownKbps = arbDown
+		}
+		if arbUp > 0 {
+			globalUpKbps = arbUp
+		}
+	}
+
 	if defaultDPActorReady.Load() {
 		st := CurrentDataplaneTierStatus()
-		globalDownKbps = st.GlobalDownKbps
-		globalUpKbps = st.GlobalUpKbps
+		if globalDownKbps <= 0 {
+			globalDownKbps = st.GlobalDownKbps
+		}
+		if globalUpKbps <= 0 {
+			globalUpKbps = st.GlobalUpKbps
+		}
 		if st.ExpressActive {
 			active = true
 			bgCeilKbps = st.ExpressBgCeilKbps
@@ -1037,45 +1051,41 @@ func resolveActiveVectorExpressParamsFull(s *server, hncDir string) (active bool
 		}
 	}
 	if active && bgPct > 0 && bgPct < 100 {
-		if bgCeilKbps <= 0 {
-			baseDownKbps := globalDownKbps
-			if baseDownKbps <= 0 {
-				diskDownMbps, _ := readAutorateDiskCurMbps(hncDir)
-				if s != nil && s.autorate != nil {
-					if ar := s.autorate.Snapshot(); ar.Enabled && ar.CurDownMbps > 0 && (diskDownMbps <= 0 || (ar.State != "sleeping" && ar.State != "disabled")) {
-						baseDownKbps = int(math.Round(ar.CurDownMbps * 1000.0))
-					}
-				}
-				if baseDownKbps <= 0 && diskDownMbps > 0 {
-					baseDownKbps = int(math.Round(diskDownMbps * 1000.0))
+		baseDownKbps := globalDownKbps
+		if baseDownKbps <= 0 {
+			diskDownMbps, _ := readAutorateDiskCurMbps(hncDir)
+			if s != nil && s.autorate != nil {
+				if ar := s.autorate.Snapshot(); ar.Enabled && ar.CurDownMbps > 0 && (diskDownMbps <= 0 || (ar.State != "sleeping" && ar.State != "disabled")) {
+					baseDownKbps = int(math.Round(ar.CurDownMbps * 1000.0))
 				}
 			}
-			if baseDownKbps <= 0 {
-				var downBps int64
-				if s != nil {
-					downBps, _ = s.readStaticGlobalShaperBps()
-				}
-				if downBps <= 0 && hncDir != "" {
-					downBps, _ = readStaticShaperDiskBps(hncDir)
-				}
-				if downBps > 0 {
-					baseDownKbps = int((downBps * 8) / 1000)
-				}
-			}
-			if baseDownKbps > 0 {
-				bgCeilKbps = (baseDownKbps * bgPct) / 100
-				if bgCeilKbps <= 0 {
-					bgCeilKbps = 1
-				}
+			if baseDownKbps <= 0 && diskDownMbps > 0 {
+				baseDownKbps = int(math.Round(diskDownMbps * 1000.0))
 			}
 		}
-		if upBgCeilKbps <= 0 {
-			baseUpKbps := resolveConfiguredUpShaperKbpsWithServer(s, hncDir, globalUpKbps)
-			if baseUpKbps > 0 {
-				upBgCeilKbps = (baseUpKbps * bgPct) / 100
-				if upBgCeilKbps <= 0 {
-					upBgCeilKbps = 1
-				}
+		if baseDownKbps <= 0 {
+			var downBps int64
+			if s != nil && s.jsonCache != nil {
+				downBps, _ = s.readStaticGlobalShaperBps()
+			}
+			if downBps <= 0 && hncDir != "" {
+				downBps, _ = readStaticShaperDiskBps(hncDir)
+			}
+			if downBps > 0 {
+				baseDownKbps = int((downBps * 8) / 1000)
+			}
+		}
+		if baseDownKbps > 0 {
+			bgCeilKbps = (baseDownKbps * bgPct) / 100
+			if bgCeilKbps <= 0 {
+				bgCeilKbps = 1
+			}
+		}
+		baseUpKbps := resolveConfiguredUpShaperKbpsWithServer(s, hncDir, globalUpKbps)
+		if baseUpKbps > 0 {
+			upBgCeilKbps = (baseUpKbps * bgPct) / 100
+			if upBgCeilKbps <= 0 {
+				upBgCeilKbps = 1
 			}
 		}
 	}

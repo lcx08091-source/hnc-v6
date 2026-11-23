@@ -41,8 +41,9 @@ import (
 
 // loopFlags 与具体循环相关的额外输入
 type loopFlags struct {
-	CtPrecise bool // conntrack DESTROY 事件在用: 短连接字节不靠轮询抓
-	Enforcing bool // app_usage: 配了应用时长上限或域名封锁(执法依赖本循环)
+	CtPrecise    bool // conntrack DESTROY 事件在用: 短连接字节不靠轮询抓
+	Enforcing    bool // app_usage: 配了应用时长上限或域名封锁(执法依赖本循环)
+	ThermoStage1 bool // ThermoCruise 一阶温控/低电巡航激活: 非关键轮询节拍翻倍降频省电
 }
 
 type powerLoopDef struct {
@@ -86,6 +87,26 @@ func powerLoopDef0(name string) (powerLoopDef, bool) {
 	return powerLoopDef{}, false
 }
 
+func applyThermoStage1Relax(def powerLoopDef, lvl string, f loopFlags, cur time.Duration, reason string) (time.Duration, string) {
+	if !f.ThermoStage1 || def.Critical || def.Mirror || lvl == lvlUnknown || lvl == lvlHotspotOff || lvl == lvlNoClients {
+		return cur, reason
+	}
+	if def.Name == "activity" || def.Name == "power_sampler" {
+		return cur, reason
+	}
+	if def.Name == "app_usage" && (f.Enforcing || !f.CtPrecise) {
+		return cur, reason
+	}
+	relaxed := cur * 2
+	if relaxed > time.Hour {
+		relaxed = time.Hour
+	}
+	if relaxed <= cur {
+		return cur, reason
+	}
+	return relaxed, reason + "（温控巡航一阶省电节流 ×2）"
+}
+
 // powerInterval 策略本体(纯函数)。未知循环名返回 0。
 func powerInterval(name string, a Activity, f loopFlags) (time.Duration, string) {
 	def, ok := powerLoopDef0(name)
@@ -98,6 +119,11 @@ func powerInterval(name string, a Activity, f loopFlags) (time.Duration, string)
 	if lvl == lvlUnknown {
 		return base, "状态未知, 按基准"
 	}
+	d, why := powerIntervalBase(name, base, lvl, quiet, a, f)
+	return applyThermoStage1Relax(def, lvl, f, d, why)
+}
+
+func powerIntervalBase(name string, base time.Duration, lvl string, quiet bool, a Activity, f loopFlags) (time.Duration, string) {
 	switch name {
 	case "app_usage":
 		switch lvl {
@@ -259,6 +285,9 @@ func powerWait(stop <-chan struct{}, name string, last time.Time, flags func() l
 		var f loopFlags
 		if flags != nil {
 			f = flags()
+		}
+		if isGlobalLiveThermoStage1Relaxed() {
+			f.ThermoStage1 = true
 		}
 		d, reason := powerInterval(name, activityNow(), f)
 		if d <= 0 {

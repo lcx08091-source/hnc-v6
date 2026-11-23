@@ -780,10 +780,32 @@ func (r *m4GoRunner) writeOutErr(lastWritten []byte, lastStatsAt *time.Time, las
 
 // writeDevicesAtomic 原子写出唯一权威设备表 data/devices.json, 随后同步原子写出 run/devices.flat。
 func (r *m4GoRunner) writeDevicesAtomic(b []byte) error {
-	out, tmp := m4DevicesJSON, m4DevicesTmpGo
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	out := m4DevicesJSON
+	tmp := fmt.Sprintf("%s.%d.%d", m4DevicesTmpGo, os.Getpid(), wdAtomicSeq.Add(1))
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		m4GoWriteFails.Add(1)
+		logf("m4_owner: 打开 %s 失败: %v", tmp, err)
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		m4GoWriteFails.Add(1)
 		logf("m4_owner: 写 %s 失败: %v", tmp, err)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		m4GoWriteFails.Add(1)
+		logf("m4_owner: sync %s 失败: %v", tmp, err)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		m4GoWriteFails.Add(1)
+		logf("m4_owner: close %s 失败: %v", tmp, err)
 		return err
 	}
 	m4Log(time.Now().Format("2006-01-02T15:04:05") + ": " + out)
@@ -803,14 +825,8 @@ func (r *m4GoRunner) writeDevicesFlatAtomic() {
 		return
 	}
 	flat := r.table.RenderFlat()
-	tmp := m4DevicesFlat + ".tmp.go"
-	if err := os.WriteFile(tmp, flat, 0o644); err != nil {
-		logf("m4_owner: 写 %s 失败: %v", tmp, err)
-		return
-	}
-	if err := os.Rename(tmp, m4DevicesFlat); err != nil {
-		_ = os.Remove(tmp)
-		logf("m4_owner: rename %s 失败: %v", m4DevicesFlat, err)
+	if err := wdWriteAtomic(m4DevicesFlat, flat, 0o644); err != nil {
+		logf("m4_owner: 写 %s 失败: %v", m4DevicesFlat, err)
 	}
 }
 
@@ -821,7 +837,7 @@ func m4Log(line string) {
 	}
 	payload := []byte(line + "\n")
 	if err := appendCappedLines(m4GoWriteLog, payload, m4GoWriteLogMaxBytes); err != nil {
-		_ = os.WriteFile(m4GoWriteLog, payload, 0o644)
+		_ = wdWriteAtomic(m4GoWriteLog, payload, 0o644)
 	}
 }
 
@@ -1482,9 +1498,5 @@ func readNonce(p string) string {
 }
 
 func writeAtomic(p string, b []byte) error {
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return wdWriteAtomic(p, b, 0o644)
 }

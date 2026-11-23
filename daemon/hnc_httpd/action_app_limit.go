@@ -201,21 +201,21 @@ func saveAppLimits(hncDir string, file AppLimitFile) error {
 		flat = append(flat, []byte(fmt.Sprintf("%s %s %g\n", it.MAC, it.AppID, it.DownMbps))...)
 	}
 
-	// 3) 两份 tmp 都写到磁盘
+	// 3) 两份唯一临时文件都写盘并落盘同步
 	jpath := filepath.Join(hncDir, appLimitsJSONRelPath)
 	fpath := filepath.Join(hncDir, appLimitsFlatRelPath)
-	jtmp := jpath + ".tmp"
-	ftmp := fpath + ".tmp"
 
-	if err := os.WriteFile(jtmp, jb, 0o644); err != nil {
+	jtmp, err := createSyncedTempFile(jpath, jb, 0o644)
+	if err != nil {
 		return fmt.Errorf("write json tmp: %w", err)
 	}
-	if err := os.WriteFile(ftmp, flat, 0o644); err != nil {
+	ftmp, err := createSyncedTempFile(fpath, flat, 0o644)
+	if err != nil {
 		_ = os.Remove(jtmp) // 回滚 JSON tmp
 		return fmt.Errorf("write flat tmp: %w", err)
 	}
 
-	// 4) 两个 tmp 都成功 → 依次 rename. JSON 先 rename 因为读者用 JSON, flat 是 shell 用的次要副本.
+	// 4) 两个 tmp 都成功 -> 依次 rename. JSON 先 rename 因为读者用 JSON, flat 是 shell 用的次要副本.
 	//    rename 是 POSIX 原子操作, 两步之间窗口极短.
 	if err := os.Rename(jtmp, jpath); err != nil {
 		_ = os.Remove(jtmp)

@@ -553,10 +553,10 @@ func (a quicAgg) method(samples int) dpiEvalQUICMethod {
 	return dpiEvalQUICMethod{Coverage: ratio(a.predicted, samples), Accuracy: ratio(a.correct, a.judged), Judged: a.judged}
 }
 
-// labelStatsSkippedSystem 读 dpid 写的 run/label_samples.stats.json(T1 计数快照)。
+// labelStatsSkippedSystem 读 dpid 写的 label_samples.stats.json(优先 data/self_studio/, 回退 run/)。
 // 系统 UID 在采集端就被跳过、不会进样本文件, 只能从这里拿到数量。读不到返回 0。
 func labelStatsSkippedSystem(hncDir string) int {
-	b, err := os.ReadFile(filepath.Join(hncDir, "run", "label_samples.stats.json"))
+	b, err := readLabelSamplesStatsRaw(hncDir)
 	if err != nil || len(b) > 64<<10 {
 		return 0
 	}
@@ -599,47 +599,57 @@ func topSNIs(m map[string]int, n int) []string {
 	return out
 }
 
-// loadEvalSamples 读最近 days 天的 label_samples.*.jsonl, 返回窗口内样本 +
-// 是否有 .capped 标记 + 因系统 UID 被跳过的条数。
+// loadEvalSamples 读最近 days 天的 label_samples.*.jsonl(优先 data/self_studio/, 回退兼容 run/),
+// 返回窗口内样本 + 是否有 .capped 标记 + 因系统 UID 被跳过的条数。
 func loadEvalSamples(hncDir string, days int, cutoff int64, now time.Time) ([]evalSample, bool, int) {
-	runDir := filepath.Join(hncDir, "run")
-	entries, err := os.ReadDir(runDir)
-	if err != nil {
-		return nil, false, 0
-	}
 	// 收集窗口内的日期(YYYYMMDD 字符串比较即可, 定长)。
 	daySet := map[string]bool{}
 	for d := 0; d < days; d++ {
 		daySet[now.AddDate(0, 0, -d).Local().Format("20060102")] = true
 	}
 	capped := false
-	var files []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "label_samples.") {
+	chosenByDay := map[string]string{}
+	for _, dir := range selfStudioScanDirs(hncDir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
 			continue
 		}
-		if strings.HasSuffix(name, ".capped") {
-			day := strings.TrimSuffix(strings.TrimPrefix(name, "label_samples."), ".capped")
-			if daySet[day] {
-				capped = true
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasPrefix(name, "label_samples.") {
+				continue
 			}
-			continue
-		}
-		if !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		day := strings.TrimSuffix(strings.TrimPrefix(name, "label_samples."), ".jsonl")
-		if daySet[day] {
-			files = append(files, filepath.Join(runDir, name))
+			if strings.HasSuffix(name, ".capped") {
+				day := strings.TrimSuffix(strings.TrimPrefix(name, "label_samples."), ".capped")
+				if daySet[day] {
+					capped = true
+				}
+				continue
+			}
+			if !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			day := strings.TrimSuffix(strings.TrimPrefix(name, "label_samples."), ".jsonl")
+			if daySet[day] {
+				if _, exists := chosenByDay[day]; !exists {
+					chosenByDay[day] = filepath.Join(dir, name)
+				}
+			}
 		}
 	}
-	sort.Strings(files)
+	if len(chosenByDay) == 0 {
+		return nil, capped, 0
+	}
+	sortedDays := make([]string, 0, len(chosenByDay))
+	for d := range chosenByDay {
+		sortedDays = append(sortedDays, d)
+	}
+	sort.Strings(sortedDays)
 
 	var out []evalSample
 	skippedSystem := 0
-	for _, path := range files {
-		f, err := os.Open(path)
+	for _, d := range sortedDays {
+		f, err := os.Open(chosenByDay[d])
 		if err != nil {
 			continue
 		}
@@ -677,7 +687,9 @@ func loadEvalSamples(hncDir string, days int, cutoff int64, now time.Time) ([]ev
 
 // ─── 缓存 / 文件 / 循环 ──────────────────────────────────────────────
 
-func dpiEvalPath(hncDir string) string { return filepath.Join(hncDir, "run", "dpi_eval.json") }
+func dpiEvalPath(hncDir string) string {
+	return filepath.Join(selfStudioDir(hncDir), "dpi_eval.json")
+}
 
 // dpiEvalCache 保存最近一次计算结果, 供不带 refresh 的请求复用。
 var dpiEvalCache atomic.Value // dpiEvalResult
@@ -698,7 +710,7 @@ func evalCached(days int, now time.Time) (dpiEvalResult, bool) {
 	return r, true
 }
 
-// evalCompute 计算并缓存 + 落盘 run/dpi_eval.json。
+// evalCompute 计算并缓存 + 落盘 data/self_studio/dpi_eval.json。
 func evalCompute(hncDir string, days int, now time.Time) dpiEvalResult {
 	r := evalDPI(hncDir, days, now)
 	dpiEvalCache.Store(r)
@@ -718,13 +730,15 @@ func evalGet(hncDir string, days int, refresh bool, now time.Time) dpiEvalResult
 		if r, ok := evalCached(days, now); ok {
 			return r
 		}
-		// 无内存缓存时尝试读磁盘缓存(进程刚重启)。
-		if b, err := os.ReadFile(dpiEvalPath(hncDir)); err == nil {
-			var r dpiEvalResult
-			if json.Unmarshal(b, &r) == nil && r.Days == days &&
-				now.Unix()-r.GeneratedAt <= int64(dpiEvalCacheTTL/time.Second) {
-				dpiEvalCache.Store(r)
-				return r
+		// 无内存缓存时尝试读磁盘缓存(优先 data/self_studio/, 回退 run/)。
+		for _, p := range []string{dpiEvalPath(hncDir), filepath.Join(hncDir, "run", "dpi_eval.json")} {
+			if b, err := os.ReadFile(p); err == nil {
+				var r dpiEvalResult
+				if json.Unmarshal(b, &r) == nil && r.Days == days &&
+					now.Unix()-r.GeneratedAt <= int64(dpiEvalCacheTTL/time.Second) {
+					dpiEvalCache.Store(r)
+					return r
+				}
 			}
 		}
 	}
@@ -752,29 +766,42 @@ func (s *server) apiDPIEval(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// actionDPIEvalClear 删除所有 label_samples.* / self_fg.* / dpi_eval.json(§T4)。
+// actionDPIEvalClear 删除 data/self_studio/ 与旧版 run/ 下的所有 label_samples.* / self_fg.* / dpi_eval.json(§T4)。
 func actionDPIEvalClear(hncDir string) actionResp {
-	runDir := filepath.Join(hncDir, "run")
-	entries, err := os.ReadDir(runDir)
-	if err != nil {
-		return actionResp{OK: false, Error: "read run dir failed", Detail: err.Error()}
-	}
 	n := 0
-	for _, e := range entries {
-		if e.IsDir() {
+	anyRead := false
+	var lastErr error
+	for _, dir := range selfStudioScanDirs(hncDir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				anyRead = true
+				continue
+			}
+			lastErr = err
 			continue
 		}
-		name := e.Name()
-		del := name == "dpi_eval.json" ||
-			(strings.HasPrefix(name, "label_samples.") &&
-				(strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".capped"))) ||
-			(strings.HasPrefix(name, "self_fg.") && strings.HasSuffix(name, ".jsonl"))
-		if !del {
-			continue
+		anyRead = true
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			del := name == "dpi_eval.json" ||
+				name == "label_samples.stats.json" ||
+				(strings.HasPrefix(name, "label_samples.") &&
+					(strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".capped"))) ||
+				(strings.HasPrefix(name, "self_fg.") && strings.HasSuffix(name, ".jsonl"))
+			if !del {
+				continue
+			}
+			if os.Remove(filepath.Join(dir, name)) == nil {
+				n++
+			}
 		}
-		if os.Remove(filepath.Join(runDir, name)) == nil {
-			n++
-		}
+	}
+	if !anyRead && lastErr != nil {
+		return actionResp{OK: false, Error: "read studio dir failed", Detail: lastErr.Error()}
 	}
 	dpiEvalCache.Store(dpiEvalResult{}) // 清缓存, 下次请求重新算
 	return actionResp{OK: true, Detail: "removed " + strconv.Itoa(n) + " file(s)"}

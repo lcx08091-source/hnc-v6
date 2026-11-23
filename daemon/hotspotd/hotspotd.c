@@ -124,7 +124,7 @@ static void hlog(const char *fmt, ...) {
    Netlink：只订阅链路事件(offload 重探主上游)
 ══════════════════════════════════════════════════════════ */
 static void nl_process(int fd) {
-    char buf[8192] __attribute__((aligned(NLMSG_ALIGNTO)));
+    _Alignas(8) uint8_t buf[8192];
     /* 单轮最多处理 64 包, 防止链路事件风暴饿死 IPC / SIGTERM;
      * 剩余事件留待下一轮 poll 唤醒继续抽干。 */
     for (int pkt = 0; pkt < NL_BATCH_PKT_CAP && g_running; pkt++) {
@@ -145,15 +145,16 @@ static void nl_process(int fd) {
 
         size_t rem = (size_t)n;
         for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
-            struct nlmsghdr *nlh = (struct nlmsghdr *)(buf + off);
-            if (nlh->nlmsg_len < sizeof(struct nlmsghdr) || (size_t)nlh->nlmsg_len > rem)
+            struct nlmsghdr nlh;
+            memcpy(&nlh, buf + off, sizeof(nlh));
+            if (nlh.nlmsg_len < sizeof(struct nlmsghdr) || (size_t)nlh.nlmsg_len > rem)
                 break;
-            size_t step = NLMSG_ALIGN(nlh->nlmsg_len);
+            size_t step = NLMSG_ALIGN(nlh.nlmsg_len);
             if (step > rem)
                 step = rem;
             off += step;
             rem -= step;
-            if (nlh->nlmsg_type == RTM_NEWLINK || nlh->nlmsg_type == RTM_DELLINK) {
+            if (nlh.nlmsg_type == RTM_NEWLINK || nlh.nlmsg_type == RTM_DELLINK) {
                 hnc_scheduler_request_refresh();
             }
         }

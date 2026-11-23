@@ -12,7 +12,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,6 +53,7 @@ const (
 	expressClassID                = "1:8010" // 独立高优特快类 (避开 mid=16 的 1:10)
 	expressFilterPrioV4           = 4
 	expressFilterPrioV6           = 5
+	expressMangleChainName        = "HNC_V6_EXPRESS"
 )
 
 // VectorExpressConfig 护航配置。
@@ -106,6 +109,7 @@ type expressDataplaneJob struct {
 	bgCeilPct       int
 	bgCeilKbps      int
 	upBgCeilKbps    int
+	escortedMACs    []string
 	iface           string
 	lastActiveIface string
 	hotspotOff      bool
@@ -135,19 +139,21 @@ type vectorExpressEngine struct {
 	applyHook       func(spec VectorExpressDataplaneSpec) error
 
 	// 单槽串行数据面下发协调器(杜绝并发 go runBin 乱序竞态)
-	dpMu            sync.Mutex
-	pendingDPJob    *expressDataplaneJob
-	dpRunning       bool
-	dpIdleCh        chan struct{}
-	dpEnabledFn     func(hncDir string) bool
-	nativeApplyFn   func(hncDir string, enable bool, gameMark uint32, bgCeilKbps int) error
-	invalidateFn    func(hncDir, iface string)
-	fallbackCmdFn   func(hncDir, script string, args ...string) (int, string)
-	pollInterval    time.Duration
-	holdDurOverride time.Duration
-	activityHook    func() (<-chan struct{}, Activity)
-	simActiveHook   func() bool
-	signalHook      func(now time.Time) []VectorExpressDeviceSignal
+	dpMu             sync.Mutex
+	pendingDPJob     *expressDataplaneJob
+	dpRunning        bool
+	dpIdleCh         chan struct{}
+	lastMangleDigest string
+	dpEnabledFn      func(hncDir string) bool
+	nativeApplyFn    func(hncDir string, enable bool, gameMark uint32, bgCeilKbps int) error
+	mangleApplyFn    func(isIPv6 bool, payload string) error
+	invalidateFn     func(hncDir, iface string)
+	fallbackCmdFn    func(hncDir, script string, args ...string) (int, string)
+	pollInterval     time.Duration
+	holdDurOverride  time.Duration
+	activityHook     func() (<-chan struct{}, Activity)
+	simActiveHook    func() bool
+	signalHook       func(now time.Time) []VectorExpressDeviceSignal
 }
 
 func newVectorExpressEngine(s *server) *vectorExpressEngine {
@@ -433,14 +439,29 @@ func (e *vectorExpressEngine) Step(now time.Time, signals []VectorExpressDeviceS
 	}
 
 	needActiveDP := e.state == expressStateActive || e.state == expressStateCooldown
-	if prevState != e.state || needActiveDP != e.lastApplied.Active {
-		e.transitions.Add(1)
+	macsChanged := !expressStringSliceEqual(e.escortedMACs, e.lastApplied.EscortedMACs)
+	if prevState != e.state || needActiveDP != e.lastApplied.Active || (needActiveDP && macsChanged) {
+		if prevState != e.state || needActiveDP != e.lastApplied.Active {
+			e.transitions.Add(1)
+		}
 		e.applyDataplaneLocked(now, needActiveDP, e.escortedMACs)
 	}
 
 	snap := e.buildSnapshotLocked(now)
 	e.mu.Unlock()
 	return snap
+}
+
+func expressStringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *vectorExpressEngine) effectivePollInterval() time.Duration {
@@ -500,7 +521,7 @@ func (e *vectorExpressEngine) isDataplaneEnabled(hncDir string) bool {
 	if e.dpEnabledFn != nil {
 		return e.dpEnabledFn(hncDir)
 	}
-	if e.nativeApplyFn != nil || e.fallbackCmdFn != nil {
+	if e.nativeApplyFn != nil || e.fallbackCmdFn != nil || e.mangleApplyFn != nil {
 		return true
 	}
 	return useNativeDataplane(hncDir)
@@ -558,6 +579,11 @@ func readStaticShaperDiskBps(hncDir string) (downBps, upBps int64) {
 }
 
 func resolveConfiguredUpShaperKbpsWithServer(srv *server, hncDir string, actorUpKbps int) int {
+	if srv != nil {
+		if _, arbUp := srv.shaperArbiter().EffectiveRateKbps(); arbUp > 0 {
+			return arbUp
+		}
+	}
 	if actorUpKbps > 0 {
 		return actorUpKbps
 	}
@@ -575,7 +601,7 @@ func resolveConfiguredUpShaperKbpsWithServer(srv *server, hncDir string, actorUp
 		return int(math.Round(diskUpMbps * 1000.0))
 	}
 	var upBps int64
-	if srv != nil {
+	if srv != nil && srv.jsonCache != nil {
 		_, upBps = srv.readStaticGlobalShaperBps()
 	}
 	if upBps <= 0 && hncDir != "" {
@@ -610,19 +636,26 @@ func (e *vectorExpressEngine) computeBgCeilKbps(ceilPct int) int {
 	if e.srv != nil {
 		hncDir = e.srv.hncDir
 	}
-	diskDownMbps, _ := readAutorateDiskCurMbps(hncDir)
 	rootKbps := 0
-	if e.srv != nil && e.srv.autorate != nil {
-		if ar := e.srv.autorate.Snapshot(); ar.Enabled && ar.CurDownMbps > 0 && (diskDownMbps <= 0 || (ar.State != "sleeping" && ar.State != "disabled")) {
-			rootKbps = int(math.Round(ar.CurDownMbps * 1000.0))
+	if e.srv != nil {
+		if arbDown, _ := e.srv.shaperArbiter().EffectiveRateKbps(); arbDown > 0 {
+			rootKbps = arbDown
 		}
 	}
-	if rootKbps <= 0 && diskDownMbps > 0 {
-		rootKbps = int(math.Round(diskDownMbps * 1000.0))
+	if rootKbps <= 0 {
+		diskDownMbps, _ := readAutorateDiskCurMbps(hncDir)
+		if e.srv != nil && e.srv.autorate != nil {
+			if ar := e.srv.autorate.Snapshot(); ar.Enabled && ar.CurDownMbps > 0 && (diskDownMbps <= 0 || (ar.State != "sleeping" && ar.State != "disabled")) {
+				rootKbps = int(math.Round(ar.CurDownMbps * 1000.0))
+			}
+		}
+		if rootKbps <= 0 && diskDownMbps > 0 {
+			rootKbps = int(math.Round(diskDownMbps * 1000.0))
+		}
 	}
 	if rootKbps <= 0 {
 		var downBps int64
-		if e.srv != nil {
+		if e.srv != nil && e.srv.jsonCache != nil {
 			downBps, _ = e.srv.readStaticGlobalShaperBps()
 		}
 		if downBps <= 0 && hncDir != "" {
@@ -643,8 +676,8 @@ func (e *vectorExpressEngine) computeBgCeilKbps(ceilPct int) int {
 }
 
 // computeUpBgCeilKbps 独立折算 5G 非对称上行背景上限:
-// 优先读取 autorate.json / Autorate 的 cur_up_mbps, 次选 rules.json 的 global_shaper_up 乘以 pct%;
-// 若两者均未开启或为 0 则严格返回 0, 绝不误拿 1000mbit 默认根速率乱锁上行。
+// 优先采用 RootShaperArbiter 仲裁上行上限, 次选 autorate.json / rules.json;
+// 若均未开启或为 0 则严格返回 0, 绝不误拿 1000mbit 默认根速率乱锁上行。
 func (e *vectorExpressEngine) computeUpBgCeilKbps(pct int) int {
 	if e == nil {
 		return 0
@@ -654,6 +687,210 @@ func (e *vectorExpressEngine) computeUpBgCeilKbps(pct int) int {
 		hncDir = e.srv.hncDir
 	}
 	return computeUpBgCeilKbpsForServer(e.srv, hncDir, pct)
+}
+
+// OnRootRateChanged 当根类 1:1 速率因温控/5G 自适应/静态总限速变更时, 动态重算同步 1:8010 与默认类 1:9999 保障带宽。
+func (e *vectorExpressEngine) OnRootRateChanged(_, _ int) {
+	if e == nil || !e.isActive() {
+		return
+	}
+	e.mu.Lock()
+	active := e.state == expressStateActive || e.state == expressStateCooldown
+	if !active {
+		e.mu.Unlock()
+		return
+	}
+	ceilPct := e.cfg.BgCeilPct
+	if ceilPct <= 0 || ceilPct >= 100 {
+		ceilPct = expressDefaultBgCeilPct
+	}
+	macs := append([]string(nil), e.escortedMACs...)
+	iface := e.resolveCurrentIfaceLocked()
+	lastIface := e.lastActiveIface
+	e.mu.Unlock()
+
+	bgKbps := e.computeBgCeilKbps(ceilPct)
+	upBgKbps := e.computeUpBgCeilKbps(ceilPct)
+
+	e.enqueueDataplaneJob(expressDataplaneJob{
+		active:          true,
+		bgCeilPct:       ceilPct,
+		bgCeilKbps:      bgKbps,
+		upBgCeilKbps:    upBgKbps,
+		escortedMACs:    macs,
+		iface:           iface,
+		lastActiveIface: lastIface,
+		hotspotOff:      false,
+	}, false)
+}
+
+// BuildVectorExpressManglePayloads 构造双栈 *mangle 表 HNC_V6_EXPRESS 护航打标链载荷:
+// 严格限定在 [25:24] 高位掩码 0x03000000 (值 0x01000000), 严守低 16 位 0x0000ffff 零触碰,
+// 且不对已被 UpdateLeash 标记为 0x03000000/0x03000000 的大包更新流提权。
+func BuildVectorExpressManglePayloads(active bool, escortedMACs []string, devIPsByMAC map[string][]string) (v4Payload, v6Payload string) {
+	const low16 = uint32(0x0000ffff)
+	markMask := DefaultAppQoSMarkMask &^ low16
+	if markMask == 0 {
+		markMask = 0x03000000
+	}
+	markVal := (v6ExpressDefaultMark & markMask) &^ low16
+	leashVal := (v6LeashDefaultMark & markMask) &^ low16
+
+	var b4, b6 strings.Builder
+	b4.WriteString("*mangle\n:" + expressMangleChainName + " - [0:0]\n")
+	b6.WriteString("*mangle\n:" + expressMangleChainName + " - [0:0]\n")
+
+	if active && len(escortedMACs) > 0 && markVal != 0 {
+		xmark := fmt.Sprintf("0x%08x/0x%08x", markVal, markMask)
+		notLeash := fmt.Sprintf("! --mark 0x%08x/0x%08x", leashVal, markMask)
+
+		fmt.Fprintf(&b4, "-A %s -m connmark --mark %s -j CONNMARK --restore-mark --nfmask 0x%08x --ctmask 0x%08x\n",
+			expressMangleChainName, xmark, markMask, markMask)
+		fmt.Fprintf(&b6, "-A %s -m connmark --mark %s -j CONNMARK --restore-mark --nfmask 0x%08x --ctmask 0x%08x\n",
+			expressMangleChainName, xmark, markMask, markMask)
+
+		sortedMACs := make([]string, 0, len(escortedMACs))
+		seenMAC := make(map[string]bool, len(escortedMACs))
+		for _, rawMAC := range escortedMACs {
+			cm := canonMAC(rawMAC)
+			if cm != "" && !seenMAC[cm] {
+				seenMAC[cm] = true
+				sortedMACs = append(sortedMACs, cm)
+			}
+		}
+		sort.Strings(sortedMACs)
+
+		for _, mac := range sortedMACs {
+			fmt.Fprintf(&b4, "-A %s -m mac --mac-source %s -m mark %s -j MARK --set-xmark %s\n",
+				expressMangleChainName, mac, notLeash, xmark)
+			fmt.Fprintf(&b6, "-A %s -m mac --mac-source %s -m mark %s -j MARK --set-xmark %s\n",
+				expressMangleChainName, mac, notLeash, xmark)
+
+			var v4IPs, v6IPs []string
+			seenIP := make(map[string]bool)
+			for _, rawIP := range devIPsByMAC[mac] {
+				ip := net.ParseIP(strings.TrimSpace(rawIP))
+				if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsMulticast() {
+					continue
+				}
+				canon := ip.String()
+				if seenIP[canon] {
+					continue
+				}
+				seenIP[canon] = true
+				if ip4 := ip.To4(); ip4 != nil {
+					v4IPs = append(v4IPs, ip4.String())
+				} else {
+					v6IPs = append(v6IPs, canon)
+				}
+			}
+			sort.Strings(v4IPs)
+			sort.Strings(v6IPs)
+			for _, ip4 := range v4IPs {
+				fmt.Fprintf(&b4, "-A %s -d %s/32 -m mark %s -j MARK --set-xmark %s\n",
+					expressMangleChainName, ip4, notLeash, xmark)
+			}
+			for _, ip6 := range v6IPs {
+				fmt.Fprintf(&b6, "-A %s -d %s/128 -m mark %s -j MARK --set-xmark %s\n",
+					expressMangleChainName, ip6, notLeash, xmark)
+			}
+		}
+
+		fmt.Fprintf(&b4, "-A %s -m mark --mark %s -j CONNMARK --save-mark --nfmask 0x%08x --ctmask 0x%08x\n",
+			expressMangleChainName, xmark, markMask, markMask)
+		fmt.Fprintf(&b6, "-A %s -m mark --mark %s -j CONNMARK --save-mark --nfmask 0x%08x --ctmask 0x%08x\n",
+			expressMangleChainName, xmark, markMask, markMask)
+	}
+
+	b4.WriteString("COMMIT\n")
+	b6.WriteString("COMMIT\n")
+	return b4.String(), b6.String()
+}
+
+func ensureV6TacticalMangleHooksOnBin(iptBin, chainName string, insertTop bool) {
+	iptBin = strings.TrimSpace(iptBin)
+	if iptBin == "" {
+		return
+	}
+	if _, err := runSubtreeIptCmd(iptBin, "-t", "mangle", "-L", chainName, "-n"); err != nil {
+		_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-N", chainName)
+	}
+	if _, err := runSubtreeIptCmd(iptBin, "-t", "mangle", "-C", "FORWARD", "-j", chainName); err != nil {
+		if insertTop {
+			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-I", "FORWARD", "1", "-j", chainName); iErr != nil {
+				_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "FORWARD", "-j", chainName)
+			}
+		} else {
+			_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "FORWARD", "-j", chainName)
+		}
+	}
+	// 挂载在 mangle/POSTROUTING 的 HNC_SAVE 之前, 防止尾部 HNC_EGRESS_FIX 还原覆盖高位标记!
+	if _, err := runSubtreeIptCmd(iptBin, "-t", "mangle", "-C", "POSTROUTING", "-j", chainName); err != nil {
+		lOut, _ := runSubtreeIptCmd(iptBin, "-t", "mangle", "-L", "POSTROUTING", "-n", "--line-numbers")
+		saveLn := findIptFirstChainRuleLine(lOut, "", "HNC_SAVE")
+		if saveLn == 0 {
+			sOut, _ := runSubtreeIptCmd(iptBin, "-t", "mangle", "-S", "POSTROUTING")
+			saveLn = findIptFirstChainRuleLine(lOut, sOut, "HNC_SAVE")
+		}
+		if saveLn > 0 {
+			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-I", "POSTROUTING", strconv.Itoa(saveLn), "-j", chainName); iErr != nil {
+				_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "POSTROUTING", "-j", chainName)
+			}
+		} else {
+			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-I", "POSTROUTING", "1", "-j", chainName); iErr != nil {
+				_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "POSTROUTING", "-j", chainName)
+			}
+		}
+	}
+}
+
+func (e *vectorExpressEngine) syncExpressMangleDataplane(hncDir string, active bool, escortedMACs []string) {
+	if e.mangleApplyFn == nil && !useNativeDataplane(hncDir) {
+		return
+	}
+	var devIPs map[string][]string
+	if active && len(escortedMACs) > 0 && e.srv != nil {
+		devIPs = e.srv.deviceIPsByMAC()
+	}
+	v4Payload, v6Payload := BuildVectorExpressManglePayloads(active, escortedMACs, devIPs)
+	digest := v4Payload + "\x00" + v6Payload
+
+	e.dpMu.Lock()
+	if e.lastMangleDigest == digest {
+		e.dpMu.Unlock()
+		return
+	}
+	e.dpMu.Unlock()
+
+	if e.mangleApplyFn != nil {
+		e1 := e.mangleApplyFn(false, v4Payload)
+		e2 := e.mangleApplyFn(true, v6Payload)
+		if e1 == nil && e2 == nil {
+			e.dpMu.Lock()
+			e.lastMangleDigest = digest
+			e.dpMu.Unlock()
+		}
+		return
+	}
+
+	v4OK := true
+	if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
+		if err := pipeIptablesRestoreWithTimeout(v4Bin, []byte(v4Payload), iptRestoreTimeout); err != nil {
+			v4OK = false
+		} else if active && len(escortedMACs) > 0 {
+			ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("iptables"), expressMangleChainName, false)
+		}
+	}
+	if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
+		if err := pipeIptablesRestoreWithTimeout(v6Bin, []byte(v6Payload), iptRestoreTimeout); err == nil && active && len(escortedMACs) > 0 {
+			ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("ip6tables"), expressMangleChainName, false)
+		}
+	}
+	if v4OK {
+		e.dpMu.Lock()
+		e.lastMangleDigest = digest
+		e.dpMu.Unlock()
+	}
 }
 
 func (e *vectorExpressEngine) resolveCurrentIfaceLocked() string {
@@ -687,6 +924,7 @@ func (e *vectorExpressEngine) WaitDataplaneIdle() {
 
 func (e *vectorExpressEngine) enqueueDataplaneJob(job expressDataplaneJob, syncWait bool) {
 	cp := job
+	cp.escortedMACs = append([]string(nil), job.escortedMACs...)
 	e.dpMu.Lock()
 	e.pendingDPJob = &cp
 	if !e.dpRunning {
@@ -726,7 +964,7 @@ func (e *vectorExpressEngine) executeDataplaneJob(job expressDataplaneJob) {
 	if e.srv != nil {
 		hncDir = e.srv.hncDir
 	}
-	if hncDir == "" && e.nativeApplyFn == nil && e.fallbackCmdFn == nil {
+	if hncDir == "" && e.nativeApplyFn == nil && e.fallbackCmdFn == nil && e.mangleApplyFn == nil {
 		return
 	}
 	if !e.isDataplaneEnabled(hncDir) {
@@ -748,6 +986,7 @@ func (e *vectorExpressEngine) executeDataplaneJob(job expressDataplaneJob) {
 	}
 
 	if job.hotspotOff {
+		e.syncExpressMangleDataplane(hncDir, false, nil)
 		err := callNative(false, v6ExpressDefaultMark, 0, 0)
 		invalidate(hncDir, "")
 		if err != nil {
@@ -761,6 +1000,8 @@ func (e *vectorExpressEngine) executeDataplaneJob(job expressDataplaneJob) {
 		}
 		return
 	}
+
+	e.syncExpressMangleDataplane(hncDir, job.active, job.escortedMACs)
 
 	mode := "off"
 	bgPct := 100
@@ -826,6 +1067,7 @@ func (e *vectorExpressEngine) applyDataplaneLocked(now time.Time, active bool, m
 		bgCeilPct:       ceilPct,
 		bgCeilKbps:      bgKbps,
 		upBgCeilKbps:    upBgKbps,
+		escortedMACs:    cpMACs,
 		iface:           iface,
 		lastActiveIface: lastIface,
 		hotspotOff:      false,
@@ -890,6 +1132,7 @@ func (e *vectorExpressEngine) resetForHotspotOff(now time.Time) {
 		bgCeilPct:       100,
 		bgCeilKbps:      0,
 		upBgCeilKbps:    0,
+		escortedMACs:    nil,
 		iface:           iface,
 		lastActiveIface: lastIface,
 		hotspotOff:      true,

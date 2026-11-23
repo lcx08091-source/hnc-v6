@@ -494,7 +494,7 @@ func parseCtNetlinkDumpChunk(raw []byte, wantFamily string, v6Intern map[string]
 			}
 			code := int32(binary.NativeEndian.Uint32(m.Data[:4]))
 			if code == 0 {
-				continue
+				return dst, hasAcct, sawV6, true, nil
 			}
 			if code < 0 {
 				code = -code
@@ -530,19 +530,6 @@ func shouldFallbackCTNetlink(err error) bool {
 var ctNetlinkDumpFn = dumpConntrackNetlinkOS
 
 func dumpConntrackNetlinkOS() ([]ctEntry, bool, error) {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, nlNetfilter)
-	if err != nil {
-		return nil, false, err
-	}
-	defer syscall.Close(fd)
-	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		return nil, false, err
-	}
-	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, ctnlDumpRcvBuf)
-	tv := syscall.Timeval{Sec: 2}
-	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
-	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
-
 	bufPtr := ctScanBufPool.Get().(*[]byte)
 	buf := *bufPtr
 	if len(buf) < 64*1024 {
@@ -560,8 +547,28 @@ func dumpConntrackNetlinkOS() ([]ctEntry, bool, error) {
 	hasAcct := false
 
 	dumpFamily := func(family uint8, seq uint32, wantFam string) (bool, error) {
+		fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, nlNetfilter)
+		if err != nil {
+			return false, err
+		}
+		defer syscall.Close(fd)
+		if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+			return false, err
+		}
+		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, ctnlDumpRcvBuf)
+		tv := syscall.Timeval{Sec: 2}
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
+
 		req := buildCtNetlinkGetDumpReq(family, seq)
-		if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+		for {
+			err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK})
+			if err == nil {
+				break
+			}
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
 			return false, err
 		}
 		sawV6Any := false
@@ -574,7 +581,7 @@ func dumpConntrackNetlinkOS() ([]ctEntry, bool, error) {
 				return sawV6Any, rerr
 			}
 			if n <= 0 {
-				break
+				return sawV6Any, syscall.EIO
 			}
 			var chunkAcct, chunkV6, done bool
 			var perr error
@@ -592,7 +599,6 @@ func dumpConntrackNetlinkOS() ([]ctEntry, bool, error) {
 				return sawV6Any, nil
 			}
 		}
-		return sawV6Any, nil
 	}
 
 	sawV6, err4 := dumpFamily(syscall.AF_INET, 1, "")

@@ -1,6 +1,6 @@
 // Package apkscan 扫描热点主机(root 过的安卓手机)上已安装 App 的 APK,
-// 提取包内写死的域名, 建立「可注册域 → 包名 → App 名称」对照表
-// (run/apk_domains.json), 供 httpd 给规则库认不出的域名找出所属 App。
+// 提取包内写死的域名, 建立「可注册域 -> 包名 -> App 名称」对照表
+// (data/apk_domains.json), 供 httpd 给规则库认不出的域名找出所属 App。
 //
 // v5.15: 首版。设计要点:
 //   - 只读 /data/app 下的用户 App(base.apk + split_*.apk), 系统 App 不扫;
@@ -34,8 +34,8 @@ const (
 	// 旧缓存整体作废重扫。
 	extractorVersion = 1
 
-	// DefaultOutPath 是输出文件默认路径。
-	DefaultOutPath = "/data/local/hnc/run/apk_domains.json"
+	// DefaultOutPath 是输出文件默认路径(持久化 data/ 目录, 避免占用 32M tmpfs run/)。
+	DefaultOutPath = "/data/local/hnc/data/apk_domains.json"
 
 	maxDistinctPerAPK = 20000     // 单 APK 可注册域上限, 防病态包撑爆 map
 	maxCachedPerAPK   = 150       // 缓存里每个 APK 保留的可注册域上限
@@ -552,9 +552,26 @@ func (s *Scanner) scanStream(ctx context.Context, r io.Reader, utf16 bool, emit 
 
 // ---- 读写输出 ----
 
-// loadCache 读回上一轮输出里的缓存。schema/提取规则版本不一致则整体作废。
+var apkAtomicSeq atomic.Uint64
+
+func legacyAPKRunPath(path string) string {
+	clean := filepath.Clean(path)
+	dir := filepath.Dir(clean)
+	if filepath.Base(dir) == "data" {
+		return filepath.Join(filepath.Dir(dir), "run", filepath.Base(clean))
+	}
+	return ""
+}
+
+// loadCache 读回上一轮输出里的缓存(若 data/apk_domains.json 不存在则兼容回退读 run/)。
+// schema/提取规则版本不一致则整体作废。
 func loadCache(path string) map[string]*CacheEntry {
 	b, err := os.ReadFile(path)
+	if err != nil && os.IsNotExist(err) {
+		if fb := legacyAPKRunPath(path); fb != "" {
+			b, err = os.ReadFile(fb)
+		}
+	}
 	if err != nil {
 		return nil
 	}
@@ -574,9 +591,14 @@ func loadCache(path string) map[string]*CacheEntry {
 	return o.Cache
 }
 
-// ReadGeneratedAt 返回输出文件的 generated_at(unix 秒); 文件不存在或坏了返回 0。
+// ReadGeneratedAt 返回输出文件的 generated_at(unix 秒); 若 data/ 下不存在则兼容回退读 run/。
 func ReadGeneratedAt(path string) int64 {
 	f, err := os.Open(path)
+	if err != nil && os.IsNotExist(err) {
+		if fb := legacyAPKRunPath(path); fb != "" {
+			f, err = os.Open(fb)
+		}
+	}
 	if err != nil {
 		return 0
 	}
@@ -591,36 +613,36 @@ func ReadGeneratedAt(path string) int64 {
 	return o.GeneratedAt
 }
 
-// writeAtomic 写 tmp(文件名带 pid, 防 -apk-scan 与常驻进程并发) → fsync → rename。
+// writeAtomic 写唯一 tmp(文件名带 pid + 序号, 防并发冲突) -> fsync -> rename; 任一步失败立即清理 tmp。
 func writeAtomic(path string, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), apkAtomicSeq.Add(1))
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 	return nil

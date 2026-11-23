@@ -361,6 +361,8 @@ func (r *Recorder) moveOut(s *recSession) {
 	}
 }
 
+var recAtomicSeq atomic.Uint64
+
 func copyFileAtomic(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -368,18 +370,18 @@ func copyFileAtomic(src, dst string) error {
 	}
 	defer in.Close()
 
-	tmp := dst + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", dst, os.Getpid(), recAtomicSeq.Add(1))
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close()
 		_ = os.Remove(tmp)
 		return err
 	}
 	if err := out.Sync(); err != nil {
-		out.Close()
+		_ = out.Close()
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -394,17 +396,43 @@ func copyFileAtomic(src, dst string) error {
 	return nil
 }
 
+func writeBytesAtomic(path string, b []byte, mode os.FileMode) error {
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), recAtomicSeq.Add(1))
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func (r *Recorder) writeStatus() {
 	st := r.Status()
 	b, err := json.Marshal(st)
 	if err != nil {
 		return
 	}
-	_ = os.MkdirAll(r.recDir(), 0o700)
-	tmp := r.statusFile() + ".tmp"
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		_ = os.Rename(tmp, r.statusFile())
+	if err := os.MkdirAll(r.recDir(), 0o700); err != nil {
+		return
 	}
+	_ = writeBytesAtomic(r.statusFile(), b, 0o644)
 }
 
 // isRecPcapName 录制文件名(rec-YYYYMMDD-HHMMSS.pcap; httpd 导出白名单

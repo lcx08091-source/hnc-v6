@@ -313,14 +313,7 @@ func fcSaveModel(hncDir string, m *fcModel) error {
 	if err != nil {
 		return err
 	}
-	p := fcModelPath(hncDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(p+".tmp", b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(p+".tmp", p)
+	return writeFileAtomic(fcModelPath(hncDir), b)
 }
 
 // fcLoadModel 读 data/flow_cls.json(失败返回 nil; 调用方容忍缺文件)。

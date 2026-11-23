@@ -773,16 +773,20 @@ cleanup() {
             $IP6T -t filter -X "$chain" 2>/dev/null
         done
     fi
-    # 兜底回收应用限速与应用 QoS 孤儿链
+    # 兜底回收应用限速、应用 QoS 与 v6 战术子链(严格只删 HNC 自有链, 绝不触碰宿主 ROM 系统规则)
     for _T in "$IPT" "$(ipv6_mangle_ok && echo "$IP6T")"; do
         [ -z "$_T" ] && continue
-        for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_QOS_MARK; do
+        for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_QOS_MARK HNC_V6_EXPRESS HNC_V6_LEASH; do
             for _k in 1 2 3 4; do $_T -t mangle -D FORWARD -j "$_ac" 2>/dev/null || break; done
         done
-        for _ac in HNC_APP_LIMIT_DOWN HNC_APP_QOS; do
+        for _ac in HNC_V6_EXPRESS HNC_V6_LEASH; do
+            for _k in 1 2 3 4; do $_T -t mangle -D PREROUTING -j "$_ac" 2>/dev/null || break; done
+        done
+        for _ac in HNC_APP_LIMIT_DOWN HNC_APP_QOS HNC_V6_EXPRESS HNC_V6_LEASH; do
             for _k in 1 2 3 4; do $_T -t mangle -D POSTROUTING -j "$_ac" 2>/dev/null || break; done
         done
         for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS HNC_APP_QOS_IP HNC_APP_QOS_MARK \
+                   HNC_V6_EXPRESS HNC_V6_LEASH \
                    $($_T -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}'); do
             $_T -t mangle -F "$_ac" 2>/dev/null || true
             $_T -t mangle -X "$_ac" 2>/dev/null || true
@@ -790,7 +794,7 @@ cleanup() {
     done
     for _T in "$IPT" "$(ipv6_filter_ok && echo "$IP6T")"; do
         [ -z "$_T" ] && continue
-        for _qc in HNC_QUIC HNC_QUIC_APPLIM; do
+        for _qc in HNC_QUIC HNC_QUIC_APPLIM HNC_SCALPEL HNC_V6_EXPRESS HNC_V6_LEASH; do
             for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j "$_qc" 2>/dev/null || break; done
             $_T -t filter -F "$_qc" 2>/dev/null || true
             $_T -t filter -X "$_qc" 2>/dev/null || true
@@ -1089,8 +1093,8 @@ ensure_stats_online() {
                 }
             }
         }'
-        mv -f "${v6_map}.tmp" "$v6_map" 2>/dev/null || : > "$v6_map"
-        mv -f "${v6_ret}.tmp" "$v6_ret" 2>/dev/null || : > "$v6_ret"
+        mv -f "${v6_map}.tmp" "$v6_map" 2>/dev/null || { rm -f "${v6_map}.tmp" 2>/dev/null; : > "$v6_map" 2>/dev/null || true; }
+        mv -f "${v6_ret}.tmp" "$v6_ret" 2>/dev/null || { rm -f "${v6_ret}.tmp" 2>/dev/null; : > "$v6_ret" 2>/dev/null || true; }
 
         # 4) 从内核链彻底删除已结转/已离线的 -d <ip6>/128 规则(含任何孤立 -d 规则)
         if [ -s "$del_d6_tmp" ]; then
@@ -1218,14 +1222,16 @@ stats_all() {
 #   - 读(stats/stats_all/ensure_stats/reset_counters): 不加锁
 # 锁失败(rc=11) 向上传递,调用方可选择重试或放弃。
 # 见 bin/hnc_lock.sh 门禁模式说明。
-. "$HNC_DIR/bin/hnc_lock.sh" 2>/dev/null || {
+if [ -r "$HNC_DIR/bin/hnc_lock.sh" ]; then
+    . "$HNC_DIR/bin/hnc_lock.sh"
+else
     # hnc_lock.sh 不可用时降级为无锁模式,保持向后兼容
     # 这不应该在正常部署里发生,但测试环境 / 部分升级场景下可能
     mac_lock()    { return 0; }
     mac_unlock()  { return 0; }
     gate_lock()   { return 0; }
     gate_unlock() { return 0; }
-}
+fi
 
 case "$1" in
     # ═══ 全局写 gate 锁 ══════════════════════════════════════

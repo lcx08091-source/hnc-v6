@@ -15,10 +15,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"hnc.io/dpid/tzlocal"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -187,6 +190,11 @@ func main() {
 	_ = os.MkdirAll(*flagHNCDir+"/run", 0755)
 	lockFile := *flagHNCDir + "/run/httpd.lock"
 	lockFd, lockErr := syscall.Open(lockFile, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC, 0644)
+	if lockErr != nil && errors.Is(lockErr, syscall.ENOSPC) {
+		// 升级前 32M tmpfs 已 100% 写满连锁文件都建不出时, 先抢救清理 run/ 再重试加锁
+		rescueRunTmpfs(*flagHNCDir)
+		lockFd, lockErr = syscall.Open(lockFile, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC, 0644)
+	}
 	if lockErr == nil {
 		if err := syscall.Flock(lockFd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 			log.Printf("FATAL: another hnc_httpd instance already holds %s (%v); exiting cleanly", lockFile, err)
@@ -198,6 +206,9 @@ func main() {
 			_ = syscall.Close(lockFd)
 		}()
 	}
+
+	// 启动急救: 在写入 run/httpd.pid 之前执行 EXDEV 安全的 run/ 抢救迁移与孤儿 .tmp 清理
+	rescueRunTmpfs(*flagHNCDir)
 
 	// 写 pid
 	pidFile := *flagHNCDir + "/run/httpd.pid"
@@ -396,4 +407,133 @@ func (lrw *loggingResponseWriter) WriteHeader(status int) {
 // 退回轮询 (api_events.go 注释"middleware 不包裹 w"与事实不符)。
 func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
 	return lrw.ResponseWriter
+}
+
+const rescueMaxTailBytes = 4 << 20
+
+func rescueRunTargetDir(hncDir, name string) string {
+	if name == "" || isProtectedRunSelfFile(name) || isOrphanTmpFileName(name) {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(name, "self_attrib."),
+		strings.HasPrefix(name, "label_samples."),
+		strings.HasPrefix(name, "self_fg."):
+		return selfStudioDir(hncDir)
+	case strings.HasPrefix(name, "fg_timeline."),
+		name == "apk_domains.json",
+		name == "app_labels_live.json":
+		return filepath.Join(hncDir, "data")
+	default:
+		return ""
+	}
+}
+
+func rescueMigrateOneFile(srcPath, dstPath string, info os.FileInfo) error {
+	perm := info.Mode().Perm()
+	if perm == 0 {
+		perm = 0o644
+	}
+	if dstInfo, err := os.Stat(dstPath); err == nil && !dstInfo.IsDir() {
+		if !info.ModTime().After(dstInfo.ModTime()) {
+			return os.Remove(srcPath)
+		}
+	}
+	if info.Size() <= rescueMaxTailBytes {
+		if err := os.Rename(srcPath, dstPath); err == nil {
+			return nil
+		}
+	}
+	f, err := os.Open(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var payload []byte
+	if info.Size() > rescueMaxTailBytes {
+		if _, err := f.Seek(info.Size()-rescueMaxTailBytes, io.SeekStart); err != nil {
+			_ = f.Close()
+			return err
+		}
+		payload, err = io.ReadAll(io.LimitReader(f, rescueMaxTailBytes))
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		// JSONL 超 4MiB 截断头部时跳过首条残缺半行, 避免首行解析异常
+		if strings.HasSuffix(dstPath, ".jsonl") {
+			if idx := bytes.IndexByte(payload, '\n'); idx >= 0 && idx+1 < len(payload) {
+				payload = payload[idx+1:]
+			}
+		}
+	} else {
+		payload, err = io.ReadAll(io.LimitReader(f, rescueMaxTailBytes))
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	_ = f.Close()
+
+	if err := writeFileAtomicWithPerm(dstPath, payload, perm); err != nil {
+		return err
+	}
+	return os.Remove(srcPath)
+}
+
+// rescueRunTmpfs 在写入 run/httpd.pid 之前抢救迁移 run/ 残存文件并清除过期 *.tmp*,
+// 单文件超 4MiB 时仅保留尾部 4MiB, 迁移后立即删除 run/ 原文件以释放 32M tmpfs。
+func rescueRunTmpfs(hncDir string) int {
+	if hncDir == "" {
+		return 0
+	}
+	runDir := filepath.Join(hncDir, "run")
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return 0
+	}
+	_ = os.MkdirAll(filepath.Join(hncDir, "data"), 0o755)
+	_, _ = ensureSelfStudioDir(hncDir)
+
+	cleaned := 0
+	// 第一遍: 立即删除所有 run/*.tmp* 孤儿临时文件, 优先释放 tmpfs 空间与 inode
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if isOrphanTmpFileName(name) {
+			if os.Remove(filepath.Join(runDir, name)) == nil {
+				cleaned++
+			}
+		}
+	}
+	// 第二遍: EXDEV 安全迁出工坊与业务数据文件并立即删除 run/ 原文件
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		dstDir := rescueRunTargetDir(hncDir, name)
+		if dstDir == "" {
+			continue
+		}
+		srcPath := filepath.Join(runDir, name)
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		dstPath := filepath.Join(dstDir, name)
+		if err := rescueMigrateOneFile(srcPath, dstPath, info); err == nil {
+			cleaned++
+		} else {
+			log.Printf("WARN: rescueRunTmpfs migrate %s -> %s failed: %v", srcPath, dstPath, err)
+		}
+	}
+	if cleaned > 0 {
+		log.Printf("rescueRunTmpfs: cleaned/migrated %d file(s) out of %s", cleaned, runDir)
+	}
+	return cleaned
 }

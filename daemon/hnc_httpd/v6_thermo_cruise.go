@@ -29,12 +29,29 @@ import (
 
 const (
 	thermoDefaultSysfsRoot   = "/sys/class/power_supply"
+	thermoDefaultThermalRoot = "/sys/class/thermal"
 	thermoDefaultStage1TempC = 42.0
 	thermoDefaultStage2TempC = 45.0
 	thermoDefaultLowBatPct   = 20
 	thermoHysteresisC        = 3.0
 	thermoCoolHoldDuration   = 60 * time.Second
+
+	ThermoReasonSensorUnreadable = "sensor_unreadable"
+	ThermoReasonSensorSentinel   = "sensor_sentinel"
+	ThermoReasonSensorOutOfRange = "sensor_out_of_range"
+
+	thermoMinValidTempC        = -20.0
+	thermoMaxValidBatteryTempC = 85.0
+	thermoMaxValidZoneTempC    = 100.0
 )
+
+var thermoAllowedZoneTypes = map[string]bool{
+	"battery":   true,
+	"bms":       true,
+	"chg_therm": true,
+}
+
+var activeLiveThermoEngine atomic.Pointer[thermoCruiseEngine]
 
 // ThermoCruiseConfig 温控与低电巡航直接数字阈值配置。
 type ThermoCruiseConfig struct {
@@ -57,19 +74,24 @@ func defaultThermoCruiseConfig() ThermoCruiseConfig {
 
 // ThermoBatteryReading 单次 sysfs 传感器零开销读数。
 type ThermoBatteryReading struct {
-	Available   bool    `json:"available"`
-	SupplyNode  string  `json:"supply_node,omitempty"`
-	TempC       float64 `json:"temp_c"`
-	CapacityPct int     `json:"capacity_pct"`
-	Status      string  `json:"status"`
-	IsCharging  bool    `json:"is_charging"`
-	ReadLatency int64   `json:"read_latency_ns"`
+	Available      bool    `json:"available"`
+	ReasonCode     string  `json:"reason_code,omitempty"`
+	SupplyNode     string  `json:"supply_node,omitempty"`
+	TempC          float64 `json:"temp_c"`
+	CapacityPct    int     `json:"capacity_pct"`
+	Status         string  `json:"status"`
+	IsCharging     bool    `json:"is_charging"`
+	ChargerOnline  bool    `json:"charger_online,omitempty"`
+	IsBypassSupply bool    `json:"is_bypass_supply,omitempty"`
+	ReadLatency    int64   `json:"read_latency_ns"`
 }
 
 // ThermoQuickState 纯内存零 sysfs IO 温控快速快照（供黑匣子 200ms 归因与信号诊断无阻塞读取）。
 type ThermoQuickState struct {
 	Enabled            bool    `json:"enabled"`
 	Available          bool    `json:"available"`
+	ReasonCode         string  `json:"reason_code,omitempty"`
+	SensorFaultCount   uint64  `json:"sensor_fault_count,omitempty"`
 	RawThermalStage    int     `json:"raw_thermal_stage"`
 	EffectiveStage     int     `json:"effective_stage"`
 	Stage2ShaperActive bool    `json:"stage2_shaper_active"`
@@ -77,23 +99,28 @@ type ThermoQuickState struct {
 	TempC              float64 `json:"temp_c"`
 	CapacityPct        int     `json:"capacity_pct"`
 	IsCharging         bool    `json:"is_charging"`
+	IsBypassSupply     bool    `json:"is_bypass_supply,omitempty"`
 }
 
 type thermoCruiseEngine struct {
 	// 64 位原子字段严格置于 offset 0 (兼容 32-bit ARM)
-	evalCount      atomic.Uint64
-	effectiveStage atomic.Int64
+	evalCount        atomic.Uint64
+	effectiveStage   atomic.Int64
+	sensorFaultCount atomic.Uint64
 
 	// 非 64 位原子字段与通道/钩子严格排在全部 64 位原子字段之后
-	loopMode atomic.Int32
-	wakeOnce sync.Once
-	wakeCh   chan struct{}
+	loopMode           atomic.Int32
+	stage1RelaxFlag    atomic.Bool
+	wakeOnce           sync.Once
+	wakeCh             chan struct{}
 
 	srv                  *server
 	mu                   sync.Mutex
 	cfg                  ThermoCruiseConfig
 	sysfsRoot            string
+	thermalRoot          string
 	cachedBatDir         string
+	cachedTempPath       string
 	rawThermalStage      int       // 0 | 1 | 2（纯温度施密特状态机输出）
 	coolBelowStage2Since time.Time // 持续 <= stage2_temp_c - 3.0°C 的起始时刻
 	coolBelowStage1Since time.Time // 持续 <= stage1_temp_c - 3.0°C 的起始时刻
@@ -175,6 +202,31 @@ func (e *thermoCruiseEngine) LoopMode() v6EngineLoopMode {
 	return v6EngineLoopMode(e.loopMode.Load())
 }
 
+// IsStage1PollingRelaxed 返回当前温控引擎是否处于一阶及以上省电轮询节流态。
+func (e *thermoCruiseEngine) IsStage1PollingRelaxed() bool {
+	if e == nil {
+		return false
+	}
+	return e.stage1RelaxFlag.Load()
+}
+
+func (s *server) isThermoStage1Relaxed() bool {
+	if s == nil {
+		return false
+	}
+	if v, ok := v6Registry.Load(s); ok {
+		if vs, ok := v.(*v6ServerState); ok && vs != nil && vs.thermo != nil {
+			return vs.thermo.IsStage1PollingRelaxed()
+		}
+	}
+	return false
+}
+
+func isGlobalLiveThermoStage1Relaxed() bool {
+	eng := activeLiveThermoEngine.Load()
+	return eng != nil && eng.IsStage1PollingRelaxed()
+}
+
 func (e *thermoCruiseEngine) loadConfigLocked() {
 	if e.srv == nil || e.srv.hncDir == "" {
 		return
@@ -233,26 +285,85 @@ func (e *thermoCruiseEngine) saveConfigLocked() error {
 	return discoverWriteAtomic(e.configPath(), b)
 }
 
-// ── 零子进程 sysfs 电池温度/电量/充电态读取 (<50µs) ──────────────────────────
+// ── 零子进程 sysfs 多量纲自适应温度解析与坏传感器熔断 (<50µs) ─────────────────
 
-// parseSysfsTempCelsius 按 sysfs 路径语义固定缩放温度:
-//   - thermal_zone*/temp: 恒按毫摄氏度 /1000.0;
-//   - power_supply/*/temp (默认电池节点): 恒按 0.1°C /10.0, 彻底避免冬季 8.5°C(85) 被误判为 85°C!
-func parseSysfsTempCelsius(path, raw string) (float64, bool) {
+func isBrokenTempSentinel(v float64, isThermalZone bool) bool {
+	if isThermalZone && math.Abs(v) < 1e-9 {
+		return true
+	}
+	iv := int64(math.Round(v))
+	if math.Abs(v-float64(iv)) > 1e-6 {
+		return false
+	}
+	switch iv {
+	case 2147483647, -2147483648, 125000, 127000, 255000, -273000, -40000, -400:
+		return true
+	default:
+		return false
+	}
+}
+
+// parseSysfsTempAdaptive 按是否热区节点执行三量纲自适应换算、哨兵拦截与物理合理区间校验。
+func parseSysfsTempAdaptive(raw string, isThermalZone, powerSupplyTenthsABI bool) (celsius float64, reasonCode string, ok bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return 0, false
+		return 0, ThermoReasonSensorUnreadable, false
 	}
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
-		return 0, false
+		return 0, ThermoReasonSensorUnreadable, false
 	}
-	slash := strings.ToLower(filepath.ToSlash(path))
-	scale := 10.0
-	if strings.Contains(slash, "thermal_zone") {
-		scale = 1000.0
+	if isBrokenTempSentinel(v, isThermalZone) {
+		return 0, ThermoReasonSensorSentinel, false
 	}
-	return math.Round((v/scale)*10) / 10, true
+
+	absV := math.Abs(v)
+	var c float64
+	if !isThermalZone && powerSupplyTenthsABI {
+		switch {
+		case absV >= 1000.0:
+			c = v / 1000.0
+		case strings.Contains(s, "."):
+			c = v
+		default:
+			c = v / 10.0
+		}
+	} else {
+		switch {
+		case absV >= 1000.0:
+			c = v / 1000.0
+		case absV >= 100.0:
+			c = v / 10.0
+		default:
+			c = v
+		}
+	}
+	c = math.Round(c*10) / 10
+
+	maxValid := thermoMaxValidBatteryTempC
+	if isThermalZone {
+		maxValid = thermoMaxValidZoneTempC
+	}
+	if c < thermoMinValidTempC || c > maxValid {
+		return 0, ThermoReasonSensorOutOfRange, false
+	}
+	return c, "", true
+}
+
+// parseSysfsTempCelsiusDetail 结合 sysfs 路径语义做多量纲自适应换算与坏传感器熔断判定:
+//   - power_supply 电芯节点: 过滤哨兵值; |v|>=1000 按毫摄氏度 /1000.0, 显式小数按原值, 其余按 Linux ABI 0.1℃ /10.0, 合法区间 [-20.0, 85.0]℃;
+//   - thermal_zone 热区节点: 过滤哨兵值及未初始化 0; |v|>=1000 按 /1000.0, 100<=|v|<1000 按 /10.0, |v|<100 按原值, 合法区间 [-20.0, 100.0]℃。
+func parseSysfsTempCelsiusDetail(path, raw string) (celsius float64, reasonCode string, ok bool) {
+	slash := strings.ToLower(filepath.ToSlash(strings.TrimSpace(path)))
+	isThermalZone := strings.Contains(slash, "thermal_zone") || strings.Contains(slash, "/thermal/")
+	isPowerSupply := !isThermalZone && slash != ""
+	return parseSysfsTempAdaptive(raw, isThermalZone, isPowerSupply)
+}
+
+// parseSysfsTempCelsius 保持原有 (path, raw) -> (float64, bool) 签名兼容旧调用方。
+func parseSysfsTempCelsius(path, raw string) (float64, bool) {
+	c, _, ok := parseSysfsTempCelsiusDetail(path, raw)
+	return c, ok
 }
 
 func readSmallSysfsFile(path string) (string, bool) {
@@ -263,119 +374,283 @@ func readSmallSysfsFile(path string) (string, bool) {
 	return strings.TrimSpace(string(b)), true
 }
 
-func discoverBatteryNodeDir(root string) string {
-	if root == "" {
-		return ""
+func resolveEffectiveThermalRoot(sysfsRoot, explicitThermalRoot string) string {
+	if strings.TrimSpace(explicitThermalRoot) != "" {
+		return strings.TrimSpace(explicitThermalRoot)
 	}
-	// 优先探测标准聚合节点 <root>/battery (避免 OPLUS 等机型 bms 次级节点屏蔽真实充电状态)
-	primary := filepath.Join(root, "battery")
-	if _, hasTemp := readSmallSysfsFile(filepath.Join(primary, "temp")); hasTemp {
-		typ, hasType := readSmallSysfsFile(filepath.Join(primary, "type"))
-		if !hasType || strings.EqualFold(typ, "Battery") {
-			return primary
-		}
+	if sysfsRoot == "" || filepath.Clean(sysfsRoot) == filepath.Clean(thermoDefaultSysfsRoot) {
+		return thermoDefaultThermalRoot
 	}
-	// 再遍历全部 power_supply 子目录核验 type == Battery
-	ents, err := os.ReadDir(root)
-	if err != nil {
-		return ""
-	}
-	var fallbackTempDir string
-	for _, ent := range ents {
-		if ent.Name() == "battery" {
-			continue
-		}
-		cand := filepath.Join(root, ent.Name())
-		typ, ok := readSmallSysfsFile(filepath.Join(cand, "type"))
-		if ok && strings.EqualFold(typ, "Battery") {
-			if _, hasTemp := readSmallSysfsFile(filepath.Join(cand, "temp")); hasTemp {
-				return cand
-			}
-			if fallbackTempDir == "" {
-				fallbackTempDir = cand
-			}
-		}
-	}
-	if fallbackTempDir != "" {
-		return fallbackTempDir
-	}
-	for _, name := range []string{"battery", "Battery", "BAT0", "bms"} {
-		cand := filepath.Join(root, name)
-		if _, ok := readSmallSysfsFile(filepath.Join(cand, "temp")); ok {
+	// 单测自定义 sysfsRoot 时仅探测同父目录下的测试热区目录, 严防逃逸读取宿主机真实 /sys/class/thermal
+	parent := filepath.Dir(filepath.Clean(sysfsRoot))
+	for _, sub := range []string{"thermal", "sysfs_thermal"} {
+		cand := filepath.Join(parent, sub)
+		if st, err := os.Stat(cand); err == nil && st.IsDir() {
 			return cand
 		}
 	}
 	return ""
 }
 
-// ReadBatteryFromSysfs 直接通过 os.ReadFile 读取缓存的 Battery 节点（典型耗时 10~35µs）。
+func collectTempCandidatePaths(psRoot, thRoot string) (tempPaths []string, primaryBatDir string) {
+	seen := make(map[string]bool)
+	addPath := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			tempPaths = append(tempPaths, p)
+		}
+	}
+
+	if psRoot != "" {
+		primary := filepath.Join(psRoot, "battery")
+		if typ, hasType := readSmallSysfsFile(filepath.Join(primary, "type")); !hasType || strings.EqualFold(typ, "Battery") {
+			if st, err := os.Stat(primary); err == nil && st.IsDir() {
+				primaryBatDir = primary
+			}
+			addPath(filepath.Join(primary, "temp"))
+		}
+		if ents, err := os.ReadDir(psRoot); err == nil {
+			for _, ent := range ents {
+				name := ent.Name()
+				if name == "battery" {
+					continue
+				}
+				cand := filepath.Join(psRoot, name)
+				if typ, ok := readSmallSysfsFile(filepath.Join(cand, "type")); ok && strings.EqualFold(typ, "Battery") {
+					if primaryBatDir == "" {
+						primaryBatDir = cand
+					}
+					addPath(filepath.Join(cand, "temp"))
+				}
+			}
+		}
+		for _, name := range []string{"bms", "BAT0", "Battery"} {
+			cand := filepath.Join(psRoot, name)
+			if st, err := os.Stat(cand); err == nil && st.IsDir() && primaryBatDir == "" {
+				primaryBatDir = cand
+			}
+			addPath(filepath.Join(cand, "temp"))
+		}
+	}
+
+	if thRoot != "" {
+		if ents, err := os.ReadDir(thRoot); err == nil {
+			for _, ent := range ents {
+				name := ent.Name()
+				if !strings.HasPrefix(name, "thermal_zone") {
+					continue
+				}
+				zDir := filepath.Join(thRoot, name)
+				typ, ok := readSmallSysfsFile(filepath.Join(zDir, "type"))
+				if !ok {
+					continue
+				}
+				normType := strings.ToLower(strings.TrimSpace(typ))
+				if thermoAllowedZoneTypes[normType] {
+					addPath(filepath.Join(zDir, "temp"))
+				}
+			}
+		}
+	}
+	return tempPaths, primaryBatDir
+}
+
+func probeChargerAndBypassState(psRoot, batDir string, statusStr string) (isCharging, chargerOnline, isBypass bool) {
+	rawCharging := strings.EqualFold(statusStr, "Charging") || strings.EqualFold(statusStr, "Full")
+	if psRoot == "" {
+		return rawCharging, rawCharging, false
+	}
+
+	hasOnlineNode := false
+	for _, supplyName := range []string{"usb", "ac", "wireless", "Mains", "USB"} {
+		if val, ok := readSmallSysfsFile(filepath.Join(psRoot, supplyName, "online")); ok {
+			hasOnlineNode = true
+			if val == "1" {
+				chargerOnline = true
+			}
+		}
+	}
+
+	explicitBypass := false
+	for _, dir := range []string{batDir, filepath.Join(psRoot, "battery")} {
+		if dir == "" {
+			continue
+		}
+		if v, ok := readSmallSysfsFile(filepath.Join(dir, "bypass_charging")); ok && (v == "1" || strings.EqualFold(v, "enabled") || strings.EqualFold(v, "true")) {
+			explicitBypass = true
+			break
+		}
+		if v, ok := readSmallSysfsFile(filepath.Join(dir, "charging_enabled")); ok && v == "0" && chargerOnline {
+			explicitBypass = true
+			break
+		}
+		if v, ok := readSmallSysfsFile(filepath.Join(dir, "input_suspend")); ok && v == "1" {
+			explicitBypass = true
+			break
+		}
+	}
+
+	if explicitBypass {
+		return false, chargerOnline, true
+	}
+	if !hasOnlineNode {
+		// 未提供 usb/online 或 ac/online 节点时保持原有 Charging / Full 判定兼容
+		return rawCharging, rawCharging, false
+	}
+	if !chargerOnline {
+		// usb/online 与 ac/online 均存在且均为 0: 即使 status 滞后报 Charging 也拒绝叠加快充偏置/豁免
+		if rawCharging {
+			return false, false, true
+		}
+		return false, false, false
+	}
+	// usb/online 或 ac/online == 1, 但电芯处于 Not charging / Discharging / Idle -> 典型旁路供电
+	if strings.EqualFold(statusStr, "Not charging") || strings.EqualFold(statusStr, "Discharging") || strings.EqualFold(statusStr, "Idle") {
+		return false, true, true
+	}
+	return rawCharging, true, false
+}
+
+// ReadBatteryFromSysfs 直接通过 os.ReadFile 读取电芯/热区节点并执行量纲自适应与坏节点熔断（典型耗时 10~35µs）。
 func (e *thermoCruiseEngine) ReadBatteryFromSysfs() ThermoBatteryReading {
 	t0 := time.Now()
 
 	e.mu.Lock()
 	root := e.sysfsRoot
+	thRootCfg := e.thermalRoot
 	batDir := e.cachedBatDir
+	tempPath := e.cachedTempPath
 	e.mu.Unlock()
 
-	if batDir == "" {
-		batDir = discoverBatteryNodeDir(root)
-		if batDir != "" {
-			e.mu.Lock()
-			if e.sysfsRoot == root {
-				e.cachedBatDir = batDir
-			}
-			e.mu.Unlock()
+	thRoot := resolveEffectiveThermalRoot(root, thRootCfg)
+
+	var (
+		tempC          float64
+		supplyNode     string
+		firstFaultCode string
+		firstFaultNode string
+		gotValid       bool
+	)
+
+	tryTempPath := func(p string) bool {
+		if p == "" {
+			return false
 		}
-	}
-	if batDir == "" {
-		return ThermoBatteryReading{Available: false, ReadLatency: time.Since(t0).Nanoseconds()}
+		raw, okRead := readSmallSysfsFile(p)
+		if !okRead {
+			return false
+		}
+		c, reason, okValid := parseSysfsTempCelsiusDetail(p, raw)
+		nodeName := filepath.Base(filepath.Dir(p))
+		if okValid {
+			tempC = c
+			supplyNode = nodeName
+			tempPath = p
+			gotValid = true
+			return true
+		}
+		if firstFaultCode == "" && reason != "" {
+			firstFaultCode = reason
+			firstFaultNode = nodeName
+		}
+		return false
 	}
 
-	tempPath := filepath.Join(batDir, "temp")
-	tempStr, okTemp := readSmallSysfsFile(tempPath)
-	if !okTemp {
-		// 节点变化时清缓存重探一次
-		batDir = discoverBatteryNodeDir(root)
-		e.mu.Lock()
-		e.cachedBatDir = batDir
-		e.mu.Unlock()
-		if batDir == "" {
-			return ThermoBatteryReading{Available: false, ReadLatency: time.Since(t0).Nanoseconds()}
-		}
-		tempPath = filepath.Join(batDir, "temp")
-		tempStr, okTemp = readSmallSysfsFile(tempPath)
+	if tempPath != "" {
+		_ = tryTempPath(tempPath)
 	}
-	tempC, validTemp := parseSysfsTempCelsius(tempPath, tempStr)
-	if !okTemp || !validTemp {
-		return ThermoBatteryReading{Available: false, SupplyNode: filepath.Base(batDir), ReadLatency: time.Since(t0).Nanoseconds()}
+	if !gotValid {
+		cands, discoveredBatDir := collectTempCandidatePaths(root, thRoot)
+		if discoveredBatDir != "" {
+			batDir = discoveredBatDir
+		}
+		for _, candPath := range cands {
+			if tryTempPath(candPath) {
+				if !strings.Contains(strings.ToLower(filepath.ToSlash(candPath)), "thermal_zone") && batDir == "" {
+					batDir = filepath.Dir(candPath)
+				}
+				break
+			}
+		}
+		e.mu.Lock()
+		if e.sysfsRoot == root && e.thermalRoot == thRootCfg {
+			if gotValid {
+				e.cachedBatDir = batDir
+				e.cachedTempPath = tempPath
+			} else {
+				e.cachedBatDir = ""
+				e.cachedTempPath = ""
+			}
+		}
+		e.mu.Unlock()
+	}
+
+	if !gotValid {
+		e.sensorFaultCount.Add(1)
+		reason := firstFaultCode
+		if reason == "" {
+			reason = ThermoReasonSensorUnreadable
+		}
+		node := firstFaultNode
+		if node == "" && batDir != "" {
+			node = filepath.Base(batDir)
+		}
+		return ThermoBatteryReading{
+			Available:   false,
+			ReasonCode:  reason,
+			SupplyNode:  node,
+			ReadLatency: time.Since(t0).Nanoseconds(),
+		}
+	}
+
+	statusDir := batDir
+	if statusDir == "" && root != "" {
+		primary := filepath.Join(root, "battery")
+		if st, err := os.Stat(primary); err == nil && st.IsDir() {
+			statusDir = primary
+		} else if !strings.Contains(strings.ToLower(filepath.ToSlash(tempPath)), "thermal_zone") {
+			statusDir = filepath.Dir(tempPath)
+		}
 	}
 
 	capPct := -1
-	if capStr, ok := readSmallSysfsFile(filepath.Join(batDir, "capacity")); ok {
-		if n, err := strconv.Atoi(capStr); err == nil && n >= 0 && n <= 100 {
-			capPct = n
+	statusStr := ""
+	if statusDir != "" {
+		if capStr, ok := readSmallSysfsFile(filepath.Join(statusDir, "capacity")); ok {
+			if n, err := strconv.Atoi(capStr); err == nil && n >= 0 && n <= 100 {
+				capPct = n
+			}
 		}
+		statusStr, _ = readSmallSysfsFile(filepath.Join(statusDir, "status"))
 	}
-	statusStr, _ := readSmallSysfsFile(filepath.Join(batDir, "status"))
 	if statusStr == "" {
 		statusStr = "Unknown"
 	}
-	charging := strings.EqualFold(statusStr, "Charging") || strings.EqualFold(statusStr, "Full")
+	charging, chargerOnline, isBypass := probeChargerAndBypassState(root, statusDir, statusStr)
 
 	return ThermoBatteryReading{
-		Available:   true,
-		SupplyNode:  filepath.Base(batDir),
-		TempC:       tempC,
-		CapacityPct: capPct,
-		Status:      statusStr,
-		IsCharging:  charging,
-		ReadLatency: time.Since(t0).Nanoseconds(),
+		Available:      true,
+		SupplyNode:     supplyNode,
+		TempC:          tempC,
+		CapacityPct:    capPct,
+		Status:         statusStr,
+		IsCharging:     charging,
+		ChargerOnline:  chargerOnline,
+		IsBypassSupply: isBypass,
+		ReadLatency:    time.Since(t0).Nanoseconds(),
 	}
 }
 
 func (e *thermoCruiseEngine) sampleBattery() ThermoBatteryReading {
 	if e != nil && e.batteryReadHook != nil {
-		return e.batteryReadHook()
+		rd := e.batteryReadHook()
+		if !rd.Available {
+			e.sensorFaultCount.Add(1)
+			if rd.ReasonCode == "" {
+				rd.ReasonCode = ThermoReasonSensorUnreadable
+			}
+		}
+		return rd
 	}
 	return e.ReadBatteryFromSysfs()
 }
@@ -386,6 +661,7 @@ func (e *thermoCruiseEngine) PeekQuickState() ThermoQuickState {
 		return ThermoQuickState{}
 	}
 	eff := int(e.effectiveStage.Load())
+	faults := e.sensorFaultCount.Load()
 	e.mu.Lock()
 	cfg := e.cfg
 	raw := e.rawThermalStage
@@ -394,16 +670,24 @@ func (e *thermoCruiseEngine) PeekQuickState() ThermoQuickState {
 	s2Exempt := e.lastStage2Exempt
 	e.mu.Unlock()
 
+	charging := rd.IsCharging
+	if !charging && !rd.IsBypassSupply && (strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full")) {
+		charging = true
+	}
+
 	return ThermoQuickState{
 		Enabled:            cfg.Enabled,
 		Available:          rd.Available,
+		ReasonCode:         rd.ReasonCode,
+		SensorFaultCount:   faults,
 		RawThermalStage:    raw,
 		EffectiveStage:     eff,
 		Stage2ShaperActive: s2Active,
 		Stage2Exempt:       s2Exempt,
 		TempC:              rd.TempC,
 		CapacityPct:        rd.CapacityPct,
-		IsCharging:         rd.IsCharging || strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full"),
+		IsCharging:         charging,
+		IsBypassSupply:     rd.IsBypassSupply,
 	}
 }
 
@@ -426,15 +710,20 @@ func (s *server) peekThermoQuickState() ThermoQuickState {
 func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, expressActive bool) map[string]any {
 	e.evalCount.Add(1)
 	holdDur := e.effectiveCoolHoldDuration()
+	faultCnt := e.sensorFaultCount.Load()
 
 	e.mu.Lock()
 	cfg := e.cfg
+	if !rd.Available && rd.ReasonCode == "" {
+		rd.ReasonCode = ThermoReasonSensorUnreadable
+	}
 	e.lastReading = rd
 
 	exitStage2Temp := cfg.Stage2TempC - thermoHysteresisC // 默认 45.0 - 3.0 = 42.0°C
 	exitStage1Temp := cfg.Stage1TempC - thermoHysteresisC // 默认 42.0 - 3.0 = 39.0°C
 
 	if !cfg.Enabled || !rd.Available {
+		// 传感器不可读/哨兵值/越界异常或温控禁用: 立即熔断归零温控档位, 绝不因坏节点误触发限速!
 		e.rawThermalStage = 0
 		e.coolBelowStage1Since = time.Time{}
 		e.coolBelowStage2Since = time.Time{}
@@ -494,9 +783,11 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 		}
 	}
 
-	pluggedIn := rd.IsCharging || strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full")
+	// 旁路供电保护: 仅真实快充/满电插电豁免二阶温控; 旁路供电不误判为大电流快充自发热, 但有外部供电时不触发低电量巡航
+	chargingExempt := !rd.IsBypassSupply && (rd.IsCharging || strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full"))
+	externalPower := chargingExempt || (rd.IsBypassSupply && rd.ChargerOnline)
 	lowBatActive := cfg.Enabled && rd.Available && rd.CapacityPct >= 0 &&
-		rd.CapacityPct <= cfg.LowBatPct && !pluggedIn
+		rd.CapacityPct <= cfg.LowBatPct && !externalPower
 
 	rawStage := e.rawThermalStage
 	effStage := 0
@@ -511,7 +802,7 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 			effStage = 1
 		}
 		if rawStage == 2 {
-			if pluggedIn {
+			if chargingExempt {
 				exemptReasons = append(exemptReasons, "charging")
 			}
 			if expressActive {
@@ -533,6 +824,7 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 	e.lastStage2Shaper = stage2ShaperActive
 	e.lastStage2Exempt = stage2Exempt
 	e.effectiveStage.Store(int64(effStage))
+	e.stage1RelaxFlag.Store(stage1PollingRelax)
 
 	coolHoldRemSec := 0
 	if rawStage == 2 && !e.coolBelowStage2Since.IsZero() {
@@ -551,6 +843,9 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 	snap := map[string]any{
 		"ok":                      true,
 		"enabled":                 cfg.Enabled,
+		"available":               rd.Available,
+		"reason_code":             rd.ReasonCode,
+		"sensor_fault_count":      faultCnt,
 		"stage2_shaper_enabled":   cfg.Stage2ShaperEnabled,
 		"stage1_temp_c":           cfg.Stage1TempC,
 		"stage2_temp_c":           cfg.Stage2TempC,
@@ -565,6 +860,7 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 		"stage2_exempt":           stage2Exempt,
 		"exempt_reason":           exemptReasonStr,
 		"low_battery_cruise":      lowBatActive,
+		"bypass_supply_active":    rd.IsBypassSupply,
 		"vector_express_active":   expressActive,
 		"cool_hold_remaining_sec": coolHoldRemSec,
 		"battery":                 rd,
@@ -574,11 +870,22 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 	e.lastSnap = snap
 
 	// 状态脏检查(忽略 updated_at 与 read_latency_ns): 状态无实质变化时不重复刷盘 run/thermo_state.json
-	stateKey := buildThermoPersistKey(cfg, rawStage, effStage, stage1PollingRelax, stage2ShaperActive, stage2Exempt, exemptReasonStr, lowBatActive, expressActive, coolHoldRemSec, rd, pluggedIn)
+	stateKey := buildThermoPersistKey(cfg, rawStage, effStage, stage1PollingRelax, stage2ShaperActive, stage2Exempt, exemptReasonStr, lowBatActive, expressActive, coolHoldRemSec, rd, externalPower)
 	needPersist := stateKey == "" || stateKey != e.lastPersistedKey
+	srv := e.srv
 	e.mu.Unlock()
 
-	if needPersist && e.srv != nil && e.srv.hncDir != "" {
+	if srv != nil {
+		_, act, sim := e.readActivity()
+		noClients := act.Known && act.HotspotActive && act.ClientsOnline <= 0 && !act.WebUIActive && !sim
+		immediateRelease := !cfg.Enabled || !rd.Available || !cfg.Stage2ShaperEnabled || stage2Exempt || (!stage2ShaperActive && noClients)
+		arbSnap := srv.shaperArbiter().UpdateThermoStage2(now, stage2ShaperActive, rd.TempC, immediateRelease)
+		snap["thermo_cap_down_mbps"] = arbSnap.ThermoCapDownMbps
+		snap["thermo_cap_up_mbps"] = arbSnap.ThermoCapUpMbps
+		snap["thermo_recovering"] = arbSnap.ThermoRecovering
+	}
+
+	if needPersist && srv != nil && srv.hncDir != "" {
 		if b, err := json.MarshalIndent(snap, "", "  "); err == nil {
 			if discoverWriteAtomic(e.stateRunPath(), b) == nil && stateKey != "" {
 				e.mu.Lock()
@@ -612,17 +919,19 @@ func buildThermoPersistKey(
 		Express      bool               `json:"exp"`
 		CoolRem      int                `json:"cr"`
 		Avail        bool               `json:"av"`
+		Reason       string             `json:"rc"`
 		Node         string             `json:"nd"`
 		TempC        float64            `json:"tc"`
 		CapPct       int                `json:"cp"`
 		Status       string             `json:"st"`
 		Plugged      bool               `json:"pl"`
+		Bypass       bool               `json:"bp"`
 	}{
 		Cfg: cfg, RawStage: rawStage, EffStage: effStage, S1Relax: s1Relax,
 		S2Active: s2Active, S2Exempt: s2Exempt, ExemptReason: exemptReason,
 		LowBat: lowBat, Express: express, CoolRem: coolRem,
-		Avail: rd.Available, Node: rd.SupplyNode, TempC: rd.TempC, CapPct: rd.CapacityPct,
-		Status: rd.Status, Plugged: plugged,
+		Avail: rd.Available, Reason: rd.ReasonCode, Node: rd.SupplyNode, TempC: rd.TempC, CapPct: rd.CapacityPct,
+		Status: rd.Status, Plugged: plugged, Bypass: rd.IsBypassSupply,
 	})
 	if err != nil {
 		return ""
@@ -635,6 +944,7 @@ func (e *thermoCruiseEngine) resetForHotspotOff(now time.Time) {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	faultCnt := e.sensorFaultCount.Load()
 	e.mu.Lock()
 	cfg := e.cfg
 	rd := e.lastReading
@@ -644,6 +954,7 @@ func (e *thermoCruiseEngine) resetForHotspotOff(now time.Time) {
 	e.lastStage2Shaper = false
 	e.lastStage2Exempt = false
 	e.effectiveStage.Store(0)
+	e.stage1RelaxFlag.Store(false)
 
 	exitStage2Temp := cfg.Stage2TempC - thermoHysteresisC
 	exitStage1Temp := cfg.Stage1TempC - thermoHysteresisC
@@ -652,6 +963,9 @@ func (e *thermoCruiseEngine) resetForHotspotOff(now time.Time) {
 	snap := map[string]any{
 		"ok":                      true,
 		"enabled":                 cfg.Enabled,
+		"available":               rd.Available,
+		"reason_code":             rd.ReasonCode,
+		"sensor_fault_count":      faultCnt,
 		"stage2_shaper_enabled":   cfg.Stage2ShaperEnabled,
 		"stage1_temp_c":           cfg.Stage1TempC,
 		"stage2_temp_c":           cfg.Stage2TempC,
@@ -666,6 +980,7 @@ func (e *thermoCruiseEngine) resetForHotspotOff(now time.Time) {
 		"stage2_exempt":           false,
 		"exempt_reason":           "",
 		"low_battery_cruise":      false,
+		"bypass_supply_active":    rd.IsBypassSupply,
 		"vector_express_active":   false,
 		"cool_hold_remaining_sec": 0,
 		"battery":                 rd,
@@ -675,9 +990,14 @@ func (e *thermoCruiseEngine) resetForHotspotOff(now time.Time) {
 	e.lastSnap = snap
 	stateKey := buildThermoPersistKey(cfg, 0, 0, false, false, false, "", false, false, 0, rd, pluggedIn)
 	needPersist := stateKey == "" || stateKey != e.lastPersistedKey
+	srv := e.srv
 	e.mu.Unlock()
 
-	if needPersist && e.srv != nil && e.srv.hncDir != "" {
+	if srv != nil {
+		srv.shaperArbiter().UpdateThermoStage2(now, false, 0, true)
+	}
+
+	if needPersist && srv != nil && srv.hncDir != "" {
 		if b, err := json.MarshalIndent(snap, "", "  "); err == nil {
 			if discoverWriteAtomic(e.stateRunPath(), b) == nil && stateKey != "" {
 				e.mu.Lock()
@@ -689,7 +1009,7 @@ func (e *thermoCruiseEngine) resetForHotspotOff(now time.Time) {
 }
 
 func (e *thermoCruiseEngine) needsHotspotOffCleanup() bool {
-	if e.effectiveStage.Load() != 0 {
+	if e.effectiveStage.Load() != 0 || e.stage1RelaxFlag.Load() {
 		return true
 	}
 	e.mu.Lock()
@@ -712,6 +1032,7 @@ func (e *thermoCruiseEngine) ReadOnlySnapshot(now time.Time, rd ThermoBatteryRea
 	if now.IsZero() {
 		now = time.Now()
 	}
+	faultCnt := e.sensorFaultCount.Load()
 	e.mu.Lock()
 	cfg := e.cfg
 	e.mu.Unlock()
@@ -721,6 +1042,9 @@ func (e *thermoCruiseEngine) ReadOnlySnapshot(now time.Time, rd ThermoBatteryRea
 	return map[string]any{
 		"ok":                      true,
 		"enabled":                 cfg.Enabled,
+		"available":               rd.Available,
+		"reason_code":             rd.ReasonCode,
+		"sensor_fault_count":      faultCnt,
 		"stage2_shaper_enabled":   cfg.Stage2ShaperEnabled,
 		"stage1_temp_c":           cfg.Stage1TempC,
 		"stage2_temp_c":           cfg.Stage2TempC,
@@ -735,6 +1059,7 @@ func (e *thermoCruiseEngine) ReadOnlySnapshot(now time.Time, rd ThermoBatteryRea
 		"stage2_exempt":           false,
 		"exempt_reason":           "",
 		"low_battery_cruise":      false,
+		"bypass_supply_active":    rd.IsBypassSupply,
 		"vector_express_active":   false,
 		"cool_hold_remaining_sec": 0,
 		"battery":                 rd,
@@ -744,18 +1069,23 @@ func (e *thermoCruiseEngine) ReadOnlySnapshot(now time.Time, rd ThermoBatteryRea
 }
 
 func (e *thermoCruiseEngine) summary() map[string]any {
+	faultCnt := e.sensorFaultCount.Load()
 	e.mu.Lock()
 	cfg := e.cfg
 	rd := e.lastReading
 	rawStage := e.rawThermalStage
 	e.mu.Unlock()
 	return map[string]any{
-		"enabled":           cfg.Enabled,
-		"effective_stage":   int(e.effectiveStage.Load()),
-		"raw_thermal_stage": rawStage,
-		"temp_c":            rd.TempC,
-		"capacity_pct":      rd.CapacityPct,
-		"status":            rd.Status,
+		"enabled":            cfg.Enabled,
+		"available":          rd.Available,
+		"reason_code":        rd.ReasonCode,
+		"sensor_fault_count": faultCnt,
+		"effective_stage":    int(e.effectiveStage.Load()),
+		"raw_thermal_stage":  rawStage,
+		"temp_c":             rd.TempC,
+		"capacity_pct":       rd.CapacityPct,
+		"status":             rd.Status,
+		"bypass_supply":      rd.IsBypassSupply,
 	}
 }
 
@@ -827,6 +1157,7 @@ func (e *thermoCruiseEngine) runLoop(stop <-chan struct{}) {
 		return
 	}
 	wakeCh := e.ensureWakeCh()
+	activeLiveThermoEngine.Store(e)
 
 	var (
 		tk              *time.Ticker
@@ -873,6 +1204,7 @@ func (e *thermoCruiseEngine) runLoop(stop <-chan struct{}) {
 	defer func() {
 		stopTicker()
 		stopRelTimer()
+		activeLiveThermoEngine.CompareAndSwap(e, nil)
 		e.loopMode.Store(int32(v6EngineModeSleeping))
 	}()
 

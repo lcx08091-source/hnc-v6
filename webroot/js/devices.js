@@ -768,10 +768,31 @@ function simBannerHtml() {
 }
 function paintSimBanner() { var el = $('#sim-bn'); if (el) { var h = simBannerHtml(); if (el._h !== h) { el._h = h; el.innerHTML = h; } } }
 function simSet(on) {
+  if (typeof clearSignalClientHistory === 'function') clearSignalClientHistory();
   return api.action('sim_set', { enabled: String(on) }).then(function (r) {
+    if (typeof clearSignalClientHistory === 'function') clearSignalClientHistory();
     S.cfg.sim_enabled = on; toast(r && r.detail ? String(r.detail).slice(0, 60) : on ? '模拟环境已开启' : '模拟环境已关闭');
     return Promise.all([loadSim(), globalRefresh()]);
   }).then(function () { paintSimBanner(); if (S.page === 'settings') renderSettings(false); });
+}
+function activeLimiterBarHtml() {
+  var l = S.live || {};
+  var r = String(l.active_limiter_reason || (l.arbiter && l.arbiter.active ? (l.arbiter.active_limiter_reason || l.arbiter.active_reason || '') : '') || '').trim();
+  if (!r) return '';
+  var msg = /^自动控速生效中/.test(r) ? r : ('自动控速生效中：' + r);
+  return '<div class="glass" id="hero-limiter-bar" style="padding:8px 12px;margin-top:-2px;border-radius:16px;display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.45;color:var(--text-2)">' +
+    '<span class="v6-dot warn" style="flex-shrink:0"></span>' +
+    '<span style="min-width:0;flex:1;font-weight:550">' + esc(msg) + '</span>' +
+  '</div>';
+}
+function paintLimiterBar() {
+  var slot = $('#hero-limiter-slot');
+  if (!slot) return;
+  var html = activeLimiterBarHtml();
+  if (slot._lastHtml !== html) {
+    slot._lastHtml = html;
+    slot.innerHTML = html;
+  }
 }
 function renderOffloadBanner() {
   var el = $('#offload-banner'); if (!el) return;
@@ -787,6 +808,7 @@ function renderDevices(anim1) {
     '<div><div class="hero-l">上行</div><div class="hero-v num"><span id="h-up">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
     '<div class="right"><div class="hero-l"><span class="breathe' + (S.hotspot.active === false ? ' off' : '') + '" id="h-dot"></span><span id="h-state">' + (S.hotspot.active === false ? '热点关' : '在线') + '</span></div><div class="hero-v num"><span id="h-on">' + num(l.online, on) + '</span><span class="u">/ <span id="h-total">' + num(l.total, S.devices.length) + '</span><span class="dw"> 设备</span></span></div></div>' +
     '<svg class="spark" id="spark" aria-label="近 60 秒下行速率"></svg></div>' +
+    '<div id="hero-limiter-slot" style="display:contents">' + activeLimiterBarHtml() + '</div>' +
     '<div class="fresh" id="fresh"></div>' + '<div id="v6-dev-strip-mount" style="display:contents">' + (typeof v6DevicesStripHtml === 'function' ? v6DevicesStripHtml() : '') + '</div>' +
     '<label class="glass search">' + ico('search') + '<input id="q" type="search" placeholder="搜索设备 · IP · MAC · 名称" value="' + esc(S.q) + '" autocomplete="off"></label>' +
     '<div class="glass filter"><div class="tx"><div class="t">设备过滤</div><div class="s">' + esc(fl[2]) + '</div></div>' +
@@ -836,6 +858,7 @@ function paintHero(tw) {
   else if ($('#h-dn')) { $('#h-dn').textContent = dn.toFixed(2); $('#h-up').textContent = up.toFixed(2); }
   if ($('#h-on')) { $('#h-on').textContent = num(l.online, 0); $('#h-total').textContent = num(l.total, S.devices.length); }
   var dot = $('#h-dot'); if (dot) { dot.classList.toggle('off', S.hotspot.active === false); $('#h-state').textContent = S.hotspot.active === false ? '热点关' : '在线'; }
+  paintLimiterBar();
 }
 function drawSpark() {
   var el = $('#spark'); if (!el) return;

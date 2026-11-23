@@ -19,6 +19,15 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-1-0-rc-4" data-version="v6.1.0-rc.4" data-version-code="6009304">
+  <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v6.1.0-rc.4(准正式版): 原生双卡槽位识别与消灭幽灵未知卡 · 本机自训迁出 32MB 内存盘 · 共享内存 v2 热升级防乱码与 32 位对齐 · 根带宽保底仲裁与三量纲温控熔断 · 门户认证放行与待机零唤醒收口 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-23 · versionCode 6009304</span></div>
+  <ul class="cl-list">
+    <li><b>原生双卡物理槽位识别与系统环境变量保护</b>：改走原生 <span class="mono">dumpsys isub</span> 与 <span class="mono">telephony.registry</span> 权威通道，按在位物理卡槽精确映射卡 1、卡 2 并识别当前实时上网卡，自动过滤已拔出历史卡与虚拟流量槽位，彻底消灭双卡手机冒出第 3 张「未知卡」卡片；修复后台调用系统命令时丢失 <span class="mono">BOOTCLASSPATH</span> 环境变量导致的静默空返回。</li>
+    <li><b>本机自训迁出 32MB 内存盘与共享内存 v2 热升级防乱码</b>：将本机真值自训练样本与流水迁出 <span class="mono">32MB tmpfs</span> 运行内存盘至持久化 <span class="mono">data/self_studio/</span> 目录并设容量上限，写盘失败时立即清理 <span class="mono">.tmp</span> 临时文件防零字节残留；升级 <span class="mono">shm_vector.bin</span> 为 v2 头部强校验与读写屏障，跨版本热升级自动平滑回退 JSON 不出乱码，并锁死 32 位 <span class="mono">armeabi-v7a</span> 8 字节对齐。</li>
+    <li><b>根带宽保底仲裁、三量纲温控熔断与防误伤护栏</b>：新增统一根带宽仲裁器协调全局整形、5G 自适应带宽与温控巡航，设立下行 <span class="mono">5Mbps</span> / 上行 <span class="mono">2Mbps</span> 保底地板并直观提示自动压速原因；电池温度自动换算三种内核单位并在越出 <span class="mono">[-20°C, 100°C]</span> 时熔断跳过防误降速；收紧连接手术台防误伤豁免、隐私安检共享云网关防连坐守卫，并在弱网 DNS 保活期间对酒店/校园网认证页探测流量直通放行。</li>
+    <li><b>硬件加速截流核验、待机零唤醒收口与架构文档对齐</b>：强化高通热点硬件加速截流比例检测与双路径修复指引，收口无客户端待机期 Netlink 零无效唤醒并清零生产路径估算假数据；重写 <span class="mono">ARCHITECTURE.md</span> 与 <span class="mono">COMPATIBILITY.md</span> 如实对齐 <span class="mono">v6.1.0-rc.4</span> 六大原生组件真实架构与三层实测边界，自动更新通道继续锁定稳定版 <span class="mono">v6.0.1</span>。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v6-1-0-rc-3" data-version="v6.1.0-rc.3" data-version-code="6009303">
   <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-rocket"/></svg>v6.1.0-rc.3(准正式版): 前台识别默认扶正「智能防抖」与多场景防跳变 · 「强制 QUIC 回落 TCP」兜底归位与双栈加固 · 全界面去黑话与历史实验标签清理 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-23 · versionCode 6009303</span></div>
   <ul class="cl-list">

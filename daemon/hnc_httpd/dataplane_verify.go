@@ -50,14 +50,19 @@ const (
 	dpEngineShellCompat    = "shell_compat"
 	dpDefaultUplinkIFB     = "ifb0"
 	dpDiagLeakFlagRelPath  = "run/diag_goroutineleak.enabled"
-	dpBPFMACMapPath        = "/sys/fs/bpf/hnc/mac_mark_map"
-	dpBPFIPMapPath         = "/sys/fs/bpf/hnc/ip_mark_map"
-	dpBPFTetherLimitPath   = "/sys/fs/bpf/tethering/map_offload_tether_limit_map"
-	dpCmdTimeout           = 3 * time.Second
-	dpActiveTrafficBytes   = 4096
-	dpLeakMaxPreviewStacks = 5
-	dpLeakMaxLinesPerStack = 6
-	dpLeakMaxCharsPerStack = 480
+	dpBPFMACMapPath          = "/sys/fs/bpf/hnc/mac_mark_map"
+	dpBPFIPMapPath           = "/sys/fs/bpf/hnc/ip_mark_map"
+	dpBPFAppPolicyPath       = "/sys/fs/bpf/hnc_app_policy"
+	dpBPFTetherLimitPath     = "/sys/fs/bpf/tethering/map_offload_tether_limit_map"
+	dpCmdTimeout             = 3 * time.Second
+	dpActiveTrafficBytes     = 4096
+	dpBypassWindowMinBytes   = 64 * 1024
+	dpBypassCaptureMinRatio  = 0.30
+	dpLeakMaxPreviewStacks   = 5
+	dpLeakMaxLinesPerStack   = 6
+	dpLeakMaxCharsPerStack   = 480
+
+	dpBypassDualPathAdvice = "检测到系统级热点硬件加速正在绕过流控队列（大流量走内核快路径直通，导致限速与分流不完全生效）。处理办法：1. 前往手机「系统设置 -> 连接与共享 -> 个人热点」关闭热点硬件加速/WLAN 共享加速；2. 或在本页将「硬件卸载守卫」切换为「始终兜底」模式。"
 
 	// 32 位正交 skb->mark 掩码常量: 高 16 位归 HNC 流控/QoS, 低 16 位归 Android netd netId
 	dpMarkHighMask32  uint32 = uint32(0xffff0000)
@@ -84,9 +89,13 @@ type TCClassStats struct {
 
 // DataplaneBPFMaps BPF Map 与 clsact / ifb0 挂载核验状态。
 type DataplaneBPFMaps struct {
+	BpfMapReadable    bool `json:"bpf_map_readable"`
 	MACMarkEntries    int  `json:"mac_mark_entries"`
 	IPMarkEntries     int  `json:"ip_mark_entries"`
+	AppPolicyEntries  int  `json:"app_policy_entries"`
 	TetherLimitZeroed bool `json:"tether_limit_zeroed"`
+	TetherBPFDetected bool `json:"tether_bpf_detected,omitempty"`
+	TetherFlowEntries int  `json:"tether_flow_entries,omitempty"`
 	ClsactAttached    bool `json:"clsact_attached"`
 	IFBRedirectPrio2  bool `json:"ifb_redirect_prio2"`
 }
@@ -103,9 +112,12 @@ type DataplaneSummary struct {
 	ControlledDevices    int    `json:"controlled_devices"`
 	HittingCount         int    `json:"hitting_count"`
 	IdleCount            int    `json:"idle_count"`
+	UnavailableCount     int    `json:"unavailable_count,omitempty"`
 	BypassOrMissingCount int    `json:"bypass_or_missing_count"`
-	OverallStatus        string `json:"overall_status"` // ok | idle | warn | fail
+	OverallStatus        string `json:"overall_status"` // ok | idle | warn | fail | unavailable
+	ReasonCode           string `json:"reason_code,omitempty"`
 	Headline             string `json:"headline"`
+	Advice               string `json:"advice,omitempty"`
 }
 
 // DataplaneAppClassEntry 单设备下属单应用限速 HTB 子类命中明细。
@@ -138,6 +150,8 @@ type DataplaneDeviceEntry struct {
 	UpLimitMbps      float64                  `json:"up_limit_mbps"`
 	AppQoS           bool                     `json:"app_qos"`
 	AppLimitsCount   int                      `json:"app_limits_count"`
+	DevDeltaBytes    uint64                   `json:"dev_delta_bytes,omitempty"`
+	CaptureRatio     float64                  `json:"capture_ratio,omitempty"`
 	DownSentBytes    uint64                   `json:"down_sent_bytes"`
 	DownDeltaBytes   uint64                   `json:"down_delta_bytes"`
 	DownDrops        uint64                   `json:"down_drops"`
@@ -150,9 +164,11 @@ type DataplaneDeviceEntry struct {
 	UpDeltaDrops     uint64                   `json:"up_delta_drops"`
 	UpOverlimits     uint64                   `json:"up_overlimits"`
 	UpObservedKbps   float64                  `json:"up_observed_kbps"`
-	Verdict          string                   `json:"verdict"` // hit | idle | bypass_offload | missing_class | missing_rule
+	Verdict          string                   `json:"verdict"` // hit | idle | bypass | missing_class | missing_rule | unavailable
+	ReasonCode       string                   `json:"reason_code,omitempty"`
 	StatusLabel      string                   `json:"status_label"`
 	Reason           string                   `json:"reason"`
+	Advice           string                   `json:"advice,omitempty"`
 	Fix              string                   `json:"fix,omitempty"`
 	AppClasses       []DataplaneAppClassEntry `json:"app_classes"`
 }
@@ -180,6 +196,8 @@ type DataplaneVerifyReport struct {
 	MarkLayout         string                 `json:"mark_layout"`
 	NetdLow16Protected bool                   `json:"netd_low16_protected"`
 	IPv6QUICControlled bool                   `json:"ipv6_quic_controlled"`
+	ReasonCode         string                 `json:"reason_code,omitempty"`
+	Advice             string                 `json:"advice,omitempty"`
 	BPFMaps            DataplaneBPFMaps       `json:"bpf_maps"`
 	OffloadGuard       DataplaneOffloadGuard  `json:"offload_guard"`
 	Summary            DataplaneSummary       `json:"summary"`
@@ -847,6 +865,13 @@ type dpIndexedAppLimit struct {
 	item      AppLimitItem
 }
 
+type dpReadHealth struct {
+	downHTBReadOK  bool
+	tcFilterReadOK bool
+	iptFilterV4OK  bool
+	iptFilterV6OK  bool
+}
+
 // runDataplaneVerify 执行一次完整的数据面命中核验与根因判定。
 func runDataplaneVerify(env *dpVerifyEnv, opts dpVerifyOptions) *DataplaneVerifyReport {
 	now := env.Now()
@@ -869,8 +894,8 @@ func runDataplaneVerify(env *dpVerifyEnv, opts dpVerifyOptions) *DataplaneVerify
 	specs, quicBlockCfg := dpLoadControlledSpecs(env)
 
 	// 2. 读取下行热点口与上行 ifb0 的 HTB 队列统计(优先 Go 原生 Netlink, 失败自动回退 tc -s 文本)
-	downStats, downEngine := dpCollectHTBStats(env, iface, hotspotActive)
-	upStats, _ := dpCollectHTBStats(env, uplinkIface, hotspotActive)
+	downStats, downEngine, downHTBOK := dpCollectHTBStats(env, iface, hotspotActive)
+	upStats, _, _ := dpCollectHTBStats(env, uplinkIface, hotspotActive)
 	engineMode := downEngine
 	if engineMode == "" {
 		engineMode = dpEngineShellCompat
@@ -884,22 +909,42 @@ func runDataplaneVerify(env *dpVerifyEnv, opts dpVerifyOptions) *DataplaneVerify
 	iptMangleV6 := ""
 	iptFilterV4 := ""
 	iptFilterV6 := ""
+	readHealth := dpReadHealth{
+		downHTBReadOK:  downHTBOK,
+		tcFilterReadOK: true,
+		iptFilterV4OK:  true,
+		iptFilterV6OK:  true,
+	}
 
 	if hotspotActive && iface != "" {
 		tcIngressFilters = dpCollectIngressFilters(env, iface)
 		if env.RunCmd != nil {
-			tcEgressFilters = dpRunQuick(env, "tc", "filter", "show", "dev", iface)
+			var errTC, errV4, errV6 error
+			tcEgressFilters, errTC = dpRunQuickErr(env, "tc", "filter", "show", "dev", iface)
+			if errTC != nil {
+				readHealth.tcFilterReadOK = false
+			}
 			tcIFBFilters = dpRunQuick(env, "tc", "filter", "show", "dev", uplinkIface)
 			iptMangleV4 = dpRunIptablesQuick(env, "iptables", "-t", "mangle", "-S")
 			iptMangleV6 = dpRunIptablesQuick(env, "ip6tables", "-t", "mangle", "-S")
-			iptFilterV4 = dpRunIptablesQuick(env, "iptables", "-t", "filter", "-S")
-			iptFilterV6 = dpRunIptablesQuick(env, "ip6tables", "-t", "filter", "-S")
+			iptFilterV4, errV4 = dpRunIptablesQuickErr(env, "iptables", "-t", "filter", "-S")
+			if errV4 != nil {
+				readHealth.iptFilterV4OK = false
+			}
+			iptFilterV6, errV6 = dpRunIptablesQuickErr(env, "ip6tables", "-t", "filter", "-S")
+			if errV6 != nil {
+				readHealth.iptFilterV6OK = false
+			}
+		} else {
+			readHealth.tcFilterReadOK = false
+			readHealth.iptFilterV4OK = false
+			readHealth.iptFilterV6OK = false
 		}
 	}
 
 	markLayout, low16Protected := checkNetdLow16Protection(iptMangleV4, iptMangleV6, tcEgressFilters)
 	offGuard, offloadRawState := dpInspectOffloadGuard(env)
-	bpfMaps := dpInspectBPFMaps(env, iface, hotspotActive, tcIngressFilters, offGuard, specs)
+	bpfMaps := dpInspectBPFMaps(env, iface, hotspotActive, tcIngressFilters, offGuard)
 	// 若 offload_guard 未显式记录 tether_offload_disabled, 结合 tether_limit_zeroed 与 slowpath 综合反映
 	if !offGuard.TetherOffloadDisabled && offGuard.SlowpathActive && bpfMaps.TetherLimitZeroed {
 		offGuard.TetherOffloadDisabled = true
@@ -911,9 +956,9 @@ func runDataplaneVerify(env *dpVerifyEnv, opts dpVerifyOptions) *DataplaneVerify
 	upFilterClassSet := parseTCFilterFlowIDs(tcIFBFilters)
 	policeActive := strings.Contains(tcIngressFilters, "police")
 
-	// 4. 逐台受控设备计算增量并输出四态智能根因判定
+	// 4. 逐台受控设备计算增量并输出根因判定
 	devicesOut := make([]DataplaneDeviceEntry, 0, len(specs))
-	var hitCnt, idleCnt, errCnt int
+	var hitCnt, idleCnt, unavailCnt, errCnt int
 
 	for _, sp := range specs {
 		entry := dpEvaluateDevice(
@@ -924,6 +969,7 @@ func runDataplaneVerify(env *dpVerifyEnv, opts dpVerifyOptions) *DataplaneVerify
 			uplinkIface,
 			hotspotActive,
 			sp,
+			readHealth,
 			downStats,
 			upStats,
 			fwFlowMap,
@@ -941,13 +987,15 @@ func runDataplaneVerify(env *dpVerifyEnv, opts dpVerifyOptions) *DataplaneVerify
 			hitCnt++
 		case "idle":
 			idleCnt++
+		case "unavailable":
+			unavailCnt++
 		default:
 			errCnt++
 		}
 		devicesOut = append(devicesOut, entry)
 	}
 
-	summary := dpBuildSummary(hotspotActive, devicesOut, hitCnt, idleCnt, errCnt)
+	summary := dpBuildSummary(hotspotActive, readHealth, devicesOut, hitCnt, idleCnt, unavailCnt, errCnt)
 
 	// 5. Go 1.27 goroutineleak 按需零闲置开销采样
 	var leakSum *GoroutineLeakSummary
@@ -967,6 +1015,8 @@ func runDataplaneVerify(env *dpVerifyEnv, opts dpVerifyOptions) *DataplaneVerify
 		MarkLayout:         markLayout,
 		NetdLow16Protected: low16Protected,
 		IPv6QUICControlled: ipv6QUICControlled,
+		ReasonCode:         summary.ReasonCode,
+		Advice:             summary.Advice,
 		BPFMaps:            bpfMaps,
 		OffloadGuard:       offGuard,
 		Summary:            summary,
@@ -999,34 +1049,40 @@ func dpResolveHotspotIface(env *dpVerifyEnv, override string) (string, bool) {
 	return "", false
 }
 
-func dpCollectHTBStats(env *dpVerifyEnv, dev string, hotspotActive bool) (map[string]TCClassStats, string) {
+func dpCollectHTBStats(env *dpVerifyEnv, dev string, hotspotActive bool) (map[string]TCClassStats, string, bool) {
 	if !hotspotActive || dev == "" {
-		return map[string]TCClassStats{}, dpEngineGoOrCompatDefault(env)
+		return map[string]TCClassStats{}, dpEngineGoOrCompatDefault(env), true
 	}
 	if env.DumpHTBNetlink != nil && env.Ifindex != nil {
 		if idx := env.Ifindex(dev); idx > 0 {
 			if stats, err := env.DumpHTBNetlink(idx); err == nil && stats != nil {
 				// 当接口尚未挂任何 HTB 类但存在 shell 输出时允许兜底校验; 有类直接走原生 Netlink
 				if len(stats) > 0 {
-					return stats, dpEngineNativeNetlink
+					return stats, dpEngineNativeNetlink, true
 				}
 				if env.RunCmd == nil {
-					return stats, dpEngineNativeNetlink
+					return stats, dpEngineNativeNetlink, true
 				}
-				txt := dpRunQuick(env, "tc", "-s", "class", "show", "dev", dev)
+				txt, sErr := dpRunQuickErr(env, "tc", "-s", "class", "show", "dev", dev)
+				if sErr != nil {
+					return stats, dpEngineNativeNetlink, true
+				}
 				parsed := parseTCStatsText(txt)
 				if len(parsed) == 0 {
-					return stats, dpEngineNativeNetlink
+					return stats, dpEngineNativeNetlink, true
 				}
-				return parsed, dpEngineShellCompat
+				return parsed, dpEngineShellCompat, true
 			}
 		}
 	}
 	if env.RunCmd != nil {
-		txt := dpRunQuick(env, "tc", "-s", "class", "show", "dev", dev)
-		return parseTCStatsText(txt), dpEngineShellCompat
+		txt, err := dpRunQuickErr(env, "tc", "-s", "class", "show", "dev", dev)
+		if err != nil {
+			return map[string]TCClassStats{}, dpEngineShellCompat, false
+		}
+		return parseTCStatsText(txt), dpEngineShellCompat, true
 	}
-	return map[string]TCClassStats{}, dpEngineShellCompat
+	return map[string]TCClassStats{}, dpEngineShellCompat, false
 }
 
 func dpEngineGoOrCompatDefault(env *dpVerifyEnv) string {
@@ -1036,19 +1092,23 @@ func dpEngineGoOrCompatDefault(env *dpVerifyEnv) string {
 	return dpEngineShellCompat
 }
 
-func dpRunQuick(env *dpVerifyEnv, name string, args ...string) string {
+func dpRunQuickErr(env *dpVerifyEnv, name string, args ...string) (string, error) {
 	if env == nil || env.RunCmd == nil {
-		return ""
+		return "", fmt.Errorf("%s: runner unavailable", name)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dpCmdTimeout)
 	defer cancel()
-	out, _ := env.RunCmd(ctx, name, args...)
+	return env.RunCmd(ctx, name, args...)
+}
+
+func dpRunQuick(env *dpVerifyEnv, name string, args ...string) string {
+	out, _ := dpRunQuickErr(env, name, args...)
 	return out
 }
 
-func dpRunIptablesQuick(env *dpVerifyEnv, bin string, args ...string) string {
+func dpRunIptablesQuickErr(env *dpVerifyEnv, bin string, args ...string) (string, error) {
 	if env == nil || env.RunCmd == nil {
-		return ""
+		return "", fmt.Errorf("%s: runner unavailable", bin)
 	}
 	tryArgs := func(a []string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), dpCmdTimeout)
@@ -1057,20 +1117,24 @@ func dpRunIptablesQuick(env *dpVerifyEnv, bin string, args ...string) string {
 	}
 	out1, err1 := tryArgs(append([]string{"-w", "2"}, args...))
 	if err1 == nil {
-		return out1
+		return out1, nil
 	}
 	if !isXtablesWaitFlagError(out1 + " " + err1.Error()) {
-		return out1
+		return out1, err1
 	}
 	out2, err2 := tryArgs(append([]string{"-w"}, args...))
 	if err2 == nil {
-		return out2
+		return out2, nil
 	}
 	if isXtablesWaitFlagError(out2 + " " + err2.Error()) {
-		out3, _ := tryArgs(args)
-		return out3
+		return tryArgs(args)
 	}
-	return out2
+	return out2, err2
+}
+
+func dpRunIptablesQuick(env *dpVerifyEnv, bin string, args ...string) string {
+	out, _ := dpRunIptablesQuickErr(env, bin, args...)
+	return out
 }
 
 func hasValidIngressFilterLines(s string) bool {
@@ -1237,6 +1301,7 @@ func dpEvaluateDevice(
 	uplinkIface string,
 	hotspotActive bool,
 	sp dpControlledSpec,
+	readHealth dpReadHealth,
 	downStats map[string]TCClassStats,
 	upStats map[string]TCClassStats,
 	fwFlowMap map[string]uint32,
@@ -1292,8 +1357,12 @@ func dpEvaluateDevice(
 			)
 		}
 		aVerdict := "idle"
-		if !present {
-			if hotspotActive && sp.online {
+		if !hotspotActive {
+			aVerdict = "idle"
+		} else if !readHealth.downHTBReadOK {
+			aVerdict = "unavailable"
+		} else if !present {
+			if sp.online {
 				aVerdict = "missing_class"
 				anyAppMissing = true
 			}
@@ -1331,27 +1400,42 @@ func dpEvaluateDevice(
 	}
 
 	// 客户端活跃流量检测(结合 devices.json 增量与 RateLoop 实时速率)
-	devDeltaBytes, _ := snaps.observeDeviceBytes(iface, sp.mac, now, sp.devTotalBytes)
+	devDeltaBytes, hadPrevDevSnap := snaps.observeDeviceBytes(iface, sp.mac, now, sp.devTotalBytes)
 	liveBps := int64(0)
 	if env.LiveDeviceBps != nil {
 		liveBps = env.LiveDeviceBps(sp.mac)
 	}
-	clientHasTraffic := sp.online && (devDeltaBytes >= dpActiveTrafficBytes || liveBps >= 1024 ||
-		(downSt.SentBytes == 0 && upSt.SentBytes == 0 && sp.devTotalBytes >= 65536))
 
-	verdict, label, reason, fix := dpComputeDeviceVerdict(
+	effDownDelta := downDeltaBytes
+	if appDeltaSum > effDownDelta {
+		effDownDelta = appDeltaSum
+	}
+	htbCapturedDelta := effDownDelta + upDeltaBytes
+	var captureRatio float64
+	if devDeltaBytes > 0 {
+		r := float64(htbCapturedDelta) / float64(devDeltaBytes)
+		if r > 1.0 {
+			r = 1.0
+		}
+		captureRatio = math.Round(r*1000) / 1000
+	}
+
+	verdict, reasonCode, label, reason, advice, fix := dpComputeDeviceVerdictEx(
 		hotspotActive,
 		sp,
+		readHealth,
 		classID,
 		downClassPresent,
 		upClassPresent,
 		downSt,
 		upSt,
-		downDeltaBytes,
+		effDownDelta,
 		upDeltaBytes,
+		devDeltaBytes,
+		hadPrevDevSnap,
+		liveBps,
 		anyAppMissing,
 		anyAppHit,
-		clientHasTraffic,
 		fwFlowMap,
 		u32ClassSet,
 		upFilterClassSet,
@@ -1383,6 +1467,8 @@ func dpEvaluateDevice(
 		UpLimitMbps:      effUpMbps,
 		AppQoS:           sp.appQoS,
 		AppLimitsCount:   len(sp.appLimits),
+		DevDeltaBytes:    devDeltaBytes,
+		CaptureRatio:     captureRatio,
 		DownSentBytes:    downSt.SentBytes,
 		DownDeltaBytes:   downDeltaBytes,
 		DownDrops:        downSt.Drops,
@@ -1396,8 +1482,10 @@ func dpEvaluateDevice(
 		UpOverlimits:     upSt.Overlimits,
 		UpObservedKbps:   upObsKbps,
 		Verdict:          verdict,
+		ReasonCode:       reasonCode,
 		StatusLabel:      label,
 		Reason:           reason,
+		Advice:           advice,
 		Fix:              fix,
 		AppClasses:       appEntries,
 	}
@@ -1426,27 +1514,102 @@ func dpComputeDeviceVerdict(
 	offGuard DataplaneOffloadGuard,
 	offloadRawState string,
 ) (verdict, label, reason, fix string) {
+	var synthDevDelta uint64
+	if clientHasTraffic {
+		synthDevDelta = dpActiveTrafficBytes
+	}
+	v, _, lbl, rsn, _, fx := dpComputeDeviceVerdictEx(
+		hotspotActive,
+		sp,
+		dpReadHealth{downHTBReadOK: true, tcFilterReadOK: true, iptFilterV4OK: true, iptFilterV6OK: true},
+		classID,
+		downClassPresent,
+		upClassPresent,
+		downSt,
+		upSt,
+		downDeltaBytes,
+		upDeltaBytes,
+		synthDevDelta,
+		clientHasTraffic,
+		0,
+		anyAppMissing,
+		anyAppHit,
+		fwFlowMap,
+		u32ClassSet,
+		upFilterClassSet,
+		policeActive,
+		iptFilterV4,
+		iptFilterV6,
+		bpfMaps,
+		offGuard,
+		offloadRawState,
+	)
+	return v, lbl, rsn, fx
+}
+
+func dpComputeDeviceVerdictEx(
+	hotspotActive bool,
+	sp dpControlledSpec,
+	readHealth dpReadHealth,
+	classID string,
+	downClassPresent bool,
+	upClassPresent bool,
+	downSt TCClassStats,
+	upSt TCClassStats,
+	downDeltaBytes uint64,
+	upDeltaBytes uint64,
+	devDeltaBytes uint64,
+	hadPrevDevSnap bool,
+	liveBps int64,
+	anyAppMissing bool,
+	anyAppHit bool,
+	fwFlowMap map[string]uint32,
+	u32ClassSet map[string]bool,
+	upFilterClassSet map[string]bool,
+	policeActive bool,
+	iptFilterV4 string,
+	iptFilterV6 string,
+	bpfMaps DataplaneBPFMaps,
+	offGuard DataplaneOffloadGuard,
+	offloadRawState string,
+) (verdict, reasonCode, label, reason, advice, fix string) {
 	if !hotspotActive {
-		return "idle", "热点未开启", "热点当前处于关闭状态，待热点激活后自动挂载内核 HTB 队列", ""
+		return "idle", "", "热点未开启", "热点当前处于关闭状态，待热点激活后自动挂载内核 HTB 队列", "", ""
 	}
 
 	// 黑名单阻断最高优先级裁决: 无论是否同时配置了 HTB 限速/QoS/单应用限速,
 	// HNC_CTRL 在转发层直接丢弃/拒绝数据包(流量不会进入出口 HTB 队列), 优先核验双栈阻断规则!
 	if sp.blacklisted {
+		if !readHealth.iptFilterV4OK || !readHealth.iptFilterV6OK {
+			return "unavailable", "iptables_read_failed", "防火墙不可读",
+				"无法读取内核 iptables/ip6tables 防火墙规则，暂无法核验黑名单阻断状态（严禁伪报空闲或生效）",
+				"请确认后台服务具备完整 Root 权限并点击重新检验",
+				"检查 Root 权限后重试数据面检验"
+		}
 		macUpper := strings.ToUpper(sp.mac)
 		macLower := strings.ToLower(sp.mac)
 		if iptFilterV4 != "" && !strings.Contains(iptFilterV4, macUpper) && !strings.Contains(iptFilterV4, macLower) {
-			return "missing_rule", "阻断规则缺失",
+			return "missing_rule", "blacklist_v4_missing", "阻断规则缺失",
 				"设备处于黑名单，但内核 HNC_CTRL 链缺少对应 MAC 阻断规则，点击立即重下发修复",
+				"",
 				"点击「重新下发规则」同步双栈黑名单防火墙链"
 		}
 		if iptFilterV6 != "" && strings.Contains(iptFilterV6, "HNC_CTRL") &&
 			!strings.Contains(iptFilterV6, macUpper) && !strings.Contains(iptFilterV6, macLower) {
-			return "missing_rule", "IPv6 阻断缺失",
+			return "missing_rule", "blacklist_v6_missing", "IPv6 阻断缺失",
 				"IPv4 黑名单已挂载，但 ip6tables HNC_CTRL 缺少对应 MAC 规则",
+				"",
 				"点击「重新下发规则」补齐 IPv6 黑名单规则"
 		}
-		return "hit", "黑名单阻断生效", "双栈防火墙 HNC_CTRL MAC 阻断规则已就绪并拦截该设备转发流量", ""
+		return "hit", "", "黑名单阻断生效", "双栈防火墙 HNC_CTRL MAC 阻断规则已就绪并拦截该设备转发流量", "", ""
+	}
+
+	// 若内核 tc HTB 类或过滤器读取失败, 严禁假报 idle 或误报 missing!
+	if !readHealth.downHTBReadOK || !readHealth.tcFilterReadOK {
+		return "unavailable", "tc_read_failed", "流控队列不可读",
+			"无法读取内核 tc 流控队列或过滤器状态，暂无法确认限速规则是否命中（严禁伪报空闲）",
+			"请确认手机 Root 权限正常及内核支持 Netlink/tc 查询后重试",
+			"检查系统权限后重新执行数据面检验"
 	}
 
 	needDownClass := (sp.limitEnabled && sp.downMbps > 0) || sp.appQoS || sp.sqmEnabled || sp.delayEnabled
@@ -1454,18 +1617,21 @@ func dpComputeDeviceVerdict(
 
 	// 1. 检查 missing_class: 配置开启了限速但内核缺少对应 1:<cid> HTB 类
 	if needDownClass && (classID == "" || !downClassPresent) {
-		return "missing_class", "内核队列缺失",
+		return "missing_class", "htb_down_class_missing", "内核队列缺失",
 			"内核队列缺失（可能被系统 netd 重置），点击立即重下发修复",
+			"",
 			"点击「立即重下发修复」重建下行 HTB 队列与正交掩码分类器"
 	}
 	if needUpClass && !upClassPresent && !policeActive {
-		return "missing_class", "上行队列缺失",
+		return "missing_class", "htb_up_class_missing", "上行队列缺失",
 			"上行 ifb0 内核 HTB 队列及 ingress police 兜底均缺失（可能被系统重置），点击立即重下发修复",
+			"",
 			"点击「立即重下发修复」重建 ifb0 上行队列与 clsact prio 2 重定向"
 	}
 	if anyAppMissing {
-		return "missing_class", "应用子类缺失",
+		return "missing_class", "htb_app_class_missing", "应用子类缺失",
 			"单应用限速配置已开启，但内核缺少对应 1:900x HTB 子类（可能被系统 netd 重置），点击立即重下发修复",
+			"",
 			"点击「立即重下发修复」重新同步单应用限速 HTB 子类与 IP 映射"
 	}
 
@@ -1474,58 +1640,91 @@ func dpComputeDeviceVerdict(
 		_, hasFW := fwFlowMap[classID]
 		hasU32 := u32ClassSet[classID]
 		if !hasFW && !hasU32 {
-			return "missing_rule", "掩码过滤器缺失",
+			return "missing_rule", "tc_down_filter_missing", "掩码过滤器缺失",
 				"内核 HTB 队列存在，但缺少指向 " + classID + " 的 fw 高位掩码或 u32 过滤器，点击立即重下发修复",
+				"",
 				"点击「立即重下发修复」恢复 tc fw 0xffff0000 正交掩码过滤器"
 		}
 	}
 	if needUpClass && upClassPresent && len(upFilterClassSet) > 0 && !upFilterClassSet[classID] {
-		return "missing_rule", "上行过滤器缺失",
+		return "missing_rule", "tc_up_filter_missing", "上行过滤器缺失",
 			"ifb0 上行 HTB 类存在，但缺少指向 " + classID + " 的分类过滤器，点击立即重下发修复",
+			"",
 			"点击「立即重下发修复」同步上行 ifb0 过滤器与 IPv6 邻居规则"
 	}
 
-	// 3. 检查 bypass_offload: 设备在线且有活跃流量, 但 HTB 队列零增量且存在快径未压制信号
+	// 3. 高通/异构硬件加速截流比例检测:
+	//    (a) 采样窗口内客户端有明显实际收发增量(>= 64 KiB), 但 tc HTB 捕获字节不足实际流量的 30%
+	//        (即使有少量 TCP 握手包走软件栈使 htbDelta > 0, 大流量走 tether_limit_map / IPA / HNAT 快路径直通亦精准检出!);
+	//    (b) 或 htbDelta == 0 且客户端在当前窗口有真实活跃流量(或首帧累计活跃且存在硬件加速未压制信号)。
 	htbDelta := downDeltaBytes + upDeltaBytes
 	htbTotalSent := downSt.SentBytes + upSt.SentBytes
 	offloadSuspect := !bpfMaps.TetherLimitZeroed ||
+		bpfMaps.TetherFlowEntries > 0 ||
 		offloadRawState == "ACTIVE" ||
 		(!offGuard.SlowpathActive && !offGuard.TetherOffloadDisabled) ||
 		offGuard.HWNAT == "detected_no_knob" ||
 		offGuard.HWNAT == "failed"
 
-	if clientHasTraffic && htbDelta == 0 && offloadSuspect {
-		return "bypass_offload", "疑似快径旁路",
-			"流量疑似被硬件快径（IPA/HNAT/Tether Offload）旁路，建议一键执行慢路径封堵",
-			"一键执行慢路径封堵（将 tether_limit_map 置 0 并启用 IPA/HNAT 硬件卸载压制）"
+	ratioBypass := sp.online && devDeltaBytes >= dpBypassWindowMinBytes &&
+		float64(htbDelta) < float64(devDeltaBytes)*dpBypassCaptureMinRatio
+	zeroCaptureBypass := sp.online && htbDelta == 0 &&
+		((hadPrevDevSnap && devDeltaBytes >= dpActiveTrafficBytes) ||
+			liveBps >= 1024 ||
+			(!hadPrevDevSnap && htbTotalSent == 0 && sp.devTotalBytes >= dpBypassWindowMinBytes && offloadSuspect))
+
+	if ratioBypass || zeroCaptureBypass {
+		rc := "hw_offload_bypass"
+		if bpfMaps.TetherBPFDetected {
+			rc = "qcom_tether_bpf_bypass"
+		}
+		var detailReason string
+		if devDeltaBytes >= dpBypassWindowMinBytes {
+			pct := float64(htbDelta) * 100.0 / float64(devDeltaBytes)
+			detailReason = fmt.Sprintf("采样窗口内客户端实际收发 %s，但流控队列仅捕获 %s（%.1f%% < 30%%）；%s",
+				formatDPBytesMB(devDeltaBytes), formatDPBytesMB(htbDelta), pct, dpBypassDualPathAdvice)
+		} else {
+			detailReason = dpBypassDualPathAdvice
+		}
+		return "bypass", rc, "硬件加速截流", detailReason, dpBypassDualPathAdvice, dpBypassDualPathAdvice
 	}
 
 	// 4. 检查 hit: HTB 队列存在且 delta_bytes > 0 或累计 sent_bytes > 0
 	if htbDelta > 0 || htbTotalSent > 0 || anyAppHit {
 		totalShapeEvents := downSt.Overlimits + downSt.Drops + upSt.Overlimits + upSt.Drops
-		return "hit", "队列真实命中",
+		return "hit", "", "队列真实命中",
 			fmt.Sprintf("内核 HTB 限速队列已真实命中（累计转发 %s，超限整形/丢包 %d 次）",
 				formatDPBytesMB(htbTotalSent), totalShapeEvents),
-			""
+			"", ""
 	}
 
 	// 5. idle: 链路完整就绪, 等待客户端产生流量
 	if !sp.online {
-		return "idle", "就绪（设备离线）", "规则链路完整就绪，当前设备离线，重连产生流量后将自动命中队列", ""
+		return "idle", "", "就绪（设备离线）", "规则链路完整就绪，当前设备离线，重连产生流量后将自动命中队列", "", ""
 	}
-	return "idle", "链路就绪（空闲）", "规则链路完整就绪，等待客户端产生流量", ""
+	return "idle", "", "链路就绪（空闲）", "规则链路完整就绪，等待客户端产生流量", "", ""
 }
 
-func dpBuildSummary(hotspotActive bool, devs []DataplaneDeviceEntry, hitCnt, idleCnt, errCnt int) DataplaneSummary {
+func dpBuildSummary(hotspotActive bool, readHealth dpReadHealth, devs []DataplaneDeviceEntry, hitCnt, idleCnt, unavailCnt, errCnt int) DataplaneSummary {
 	total := len(devs)
 	if !hotspotActive {
 		return DataplaneSummary{
 			ControlledDevices:    total,
 			HittingCount:         hitCnt,
 			IdleCount:            idleCnt,
+			UnavailableCount:     unavailCnt,
 			BypassOrMissingCount: errCnt,
 			OverallStatus:        "idle",
 			Headline:             "热点当前未开启，开启热点后可实时核验内核 HTB 限速队列命中计数",
+		}
+	}
+	if !readHealth.downHTBReadOK && total == 0 {
+		return DataplaneSummary{
+			ControlledDevices: 0,
+			UnavailableCount:  1,
+			OverallStatus:     "unavailable",
+			ReasonCode:        "tc_read_failed",
+			Headline:          "无法读取内核 tc 流控队列状态，请确认 Root 权限与内核 Netlink 支持",
 		}
 	}
 	if total == 0 {
@@ -1536,30 +1735,57 @@ func dpBuildSummary(hotspotActive bool, devs []DataplaneDeviceEntry, hitCnt, idl
 		}
 	}
 	if errCnt > 0 {
-		hasBypass := false
+		bypassCode := ""
 		for _, d := range devs {
-			if d.Verdict == "bypass_offload" {
-				hasBypass = true
+			if d.Verdict == "bypass" || d.Verdict == "bypass_offload" {
+				bypassCode = d.ReasonCode
+				if bypassCode == "" {
+					bypassCode = "hw_offload_bypass"
+				}
 				break
 			}
 		}
-		if hasBypass {
+		if bypassCode != "" {
 			return DataplaneSummary{
 				ControlledDevices:    total,
 				HittingCount:         hitCnt,
 				IdleCount:            idleCnt,
+				UnavailableCount:     unavailCnt,
 				BypassOrMissingCount: errCnt,
 				OverallStatus:        "fail",
-				Headline:             fmt.Sprintf("告警：%d 台受控设备存在异常（检测到疑似硬件快径旁路），建议立即执行慢路径封堵", errCnt),
+				ReasonCode:           bypassCode,
+				Headline:             dpBypassDualPathAdvice,
+				Advice:               dpBypassDualPathAdvice,
 			}
 		}
 		return DataplaneSummary{
 			ControlledDevices:    total,
 			HittingCount:         hitCnt,
 			IdleCount:            idleCnt,
+			UnavailableCount:     unavailCnt,
 			BypassOrMissingCount: errCnt,
 			OverallStatus:        "warn",
+			ReasonCode:           "missing_rule_or_class",
 			Headline:             fmt.Sprintf("注意：%d 台受控设备缺少内核 HTB 队列或过滤器，请点击重下发修复", errCnt),
+		}
+	}
+	if unavailCnt > 0 {
+		rc := "dataplane_read_failed"
+		for _, d := range devs {
+			if d.Verdict == "unavailable" && d.ReasonCode != "" {
+				rc = d.ReasonCode
+				break
+			}
+		}
+		return DataplaneSummary{
+			ControlledDevices:    total,
+			HittingCount:         hitCnt,
+			IdleCount:            idleCnt,
+			UnavailableCount:     unavailCnt,
+			BypassOrMissingCount: 0,
+			OverallStatus:        "unavailable",
+			ReasonCode:           rc,
+			Headline:             fmt.Sprintf("无法读取 %d 台受控设备的内核流控或防火墙状态，暂不能确认限速生效情况", unavailCnt),
 		}
 	}
 	if hitCnt > 0 {
@@ -1584,21 +1810,47 @@ func dpBuildSummary(hotspotActive bool, devs []DataplaneDeviceEntry, hitCnt, idl
 
 // ── BPF Map、clsact/ifb0 优先级、CONNMARK 高位掩码与 Offload 解析器 ────
 
-// dpInspectBPFMaps 读取 hnc_clsact_ctl check、BPF 映射状态与 prio 1/prio 2 分离状态。
+// dpDetectSystemTetherBPF 检测系统是否存在 /sys/fs/bpf/tether_* 或 /sys/fs/bpf/tethering/map_offload_tether_* 加速映射。
+func dpDetectSystemTetherBPF(env *dpVerifyEnv) bool {
+	if env == nil || env.Exists == nil {
+		return false
+	}
+	cands := []string{
+		env.BPFTetherLimitPin,
+		"/sys/fs/bpf/tether_limit_map",
+		"/sys/fs/bpf/tether_downstream6_map",
+		"/sys/fs/bpf/tether_downstream4_map",
+		"/sys/fs/bpf/tethering/map_offload_tether_limit_map",
+		"/sys/fs/bpf/tethering/map_offload_tether_downstream6_map",
+		"/sys/fs/bpf/tethering/map_offload_tether_downstream4_map",
+		"/sys/fs/bpf/map_offload_tether_downstream6_map",
+	}
+	for _, p := range cands {
+		if p != "" && env.Exists(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// dpInspectBPFMaps 读取 hnc_clsact_ctl check、BPF 映射真实条目数与 prio 1/prio 2 分离状态。
+// 铁律: 严禁拿规则配置文件条数冒充内核 BPF 条目数! 不可读时如实置 BpfMapReadable: false。
 func dpInspectBPFMaps(
 	env *dpVerifyEnv,
 	iface string,
 	hotspotActive bool,
 	tcIngressFilters string,
 	offGuard DataplaneOffloadGuard,
-	specs []dpControlledSpec,
 ) DataplaneBPFMaps {
 	out := DataplaneBPFMaps{
+		BpfMapReadable:    false,
 		TetherLimitZeroed: true,
+		TetherBPFDetected: dpDetectSystemTetherBPF(env),
 	}
 
 	// 1. 检查 tether_limit_map 是否全部置 0
 	if env.BPFTetherLimitPin != "" && env.Exists != nil && env.Exists(env.BPFTetherLimitPin) {
+		out.TetherBPFDetected = true
 		if b, err := env.ReadFile(env.BPFTetherLimitPin); err == nil {
 			_, allZero, ok := parseTetherLimitMapZeroed(string(b))
 			if ok {
@@ -1615,10 +1867,13 @@ func dpInspectBPFMaps(
 		return out
 	}
 
-	// 2. 调用 hnc_clsact_ctl check <iface> 解析 clsact / bpf_filter / map 状态
-	var ctlHasQdisc, ctlHasBPF, ctlHasIPMap, ctlHasMACMap bool
+	// 2. 调用 hnc_clsact_ctl check <iface> 解析 clsact / bpf_filter / 真实 BPF map 遍历计数
+	var ctlHasQdisc, ctlHasBPF bool
+	var ctlReadableExplicit bool
+	var ctlReadableVal bool
 	ctlMACCount := -1
 	ctlIPCount := -1
+	ctlAppPolicyCount := -1
 	if env.RunCmd != nil {
 		ctlBin := filepath.Join(env.HNCDir, "bin", "hnc_clsact_ctl")
 		raw := dpRunQuick(env, ctlBin, "check", iface)
@@ -1627,13 +1882,26 @@ func dpInspectBPFMaps(
 			if json.Unmarshal([]byte(strings.TrimSpace(raw)), &cm) == nil {
 				ctlHasQdisc = dpJSONBool(cm["qdisc"])
 				ctlHasBPF = dpJSONBool(cm["bpf_filter"])
-				ctlHasIPMap = dpJSONBool(cm["map"])
-				ctlHasMACMap = dpJSONBool(cm["mac_map"])
+				if v, ok := cm["bpf_map_readable"].(bool); ok {
+					ctlReadableExplicit = true
+					ctlReadableVal = v
+				}
 				if _, ok := cm["mac_entries"]; ok {
 					ctlMACCount = int(dpJSONFloat(cm["mac_entries"]))
 				}
 				if _, ok := cm["ip_entries"]; ok {
 					ctlIPCount = int(dpJSONFloat(cm["ip_entries"]))
+				}
+				if _, ok := cm["app_policy_entries"]; ok {
+					ctlAppPolicyCount = int(dpJSONFloat(cm["app_policy_entries"]))
+				}
+				if v, ok := cm["tether_bpf_present"].(bool); ok && v {
+					out.TetherBPFDetected = true
+				}
+				if _, ok := cm["tether_flow_entries"]; ok {
+					if tf := int(dpJSONFloat(cm["tether_flow_entries"])); tf > 0 {
+						out.TetherFlowEntries = tf
+					}
 				}
 				if v, ok := cm["tether_limit_zeroed"].(bool); ok {
 					out.TetherLimitZeroed = v
@@ -1647,21 +1915,34 @@ func dpInspectBPFMaps(
 	out.ClsactAttached = (ctlHasQdisc && ctlHasBPF) || ingHasBPFPrio1
 	out.IFBRedirectPrio2 = ingHasIFBPrio2
 
-	// 4. 统计 mac_mark_map 与 ip_mark_map 条目数
+	// 4. 仅采信真实内核 BPF map 遍历计数或可读转储; 不可读时诚实置 BpfMapReadable = false, 绝不拿配置条数假回退!
+	anyReadable := false
 	if ctlMACCount >= 0 {
 		out.MACMarkEntries = ctlMACCount
+		anyReadable = true
 	} else if n, ok := dpCountPinnedMapEntries(env, env.BPFMACMapPin); ok {
 		out.MACMarkEntries = n
-	} else if ctlHasMACMap || (env.Exists != nil && env.Exists(env.BPFMACMapPin)) {
-		out.MACMarkEntries = dpCountSyncedSpecs(specs, false)
+		anyReadable = true
 	}
 
 	if ctlIPCount >= 0 {
 		out.IPMarkEntries = ctlIPCount
+		anyReadable = true
 	} else if n, ok := dpCountPinnedMapEntries(env, env.BPFIPMapPin); ok {
 		out.IPMarkEntries = n
-	} else if ctlHasIPMap || (env.Exists != nil && env.Exists(env.BPFIPMapPin)) {
-		out.IPMarkEntries = dpCountSyncedSpecs(specs, true)
+		anyReadable = true
+	}
+
+	if ctlAppPolicyCount >= 0 {
+		out.AppPolicyEntries = ctlAppPolicyCount
+	} else if n, ok := dpCountPinnedMapEntries(env, dpBPFAppPolicyPath); ok {
+		out.AppPolicyEntries = n
+	}
+
+	if ctlReadableExplicit {
+		out.BpfMapReadable = ctlReadableVal || anyReadable
+	} else {
+		out.BpfMapReadable = anyReadable
 	}
 
 	return out
@@ -1701,20 +1982,6 @@ func countBPFMapTextEntries(raw string) int {
 		}
 	}
 	return cnt
-}
-
-func dpCountSyncedSpecs(specs []dpControlledSpec, requireIPv4 bool) int {
-	n := 0
-	for _, sp := range specs {
-		if sp.markID <= 0 || !sp.online {
-			continue
-		}
-		if requireIPv4 && sp.ip == "" {
-			continue
-		}
-		n++
-	}
-	return n
 }
 
 // parseTetherLimitMapZeroed 解析 /sys/fs/bpf/tethering/map_offload_tether_limit_map 文本转储。

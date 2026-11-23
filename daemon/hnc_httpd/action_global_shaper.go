@@ -1,8 +1,11 @@
 package main
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
-// actionGlobalShaperSet · rc32 全局带宽整形器 (opt-in, 默认关)
+// actionGlobalShaperSet · 全局静态带宽整形器 (opt-in, 默认关)
 //
 // params:
 //
@@ -10,17 +13,19 @@ import "strings"
 //	rate_down optional (enabled 时至少一个方向): "<n>mbit"/"<n>kbit" — WAN 下行带宽
 //	rate_up   optional: WAN 上行带宽
 //
-// 给整个热点的 HTB 父类 1:1 设 WAN 带宽 ceil + 默认类挂 AQM 叶子,让总流量受 WAN
-// 瓶颈管,AQM 才压得住 bufferbloat。手动填带宽、默认关 → 不用的人零风险。状态持久化
-// 到 rules.json 顶层 global_shaper_enabled/down/up,restore_rules 重启后据此恢复。
-//
-// 诚实边界:固定 ceil 对蜂窝(速率乱跳)效果有限;最适合稳定链路(WiFi 中继 / 固定
-// WISP / 光猫)。这是设计如此,不是 bug —— UI 文案已注明。
+// 状态唯一持久化到 rules.json 顶层 global_shaper_enabled/down/up (作为用户静态基准);
+// 实际 1:1 根速率由 RootShaperArbiter 综合 static_shaper、5G Autorate 与 ThermoCruise 统一仲裁下发。
 func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 	hncDir := s.hncDir
 	if rawAR, hasAR := p["autorate_enabled"]; hasAR && strings.TrimSpace(rawAR) != "" {
-		if arOn, ok := parseBoolStr(rawAR); ok && arOn {
-			return actionAutorateSet(s, p)
+		if arOn, ok := parseBoolStr(rawAR); ok {
+			if arOn {
+				return actionAutorateSet(s, p)
+			}
+			if s.autorate != nil {
+				s.autorate.bindServer(s)
+				s.autorate.DisableFromStaticShaper()
+			}
 		}
 	}
 	enabled, ok := parseEnabledParam(p)
@@ -28,28 +33,26 @@ func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
 
+	resolveIface := func() string {
+		ifc := s.currentHotspotIface()
+		if ifc == "" {
+			_, out := runBin(hncDir, "device_detect.sh", "iface")
+			ifc = strings.TrimSpace(out)
+		}
+		return ifc
+	}
+
 	if !enabled {
-		if s.autorate != nil {
-			s.autorate.DisableFromStaticShaper()
-		}
-		// 关:复位 1:1 ceil 回 DEFAULT_RATE,并落 flag。即便没热点接口也把 flag 清掉,
-		// 免得 restore_rules 下次又把它拉起来。
-		_, out := runBin(hncDir, "device_detect.sh", "iface")
-		iface := strings.TrimSpace(out)
-		if iface != "" {
-			if rc2, out2 := runBin(hncDir, "tc_manager.sh", "global_shaper", iface, "off", "0", "0"); rc2 != 0 {
-				return actionResp{OK: false, Error: "shaper apply failed", Detail: strings.TrimSpace(out2)}
-			}
-		}
-		InvalidateDataplaneReconcileNative(hncDir, "")
-		// GS-2: 检查 flag 写入 rc。否则 UI 报"已关闭"但持久化没落 → 重启 restore 又拉起。
 		if rc, out := runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "false"); rc != 0 {
 			return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(out)}
+		}
+		iface := resolveIface()
+		if err := s.shaperArbiter().SetStaticBaseline(time.Now(), iface, false, 0, 0, true); err != nil {
+			return actionResp{OK: false, Error: "shaper apply failed", Detail: err.Error()}
 		}
 		return actionResp{OK: true, Detail: "global shaper off"}
 	}
 
-	// 开:需要 HTB。capabilities.json 权威, tc_htb=false 直接拒(别卡在 shell/tc 路径)。
 	if supported, known := tcHTBSupported(hncDir); known && !supported {
 		return actionResp{OK: false, Error: "unsupported", Detail: "tc_htb=false; 全局整形需要 HTB"}
 	}
@@ -62,7 +65,6 @@ func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 	if rateUp == "" {
 		rateUp = "0"
 	}
-	// validateRate 允许 "0"(= 该方向不整形),其余必须合法且 >= 最小速率。
 	if err := validateRate(rateDown); err != nil {
 		return actionResp{OK: false, Error: "bad params", Detail: "rate_down: " + err.Error()}
 	}
@@ -73,23 +75,12 @@ func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled 时至少一个方向带宽 > 0"}
 	}
 
-	_, out := runBin(hncDir, "device_detect.sh", "iface")
-	iface := strings.TrimSpace(out)
+	iface := resolveIface()
 	if iface == "" {
 		return actionResp{OK: false, Error: "no hotspot iface", Detail: "热点未开启,无法应用全局整形"}
 	}
 
-	if s.autorate != nil {
-		s.autorate.DisableFromStaticShaper()
-	}
-
-	if rc2, out2 := runBin(hncDir, "tc_manager.sh", "global_shaper", iface, "on", rateDown, rateUp); rc2 != 0 {
-		return actionResp{OK: false, Error: "shaper apply failed", Detail: strings.TrimSpace(out2)}
-	}
-	InvalidateDataplaneReconcileNative(hncDir, "")
-	// 持久化(先写参数, 最后写 enabled, 让 restore 永远读到一致快照)。
-	// GS-2: 三次写全部检查 rc。down/up 任一失败 → 显式落 enabled=false 防半状态
-	// (tc 此刻已生效但不持久化;用户见 error 重试),再返回错误。
+	// 先持久化用户静态基准到 rules.json, 再交由 RootShaperArbiter 综合仲裁下发 1:1
 	if rc1, out1 := runBin(hncDir, "json_set.sh", "top", "global_shaper_down", rateDown); rc1 != 0 {
 		runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "false")
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: "down: " + strings.TrimSpace(out1)}
@@ -100,6 +91,13 @@ func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 	}
 	if rcW, outW := runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "true"); rcW != 0 {
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(outW)}
+	}
+
+	downMbps := tcRateStrToMbps(rateDown)
+	upMbps := tcRateStrToMbps(rateUp)
+	if err := s.shaperArbiter().SetStaticBaseline(time.Now(), iface, true, downMbps, upMbps, true); err != nil {
+		runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "false")
+		return actionResp{OK: false, Error: "shaper apply failed", Detail: err.Error()}
 	}
 	return actionResp{OK: true, Detail: "global shaper on down=" + rateDown + " up=" + rateUp}
 }

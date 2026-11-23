@@ -204,7 +204,7 @@ func m5Alive(name string, pidFiles ...string) int {
 	}
 	pid := procScan(name)
 	if pid > 0 && len(pidFiles) > 0 {
-		_ = os.WriteFile(pidFiles[0], []byte(strconv.Itoa(pid)), 0o644)
+		_ = wdWriteAtomic(pidFiles[0], []byte(strconv.Itoa(pid)), 0o644)
 	}
 	return pid
 }
@@ -388,14 +388,9 @@ func m5Rescue(now time.Time) bool {
 	return true
 }
 
-// writeLauncherChoice 原子改写 run/dpid_launcher.choice(tmp + rename, 同哨兵)。
+// writeLauncherChoice 原子改写 run/dpid_launcher.choice(tmp + fsync + rename, 同哨兵)。
 func writeLauncherChoice(c string) error {
-	p := m5Pid("dpid_launcher.choice")
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, []byte(c+"\n"), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return wdWriteAtomic(m5Pid("dpid_launcher.choice"), []byte(c+"\n"), 0o644)
 }
 
 func m5Record(name string, err error, now time.Time) {

@@ -175,6 +175,64 @@ func safeCallVectorProvider(name string, ent vectorSyncProviderEntry, s *server)
 
 // ─── 进程组隔离外部命令执行器 ─────────────────────────────────────────
 
+var hubAllowedAndroidEnvKeys = map[string]bool{
+	"BOOTCLASSPATH":                true,
+	"DEX2OATBOOTCLASSPATH":         true,
+	"SYSTEMSERVERCLASSPATH":        true,
+	"STANDALONE_SYSTEMSERVER_JARS": true,
+	"ANDROID_ROOT":                 true,
+	"ANDROID_DATA":                 true,
+	"ANDROID_STORAGE":              true,
+	"ANDROID_ASSETS":               true,
+	"ANDROID_ART_ROOT":             true,
+	"ANDROID_I18N_ROOT":            true,
+	"ANDROID_TZDATA_ROOT":          true,
+	"TZ":                           true,
+}
+
+// hubSanitizedAndroidEnv 构造进程组隔离子进程的白名单环境变量切片:
+// 锁定安全 PATH, 同时从宿主环境保留 ART 类路径与系统目录变量, 避免 Android 工具链静默异常。
+func hubSanitizedAndroidEnv() []string {
+	return hubAppendAndroidEnv("PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin")
+}
+
+// hubAppendAndroidEnv 在调用方指定的基础环境变量切片上追加宿主白名单 Android ART / 系统目录变量,
+// 确保 sh 脚本或系统工具链内调用 settings / content / cmd / dumpsys 时不会因丢失 BOOTCLASSPATH 而静默失败。
+func hubAppendAndroidEnv(base ...string) []string {
+	rawEnv := os.Environ()
+	out := make([]string, 0, len(base)+len(hubAllowedAndroidEnvKeys))
+	idxByKey := make(map[string]int, len(base)+len(hubAllowedAndroidEnvKeys))
+	for _, kv := range base {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			continue
+		}
+		if prevIdx, exists := idxByKey[k]; exists {
+			out[prevIdx] = kv
+		} else {
+			idxByKey[k] = len(out)
+			out = append(out, kv)
+		}
+	}
+	for _, kv := range rawEnv {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || v == "" || strings.IndexByte(v, 0) >= 0 {
+			continue
+		}
+		if !hubAllowedAndroidEnvKeys[k] {
+			continue
+		}
+		entry := k + "=" + v
+		if prevIdx, exists := idxByKey[k]; exists {
+			out[prevIdx] = entry
+		} else {
+			idxByKey[k] = len(out)
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 // ExecIsolatedAndroidCmd 在独立进程组中执行外部系统命令:
 //   - 默认 2s 硬超时(timeout <= 0 时自动采用 2s);
 //   - Linux/Android 下启用 Setpgid: true, 超时瞬间向 -pgid 发送 SIGKILL 连根清理全部孙进程;
@@ -194,9 +252,7 @@ func ExecIsolatedAndroidCmd(parentCtx context.Context, timeout time.Duration, bi
 	defer cancel()
 
 	cmd := hardenCmd(exec.CommandContext(ctx, bin, args...))
-	cmd.Env = []string{
-		"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin",
-	}
+	cmd.Env = hubSanitizedAndroidEnv()
 	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
@@ -1404,17 +1460,20 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 			}, false, statErr
 		}
 
-		if h.shmReader != nil && (h.shmRunDir != runDir || h.shmInfo == nil || !os.SameFile(h.shmInfo, curInfo) || curInfo.Size() < shm.FileSize) {
+		if h.shmReader != nil && (h.shmRunDir != runDir || h.shmInfo == nil || !os.SameFile(h.shmInfo, curInfo) || curInfo.Size() != shm.FileSize) {
 			h.closeShmReaderLocked()
 		}
 
 		if h.shmReader == nil {
 			r, openErr := shm.OpenReader(runDir)
 			if openErr != nil {
-				if errors.Is(openErr, os.ErrNotExist) || errors.Is(openErr, shm.ErrUninitialized) {
+				if reason, benign, recordDiag := classifyBenignShmFallback(openErr); benign {
+					if recordDiag && h.DpiShmBulkhead != nil {
+						h.DpiShmBulkhead.setLastErr(openErr.Error())
+					}
 					return dpiShmReadResult{
 						Source:         "json_fallback",
-						FallbackReason: "standby_uninitialized",
+						FallbackReason: reason,
 					}, false, nil
 				}
 				return dpiShmReadResult{
@@ -1442,27 +1501,28 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 			h.shmLastStatMono = 0
 			return dpiShmReadResult{}, true, nil
 		}
-		switch {
-		case errors.Is(readErr, shm.ErrUninitialized):
+		if errors.Is(readErr, shm.ErrUninitialized) {
 			return dpiShmReadResult{
 				Attached:       attached,
 				Mmapped:        mmapped,
 				Source:         "json_fallback",
 				FallbackReason: "uninitialized",
 			}, false, nil
-		case errors.Is(readErr, shm.ErrClosed):
-			h.closeShmReaderLocked()
-			return dpiShmReadResult{
-				Source:         "json_fallback",
-				FallbackReason: "reader_closed",
-			}, false, nil
-		default:
-			h.closeShmReaderLocked()
-			return dpiShmReadResult{
-				Source:         "json_fallback",
-				FallbackReason: "read_corrupt",
-			}, false, readErr
 		}
+		h.closeShmReaderLocked()
+		if reason, benign, recordDiag := classifyBenignShmFallback(readErr); benign {
+			if recordDiag && h.DpiShmBulkhead != nil {
+				h.DpiShmBulkhead.setLastErr(readErr.Error())
+			}
+			return dpiShmReadResult{
+				Source:         "json_fallback",
+				FallbackReason: reason,
+			}, false, nil
+		}
+		return dpiShmReadResult{
+			Source:         "json_fallback",
+			FallbackReason: "read_corrupt",
+		}, false, readErr
 	}
 
 	hdr := h.shmSnapBuf.Header
@@ -1562,6 +1622,9 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 			}
 		}
 	}
+	if h.DpiShmBulkhead != nil && strings.HasPrefix(h.DpiShmBulkhead.getLastErr(), "shm:") {
+		h.DpiShmBulkhead.setLastErr("")
+	}
 
 	return dpiShmReadResult{
 		Valid:         true,
@@ -1578,6 +1641,103 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 		Source:        "shm_seqlock",
 		ByMAC:         byMAC,
 	}, false, nil
+}
+
+// classifyBenignShmFallback 判定热升级/未就绪阶段的共享内存预期回退错误:
+// 命中时无感静默降级至 json_fallback, 不计入舱壁 totalErrors 亦不触发熔断器。
+func classifyBenignShmFallback(err error) (reason string, benign bool, recordDiag bool) {
+	switch {
+	case errors.Is(err, os.ErrNotExist) || errors.Is(err, shm.ErrUninitialized):
+		return "standby_uninitialized", true, false
+	case errors.Is(err, shm.ErrClosed):
+		return "reader_closed", true, false
+	case errors.Is(err, shm.ErrShortRegion):
+		return "short_region", true, true
+	case errors.Is(err, shm.ErrSchemaMismatch):
+		return "schema_mismatch", true, true
+	case errors.Is(err, shm.ErrBadMagic):
+		return "bad_magic", true, true
+	default:
+		return "", false, false
+	}
+}
+
+// mergeDpiStateFallbackDevices 在 shm_vector.bin 处于 json_fallback 阶段时,
+// 纯内存融合 devices.json 与 run/dpi_state.json["clients"] 活跃客户端观测信息(零磁盘写入)。
+func mergeDpiStateFallbackDevices(devMap map[string]any, dpiRaw any, nowUnix int64) map[string]any {
+	root, ok := dpiRaw.(map[string]any)
+	if !ok || root == nil {
+		return devMap
+	}
+	clients, ok := root["clients"].(map[string]any)
+	if !ok || len(clients) == 0 {
+		return devMap
+	}
+
+	copied := make(map[string]any, len(devMap)+len(clients))
+	for k, v := range devMap {
+		if inner, ok := v.(map[string]any); ok {
+			cp := make(map[string]any, len(inner)+2)
+			for ik, iv := range inner {
+				cp[ik] = iv
+			}
+			copied[k] = cp
+		} else {
+			copied[k] = v
+		}
+	}
+
+	for _, cRaw := range clients {
+		cm, ok := cRaw.(map[string]any)
+		if !ok || cm == nil {
+			continue
+		}
+		mac := normalizeShmMAC(asString(cm["client_mac"]))
+		if mac == "" {
+			continue
+		}
+		bestIP := cleanShmIP(asString(cm["client_ip"]))
+		if bestIP == "" {
+			if ips, ok := cm["client_ips"].([]any); ok {
+				for _, item := range ips {
+					if cand := cleanShmIP(asString(item)); cand != "" {
+						bestIP = cand
+						break
+					}
+				}
+			}
+		}
+		seenSec, _ := toInt64(cm["last_seen"])
+		liveClient := bestIP != "" && seenSec > 0 && nowUnix-seenSec <= activityOnlineWindow
+
+		matchedKey := ""
+		for k := range copied {
+			if strings.EqualFold(strings.TrimSpace(k), mac) {
+				matchedKey = k
+				break
+			}
+		}
+		if matchedKey != "" {
+			if dm, ok := copied[matchedKey].(map[string]any); ok {
+				if asString(dm["ip"]) == "" && bestIP != "" {
+					dm["ip"] = bestIP
+				}
+				if liveClient {
+					prevSeen, _ := toInt64(dm["last_seen"])
+					if seenSec > prevSeen {
+						dm["last_seen"] = float64(seenSec)
+					}
+				}
+			}
+		} else if liveClient {
+			copied[mac] = map[string]any{
+				"mac":       mac,
+				"ip":        bestIP,
+				"last_seen": float64(seenSec),
+			}
+		}
+	}
+	return copied
 }
 
 func buildVectorLiveSummary(s *server, now time.Time) VectorLiveSummary {
@@ -1661,6 +1821,10 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 			}
 		}
 		devMap = copied
+	} else if !shmRes.Valid && s.jsonCache != nil {
+		if dpiRaw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_state.json")); err == nil && dpiRaw != nil {
+			devMap = mergeDpiStateFallbackDevices(devMap, dpiRaw, now.Unix())
+		}
 	}
 	var ruleDevs map[string]any
 	var blSet map[string]bool

@@ -265,15 +265,7 @@ func appendCappedLines(path string, extra []byte, maxBytes int64) error {
 	merged = append(merged, tail...)
 	merged = append(merged, extra...)
 
-	tmp := path + ".tmp.go"
-	if err := os.WriteFile(tmp, merged, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return wdWriteAtomic(path, merged, 0o644)
 }
 
 // hotspotDown 热点关闭时调用: 先落盘已累计分钟, 再重置采样基线 a.last,

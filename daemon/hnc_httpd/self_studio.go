@@ -209,11 +209,25 @@ func (s *server) SelfResidentLoop(stopCh <-chan struct{}) {
 }
 
 func todaySampleFileSize(hncDir string) int64 {
-	p := filepath.Join(hncDir, "run", "label_samples."+time.Now().Format("20060102")+".jsonl")
-	if st, err := os.Stat(p); err == nil {
-		return st.Size()
+	name := "label_samples." + time.Now().Format("20060102") + ".jsonl"
+	for _, dir := range selfStudioScanDirs(hncDir) {
+		if st, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return st.Size()
+		}
 	}
 	return 0
+}
+
+func readLabelSamplesStatsRaw(hncDir string) ([]byte, error) {
+	var lastErr error
+	for _, dir := range selfStudioScanDirs(hncDir) {
+		b, err := os.ReadFile(filepath.Join(dir, "label_samples.stats.json"))
+		if err == nil {
+			return b, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func hasNewLabelSamplesLocked(hncDir string) bool {
@@ -347,7 +361,7 @@ func (s *server) apiSelfStudio(w http.ResponseWriter, r *http.Request) {
 	}
 
 	samplesCnt := 0
-	if stB, err := os.ReadFile(filepath.Join(hncDir, "run", "label_samples.stats.json")); err == nil {
+	if stB, err := readLabelSamplesStatsRaw(hncDir); err == nil {
 		var ls struct {
 			Written int `json:"written"`
 		}

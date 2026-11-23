@@ -24,7 +24,7 @@ LOG="$LOG_DIR/dpi_rules_import.log"
 
 mkdir -p "$ETC" "$ETC/dpi_rules.d" "$RUN" "$LOG_DIR" 2>/dev/null || true
 log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)] [DPI-RULES] $*" >> "$LOG" 2>/dev/null || true; }
-fail(){ echo "ERR: $*" >&2; log "ERR: $*"; exit 1; }
+fail(){ [ -n "${TMP:-}" ] && rm -f "$TMP" 2>/dev/null || true; echo "ERR: $*" >&2; log "ERR: $*"; exit 1; }
 
 json_escape(){ printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g'; }
 write_state_note(){
@@ -32,10 +32,14 @@ write_state_note(){
   msg=$(json_escape "$1")
   iface=$(cat "$RUN/hotspot_iface" 2>/dev/null | head -1)
   iface=$(json_escape "$iface")
-  cat > "$RUN/dpi_rules_last_import.json.tmp" <<EOF_STATE
+  _note_tmp="$RUN/dpi_rules_last_import.json.tmp.$$"
+  if cat > "$_note_tmp" 2>/dev/null <<EOF_STATE && [ -s "$_note_tmp" ]; then
 {"timestamp":$now,"message":"$msg","path":"$DST","iface":"$iface"}
 EOF_STATE
-  mv -f "$RUN/dpi_rules_last_import.json.tmp" "$RUN/dpi_rules_last_import.json" 2>/dev/null || true
+    mv -f "$_note_tmp" "$RUN/dpi_rules_last_import.json" 2>/dev/null || rm -f "$_note_tmp" 2>/dev/null || true
+  else
+    rm -f "$_note_tmp" 2>/dev/null || true
+  fi
 }
 
 validate_rules(){
@@ -79,18 +83,23 @@ case "$1" in
     ;;
   --stdin|"")
     TMP="$DST.tmp.$$"
-    cat > "$TMP" || fail "read stdin failed"
+    cat > "$TMP" || { rm -f "$TMP" 2>/dev/null || true; fail "read stdin failed"; }
     ;;
   *)
     SRC="$1"
     [ -f "$SRC" ] || fail "source file not found: $SRC"
     TMP="$DST.tmp.$$"
-    cp -f "$SRC" "$TMP" || fail "copy source failed"
+    cp -f "$SRC" "$TMP" || { rm -f "$TMP" 2>/dev/null || true; fail "copy source failed"; }
     ;;
 esac
 
 validate_rules "$TMP"
-mv -f "$TMP" "$DST" || fail "install rules failed"
+if [ -s "$TMP" ] && mv -f "$TMP" "$DST"; then
+  TMP=""
+else
+  rm -f "$TMP" 2>/dev/null || true
+  fail "install rules failed"
+fi
 chmod 644 "$DST" 2>/dev/null || true
 write_state_note "user rules imported as dpi_rules.d/99-user-custom.json"
 log "imported custom rules to $DST"

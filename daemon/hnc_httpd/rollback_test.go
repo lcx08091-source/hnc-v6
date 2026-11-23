@@ -88,6 +88,7 @@ func TestVcName(t *testing.T) {
 		"6009301": "6.1.0-rc.1",
 		"6009302": "6.1.0-rc.2",
 		"6009303": "6.1.0-rc.3",
+		"6009304": "6.1.0-rc.4",
 		"6010000": "6.1.0",
 		"6010002": "6.1.2",
 		"6019203": "6.2.0-beta.3",
@@ -130,6 +131,31 @@ func TestRollbackCorridorRC2And610(t *testing.T) {
 	if it := scRollbackItem(c); it.Status != scWarn || it.Value != "已自动退回 6.0.1" ||
 		!strings.Contains(it.Detail, "检测到 6.1.0-rc.2 启动失败") {
 		t.Fatalf("rc.2 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
+	}
+
+	// 场景 1b: 当前候选版 6009304 (6.1.0-rc.4) 启动失败同样自动退回黄金底包 6000001 (6.0.1)
+	dirRC4 := t.TempDir()
+	dataRC4 := filepath.Join(dirRC4, "data")
+	if err := os.MkdirAll(dataRC4, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rc4JSON := `{"from":"6009304","to":"6000001","reason":"failstreak=6 restarts=0","at":1795390000,"action":"rolled_back"}`
+	if err := os.WriteFile(filepath.Join(dataRC4, "rollback.json"), []byte(rc4JSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataRC4, "rollback.pinned"), []byte("6009304\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sRC4 := &server{hncDir: dirRC4}
+	gotRC4 := sRC4.rollbackStatus()
+	if gotRC4 == nil || !gotRC4.Rolled || gotRC4.From != "6009304" || gotRC4.To != "6000001" ||
+		gotRC4.FromName != "6.1.0-rc.4" || gotRC4.ToName != "6.0.1" || !gotRC4.Pinned || gotRC4.Acknowledged {
+		t.Fatalf("rc.4 -> 6.0.1 rollbackStatus mismatch: %+v", gotRC4)
+	}
+	f.files[f.h("data", "rollback.json")] = rc4JSON
+	if it := scRollbackItem(c); it.Status != scWarn || it.Value != "已自动退回 6.0.1" ||
+		!strings.Contains(it.Detail, "检测到 6.1.0-rc.4 启动失败") {
+		t.Fatalf("rc.4 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
 	}
 
 	// 场景 2: 6010000 (6.1.0 正式版) 回退至 6000001 (6.0.1) 与后续预发布回退至 6010000 (6.1.0)

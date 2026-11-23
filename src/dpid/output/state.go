@@ -1654,6 +1654,10 @@ func portStr(p uint16) string {
 // ─── Flush: build State snapshot and atomically write JSON ─────────────
 
 func (w *Writer) Flush() error {
+	// 死定律四: 可能触发磁盘目录扫描与文件读取的规则版本查询移出 w.mu 互斥锁。
+	l3Ver := currentL3RuleVersion()
+	dfpVer := currentDFPRuleVersion()
+
 	w.mu.Lock()
 	snap := w.state
 	snap.SchemaVersion = SchemaVersion
@@ -1714,9 +1718,9 @@ func (w *Writer) Flush() error {
 	snap.UniqueSNI = len(w.globalSNI)
 	snap.UniqueJA4 = len(w.globalJA4)
 	snap.L3Enabled = true
-	snap.L3RuleVersion = currentL3RuleVersion()
+	snap.L3RuleVersion = l3Ver
 	snap.DFPEnabled = true
-	snap.DFPRuleVersion = currentDFPRuleVersion()
+	snap.DFPRuleVersion = dfpVer
 	// v5.18: IP→域名表条目数。IPNameTable 自带锁, 与 w.mu 无嵌套关系
 	// (IPNameTable 从不回调 Writer), 在 w.mu 内调用安全。
 	if t := w.ipNames.Load(); t != nil {

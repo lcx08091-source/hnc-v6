@@ -133,11 +133,38 @@ func openRouteSocket() (int, error) {
 		return -1, fmt.Errorf("nlroute: socket: %w", err)
 	}
 	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Sec: 3})
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &syscall.Timeval{Sec: 3})
+	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 256<<10)
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		_ = syscall.Close(fd)
 		return -1, fmt.Errorf("nlroute: bind: %w", err)
 	}
 	return fd, nil
+}
+
+func recvNetlinkPacket(fd int, buf []byte) ([]byte, int, error) {
+	const maxNetlinkBuf = 1 << 20
+	for {
+		peekLen, _, perr := syscall.Recvfrom(fd, buf[:1], syscall.MSG_PEEK|syscall.MSG_TRUNC)
+		if errors.Is(perr, syscall.EINTR) {
+			continue
+		}
+		if perr == nil && peekLen > len(buf) {
+			alloc := peekLen
+			if alloc > maxNetlinkBuf {
+				alloc = maxNetlinkBuf
+			}
+			buf = make([]byte, alloc)
+		}
+		break
+	}
+	for {
+		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return buf, n, err
+	}
 }
 
 func sendTcDumpReq(fd int, msgType uint16, seq uint32, ifindex int, parent uint32) error {
@@ -161,25 +188,16 @@ func sendTcDumpReq(fd int, msgType uint16, seq uint32, ifindex int, parent uint3
 	}
 }
 
-func dumpQdiscsOnFD(fd int, seq uint32, ifindex int, buf []byte) ([]Qdisc, error) {
-	if err := sendTcDumpReq(fd, rtmGetQdisc, seq, ifindex, 0); err != nil {
-		return nil, err
-	}
+func dumpQdiscsFromChunks(recv func() ([]byte, error), seq uint32, ifindex int) ([]Qdisc, error) {
 	var out []Qdisc
 	for {
-		n, _, err := syscall.Recvfrom(fd, buf, 0)
-		if errors.Is(err, syscall.EINTR) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("nlroute: recv: %w", err)
-		}
-		if n <= 0 {
-			return nil, errors.New("nlroute: empty recv")
-		}
-		qs, done, err := parseQdiscMsgs(buf[:n])
+		chunk, err := recv()
 		if err != nil {
 			return nil, err
+		}
+		qs, done, perr := parseQdiscMsgsSeq(chunk, seq)
+		if perr != nil {
+			return nil, perr
 		}
 		out = append(out, keepIfIndex(qs, ifindex)...)
 		if done {
@@ -188,31 +206,58 @@ func dumpQdiscsOnFD(fd int, seq uint32, ifindex int, buf []byte) ([]Qdisc, error
 	}
 }
 
-func dumpTFiltersOnFD(fd int, seq uint32, ifindex int, parent uint32, buf []byte) ([]TFilter, error) {
-	if err := sendTcDumpReq(fd, rtmGetTFilter, seq, ifindex, parent); err != nil {
-		return nil, err
-	}
+func dumpTFiltersFromChunks(recv func() ([]byte, error), seq uint32, ifindex int) ([]TFilter, error) {
 	var out []TFilter
 	for {
-		n, _, err := syscall.Recvfrom(fd, buf, 0)
-		if errors.Is(err, syscall.EINTR) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("nlroute: recv: %w", err)
-		}
-		if n <= 0 {
-			return nil, errors.New("nlroute: empty recv")
-		}
-		fs, done, err := parseFilterMsgs(buf[:n])
+		chunk, err := recv()
 		if err != nil {
 			return nil, err
+		}
+		fs, done, perr := parseFilterMsgsSeq(chunk, seq)
+		if perr != nil {
+			return nil, perr
 		}
 		out = append(out, keepFilterIfIndex(fs, ifindex)...)
 		if done {
 			return out, nil
 		}
 	}
+}
+
+func dumpQdiscsOnFD(fd int, seq uint32, ifindex int, buf []byte) ([]Qdisc, error) {
+	if err := sendTcDumpReq(fd, rtmGetQdisc, seq, ifindex, 0); err != nil {
+		return nil, err
+	}
+	return dumpQdiscsFromChunks(func() ([]byte, error) {
+		var n int
+		var err error
+		buf, n, err = recvNetlinkPacket(fd, buf)
+		if err != nil {
+			return nil, fmt.Errorf("nlroute: recv: %w", err)
+		}
+		if n <= 0 {
+			return nil, errors.New("nlroute: empty recv")
+		}
+		return buf[:n], nil
+	}, seq, ifindex)
+}
+
+func dumpTFiltersOnFD(fd int, seq uint32, ifindex int, parent uint32, buf []byte) ([]TFilter, error) {
+	if err := sendTcDumpReq(fd, rtmGetTFilter, seq, ifindex, parent); err != nil {
+		return nil, err
+	}
+	return dumpTFiltersFromChunks(func() ([]byte, error) {
+		var n int
+		var err error
+		buf, n, err = recvNetlinkPacket(fd, buf)
+		if err != nil {
+			return nil, fmt.Errorf("nlroute: recv: %w", err)
+		}
+		if n <= 0 {
+			return nil, errors.New("nlroute: empty recv")
+		}
+		return buf[:n], nil
+	}, seq, ifindex)
 }
 
 // QdiscList 查询 ifindex 的全部 qdisc。错误时返回 (nil, err)。
@@ -375,6 +420,10 @@ func decodeNlMsgError(msg []byte) error {
 // parseQdiscMsgs 解析一段 netlink 报文(可能含多条消息)。
 // 返回 (qdisc 列表, 是否见到 NLMSG_DONE, error)。
 func parseQdiscMsgs(b []byte) ([]Qdisc, bool, error) {
+	return parseQdiscMsgsSeq(b, 0)
+}
+
+func parseQdiscMsgsSeq(b []byte, wantSeq uint32) ([]Qdisc, bool, error) {
 	var out []Qdisc
 	native := binary.LittleEndian
 	for off := 0; off < len(b); {
@@ -384,13 +433,25 @@ func parseQdiscMsgs(b []byte) ([]Qdisc, bool, error) {
 		}
 		msgLen := int(native.Uint32(b[off : off+4]))
 		msgType := native.Uint16(b[off+4 : off+6])
+		msgSeq := native.Uint32(b[off+8 : off+12])
 		if msgLen < nlMsgHdrLen || msgLen > rest {
 			return nil, false, fmt.Errorf("nlroute: bad nlmsg len %d (rest %d)", msgLen, rest)
 		}
 		msg := b[off : off+msgLen]
-		off += alignUp(msgLen, nlMsgAligned)
+		step := alignUp(msgLen, nlMsgAligned)
+		if step <= 0 || off+step > len(b) {
+			off = len(b)
+		} else {
+			off += step
+		}
+
+		if wantSeq != 0 && msgSeq != 0 && msgSeq != wantSeq {
+			continue
+		}
 
 		switch msgType {
+		case syscall.NLMSG_NOOP:
+			continue
 		case nlMsgDone:
 			return out, true, nil
 		case nlMsgError:
@@ -431,6 +492,10 @@ func parseQdiscMsgs(b []byte) ([]Qdisc, bool, error) {
 // parseFilterMsgs 解析 RTM_NEWTFILTER 响应报文(支持 matchall/u32/flower/basic/fw/bpf 及嵌套 mirred 动作)。
 // 任何头部或嵌套 TLV 截断均返回 error, 严禁越界 panic。
 func parseFilterMsgs(b []byte) ([]TFilter, bool, error) {
+	return parseFilterMsgsSeq(b, 0)
+}
+
+func parseFilterMsgsSeq(b []byte, wantSeq uint32) ([]TFilter, bool, error) {
 	var out []TFilter
 	native := binary.LittleEndian
 	for off := 0; off < len(b); {
@@ -440,13 +505,25 @@ func parseFilterMsgs(b []byte) ([]TFilter, bool, error) {
 		}
 		msgLen := int(native.Uint32(b[off : off+4]))
 		msgType := native.Uint16(b[off+4 : off+6])
+		msgSeq := native.Uint32(b[off+8 : off+12])
 		if msgLen < nlMsgHdrLen || msgLen > rest {
 			return nil, false, fmt.Errorf("nlroute: bad nlmsg len %d (rest %d)", msgLen, rest)
 		}
 		msg := b[off : off+msgLen]
-		off += alignUp(msgLen, nlMsgAligned)
+		step := alignUp(msgLen, nlMsgAligned)
+		if step <= 0 || off+step > len(b) {
+			off = len(b)
+		} else {
+			off += step
+		}
+
+		if wantSeq != 0 && msgSeq != 0 && msgSeq != wantSeq {
+			continue
+		}
 
 		switch msgType {
+		case syscall.NLMSG_NOOP:
+			continue
 		case nlMsgDone:
 			return out, true, nil
 		case nlMsgError:

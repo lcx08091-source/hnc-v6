@@ -144,7 +144,7 @@ func runIsolatedGetpropBin(timeout time.Duration, binPath string, args ...string
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := hardenCmd(osExec.CommandContext(ctx, binPath, args...))
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
+	cmd.Env = hubSanitizedAndroidEnv()
 	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
@@ -481,6 +481,7 @@ func (s *server) addDailyJSONLToZip(zw *zip.Writer, prefix, archiveDir string, f
 	fromDay, toDay := keys[0], keys[len(keys)-1]
 
 	scanDirs := []string{
+		selfStudioDir(s.hncDir),
 		filepath.Join(s.hncDir, "data", "dpi_history"),
 		filepath.Join(s.hncDir, "data"),
 		filepath.Join(s.hncDir, "run"),

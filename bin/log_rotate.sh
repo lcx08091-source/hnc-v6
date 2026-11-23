@@ -47,6 +47,8 @@ unset _he _he_loaded
 DEFAULT_SIZE_LIMIT=1048576          # 1 MB
 EXPORTS_MAX_FILES=${HNC_EXPORTS_MAX_FILES:-10}
 EXPORTS_MAX_BYTES=${HNC_EXPORTS_MAX_BYTES:-134217728}  # 128 MB
+SELF_STUDIO_MAX_BYTES=${HNC_SELF_STUDIO_MAX_BYTES:-25165824}  # 24 MB 硬上限
+STALE_TMP_MAX_AGE=${HNC_TMP_MAX_AGE_SEC:-600}                 # 10 分钟陈旧 .tmp 阈值
 
 # 防 mksh 32 位有符号整数(>2.14GB)溢出的十进制无符号小于比较
 uint_lt() {
@@ -76,24 +78,108 @@ get_size() {
 rotate_one() {
     local f=$1
     local limit=${2:-$DEFAULT_SIZE_LIMIT}
-    local sz
+    local sz tmp
     sz=$(get_size "$f")
 
-    # 未达阈值 → 什么都不做(使用无符号比较防止 >2.14GB 溢出为负数漏转)
+    # 未达阈值或空文件 → 什么都不做(使用无符号比较防止 >2.14GB 溢出为负数漏转)
+    [ "$sz" = "0" ] && return 0
     uint_lt "$sz" "$limit" && return 0
 
-    rm -f "$f.2" 2>/dev/null
-    [ -f "$f.1" ] && mv "$f.1" "$f.2" 2>/dev/null
-
-    # v5.9.3 BUG-014: .log → .1 用 copytruncate, cp 失败绝不截断原文件
-    if cp "$f" "$f.1" 2>/dev/null; then
-        chmod 644 "$f.1" 2>/dev/null
-        : > "$f" 2>/dev/null
+    # v5.9.3 BUG-014 + v6.1.0-rc.4: 先写临时副本校验非空再原子替换 .1, 写失败立即清理 tmp 且绝不截断原文件
+    tmp="${f}.1.tmp.$$"
+    if cp "$f" "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        rm -f "$f.2" 2>/dev/null
+        [ -f "$f.1" ] && mv -f "$f.1" "$f.2" 2>/dev/null
+        if mv -f "$tmp" "$f.1" 2>/dev/null; then
+            chmod 644 "$f.1" 2>/dev/null
+            : > "$f" 2>/dev/null
+        else
+            rm -f "$tmp" 2>/dev/null
+            return 1
+        fi
     else
+        rm -f "$tmp" 2>/dev/null
         return 1
     fi
 
     chmod 644 "$f" 2>/dev/null
+    return 0
+}
+
+# prune_stale_tmp_files — 清理 run/ 与 data/(含子目录)下修改时间超过 10 分钟的陈旧 *.tmp* 孤儿文件
+prune_stale_tmp_files() {
+    local _now _d _f _mt _age
+    _now=$(date +%s 2>/dev/null | tr -dc '0-9')
+    for _d in "$HNC_DIR/run" "$HNC_DIR/data"; do
+        [ -d "$_d" ] || continue
+        if [ -n "$_now" ] && [ "$_now" -gt 0 ] 2>/dev/null; then
+            find "$_d" -type f \( -name '*.tmp*' -o -name '.*.hnc_json*' -o -name 'hnc_json_literal.*' \) 2>/dev/null | while IFS= read -r _f; do
+                [ -n "$_f" ] && [ -f "$_f" ] || continue
+                _mt=$(stat -c %Y "$_f" 2>/dev/null | tr -dc '0-9')
+                if [ -n "$_mt" ] && [ "$_mt" -gt 0 ] 2>/dev/null; then
+                    _age=$((_now - _mt))
+                    if [ "$_age" -gt "$STALE_TMP_MAX_AGE" ]; then
+                        rm -f "$_f" 2>/dev/null || true
+                    fi
+                fi
+            done
+        else
+            find "$_d" -type f \( -name '*.tmp*' -o -name '.*.hnc_json*' -o -name 'hnc_json_literal.*' \) -mmin +10 -exec rm -f {} \; 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# prune_self_studio_dir — 守住 data/self_studio 总体积硬上限(默认 24MB, 超限时按最旧文件优先轮转淘汰)
+prune_self_studio_dir() {
+    local ss_dir="${HNC_SELF_STUDIO_DIR:-$HNC_DIR/data/self_studio}"
+    [ -d "$ss_dir" ] || return 0
+    local _f _mt _sz
+    find "$ss_dir" -type f ! -name '*.tmp*' 2>/dev/null | while IFS= read -r _f; do
+        [ -n "$_f" ] && [ -f "$_f" ] || continue
+        _mt=$(stat -c %Y "$_f" 2>/dev/null | tr -dc '0-9')
+        _sz=$(get_size "$_f")
+        printf '%s\t%s\t%s\n' "${_mt:-0}" "${_sz:-0}" "$_f"
+    done | sort -t "$(printf '\t')" -k1,1n -k3,3 | awk -F '\t' -v max_b="$SELF_STUDIO_MAX_BYTES" '
+        BEGIN { max_b += 0; n = 0; total = 0 }
+        NF >= 3 {
+            n++
+            sz[n] = $2 + 0
+            fp[n] = $3
+            total += sz[n]
+        }
+        END {
+            if (total <= max_b) exit 0
+            for (i = 1; i <= n && total > max_b; i++) {
+                if (i < n) {
+                    printf "DEL\t%s\n", fp[i]
+                    total -= sz[i]
+                } else if (sz[i] > max_b) {
+                    keep_b = int(max_b / 2)
+                    if (keep_b < 1) keep_b = 1
+                    printf "TRUNC\t%d\t%s\n", keep_b, fp[i]
+                }
+            }
+        }
+    ' | while IFS="$(printf '\t')" read -r _act _arg1 _arg2; do
+        case "$_act" in
+            DEL)
+                [ -n "$_arg1" ] && rm -f "$_arg1" 2>/dev/null || true
+                ;;
+            TRUNC)
+                if [ -n "$_arg2" ] && [ -f "$_arg2" ]; then
+                    _stmp="${_arg2}.tmp.$$"
+                    if tail -c "$_arg1" "$_arg2" > "$_stmp" 2>/dev/null && [ -s "$_stmp" ]; then
+                        cat "$_stmp" > "$_arg2" 2>/dev/null || mv -f "$_stmp" "$_arg2" 2>/dev/null || : > "$_arg2" 2>/dev/null
+                        rm -f "$_stmp" 2>/dev/null || true
+                    else
+                        rm -f "$_stmp" 2>/dev/null || true
+                        : > "$_arg2" 2>/dev/null || true
+                    fi
+                fi
+                ;;
+        esac
+    done
     return 0
 }
 
@@ -125,9 +211,10 @@ prune_exports_dir() {
     return 0
 }
 
-# rotate_all_logs — 扫 $HNC_DIR/logs/*.log + 轮转 run/m4_go_write.log + 清理 exports/
+# rotate_all_logs — 扫 $HNC_DIR/logs/*.log + 轮转 run/m4_go_write.log + 清陈旧 .tmp + 控 self_studio/exports 配额
 rotate_all_logs() {
     local dir="$HNC_DIR/logs"
+    prune_stale_tmp_files
     if [ -d "$dir" ]; then
         for f in "$dir"/*.log; do
             [ -f "$f" ] || continue
@@ -137,6 +224,7 @@ rotate_all_logs() {
     if [ -f "$HNC_DIR/run/m4_go_write.log" ]; then
         rotate_one "$HNC_DIR/run/m4_go_write.log" "${HNC_M4_LOG_MAX_BYTES:-$DEFAULT_SIZE_LIMIT}" || true
     fi
+    prune_self_studio_dir
     prune_exports_dir
     return 0
 }
@@ -150,7 +238,7 @@ case "$1" in
     "")
         echo "Usage:"
         echo "  log_rotate.sh <file> [size_bytes]"
-        echo "  log_rotate.sh check                  # rotate all logs/*.log + m4_go_write.log + prune exports/"
+        echo "  log_rotate.sh check                  # rotate all logs/*.log + m4_go_write.log + prune .tmp/self_studio/exports"
         exit 1
         ;;
     *)

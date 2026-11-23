@@ -69,64 +69,80 @@ func ctNewSetActive(v bool) {
 	ctNewEvents.mu.Unlock()
 }
 
-func openCtNewSocket() (int, error) {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, nlNetfilter)
-	if err != nil {
-		return -1, err
-	}
-	sa := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Groups: 1 << (nfnlGrpConntrackNew - 1)}
-	if err := syscall.Bind(fd, sa); err != nil {
-		_ = syscall.Close(fd)
-		return -1, err
-	}
-	if syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, ctNewRcvBuf) != nil {
-		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, ctNewRcvBuf)
-	}
-	tv := syscall.Timeval{Sec: 1}
-	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
-	return fd, nil
+var ctOpenNewSubFn = func() (*netlinkSubConn, error) {
+	return openNetlinkSubConn(nlNetfilter, 1<<(nfnlGrpConntrackNew-1), ctNewRcvBuf, "netlink-ct-new")
 }
 
-// CtNewEventLoop 后台订阅 conntrack NEW 事件(失败每 60s 重试)
+// CtNewEventLoop 后台订阅 conntrack NEW 事件:
+//   - 热点关闭待机(lvlHotspotOff 且非仿真态)时主动关闭 socket 并阻塞在 activityChanged(), 0 唤醒;
+//   - 连接期走 SOCK_NONBLOCK + Go runtime epoll netpoll, 移除 1s SO_RCVTIMEO 轮询。
 func (s *server) CtNewEventLoop(stop <-chan struct{}) {
 	buf := make([]byte, 256*1024)
 	lastErr := ""
 	for {
-		fd, err := openCtNewSocket()
+		select {
+		case <-stop:
+			ctNewSetActive(false)
+			return
+		default:
+		}
+		if s.netlinkShouldSleep() {
+			ctNewSetActive(false)
+			ch := activityChanged()
+			if s.netlinkShouldSleep() {
+				select {
+				case <-stop:
+					return
+				case <-ch:
+					continue
+				}
+			}
+		}
+
+		conn, err := ctOpenNewSubFn()
 		if err != nil {
 			ctNewSetActive(false)
 			if err.Error() != lastErr {
 				lastErr = err.Error()
 				log.Printf("ident: conntrack NEW events unavailable (%v), co-occurrence uses 10s poll granularity", err)
 			}
-			select {
-			case <-stop:
+			if !waitNetlinkRetryOrWake(stop, ctEventRetryAfterFailure) {
 				return
-			case <-time.After(ctEventRetryAfterFailure):
-				continue
 			}
+			continue
 		}
+
 		ctNewSetActive(true)
 		lastErr = ""
-		fatal := false
-		for !fatal {
-			select {
-			case <-stop:
-				_ = syscall.Close(fd)
-				ctNewSetActive(false)
-				return
-			default:
-			}
-			n, _, rerr := syscall.Recvfrom(fd, buf, 0)
+		sessDone := make(chan struct{})
+		go s.watchNetlinkSession(stop, sessDone, conn)
+
+		recvFailed := false
+		for {
+			n, rerr := conn.f.Read(buf)
 			now := time.Now()
 			if rerr != nil {
+				select {
+				case <-stop:
+					close(sessDone)
+					_ = conn.Close()
+					ctNewSetActive(false)
+					return
+				default:
+				}
+				if s.netlinkShouldSleep() || isNetlinkStopOrClosedErr(rerr) {
+					break
+				}
 				switch {
 				case errors.Is(rerr, syscall.EAGAIN), errors.Is(rerr, syscall.EINTR), errors.Is(rerr, syscall.ENOBUFS):
 					continue // 溢出只丢这批事件: 那些连接退回 10 秒粒度
 				default:
-					fatal = true
-					continue
+					recvFailed = true
 				}
+				break
+			}
+			if n <= 0 {
+				continue
 			}
 			msgs, perr := syscall.ParseNetlinkMessage(buf[:n])
 			if perr != nil {
@@ -138,12 +154,15 @@ func (s *server) CtNewEventLoop(stop <-chan struct{}) {
 				}
 			}
 		}
-		_ = syscall.Close(fd)
+
+		close(sessDone)
+		_ = conn.Close()
 		ctNewSetActive(false)
-		select {
-		case <-stop:
+		if !recvFailed {
+			continue
+		}
+		if !waitNetlinkRetryOrWake(stop, 5*time.Second) {
 			return
-		case <-time.After(5 * time.Second):
 		}
 	}
 }

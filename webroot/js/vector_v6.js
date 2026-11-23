@@ -1,4 +1,4 @@
-/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.3 · 智能护航、隐私明文安检与连接排障中心
+/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.4 · 智能护航、隐私明文安检与连接排障中心
  * 设计准则:
  *   1. 3秒简易认知渐进披露: 顶部一句话人话态势 + 3格控制中心磁贴 + 三大场景切换(网速护航 / 隐私安检 / 连接排障) + 高级参数按需折叠。
  *   2. 100% 真实后端能力闭环: 完整对接 /api/vector_sync、LeakGuard(含白名单/三级守卫/撤销栈)、Express、UpdateLeash、ThermoCruise、FlowScalpel、Blackbox(四维归因)、MultiIface、NativeSubtrees 与 ConfigVault。
@@ -164,7 +164,10 @@ var V6 = {
     low_bat_pct: 20,
     temp_c: 0,
     capacity_pct: 0,
-    bat_available: false,
+    bat_available: null,
+    sensor_checked: false,
+    reason_code: '',
+    reason_zh: '',
     bat_status: '',
     is_charging: false,
     vector_express_active: false,
@@ -174,7 +177,7 @@ var V6 = {
     cool_hold_remaining_sec: 0,
     raw_stage: 0,
     stage: 0,
-    stage_label: '正常'
+    stage_label: '待读取'
   },
   scalpel: {
     open: false,
@@ -201,7 +204,17 @@ var V6 = {
     total_ticks: 0,
     incident_count: 0,
     latest_jitter_ms: 0,
+    latest_rtt_ms: 0,
+    rtt_probe_active: null,
     incidents: []
+  },
+  arbiter: {
+    active: false,
+    source: '',
+    reason: '',
+    down_mbps: 0,
+    up_mbps: 0,
+    sources: []
   },
   multiIface: {
     primary_downstream: '',
@@ -732,8 +745,18 @@ function v6ApplyLeashData(r, forceAccept) {
 }
 
 /* ── ThermoCruise 数据归一化 ── */
+function v6IsThermoSensorUnreadable(th) {
+  th = th || V6.thermo || {};
+  var rc = String(th.reason_code || '').toLowerCase();
+  if (rc && /unreadable|unavailable|sensor|out_of_range|out_of_bounds|invalid_temp|fuse|trip|missing|nan/.test(rc)) return true;
+  if (th.bat_available === false) return true;
+  return false;
+}
+
 function v6ThermoStageZh(stage) {
   if (!V6.thermo.enabled) return '已关闭';
+  if (v6IsThermoSensorUnreadable(V6.thermo)) return '温度传感器不可读（已安全跳过控温）';
+  if (V6.thermo.bat_available === null && !(V6.thermo.temp_c > 0)) return '待读取';
   if (stage >= 2) return '高温降温中';
   if (stage === 1) return '一级省电中';
   return '温度正常';
@@ -761,8 +784,23 @@ function v6ApplyThermoData(r, forceAccept) {
     V6.thermo.low_bat_pct = clamp(Math.round(num(r.low_bat_pct != null ? r.low_bat_pct : cfg.low_bat_pct, 20)), 1, 80);
   }
 
+  V6.thermo.sensor_checked = true;
+  if (r.reason_code != null || (bat && bat.reason_code != null)) {
+    V6.thermo.reason_code = String(r.reason_code != null ? r.reason_code : bat.reason_code).trim();
+  }
+  if (r.reason_zh != null || r.reason != null || (bat && (bat.reason_zh != null || bat.reason != null))) {
+    V6.thermo.reason_zh = String(r.reason_zh || r.reason || (bat && (bat.reason_zh || bat.reason)) || '').trim();
+  }
+
+  if (typeof r.bat_available === 'boolean') {
+    V6.thermo.bat_available = r.bat_available;
+  } else if (bat && typeof bat.available === 'boolean') {
+    V6.thermo.bat_available = bat.available;
+  } else if (r.temp_c != null && isFinite(Number(r.temp_c)) && Number(r.temp_c) > 0 && Number(r.temp_c) < 95) {
+    V6.thermo.bat_available = true;
+  }
+
   if (bat) {
-    V6.thermo.bat_available = bat.available === true;
     if (bat.temp_c != null) V6.thermo.temp_c = num(bat.temp_c);
     if (bat.capacity_pct != null) V6.thermo.capacity_pct = clamp(Math.round(num(bat.capacity_pct)), 0, 100);
     if (bat.status != null) V6.thermo.bat_status = String(bat.status);
@@ -782,13 +820,19 @@ function v6ApplyThermoData(r, forceAccept) {
   if (typeof r.low_battery_cruise === 'boolean') V6.thermo.low_battery_cruise = r.low_battery_cruise;
   if (r.cool_hold_remaining_sec != null) V6.thermo.cool_hold_remaining_sec = Math.max(0, Math.round(num(r.cool_hold_remaining_sec)));
 
-  var effStg = r.effective_stage != null ? Math.round(num(r.effective_stage)) : (r.raw_thermal_stage != null ? Math.round(num(r.raw_thermal_stage)) : null);
-  if (r.raw_thermal_stage != null) V6.thermo.raw_stage = Math.round(num(r.raw_thermal_stage));
-  if (effStg != null) {
-    V6.thermo.stage = clamp(effStg, 0, 2);
+  if (v6IsThermoSensorUnreadable(V6.thermo)) {
+    V6.thermo.temp_c = 0;
+    V6.thermo.raw_stage = 0;
+    V6.thermo.stage = 0;
   } else {
-    var tc = V6.thermo.temp_c;
-    V6.thermo.stage = !V6.thermo.enabled ? 0 : (tc >= V6.thermo.stage2_temp_c ? 2 : (tc >= V6.thermo.stage1_temp_c ? 1 : 0));
+    var effStg = r.effective_stage != null ? Math.round(num(r.effective_stage)) : (r.raw_thermal_stage != null ? Math.round(num(r.raw_thermal_stage)) : null);
+    if (r.raw_thermal_stage != null) V6.thermo.raw_stage = Math.round(num(r.raw_thermal_stage));
+    if (effStg != null) {
+      V6.thermo.stage = clamp(effStg, 0, 2);
+    } else {
+      var tc = V6.thermo.temp_c;
+      V6.thermo.stage = !V6.thermo.enabled || !(tc > 0) ? 0 : (tc >= V6.thermo.stage2_temp_c ? 2 : (tc >= V6.thermo.stage1_temp_c ? 1 : 0));
+    }
   }
   V6.thermo.stage_label = v6ThermoStageZh(V6.thermo.stage);
   V6._committed.thermo = {
@@ -871,9 +915,13 @@ function v6ApplyScalpelData(r, isDrawerScoped) {
 
 function v6ApplyBlackboxData(r) {
   if (!r || typeof r !== 'object') return;
+  var sumObj = (r.summary && typeof r.summary === 'object') ? r.summary : r;
+  if (typeof r.rtt_probe_active === 'boolean') V6.blackbox.rtt_probe_active = r.rtt_probe_active;
+  else if (typeof sumObj.rtt_probe_active === 'boolean') V6.blackbox.rtt_probe_active = sumObj.rtt_probe_active;
   if (r.granularity_ms != null) V6.blackbox.granularity_ms = Math.max(50, Math.round(num(r.granularity_ms, 200)));
   if (r.total_ticks != null) V6.blackbox.total_ticks = Math.max(0, Math.round(num(r.total_ticks, 0)));
   if (r.latest_jitter_ms != null) V6.blackbox.latest_jitter_ms = Math.max(0, num(r.latest_jitter_ms, 0));
+  if (r.latest_rtt_ms != null) V6.blackbox.latest_rtt_ms = Math.max(0, num(r.latest_rtt_ms, 0));
   if (Array.isArray(r.incidents)) {
     V6.blackbox.incidents = r.incidents.slice(0, 12);
     V6.blackbox.incident_count = r.incident_count != null ? Math.round(num(r.incident_count)) : r.incidents.length;
@@ -881,6 +929,119 @@ function v6ApplyBlackboxData(r) {
     V6.blackbox.incident_count = Math.max(0, Math.round(num(r.incident_count)));
   }
 }
+
+var V6_ARBITER_SRC_ZH = {
+  thermo: '发热温控巡航',
+  thermo_cruise: '发热温控巡航',
+  thermal: '发热温控巡航',
+  autorate: '5G 自适应总带宽',
+  '5g_autorate': '5G 自适应总带宽',
+  global_shaper: '热点总网速上限',
+  manual: '手动总带宽上限'
+};
+
+function v6ArbiterSrcZh(s) {
+  var k = String(s || '').trim();
+  if (!k) return '';
+  var low = k.toLowerCase();
+  return V6_ARBITER_SRC_ZH[low] || k;
+}
+
+function v6ApplyArbiterData(arb, liveObj) {
+  var lv = liveObj || (typeof S !== 'undefined' && S.live) || {};
+  var srcArr = [];
+  var rawList = (arb && Array.isArray(arb.sources) ? arb.sources : null) ||
+    (arb && Array.isArray(arb.throttle_sources) ? arb.throttle_sources : null) ||
+    (Array.isArray(lv.throttle_sources) ? lv.throttle_sources : []);
+
+  rawList.forEach(function (it) {
+    if (!it) return;
+    if (typeof it === 'string') {
+      var st = it.trim();
+      if (st) srcArr.push({ source: st, label: v6ArbiterSrcZh(st), reason: '', down_mbps: 0, active: true });
+      return;
+    }
+    if (typeof it === 'object') {
+      if (it.active === false) return;
+      var sKey = String(it.source || it.id || it.name || '').trim();
+      var dMbps = it.down_mbps != null ? num(it.down_mbps, 0) : (it.down_kbps != null ? num(it.down_kbps, 0) / 1000 : (it.ceil_kbps != null ? num(it.ceil_kbps, 0) / 1000 : 0));
+      srcArr.push({
+        source: sKey,
+        label: String(it.label || v6ArbiterSrcZh(sKey) || '自动控速'),
+        reason: String(it.reason_zh || it.reason || it.detail || '').trim(),
+        down_mbps: dMbps > 0 ? dMbps : 0,
+        active: true
+      });
+    }
+  });
+
+  var winSrc = String((arb && (arb.active_source || arb.winner || arb.source)) || (lv.active_limiter_source || '')).trim();
+  var reasonStr = String(
+    (arb && (arb.active_limiter_reason || arb.active_reason || arb.reason_zh || arb.reason || arb.summary)) ||
+    lv.active_limiter_reason ||
+    ''
+  ).trim();
+  var downMbps = 0, upMbps = 0;
+  if (arb) {
+    if (arb.effective_down_mbps != null || arb.ceil_mbps != null || arb.down_mbps != null) {
+      downMbps = num(arb.effective_down_mbps != null ? arb.effective_down_mbps : (arb.ceil_mbps != null ? arb.ceil_mbps : arb.down_mbps), 0);
+    } else if (arb.effective_down_kbps != null || arb.ceil_kbps != null || arb.down_kbps != null) {
+      downMbps = num(arb.effective_down_kbps != null ? arb.effective_down_kbps : (arb.ceil_kbps != null ? arb.ceil_kbps : arb.down_kbps), 0) / 1000;
+    }
+    if (arb.effective_up_mbps != null || arb.up_mbps != null) {
+      upMbps = num(arb.effective_up_mbps != null ? arb.effective_up_mbps : arb.up_mbps, 0);
+    } else if (arb.effective_up_kbps != null || arb.up_kbps != null) {
+      upMbps = num(arb.effective_up_kbps != null ? arb.effective_up_kbps : arb.up_kbps, 0) / 1000;
+    }
+  }
+
+  var isAct = false;
+  if (arb && typeof arb.active === 'boolean') isAct = arb.active;
+  else if (arb && typeof arb.limiting === 'boolean') isAct = arb.limiting;
+  else isAct = Boolean(reasonStr || srcArr.length > 0 || (winSrc && winSrc.toLowerCase() !== 'none' && winSrc.toLowerCase() !== 'idle'));
+
+  if (!isAct && !reasonStr && !srcArr.length) {
+    V6.arbiter = { active: false, source: '', reason: '', down_mbps: 0, up_mbps: 0, sources: [] };
+    return;
+  }
+
+  if (!winSrc && srcArr.length) winSrc = srcArr[0].source || srcArr[0].label;
+  if (!reasonStr && srcArr.length) {
+    reasonStr = srcArr.map(function (x) {
+      var seg = x.reason || x.label;
+      if (x.down_mbps > 0 && seg.indexOf('Mbps') < 0) seg += '（上限 ' + trim0(x.down_mbps.toFixed(1)) + ' Mbps）';
+      return seg;
+    }).filter(Boolean).join('；');
+  }
+
+  V6.arbiter = {
+    active: isAct,
+    source: winSrc,
+    reason: reasonStr,
+    down_mbps: downMbps > 0 ? downMbps : 0,
+    up_mbps: upMbps > 0 ? upMbps : 0,
+    sources: srcArr
+  };
+}
+
+function v6ActiveLimiterInfo() {
+  var lv = (typeof S !== 'undefined' && S.live) || {};
+  if (!V6._rawSyncArbiter || lv.active_limiter_reason != null || Array.isArray(lv.throttle_sources) || lv.arbiter) {
+    v6ApplyArbiterData(V6._rawSyncArbiter || lv.arbiter || null, lv);
+    if (V6._rawSyncArbiter && V6.arbiter.active) V6.arbiter._fromSync = true;
+  }
+  var ab = V6.arbiter || {};
+  if (!ab.active && !ab.reason && !(ab.sources && ab.sources.length)) return null;
+  return {
+    active: true,
+    sourceLabel: v6ArbiterSrcZh(ab.source) || (ab.sources && ab.sources[0] && ab.sources[0].label) || '自动总带宽仲裁',
+    reason: ab.reason || v6ArbiterSrcZh(ab.source) || '总带宽自动压速保护生效中',
+    down_mbps: ab.down_mbps || 0,
+    up_mbps: ab.up_mbps || 0,
+    sources: ab.sources || []
+  };
+}
+window.v6ActiveLimiterInfo = v6ActiveLimiterInfo;
 
 function v6ApplyMultiIfaceData(r) {
   if (!r || typeof r !== 'object') return;
@@ -927,12 +1088,19 @@ function v6IngestVectorSync(r) {
   var ulSrc = r.update_leash || ext.update_leash || v.update_leash || v.leash;
   var thSrc = r.thermo || ext.thermo || v.thermo || v.thermo_cruise;
   var scSrc = r.scalpel || ext.scalpel || v.scalpel;
+  var bbSrc = r.blackbox || ext.blackbox || v.blackbox;
+  var arbSrc = ext.arbiter || r.arbiter || v.arbiter || null;
 
   if (lgSrc) v6ApplyLeakGuardData(lgSrc, false);
   if (exSrc) v6ApplyExpressData(exSrc, false);
   if (ulSrc) v6ApplyLeashData(ulSrc, false);
   if (thSrc) v6ApplyThermoData(thSrc, false);
   if (scSrc) v6ApplyScalpelData(scSrc, false);
+  if (bbSrc) v6ApplyBlackboxData(bbSrc);
+
+  V6._rawSyncArbiter = arbSrc;
+  v6ApplyArbiterData(arbSrc, r.live || S.live);
+  if (arbSrc) V6.arbiter._fromSync = true;
 
   var pk = (ext.v6_pack && typeof ext.v6_pack === 'object') ? ext.v6_pack : ((r.v6_pack && typeof r.v6_pack === 'object') ? r.v6_pack : null);
   if (pk) v6ApplyScreenshotPackSummary(pk);
@@ -1119,16 +1287,21 @@ function v6DevicesStripHtml() {
   var leashCnt = V6.leash.enabled ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
   var unreadLg = v6UnreadLeakHits();
   var totalLg = num(V6.lg.total_hits, 0);
-  var tempTxt = V6.thermo.temp_c > 0 ? (V6.thermo.temp_c.toFixed(1) + '°C') : '';
+  var sensorUnreadable = v6IsThermoSensorUnreadable(V6.thermo);
+  var tempTxt = (!sensorUnreadable && V6.thermo.bat_available !== false && V6.thermo.temp_c > 0) ? (V6.thermo.temp_c.toFixed(1) + '°C') : '';
+  var arbInfo = v6ActiveLimiterInfo();
 
   var parts = [];
   var dotCls = 'ok';
   if (S.coreHealthy === false) {
     parts.push('部分后台组件降级运行');
     dotCls = 'bad';
-  } else if (V6.thermo.enabled && V6.thermo.stage >= 2) {
+  } else if (V6.thermo.enabled && !sensorUnreadable && V6.thermo.stage >= 2) {
     parts.push('机身偏热已启动降温保护' + (tempTxt ? '（' + tempTxt + '）' : ''));
     dotCls = 'bad';
+  } else if (arbInfo && arbInfo.active) {
+    parts.push('总带宽压速：' + arbInfo.sourceLabel);
+    dotCls = 'warn';
   } else if (escortCnt > 0) {
     parts.push('正在为 ' + escortCnt + ' 台设备优先护航');
   } else {
@@ -1223,7 +1396,7 @@ function v6RenderLatencyCompareHtml() {
   var baseRtt = num(ar.base_rtt_ms, 0);
   var curRtt = num(ar.rtt_ms, 0);
   var hasRealRtt = baseRtt > 0 && curRtt > 0;
-  var jitterMs = num(bb.latest_jitter_ms, 0);
+  var jitterMs = bb.rtt_probe_active === false ? 0 : num(bb.latest_jitter_ms, 0);
   var incCnt = Math.round(num(bb.incident_count, 0));
 
   if (!hasRealRtt && !(jitterMs > 0) && !(incCnt > 0)) {
@@ -1252,7 +1425,7 @@ function v6HeroHeadlineInfo() {
   if (S.coreHealthy === false) {
     return { dot: 'bad', title: '部分底层服务异常，已自动隔离降级', sub: '热点基础联网不受影响，点击右侧状态按钮可查看具体模块' };
   }
-  if (V6.thermo.enabled && V6.thermo.stage >= 2) {
+  if (V6.thermo.enabled && !v6IsThermoSensorUnreadable(V6.thermo) && V6.thermo.stage >= 2) {
     return { dot: 'bad', title: '手机温度偏高（' + V6.thermo.temp_c.toFixed(1) + '°C），正在自动降载降温', sub: '已温和收紧后台大流量下载，防止系统过热强关热点' };
   }
   if (escortCnt > 0 && leashCnt > 0) {
@@ -1289,6 +1462,27 @@ function v6BulkheadHumanHtml() {
     (upMin > 0 ? '<span class="note" style="margin:0">已稳定运行 ' + upMin + ' 分钟</span>' : '');
 }
 
+function v6RenderArbiterBarHtml() {
+  var arb = v6ActiveLimiterInfo();
+  if (!arb || !arb.active) return '';
+  var ceilParts = [];
+  if (arb.down_mbps > 0) ceilParts.push('下行上限 ' + trim0(arb.down_mbps.toFixed(1)) + ' Mbps');
+  if (arb.up_mbps > 0) ceilParts.push('上行上限 ' + trim0(arb.up_mbps.toFixed(1)) + ' Mbps');
+  var srcExtra = (arb.sources && arb.sources.length > 1)
+    ? (' · 参与仲裁：' + arb.sources.map(function (s) { return s.label; }).filter(Boolean).join(' / '))
+    : '';
+  return '<div class="v6-lat-cmp" data-mkey="v6-arbiter-bar">' +
+    '<div class="v6-lat-top">' +
+      '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        '<span class="v6-dot warn"></span>' +
+        '<b>当前总带宽压速来源：' + escapeHtml(arb.sourceLabel) + '</b>' +
+      '</div>' +
+      (ceilParts.length ? '<span class="v6-mono-badge b-warn">' + escapeHtml(ceilParts.join(' · ')) + '</span>' : '<span class="v6-mono-badge b-warn">自动控速生效中</span>') +
+    '</div>' +
+    '<div class="note" style="margin:4px 0 0;color:var(--text-2)">' + escapeHtml(arb.reason + srcExtra) + '</div>' +
+  '</div>';
+}
+
 function v6RenderHeroCardHtml() {
   var hl = v6HeroHeadlineInfo();
   var allOk = S.coreHealthy !== false;
@@ -1300,9 +1494,14 @@ function v6RenderHeroCardHtml() {
   var leashActCnt = V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length;
   var leashSub = !V6.leash.enabled ? '点击开启' : (leashActCnt > 0 ? ('限速中 ' + leashActCnt + ' 项') : ('超 ' + V6.leash.grace_mb + 'MB 限速'));
 
-  var tempStr = V6.thermo.temp_c > 0 ? (V6.thermo.temp_c.toFixed(1) + '°C') : '待采样';
-  var thSub = !V6.thermo.enabled ? (tempStr + ' · 已关') : (tempStr + ' · ' + (V6.thermo.stage >= 2 ? '降温中' : (V6.thermo.stage === 1 ? '省电中' : '正常')));
-  var thTone = V6.thermo.stage >= 2 ? ' is-hot' : (V6.thermo.stage === 1 ? ' is-warn' : '');
+  var sensorUnreadable = v6IsThermoSensorUnreadable(V6.thermo);
+  var tempStr = sensorUnreadable ? '传感器不可读' : (V6.thermo.temp_c > 0 ? (V6.thermo.temp_c.toFixed(1) + '°C') : '待采样');
+  var thSub = !V6.thermo.enabled
+    ? (tempStr + ' · 已关')
+    : (sensorUnreadable
+      ? '已安全跳过控温'
+      : (tempStr + ' · ' + (V6.thermo.stage >= 2 ? '降温中' : (V6.thermo.stage === 1 ? '省电中' : (V6.thermo.temp_c > 0 ? '正常' : '待读取')))));
+  var thTone = (!sensorUnreadable && V6.thermo.stage >= 2) ? ' is-hot' : ((!sensorUnreadable && V6.thermo.stage === 1) ? ' is-warn' : '');
 
   var lgTotal = num(V6.lg.total_hits, 0);
   var lgUnread = v6UnreadLeakHits();
@@ -1325,6 +1524,7 @@ function v6RenderHeroCardHtml() {
       '</div>' +
     '</div>' +
     '<div class="v6-health-drawer" id="v6-health-drawer"' + (showHealth ? '' : ' hidden') + '>' + v6BulkheadHumanHtml() + '</div>' +
+    v6RenderArbiterBarHtml() +
     '<div class="v6-bento-grid" role="group" aria-label="核心护航快捷控制">' +
       '<div class="v6-bento is-exp press' + (V6.express.enabled ? ' on' : '') + '" data-v6-bento-nav="express" role="button" tabindex="0" aria-label="查看游戏通话优先详情">' +
         '<div class="v6-bento-top"><span class="v6-bento-ic">' + v6Svg('express') + '</span><button type="button" class="v6-bento-sw" data-v6-bento="express" aria-pressed="' + V6.express.enabled + '" title="点按快速开关">' + (V6.express.enabled ? '已开启' : '已关闭') + '</button></div>' +
@@ -1519,12 +1719,22 @@ function v6RenderLeashCardHtml() {
 
 function v6RenderThermoCardHtml() {
   var th = V6.thermo;
-  var tempStr = th.temp_c > 0 ? (th.temp_c.toFixed(1) + ' °C') : '待读取';
-  var batStr = th.capacity_pct > 0 ? (th.capacity_pct + '%') : '—';
-  var stBadgeCls = !th.enabled ? '' : (th.stage >= 2 ? 'b-bad' : (th.stage === 1 ? 'b-warn' : 'b-ok'));
+  var sensorUnreadable = v6IsThermoSensorUnreadable(th);
+  var hasTemp = !sensorUnreadable && th.bat_available !== false && th.temp_c > 0;
+  var tempStr = hasTemp ? (th.temp_c.toFixed(1) + ' °C') : '待读取';
+  var batStr = th.capacity_pct > 0 ? (th.capacity_pct + '%') : '';
+  var stBadgeCls = !th.enabled || sensorUnreadable || !hasTemp
+    ? ''
+    : (th.stage >= 2 ? 'b-bad' : (th.stage === 1 ? 'b-warn' : 'b-ok'));
+  var stDotCls = !th.enabled || sensorUnreadable || !hasTemp
+    ? 'idle'
+    : (th.stage >= 2 ? 'bad' : (th.stage === 1 ? 'warn' : 'ok'));
 
   var exemptNote = '';
-  if (th.enabled && th.raw_stage >= 2 && th.stage < 2 && th.stage2_exempt) {
+  if (sensorUnreadable) {
+    var sensorHint = th.reason_zh || (th.reason_code ? ('诊断码：' + th.reason_code) : '内核电池温控节点未暴露或读数越界，已安全跳过温控降速保护');
+    exemptNote = '<div class="note" style="margin:0;color:var(--text-3)">' + escapeHtml(sensorHint) + '</div>';
+  } else if (th.enabled && th.raw_stage >= 2 && th.stage < 2 && th.stage2_exempt) {
     exemptNote = '<div class="note" style="margin:0;color:var(--badge-warn)">机身温度已达二级降温线，因当前正在' + (th.is_charging ? '充电' : '游戏/通话优先护航') + '，暂不限制网速以保证体验</div>';
   } else if (th.cool_hold_remaining_sec > 0) {
     exemptNote = '<div class="note" style="margin:0">温度正在回落，稳态观察剩余 ' + th.cool_hold_remaining_sec + ' 秒（防止临界温度反复跳变）</div>';
@@ -1533,7 +1743,7 @@ function v6RenderThermoCardHtml() {
   return '<article class="glass v6-card" id="v6-card-thermo">' +
     '<div class="v6-card-head">' +
       '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb ' + (th.stage >= 2 ? 'red' : (th.stage === 1 ? 'orange' : 'purple')) + '">' + v6Svg('thermo') + '</span>' +
+        '<span class="v6-orb ' + (!sensorUnreadable && th.stage >= 2 ? 'red' : (!sensorUnreadable && th.stage === 1 ? 'orange' : 'purple')) + '">' + v6Svg('thermo') + '</span>' +
         '<div>' +
           '<div class="v6-card-t"><span>发热与省电保护</span></div>' +
           '<div class="v6-card-s">盛夏开热点发烫时自动降低后台负载降温，插电或游戏中自动豁免不降速</div>' +
@@ -1542,9 +1752,9 @@ function v6RenderThermoCardHtml() {
       toggle(th.enabled, 'data-v6-tog="thermo" aria-label="发热与省电保护总开关"') +
     '</div>' +
     '<div class="v6-thermo-flags">' +
-      '<span class="v6-mono-badge ' + stBadgeCls + '"><span class="v6-dot ' + (th.stage >= 2 ? 'bad' : (th.stage === 1 ? 'warn' : 'ok')) + '"></span>' + escapeHtml(v6ThermoStageZh(th.stage)) + '</span>' +
-      '<span class="v6-mono-badge">电池温度 ' + escapeHtml(tempStr) + '</span>' +
-      '<span class="v6-mono-badge">电量 ' + escapeHtml(batStr) + (th.is_charging ? ' · 充电中不限速' : '') + '</span>' +
+      '<span class="v6-mono-badge ' + stBadgeCls + '"><span class="v6-dot ' + stDotCls + '"></span>' + escapeHtml(sensorUnreadable ? '温度传感器不可读（已安全跳过控温）' : v6ThermoStageZh(th.stage)) + '</span>' +
+      (!sensorUnreadable ? '<span class="v6-mono-badge">电池温度 ' + escapeHtml(tempStr) + '</span>' : '') +
+      (batStr ? '<span class="v6-mono-badge">电量 ' + escapeHtml(batStr) + (th.is_charging ? ' · 充电中不限速' : '') + '</span>' : '') +
       (th.vector_express_active ? '<span class="v6-mono-badge b-ok">游戏通话中 · 不限速</span>' : '') +
       (th.low_battery_cruise ? '<span class="v6-mono-badge b-warn">低电量省电中</span>' : '') +
     '</div>' +
@@ -1965,6 +2175,11 @@ function v6RenderBlackboxCardHtml() {
   }).join('') + '</div>') : '<div class="v6-calm-empty"><span class="v6-dot ok"></span><span>近期网络平稳，未捕捉到明显跳 Ping 卡顿事件</span></div>';
 
   var ifacesTxt = mi.shape_targets && mi.shape_targets.length ? mi.shape_targets.join(' + ') : (mi.primary_downstream || '自动跟随热点接口');
+  var rttProbeOff = bb.rtt_probe_active === false ||
+    (bb.rtt_probe_active == null && !(num(bb.latest_jitter_ms) > 0) && !(num(bb.latest_rtt_ms) > 0) && !(typeof S !== 'undefined' && S.autorate && S.autorate.enabled && num(S.autorate.rtt_ms) > 0));
+  var rttKpiHtml = rttProbeOff
+    ? '<div class="v6-kpi"><span>上游 RTT</span><b style="font-size:13px;color:var(--text-3);font-weight:650">未开启延迟探测</b></div>'
+    : '<div class="v6-kpi ' + (bb.latest_jitter_ms > 25 ? 'is-warn' : 'is-ok') + '"><span>当前延迟波动</span><b>' + num(bb.latest_jitter_ms).toFixed(1) + '<small>ms</small></b></div>';
   return '<article class="glass v6-card" id="v6-card-blackbox">' +
     '<div class="v6-card-head">' +
       '<div class="v6-card-title-wrap">' +
@@ -1980,7 +2195,7 @@ function v6RenderBlackboxCardHtml() {
       '</div>' +
     '</div>' +
     '<div class="v6-kpi-row">' +
-      '<div class="v6-kpi ' + (bb.latest_jitter_ms > 25 ? 'is-warn' : 'is-ok') + '"><span>当前延迟波动</span><b>' + num(bb.latest_jitter_ms).toFixed(1) + '<small>ms</small></b></div>' +
+      rttKpiHtml +
       '<div class="v6-kpi ' + (bb.incident_count > 0 ? 'is-warn' : '') + '"><span>抓拍卡顿事件</span><b>' + num(bb.incident_count) + '<small>次</small></b></div>' +
       '<div class="v6-kpi is-acc"><span>三档网速配比</span><b>' + sb.tier1_pct + '/' + sb.tier2_pct + '/' + sb.tier3_pct + '</b></div>' +
     '</div>' +
@@ -2901,7 +3116,7 @@ function v6ExportBackupBundle(actEl) {
   if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function' && typeof loadSecret === 'function') {
     var ksuVer = v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.3';
+      'v6.1.0-rc.4';
     var ksuFname = 'hnc-backup-' + ksuVer + '-' + Date.now() + '.json';
     var outPath = '/sdcard/Download/' + ksuFname;
     var runCurlSave = function (forceSec) {
@@ -2947,7 +3162,7 @@ function v6ExportBackupBundle(actEl) {
     var verTag = v6CleanBackupVer(bundle.module_version) ||
       v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.3';
+      'v6.1.0-rc.4';
     var fname = 'hnc-backup-' + verTag + '-' + Date.now() + '.json';
     try {
       var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });

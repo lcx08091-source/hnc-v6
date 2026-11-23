@@ -3703,6 +3703,17 @@ func nlProbeKernelCapabilities(ifindex int) (hasRTNetlink bool, hasClsact bool, 
 
 const rtnlGetTFilter = 46 // RTM_GETTFILTER
 
+func rtnlSendtoRetry(fd int, req []byte) error {
+	dst := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}
+	for {
+		err := syscall.Sendto(fd, req, 0, dst)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return err
+	}
+}
+
 // nlDumpIngressFilterSummary 通过原生 RTNetlink RTM_GETTFILTER 读取入口(clsact ffff:fff2 / ingress ffff:)过滤器摘要,
 // 绕过 ColorOS /system/bin/tc 对 `ingress` 关键字返回空串或语法报错的缺陷。
 func nlDumpIngressFilterSummary(ifindex int) string {
@@ -3713,17 +3724,30 @@ func nlDumpIngressFilterSummary(ifindex int) string {
 	if err != nil {
 		return ""
 	}
-	defer syscall.Close(fd)
+	defer func() {
+		if fd >= 0 {
+			_ = syscall.Close(fd)
+		}
+	}()
 
 	var lines []string
 	buf := make([]byte, 65536)
 	for _, parent := range []uint32{0xfffffff2, 0xffff0000, rtnlTcHIngress} {
+		if fd < 0 {
+			fd, err = openRTNetlinkSocket()
+			if err != nil {
+				return strings.Join(lines, "\n")
+			}
+		}
 		seq := rtnlNextSeq()
 		req := rtnlBuildTCMsg(rtnlGetTFilter, rtnlFRequest|rtnlFDump, seq, ifindex, 0, parent, 0, nil)
-		if syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}) != nil {
+		if rtnlSendtoRetry(fd, req) != nil {
+			_ = syscall.Close(fd)
+			fd = -1
 			continue
 		}
-		for {
+		cleanDone := false
+		for chunks := 0; chunks < 256; {
 			n, _, rErr := syscall.Recvfrom(fd, buf, 0)
 			if errors.Is(rErr, syscall.EINTR) {
 				continue
@@ -3731,10 +3755,19 @@ func nlDumpIngressFilterSummary(ifindex int) string {
 			if rErr != nil || n <= 0 {
 				break
 			}
-			done := parseIngressFilterSummaryChunk(buf[:n], ifindex, &lines)
-			if done {
+			chunks++
+			done, malformed := parseIngressFilterSummaryChunkWithSeq(buf[:n], seq, ifindex, &lines)
+			if malformed {
 				break
 			}
+			if done {
+				cleanDone = true
+				break
+			}
+		}
+		if !cleanDone {
+			_ = syscall.Close(fd)
+			fd = -1
 		}
 		if len(lines) > 0 {
 			break
@@ -3744,15 +3777,21 @@ func nlDumpIngressFilterSummary(ifindex int) string {
 }
 
 func parseIngressFilterSummaryChunk(b []byte, wantIfIndex int, lines *[]string) bool {
+	done, malformed := parseIngressFilterSummaryChunkWithSeq(b, 0, wantIfIndex, lines)
+	return done || malformed
+}
+
+func parseIngressFilterSummaryChunkWithSeq(b []byte, wantSeq uint32, wantIfIndex int, lines *[]string) (done bool, malformed bool) {
 	for off := 0; off < len(b); {
 		rem := len(b) - off
 		if rem < rtnlMsgHdrLen {
-			return true
+			return false, true
 		}
 		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
 		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
+		msgSeq := binary.LittleEndian.Uint32(b[off+8 : off+12])
 		if msgLen < rtnlMsgHdrLen || msgLen > rem {
-			return true
+			return false, true
 		}
 		msg := b[off : off+msgLen]
 		adv := rtnlAlign(msgLen)
@@ -3761,8 +3800,11 @@ func parseIngressFilterSummaryChunk(b []byte, wantIfIndex int, lines *[]string) 
 		} else {
 			off += adv
 		}
+		if wantSeq != 0 && msgSeq != wantSeq {
+			continue
+		}
 		if msgType == rtnlMsgDone || msgType == rtnlMsgError {
-			return true
+			return true, false
 		}
 		if msgType != rtnlNewTFilter || len(msg) < rtnlMsgHdrLen+rtnlTcMsgLen {
 			continue
@@ -3818,7 +3860,7 @@ func parseIngressFilterSummaryChunk(b []byte, wantIfIndex int, lines *[]string) 
 		*lines = append(*lines, fmt.Sprintf("filter parent ffff: protocol all pref %d %s handle 0x%x %s",
 			prio, kind, handle, strings.Join(extras, " ")))
 	}
-	return false
+	return false, false
 }
 
 func hasNestedPoliceAttr(rawAttrs []byte, kind string) bool {
@@ -3874,17 +3916,30 @@ func dumpDefaultRouteIfindexesOS() (map[int]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer syscall.Close(fd)
+	defer func() {
+		if fd >= 0 {
+			_ = syscall.Close(fd)
+		}
+	}()
 
 	out := make(map[int]bool)
 	buf := make([]byte, 65536)
 	for _, family := range []uint8{2, 10} { // AF_INET, AF_INET6
+		if fd < 0 {
+			fd, err = openRTNetlinkSocket()
+			if err != nil {
+				return out, nil
+			}
+		}
 		seq := rtnlNextSeq()
 		req := buildGetRouteDumpMsg(seq, family)
-		if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+		if err := rtnlSendtoRetry(fd, req); err != nil {
+			_ = syscall.Close(fd)
+			fd = -1
 			continue
 		}
-		for {
+		cleanDone := false
+		for chunks := 0; chunks < 512; {
 			n, _, rErr := syscall.Recvfrom(fd, buf, 0)
 			if errors.Is(rErr, syscall.EINTR) {
 				continue
@@ -3892,13 +3947,23 @@ func dumpDefaultRouteIfindexesOS() (map[int]bool, error) {
 			if rErr != nil || n <= 0 {
 				break
 			}
+			chunks++
 			chunkIfs, done, pErr := parseDefaultRouteIfindexesMsgs(buf[:n])
 			for idx := range chunkIfs {
 				out[idx] = true
 			}
-			if pErr != nil || done {
+			if pErr != nil {
 				break
 			}
+			if done {
+				cleanDone = true
+				break
+			}
+		}
+		if !cleanDone {
+			// 若当前协议族未读到完整 NLMSG_DONE, 重开干净套接字防止残余分片污染下一协议族
+			_ = syscall.Close(fd)
+			fd = -1
 		}
 	}
 	return out, nil
@@ -3924,16 +3989,65 @@ func sendConntrackDeleteNetlink(tuple ScalpelTuple, seq uint32) error {
 	}
 	tv := syscall.Timeval{Sec: 1}
 	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
 
-	if err := syscall.Sendto(fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+	if err := rtnlSendtoRetry(fd, msg); err != nil {
 		return err
 	}
-	buf := make([]byte, 4096)
-	n, _, err := syscall.Recvfrom(fd, buf, 0)
-	if err != nil {
-		return err
+	buf := make([]byte, 8192)
+	for tries := 0; tries < rtnlMaxAckTries; {
+		n, _, rErr := syscall.Recvfrom(fd, buf, 0)
+		if errors.Is(rErr, syscall.EINTR) {
+			continue
+		}
+		if rErr != nil {
+			return rErr
+		}
+		if n <= 0 {
+			return errors.New("ctnetlink delete: empty recv")
+		}
+		tries++
+		matched, ackErr, parseErr := parseConntrackAckMsgs(buf[:n], seq)
+		if parseErr != nil {
+			return parseErr
+		}
+		if matched {
+			return ackErr
+		}
 	}
-	return parseNetlinkAck(buf[:n])
+	return fmt.Errorf("ctnetlink delete: unmatched ack seq %d", seq)
+}
+
+func parseConntrackAckMsgs(b []byte, wantSeq uint32) (matched bool, ackErr error, parseErr error) {
+	for off := 0; off < len(b); {
+		rem := len(b) - off
+		if rem < rtnlMsgHdrLen {
+			return false, nil, errors.New("short netlink response")
+		}
+		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
+		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
+		msgSeq := binary.LittleEndian.Uint32(b[off+8 : off+12])
+		if msgLen < rtnlMsgHdrLen || msgLen > rem {
+			return false, nil, errors.New("malformed netlink length")
+		}
+		msg := b[off : off+msgLen]
+		adv := rtnlAlign(msgLen)
+		if adv > rem {
+			off = len(b)
+		} else {
+			off += adv
+		}
+		if wantSeq != 0 && msgSeq != wantSeq {
+			continue
+		}
+		if msgType == rtnlMsgDone {
+			return true, nil, nil
+		}
+		if msgType == rtnlMsgError {
+			return true, parseNetlinkAck(msg), nil
+		}
+	}
+	return false, nil, nil
 }
 
 func dumpNativeIPv6NeighborsOS(allowedIfindexes map[int]bool) (map[string][]net.IP, error) {
@@ -3945,14 +4059,14 @@ func dumpNativeIPv6NeighborsOS(allowedIfindexes map[int]bool) (map[string][]net.
 
 	seq := rtnlNextSeq()
 	req := buildGetNeighIPv6DumpMsg(seq)
-	if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+	if err := rtnlSendtoRetry(fd, req); err != nil {
 		return nil, fmt.Errorf("rtnl neigh dump send: %w", err)
 	}
 
 	allCands := make(map[string]map[string]ipv6NeighCandidate)
 	orderCounter := 0
 	buf := make([]byte, 65536)
-	for {
+	for chunks := 0; chunks < 512; {
 		n, _, err := syscall.Recvfrom(fd, buf, 0)
 		if errors.Is(err, syscall.EINTR) {
 			continue
@@ -3963,6 +4077,7 @@ func dumpNativeIPv6NeighborsOS(allowedIfindexes map[int]bool) (map[string][]net.
 		if n <= 0 {
 			return nil, errors.New("rtnl neigh dump: empty recv")
 		}
+		chunks++
 		done, pErr := parseIPv6NeighDumpChunkCandidates(buf[:n], allowedIfindexes, allCands, &orderCounter)
 		if pErr != nil {
 			return nil, pErr
@@ -3972,6 +4087,7 @@ func dumpNativeIPv6NeighborsOS(allowedIfindexes map[int]bool) (map[string][]net.
 			return rankAndCapIPv6Neighbors(allCands, v6IPv6MaxAddrs), nil
 		}
 	}
+	return nil, errors.New("rtnl neigh dump: exceeded max chunks without NLMSG_DONE")
 }
 
 // filterActiveSubnetIPv4 过滤离线或跨次重启残留的非当前热点网段旧 IPv4,

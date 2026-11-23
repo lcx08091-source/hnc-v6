@@ -109,12 +109,35 @@ func (r *Reader) Get() Snapshot {
 	return r.last
 }
 
+// Invalidate 清空 5 秒读取缓存, 供 inotify 监听到 activity.json 变更时立即刷新状态。
+func (r *Reader) Invalidate() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.at = time.Time{}
+	r.mu.Unlock()
+}
+
+// HotspotOff 信号新鲜可信且热点已关闭。
+func (s Snapshot) HotspotOff() bool {
+	return s.OK && !s.Hotspot
+}
+
+// ShmShouldSleep 当信号可信且 WebUI 不活跃、同时热点关闭或无在线客户端时返回 true:
+// 此时 shmFlushLoop 完成最后一次归零刷写后应彻底 ticker.Stop() 休眠(0 次后台唤醒)。
+func (s Snapshot) ShmShouldSleep() bool {
+	return s.OK && !s.WebUI && (!s.Hotspot || s.Clients <= 0)
+}
+
 // idle 热点未开或没有在线设备(且信号可信)
 func (s Snapshot) idle() bool {
 	return s.OK && (s.Level == LevelHotspotOff || s.Level == LevelNoClients)
 }
 
 // ConntrackEvery 连接表扫描(基准 15s; 无在线设备 60s)
+func (s Snapshot) conntrackEvery() time.Duration { return ConntrackEvery(s) }
+
 func ConntrackEvery(s Snapshot) time.Duration {
 	if s.idle() {
 		return 60 * time.Second
@@ -138,10 +161,10 @@ func BlindFlushEvery(s Snapshot) time.Duration {
 	return 10 * time.Second
 }
 
-// ShmFlushEvery shm_vector.bin 写入间隔:
-// activity 不可信或 WebUI 活跃 → 1s;
-// 热点未开或无在线设备 → 10s(严格 < 15s, 防 CoreHub 陈旧误判);
-// 熄屏静默 → 5s; 其余 → 1s。
+// ShmFlushEvery shm_vector.bin 活跃态写入间隔(空闲休眠门控见 Snapshot.ShmShouldSleep):
+// activity 不可信或 WebUI 活跃 -> 1s;
+// 热点未开或无在线设备(兼容兜底间隔) -> 10s(严格 < 15s);
+// 熄屏静默 -> 5s; 其余 -> 1s。
 func ShmFlushEvery(s Snapshot) time.Duration {
 	if !s.OK || s.WebUI {
 		return time.Second

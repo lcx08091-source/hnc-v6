@@ -533,11 +533,16 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 	case "phone_usage_set": // 本机流量: 计费日 / 每卡套餐 GB / 预警百分比
 		return actionPhoneUsageSet(hncDir, p)
 	case "self_attrib_purge":
-		files, _ := filepath.Glob(filepath.Join(hncDir, "run", "self_attrib.*.jsonl"))
-		for _, f := range files {
-			_ = os.Remove(f)
+		purged := 0
+		for _, dir := range selfStudioScanDirs(hncDir) {
+			files, _ := filepath.Glob(filepath.Join(dir, "self_attrib.*.jsonl"))
+			for _, f := range files {
+				if os.Remove(f) == nil {
+					purged++
+				}
+			}
 		}
-		return actionResp{OK: true, Detail: fmt.Sprintf("purged %d file(s)", len(files))}
+		return actionResp{OK: true, Detail: fmt.Sprintf("purged %d file(s)", purged)}
 	// v5.9.7: clsact BPF (T1 tier) 状态查询/修复/开关
 	case "clsact_check":
 		return actionClsactCheck(hncDir)
@@ -879,11 +884,11 @@ func runExe(hncDir, name string, args ...string) (int, string) {
 	defer cancel()
 	path := filepath.Join(hncDir, "bin", name)
 	cmd := hardenCmd(exec.CommandContext(ctx, path, args...))
-	cmd.Env = []string{
-		"HNC_DIR=" + hncDir,
-		"HNC=" + hncDir,
-		"PATH=" + hncExecPATH,
-	}
+	cmd.Env = hubAppendAndroidEnv(
+		"HNC_DIR="+hncDir,
+		"HNC="+hncDir,
+		"PATH="+hncExecPATH,
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// v5.11: 先判超时 —— 被 ctx kill 的进程同样返回 *ExitError(ExitCode -1),
@@ -930,11 +935,11 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 	defer cancel()
 	cmdArgs := append([]string{hncDir + "/bin/" + script}, args...)
 	cmd := hardenCmd(exec.CommandContext(ctx, "sh", cmdArgs...)) // v5.11: WaitDelay, 见 execWaitDelay
-	cmd.Env = []string{
-		"HNC_DIR=" + hncDir,
-		"HNC=" + hncDir, // rc3: json_set.sh / 其他脚本用 $HNC 不是 $HNC_DIR
-		"PATH=" + hncExecPATH,
-	}
+	cmd.Env = hubAppendAndroidEnv(
+		"HNC_DIR="+hncDir,
+		"HNC="+hncDir, // rc3: json_set.sh / 其他脚本用 $HNC 不是 $HNC_DIR
+		"PATH="+hncExecPATH,
+	)
 	out, err := cmd.CombinedOutput()
 	rc := 0
 	if err != nil {
@@ -1040,7 +1045,7 @@ func actionClsactCheck(hncDir string) actionResp {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "check", iface)) // v5.11: WaitDelay
-	cmd.Env = []string{"PATH=" + hncExecPATH}
+	cmd.Env = hubAppendAndroidEnv("PATH=" + hncExecPATH)
 	out, _ := cmd.CombinedOutput()
 	s := string(out)
 	hasClsact := strings.Contains(s, `"qdisc":true`)
@@ -1148,11 +1153,11 @@ func runBinDetached(hncDir, script string, args ...string) error {
 	cmdArgs := append([]string{hncDir + "/bin/" + script}, args...)
 	cmd := exec.Command("sh", cmdArgs...)
 	cmd.WaitDelay = execWaitDelay
-	cmd.Env = []string{
-		"HNC_DIR=" + hncDir,
-		"HNC=" + hncDir, // rc3: json_set.sh 等脚本读 $HNC
-		"PATH=" + hncExecPATH,
-	}
+	cmd.Env = hubAppendAndroidEnv(
+		"HNC_DIR="+hncDir,
+		"HNC="+hncDir, // rc3: json_set.sh 等脚本读 $HNC
+		"PATH="+hncExecPATH,
+	)
 	// 重定向 stdout/stderr 到 cleanup.log · 脱离 httpd
 	// M-3 (回移自 5.9.91 分叉): 0600 防 world-readable 日志泄敏感审计信息
 	logPath := hncDir + "/logs/cleanup_async.log"

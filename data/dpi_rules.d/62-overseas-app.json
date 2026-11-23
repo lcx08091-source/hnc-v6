@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "62-overseas-app",
-  "rules_version": "hnc-curated-v6.1.0-rc.3#62-overseas-app",
+  "rules_version": "hnc-curated-v6.1.0-rc.4#62-overseas-app",
   "rules": [
     {
       "id": "discord",

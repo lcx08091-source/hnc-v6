@@ -1429,7 +1429,7 @@ func (m *fgModel) closeSessionLocked(mac string, d *fgDev, end time.Time) {
 }
 
 func fgDayPath(hncDir, date string) string {
-	return filepath.Join(hncDir, "run", "fg_timeline."+date+".json")
+	return filepath.Join(hncDir, "data", "fg_timeline."+date+".json")
 }
 
 func fgSaveDay(hncDir string, d *fgDay) error {
@@ -1442,6 +1442,9 @@ func fgSaveDay(hncDir string, d *fgDay) error {
 
 func fgLoadDay(hncDir, date string) *fgDay {
 	b, err := os.ReadFile(fgDayPath(hncDir, date))
+	if err != nil {
+		b, err = os.ReadFile(filepath.Join(hncDir, "run", "fg_timeline."+date+".json"))
+	}
 	if err != nil {
 		return nil
 	}
@@ -1463,6 +1466,9 @@ func (m *fgModel) load(hncDir string, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dir = hncDir
+	if hncDir != "" {
+		_ = os.MkdirAll(filepath.Join(hncDir, "data"), 0o755)
+	}
 	m.cmp.load(hncDir) // v5.27 T4: 对比统计
 	m.engineCur = fgEngineFor(hncDir)
 	date := now.Format("20060102")
@@ -1513,12 +1519,14 @@ func (m *fgModel) flush(now time.Time) {
 		return
 	}
 	cut := now.AddDate(0, 0, -fgKeepDays).Format("20060102")
-	ents, _ := os.ReadDir(filepath.Join(dir, "run"))
-	for _, e := range ents {
-		n := e.Name()
-		if strings.HasPrefix(n, "fg_timeline.") && strings.HasSuffix(n, ".json") {
-			if date := strings.TrimSuffix(strings.TrimPrefix(n, "fg_timeline."), ".json"); len(date) == 8 && date < cut {
-				_ = os.Remove(filepath.Join(dir, "run", n))
+	for _, sub := range []string{"data", "run"} {
+		ents, _ := os.ReadDir(filepath.Join(dir, sub))
+		for _, e := range ents {
+			n := e.Name()
+			if strings.HasPrefix(n, "fg_timeline.") && strings.HasSuffix(n, ".json") {
+				if date := strings.TrimSuffix(strings.TrimPrefix(n, "fg_timeline."), ".json"); len(date) == 8 && date < cut {
+					_ = os.Remove(filepath.Join(dir, sub, n))
+				}
 			}
 		}
 	}

@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/binary"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -579,11 +582,15 @@ func TestDNSForwarderAtomicAlignment(t *testing.T) {
 		"stale":      uintptr(unsafe.Pointer(&f.st.stale)) - base,
 		"staleFlush": uintptr(unsafe.Pointer(&f.st.staleFlush)) - base,
 		"netCheckNs": uintptr(unsafe.Pointer(&f.st.netCheckNs)) - base,
+		"wg":         unsafe.Offsetof(f.wg),
 	}
 	for name, off := range fields {
 		if off%8 != 0 {
-			t.Fatalf("atomic.Int64 field %s offset = %d (not 8-byte aligned)", name, off)
+			t.Fatalf("atomic64/WaitGroup field %s offset = %d (not 8-byte aligned)", name, off)
 		}
+	}
+	if unsafe.Offsetof(f.wg) != 104 {
+		t.Fatalf("dnsForwarder.wg offset = %d, want 104 (immediately after 13*8-byte st)", unsafe.Offsetof(f.wg))
 	}
 }
 
@@ -1250,3 +1257,318 @@ func TestDNSRateLimiterTableFullFailClosedAndSweepThrottle(t *testing.T) {
 		t.Fatalf("expected 2 active buckets (10.0.0.1 + 192.168.43.250) after 61s sweep, got %d", afterSweepSize)
 	}
 }
+
+func TestCaptivePortalProbeDomainsAndPrivateHijackNoServeStale(t *testing.T) {
+	// 1. 全量覆盖 19 个主流系统 Captive Portal 连通性探测域名(含大小写、末尾点、子域与对照非探测域名)
+	probeDomains := []string{
+		"connectivitycheck.gstatic.com",
+		"clients3.google.com",
+		"clients1.google.com",
+		"www.google.com",
+		"play.googleapis.com",
+		"captive.apple.com",
+		"www.apple.com",
+		"connect.rom.miui.com",
+		"wifi.vivo.com.cn",
+		"connectivitycheck.vivo.com.cn",
+		"conn1.oppomobile.com",
+		"conn2.oppomobile.com",
+		"conn-service-cn.allawntech.com",
+		"connectivitycheck.platform.hicloud.com",
+		"www.msftconnecttest.com",
+		"dns.msftncsi.com",
+		"detectportal.firefox.com",
+		"connectivity-check.ubuntu.com",
+		"nmcheck.gnome.org",
+	}
+	if len(probeDomains) != 19 {
+		t.Fatalf("expected 19 captive portal probe domains, got %d", len(probeDomains))
+	}
+	for _, d := range probeDomains {
+		if !isCaptivePortalProbeDomain(d) || !isCaptivePortalProbeDomain(strings.ToUpper(d)+".") || !isCaptivePortalProbeDomain("sub."+d) {
+			t.Fatalf("expected isCaptivePortalProbeDomain=true for %q and its variants", d)
+		}
+	}
+	for _, normal := range []string{"gstatic.com", "google.com", "apple.com", "miui.com", "vivo.com.cn", "oppomobile.com", "hicloud.com", "example.com"} {
+		if isCaptivePortalProbeDomain(normal) {
+			t.Fatalf("expected root/normal domain %q NOT to match captive probe list", normal)
+		}
+	}
+
+	// 2. 规则(a): Captive Portal 探测域名必须压低 TTL<=2s、彻底禁用 serve-stale、且绝不写入 dnsIPNames!
+	u := startControllableUpstream(t)
+	u.mu.Lock()
+	u.ip = net.IPv4(142, 250, 190, 14)
+	u.ttl = 300
+	u.mu.Unlock()
+
+	names := newDNSIPNames()
+	f := newDNSForwarder()
+	f.SetUpstream(u.addr)
+	f.timeout = 120 * time.Millisecond
+	f.staleWait = 50 * time.Millisecond
+
+	var onAnswerCnt atomic.Int64
+	f.onAnswer = func(ev dnsAnswerEvent) {
+		onAnswerCnt.Add(1)
+		names.record(ev)
+	}
+
+	mProbe := mustResp(t, f.handle(dnsBuildQuery(0x301, "connectivitycheck.gstatic.com", dnsTypeA, 0, false), dnsTestClient, "udp"))
+	if mProbe.Rcode != 0 || len(mProbe.Answers) != 1 || mProbe.Answers[0].TTL > 2 {
+		t.Fatalf("probe wire TTL must be clamped <= 2s, got %+v", mProbe.Answers)
+	}
+	if onAnswerCnt.Load() != 0 || names.size() != 0 {
+		t.Fatalf("probe domain must NEVER trigger onAnswer or populate dnsIPNames: calls=%d size=%d", onAnswerCnt.Load(), names.size())
+	}
+	// 即使直接调 names.record 也必须二次防御拦截探测域名
+	names.record(dnsAnswerEvent{
+		Ts:    time.Now(),
+		QName: "captive.apple.com",
+		IPs:   []dnsRR{{Type: dnsTypeA, TTL: 60, Value: "17.253.144.10"}},
+	})
+	if names.size() != 0 {
+		t.Fatalf("dnsIPNames.record must reject captive probe domains, got size=%d", names.size())
+	}
+
+	// 等待 >2s 让 2s 缓存过期, 随后模拟上游 SERVFAIL/丢包: 严禁回退 serve-stale!
+	time.Sleep(2150 * time.Millisecond)
+	u.mu.Lock()
+	u.rcode = dnsRcodeServFail
+	u.mu.Unlock()
+	mExpiredProbe := mustResp(t, f.handle(dnsBuildQuery(0x302, "connectivitycheck.gstatic.com", dnsTypeA, 0, false), dnsTestClient, "udp"))
+	if mExpiredProbe.Rcode != dnsRcodeServFail || f.Stats().Stale != 0 {
+		t.Fatalf("captive probe domain MUST NOT serve stale on upstream failure: rcode=%d stale=%d", mExpiredProbe.Rcode, f.Stats().Stale)
+	}
+
+	// 3. 规则(b): 普通公网域名返回私网 RFC1918 / CGNAT(100.64/10) / link-local(Portal 劫持页 IP)时, 压低 TTL<=2s 且严禁 serve-stale!
+	c := newDNSCache(32, 1<<20)
+	t0 := time.Unix(1_780_000_000, 0)
+	for _, tc := range []struct {
+		domain string
+		ip     net.IP
+	}{
+		{"hijack-10.example.org", net.IPv4(10, 88, 0, 1)},
+		{"hijack-172.example.org", net.IPv4(172, 20, 0, 1)},
+		{"hijack-192.example.org", net.IPv4(192, 168, 1, 1)},
+		{"hijack-cgnat.example.org", net.IPv4(100, 64, 10, 1)},
+		{"hijack-ll.example.org", net.IPv4(169, 254, 1, 1)},
+	} {
+		u.mu.Lock()
+		u.rcode = dnsRcodeNoError
+		u.ip = tc.ip
+		u.ttl = 600
+		u.mu.Unlock()
+
+		mh := mustResp(t, f.handle(dnsBuildQuery(0x310, tc.domain, dnsTypeA, 0, false), dnsTestClient, "udp"))
+		if len(mh.Answers) != 1 || mh.Answers[0].TTL > 2 {
+			t.Fatalf("captive-hijacked public domain %s (%s) wire TTL must clamp <= 2s, got %+v", tc.domain, tc.ip, mh.Answers)
+		}
+
+		// 在确定性时钟缓存上验证 >2s 彻底过期且 getStale 0s 保活宽限
+		qb := dnsBuildQuery(1, tc.domain, dnsTypeA, 0, false)
+		pqb, _ := dnsParseQuery(qb)
+		rb := buildTestAReply(qb, pqb, tc.ip, 600, true)
+		c.put(dnsCacheKey(pqb), rb, mustResp(t, rb), t0)
+		if fresh, _ := c.get(dnsCacheKey(pqb), qb, pqb, t0.Add(3*time.Second)); fresh != nil {
+			t.Fatalf("captive-hijacked %s must expire within 2s", tc.domain)
+		}
+		if stale, _ := c.getStale(dnsCacheKey(pqb), qb, pqb, t0.Add(3*time.Second)); stale != nil {
+			t.Fatalf("captive-hijacked %s (%s) must have 0s serve-stale grace", tc.domain, tc.ip)
+		}
+	}
+	if onAnswerCnt.Load() != 0 {
+		t.Fatalf("captive-hijacked private answers for public domains must not pollute DPI IP names, calls=%d", onAnswerCnt.Load())
+	}
+
+	// 合法本地后缀(.lan / .local / .home.arpa)返回内网 IP 必须保持完整原始 TTL 与正常缓存
+	for _, localDom := range []string{"nas.lan", "printer.local", "gateway.home.arpa"} {
+		u.mu.Lock()
+		u.rcode = dnsRcodeNoError
+		u.ip = net.IPv4(192, 168, 1, 50)
+		u.ttl = 300
+		u.mu.Unlock()
+		ml := mustResp(t, f.handle(dnsBuildQuery(0x320, localDom, dnsTypeA, 0, false), dnsTestClient, "udp"))
+		if len(ml.Answers) != 1 || ml.Answers[0].TTL != 300 {
+			t.Fatalf("local domain %s returning RFC1918 IP must keep TTL=300, got %+v", localDom, ml.Answers)
+		}
+	}
+}
+
+func TestDNSTakeoverSameSubnetGatewayMACSwitchAndStandbySleep(t *testing.T) {
+	// 1. 同网段 Wi-Fi 切换(均为 192.168.1.x + 网关 192.168.1.1 + wlan0, 仅网关 ARP MAC 不同):
+	//    必须识别网关 MAC 变更并同步秒清 DNS 转发器缓存与 t.names (dnsIPNames)!
+	tmpDir := t.TempDir()
+	routeFile := filepath.Join(tmpDir, "route")
+	arpFile := filepath.Join(tmpDir, "arp")
+
+	gwHex := strings.ToUpper(strconv.FormatUint(uint64(binary.NativeEndian.Uint32([]byte{192, 168, 1, 1})), 16))
+	for len(gwHex) < 8 {
+		gwHex = "0" + gwHex
+	}
+	routeContent := "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n" +
+		"wlan0\t00000000\t" + gwHex + "\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+	arpA := "IP address       HW type     Flags       HW address            Mask     Device\n" +
+		"192.168.1.1      0x1         0x2         aa:11:22:33:44:01     *        wlan0\n"
+	arpB := "IP address       HW type     Flags       HW address            Mask     Device\n" +
+		"192.168.1.1      0x1         0x2         bb:11:22:33:44:02     *        wlan0\n"
+
+	if err := os.WriteFile(routeFile, []byte(routeContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(arpFile, []byte(arpA), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	skip := map[string]bool{"wlan2": true}
+	gwIP1, gwMAC1 := defaultGatewaySigFromProc(routeFile, arpFile, skip)
+	if gwIP1 != "192.168.1.1" || gwMAC1 != "aa:11:22:33:44:01" {
+		t.Fatalf("unexpected gateway sig A: ip=%q mac=%q", gwIP1, gwMAC1)
+	}
+	if err := os.WriteFile(arpFile, []byte(arpB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gwIP2, gwMAC2 := defaultGatewaySigFromProc(routeFile, arpFile, skip)
+	if gwIP2 != "192.168.1.1" || gwMAC2 != "bb:11:22:33:44:02" || gwMAC1 == gwMAC2 {
+		t.Fatalf("unexpected gateway sig B: ip=%q mac=%q", gwIP2, gwMAC2)
+	}
+
+	srv := newServer(tmpDir)
+	tk := srv.dnsTK()
+	var sigMu sync.Mutex
+	curNetSig := "192.168.1.25@" + gwIP1 + "@" + gwMAC1 + "|wlan0"
+	tk.upstreamSig = func(_ string) string {
+		sigMu.Lock()
+		defer sigMu.Unlock()
+		return curNetSig
+	}
+
+	u := startFakeUpstream(t)
+	fwd := newDNSForwarder()
+	fwd.SetUpstream(u.addr)
+	fwd.onAnswer = tk.names.record
+	fwd.onFlush = tk.names.clear
+	fwd.netSig = tk.currentUpstreamSig
+
+	tNow := time.Now()
+	fwd.maybeCheckNetSig(tNow) // 建立基线签名(Wi-Fi A)
+	_ = mustResp(t, fwd.handle(dnsBuildQuery(0x401, "corp.portal.example", dnsTypeA, 0, false), dnsTestClient, "udp"))
+	if fwd.cache.Len() != 1 || tk.names.size() != 1 {
+		t.Fatalf("expected 1 cached entry & 1 dnsIPNames entry before Wi-Fi switch, got cache=%d names=%d",
+			fwd.cache.Len(), tk.names.size())
+	}
+
+	// 切换到同网段不同路由器的 Wi-Fi B(仅网关 MAC 变化)
+	sigMu.Lock()
+	curNetSig = "192.168.1.25@" + gwIP2 + "@" + gwMAC2 + "|wlan0"
+	sigMu.Unlock()
+	fwd.maybeCheckNetSig(tNow.Add(dnsNetCheckInterval + 100*time.Millisecond))
+	if fwd.cache.Len() != 0 || tk.names.size() != 0 {
+		t.Fatalf("same-subnet gateway MAC switch MUST flush both DNS cache and dnsIPNames: cache=%d names=%d",
+			fwd.cache.Len(), tk.names.size())
+	}
+
+	// 2. Task 6: dns_takeover 未开启且处于 lvlHotspotOff 时, DNSTakeoverLoop 必须释放 Ticker 0 唤醒休眠!
+	srvSleep := newServer(t.TempDir())
+	tkSleep := srvSleep.dnsTK()
+	tkSleep.tickInterval = 20 * time.Millisecond
+
+	var scriptRuns atomic.Int64
+	tkSleep.runScript = func(args ...string) (int, string) {
+		scriptRuns.Add(1)
+		return 0, "DNSTK=off"
+	}
+	tkSleep.hotspotIface = func() string { return "" }
+
+	var actMu sync.Mutex
+	curAct := Activity{Known: true, HotspotActive: false, ClientsOnline: 0}
+	actCh := make(chan struct{})
+	setAct := func(next Activity) {
+		actMu.Lock()
+		curAct = next
+		old := actCh
+		actCh = make(chan struct{})
+		actMu.Unlock()
+		close(old)
+	}
+	var actQueries atomic.Int32
+	tkSleep.activityHook = func() (<-chan struct{}, Activity) {
+		actQueries.Add(1)
+		actMu.Lock()
+		defer actMu.Unlock()
+		return actCh, curAct
+	}
+
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		srvSleep.DNSTakeoverLoop(stopCh)
+	}()
+	defer func() {
+		select {
+		case <-doneCh:
+		default:
+			close(stopCh)
+			<-doneCh
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if actQueries.Load() >= 1 && !tkSleep.IsTickerActive() {
+			break
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+	if tkSleep.IsTickerActive() {
+		t.Fatal("expected DNSTakeoverLoop ticker stopped during disabled + lvlHotspotOff")
+	}
+
+	// 休眠 90ms (超过 4 个 20ms tick 周期): lastCheck 与 scriptRuns 绝不递增, 严格 0 次定时唤醒!
+	tkSleep.mu.Lock()
+	bootedAfterInit := tkSleep.booted
+	tkSleep.mu.Unlock()
+	if !bootedAfterInit {
+		t.Fatal("expected initial boot tick before standby sleep")
+	}
+	queriesAtSleep := actQueries.Load()
+	time.Sleep(90 * time.Millisecond)
+	if tkSleep.IsTickerActive() || actQueries.Load() != queriesAtSleep {
+		t.Fatalf("expected 0 wakeups during lvlHotspotOff standby sleep: tickerActive=%v actQueries=%d->%d",
+			tkSleep.IsTickerActive(), queriesAtSleep, actQueries.Load())
+	}
+
+	// 热点开启(切入 lvlNoClients) -> 立即唤醒并激活对账 Ticker
+	setAct(Activity{Known: true, HotspotActive: true, ClientsOnline: 0})
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !tkSleep.IsTickerActive() {
+		time.Sleep(3 * time.Millisecond)
+	}
+	if !tkSleep.IsTickerActive() {
+		t.Fatal("expected DNSTakeoverLoop ticker to activate when hotspot turns on")
+	}
+
+	// 热点关闭 -> 重新回到 0 唤醒停表态
+	setAct(Activity{Known: true, HotspotActive: false, ClientsOnline: 0})
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && tkSleep.IsTickerActive() {
+		time.Sleep(3 * time.Millisecond)
+	}
+	if tkSleep.IsTickerActive() {
+		t.Fatal("expected DNSTakeoverLoop ticker to stop again on lvlHotspotOff")
+	}
+
+	// 在 lvlHotspotOff 下通过 actionDNSTakeoverSet 开启 enabled=true -> wake() 立即唤醒对账循环!
+	if resp := actionDNSTakeoverSet(srvSleep, map[string]string{"enabled": "true"}); !resp.OK {
+		t.Fatalf("actionDNSTakeoverSet enabled=true failed: %+v", resp)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !tkSleep.IsTickerActive() {
+		time.Sleep(3 * time.Millisecond)
+	}
+	if !tkSleep.IsTickerActive() {
+		t.Fatal("expected actionDNSTakeoverSet(enabled=true) to wake DNSTakeoverLoop from standby")
+	}
+}
+

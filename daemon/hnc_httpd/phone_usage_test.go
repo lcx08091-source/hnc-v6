@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -500,4 +501,368 @@ func TestPhoneUsageRC2DualDirAndMigration(t *testing.T) {
 		t.Fatalf("legacy run/ file should be removed after migration, err=%v", err)
 	}
 }
+
+// rmx5010IsubSample 源自 realme RMX5010 / ColorOS 16 (Android 16) 真机脱敏 dumpsys isub:
+//   - id=1,3,4,5,6,7,8 为历史拔出卡(simSlotIndex=-1)
+//   - id=2 为物理卡1 中国联通(carrierName=China Unicom, mccmnc=46001, imsi=460011898[****])
+//   - id=9 为物理卡2 中国移动, 用户自定义卡名 "中国移不动"(displayNameSource=2, carrierName=中国移动 — giffgaff)
+//   - id=10 为 ColorOS 逍遥游云虚拟流量卡(simSlotIndex=2, isOpportunistic=1, ORoaming)
+//   - id=11 为伪装在槽位 1 的红茶移动远程云卡(subscriptionType=1, mcc=001)
+//   - defaultDataSubId=2, activeDataSubId=9(双卡智能切换/通话临时上网切到卡2)
+const rmx5010IsubSample = `SubscriptionManagerService:
+  Active modem count=2
+  Logical SIM slot 0: subId=2
+  Logical SIM slot 1: subId=9
+  defaultSubId=9
+  defaultDataSubId=2
+  activeDataSubId=9
+  defaultVoiceSubId=2
+  defaultSmsSubId=2
+
+Active subscriptions:
+  [SubscriptionInfo: id=2 iccId=898601208[****] simSlotIndex=0 carrierId=1435 displayName=China Unicom carrierName=China Unicom displayNameSource=0 iconTint=-16746133 number=[****] dataRoaming=0 mcc=460 mnc=01 countryIso=cn isEmbedded=false cardString=898601208[****] cardId=0 portIndex=0 isOpportunistic=false groupUUID=null subscriptionType=0]
+  [SubscriptionInfo: id=9 iccId=898600981[****] simSlotIndex=1 carrierId=1434 displayName=中国移不动 carrierName=中国移动 — giffgaff displayNameSource=2 iconTint=-16746133 number=[****] dataRoaming=0 mcc=460 mnc=00 countryIso=cn isEmbedded=false cardString=898600981[****] cardId=1 portIndex=0 isOpportunistic=false groupUUID=null subscriptionType=0]
+  [SubscriptionInfo: id=10 iccId=898699000[****] simSlotIndex=2 carrierId=-1 displayName=逍遥游 carrierName=ORoaming displayNameSource=0 mcc=460 mnc=01 isEmbedded=true cardString=vsim_oroaming isOpportunistic=true subscriptionType=0]
+
+All subscriptions:
+  [SubscriptionInfoInternal: id=1 iccId=898600111[****] simSlotIndex=-1 carrierId=1434 displayName=CMCC carrierName=中国移动 displayNameSource=0 mccmnc=46000 cardString=898600111[****] isOpportunistic=0 subscriptionType=0 imsi=460001391[****]]
+  [SubscriptionInfoInternal: id=2 iccId=898601208[****] simSlotIndex=0 carrierId=1435 displayName=China Unicom carrierName=China Unicom displayNameSource=0 mccmnc=46001 cardString=898601208[****] isOpportunistic=0 subscriptionType=0 imsi=460011898[****]]
+  [SubscriptionInfoInternal: id=3 iccId=898603333[****] simSlotIndex=-1 carrierId=2125 displayName=中国电信 carrierName=CHN-CT displayNameSource=0 mccmnc=46011 cardString=898603333[****] isOpportunistic=0 subscriptionType=0 imsi=460110555[****]]
+  [SubscriptionInfoInternal: id=4 iccId=898600444[****] simSlotIndex=-1 carrierId=1434 displayName=中国移动 carrierName=CMCC displayNameSource=0 mccmnc=46002 cardString=898600444[****] isOpportunistic=0 subscriptionType=0 imsi=460028888[****]]
+  [SubscriptionInfoInternal: id=5 iccId=898615555[****] simSlotIndex=-1 carrierId=2501 displayName=中国广电 carrierName=CBN displayNameSource=0 mccmnc=46015 cardString=898615555[****] isOpportunistic=0 subscriptionType=0 imsi=460150123[****]]
+  [SubscriptionInfoInternal: id=6 iccId=898601666[****] simSlotIndex=-1 carrierId=1435 displayName=China Unicom carrierName=CUCC displayNameSource=0 mccmnc=46001 cardString=898601666[****] isOpportunistic=0 subscriptionType=0 imsi=460016666[****]]
+  [SubscriptionInfoInternal: id=7 iccId=898600777[****] simSlotIndex=-1 carrierId=1434 displayName=中国移动 carrierName=中国移动 displayNameSource=0 mccmnc=46007 cardString=898600777[****] isOpportunistic=0 subscriptionType=0 imsi=460077777[****]]
+  [SubscriptionInfoInternal: id=8 iccId=898603888[****] simSlotIndex=-1 carrierId=2125 displayName=中国电信 carrierName=China Telecom displayNameSource=0 mccmnc=46003 cardString=898603888[****] isOpportunistic=0 subscriptionType=0 imsi=460038888[****]]
+  [SubscriptionInfoInternal: id=9 iccId=898600981[****] simSlotIndex=1 carrierId=1434 displayName=中国移不动 carrierName=中国移动 — giffgaff displayNameSource=2 mccmnc=46000 cardString=898600981[****] isOpportunistic=0 subscriptionType=0 imsi=460001380[****]]
+  [SubscriptionInfoInternal: id=10 iccId=898699000[****] simSlotIndex=2 carrierId=-1 displayName=逍遥游 carrierName=ORoaming displayNameSource=0 mccmnc=46001 cardString=vsim_oroaming isOpportunistic=1 subscriptionType=0 imsi=460019999[****]]
+  [SubscriptionInfoInternal: id=11 iccId=890010101[****] simSlotIndex=1 carrierId=-1 displayName=RedteaGO carrierName=红茶移动 displayNameSource=0 mccmnc=00101 cardString=redtea_vsim isOpportunistic=0 subscriptionType=1 imsi=001010000[****]]
+
+Local logs:
+  2026-11-20T10:00:00 - activeDataSubId=2 defaultDataSubId=1
+`
+
+func TestPhoneUsageSanitizedAndroidEnv(t *testing.T) {
+	raw := []string{
+		"PATH=/data/local/tmp/hijack:/bin",
+		"BOOTCLASSPATH=/apex/com.android.art/javalib/core-oj.jar:/system/framework/framework.jar",
+		"DEX2OATBOOTCLASSPATH=/apex/com.android.art/javalib/core-oj.jar",
+		"SYSTEMSERVERCLASSPATH=/system/framework/services.jar",
+		"STANDALONE_SYSTEMSERVER_JARS=/apex/com.android.tethering/javalib/service-connectivity.jar",
+		"ANDROID_ROOT=/system",
+		"ANDROID_DATA=/data",
+		"ANDROID_STORAGE=/storage",
+		"ANDROID_ASSETS=/system/app",
+		"ANDROID_ART_ROOT=/apex/com.android.art",
+		"ANDROID_I18N_ROOT=/apex/com.android.i18n",
+		"ANDROID_TZDATA_ROOT=/apex/com.android.tzdata",
+		"TZ=Asia/Shanghai",
+		"LD_PRELOAD=/data/local/tmp/evil.so",
+		"SECRET_TOKEN=123456",
+	}
+	got := puSanitizedAndroidEnvFrom(raw)
+	m := map[string]string{}
+	for _, kv := range got {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			t.Fatalf("malformed env entry %q", kv)
+		}
+		m[kv[:eq]] = kv[eq+1:]
+	}
+	if m["PATH"] != "/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin" {
+		t.Fatalf("unexpected PATH: %q", m["PATH"])
+	}
+	for _, k := range puAndroidEnvAllowKeys {
+		if m[k] == "" {
+			t.Errorf("missing allowlisted Android env %s", k)
+		}
+	}
+	if _, bad := m["LD_PRELOAD"]; bad {
+		t.Error("LD_PRELOAD must not leak into sanitized env")
+	}
+	if _, bad := m["SECRET_TOKEN"]; bad {
+		t.Error("SECRET_TOKEN must not leak into sanitized env")
+	}
+}
+
+func TestIsubParseRMX5010AndFiveGates(t *testing.T) {
+	snap := puParseIsubDump(rmx5010IsubSample)
+	if snap.MaxSlots != 2 || snap.ModemCount != 2 {
+		t.Fatalf("MaxSlots=%d ModemCount=%d, want 2/2", snap.MaxSlots, snap.ModemCount)
+	}
+	if snap.ActiveDataSubID != 9 || snap.DefaultDataSubID != 2 {
+		t.Fatalf("activeDataSubId=%d defaultDataSubId=%d, want 9/2", snap.ActiveDataSubID, snap.DefaultDataSubID)
+	}
+	if snap.LogicalSlotSubID[0] != 2 || snap.LogicalSlotSubID[1] != 9 {
+		t.Fatalf("LogicalSlotSubID=%v", snap.LogicalSlotSubID)
+	}
+	if len(snap.Subs) != 2 {
+		t.Fatalf("expected exactly 2 physical SIMs after 5 gates, got %d: %+v", len(snap.Subs), snap.Subs)
+	}
+
+	s1 := snap.Subs[0]
+	if s1.Slot != 1 || s1.SubID != 2 || s1.Carrier != "中国联通" || s1.CustomName != "" || s1.IMSI != "460011898" {
+		t.Errorf("slot1 mismatch: %+v", s1)
+	}
+	s2 := snap.Subs[1]
+	if s2.Slot != 2 || s2.SubID != 9 || s2.Carrier != "中国移动" || s2.CustomName != "中国移不动" || s2.IMSI != "460001380" ||
+		s2.RawCarrierName != "中国移动 — giffgaff" {
+		t.Errorf("slot2 mismatch: %+v", s2)
+	}
+
+	// 验证原生链路零 app_process 开销(绝不调用 settings 或 content query), 且 activeDataSubId=9 优先于 defaultDataSubId=2
+	calledAppProcess := false
+	probe := puDetectSIMProbeWith(func(name string, args ...string) (string, bool) {
+		switch name {
+		case "dumpsys":
+			if len(args) == 1 && args[0] == "isub" {
+				return rmx5010IsubSample, true
+			}
+			if len(args) == 1 && args[0] == "telephony.registry" {
+				return "mActiveDataSubId=9\nPhone Id=0\n  mSubId=2\n  mDataConnectionState=0\nPhone Id=1\n  mSubId=9\n  mDataConnectionState=2\n", true
+			}
+		case "content", "settings":
+			calledAppProcess = true
+		}
+		return "", false
+	})
+	if calledAppProcess {
+		t.Fatal("native dumpsys isub path must not spawn app_process (content/settings)")
+	}
+	if probe.Active.Slot != 2 || probe.Active.SubID != 9 || probe.Active.Carrier != "中国移动" ||
+		probe.Active.CustomName != "中国移不动" || probe.Active.key() != "2|中国移动" {
+		t.Fatalf("active SIM mismatch: %+v key=%s", probe.Active, probe.Active.key())
+	}
+	if !probe.SlotsKnown || len(probe.Slots) != 2 || probe.Slots[1].Carrier != "中国联通" || probe.Slots[2].CustomName != "中国移不动" {
+		t.Fatalf("probe slots mismatch: %+v", probe)
+	}
+
+	// 验证 dumpsys isub 失败时自动回退 content query
+	fbProbe := puDetectSIMProbeWith(func(name string, args ...string) (string, bool) {
+		switch name {
+		case "dumpsys":
+			return "", false
+		case "settings":
+			return "9\n", true
+		case "content":
+			return "Row: 0 _id=2, sim_id=0, display_name=China Unicom, carrier_name=China Unicom, mcc_string=460, mnc_string=01, name_source=0\n" +
+				"Row: 1 _id=9, sim_id=1, display_name=中国移不动, carrier_name=CMCC, mcc_string=460, mnc_string=00, name_source=2\n", true
+		}
+		return "", false
+	})
+	if fbProbe.Active.Slot != 2 || fbProbe.Active.Carrier != "中国移动" || fbProbe.Active.CustomName != "中国移不动" {
+		t.Fatalf("fallback probe mismatch: %+v", fbProbe)
+	}
+}
+
+func TestPhoneUsageNoGhostThirdCardAndZeroSlotReconcile(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "data"), 0o755)
+	defer clockForget(dir)
+
+	loc := time.FixedZone("CST", 8*3600)
+	t0 := time.Date(2026, 9, 20, 10, 0, 0, 0, loc)
+
+	curProbe := puSIMProbe{
+		Active:     puSIM{Slot: 0, Carrier: puUnknownSIM},
+		SlotsKnown: false,
+		MaxSlots:   2,
+	}
+	ctr := map[string][2]uint64{"rmnet_data2": {1000, 1000}, "wlan2": {0, 0}}
+	e := newPuEngine(dir, puEnv{
+		readNetDev:   func() ([]byte, error) { return fakeNetDev(ctr), nil },
+		hotspotIface: func() string { return "wlan2" },
+		upstream:     func() string { return "rmnet_data2" },
+		simProbe:     func() puSIMProbe { return curProbe },
+		bootID:       func() string { return "boot-rmx5010" },
+		alertsOn:     func() bool { return true },
+	})
+
+	// 1) 首轮建基线, 第 1 分钟 Modem 尚未就绪(Slot=0), 产生 10MB 蜂窝流量落入 "0|蜂窝(未知卡)"
+	e.tick(t0)
+	ctr["rmnet_data2"] = [2]uint64{1000 + 8*(1<<20), 1000 + 2*(1<<20)}
+	e.tick(t0.Add(time.Minute))
+
+	// 2) 第 2 分钟 RMX5010 双卡识别就绪: 卡1 联通(id=2), 卡2 移动(id=9, 自定义名 "中国移不动", activeDataSubId=9), 再产生 20MB
+	snap := puParseIsubDump(rmx5010IsubSample)
+	curProbe, _ = puResolveProbeFromIsub(snap, puRegistryDataState{ActiveDataSubID: 9})
+	ctr["rmnet_data2"] = [2]uint64{1000 + 24*(1<<20), 1000 + 6*(1<<20)}
+	e.tick(t0.Add(2 * time.Minute))
+	e.flush(t0.Add(2 * time.Minute))
+
+	// 今日记录中的 "0|蜂窝(未知卡)" 必须已被自动归并进 "2|中国移动" 并彻底删除
+	d, ok := puLoadDay(dir, "20260920")
+	if !ok {
+		t.Fatal("missing saved day")
+	}
+	if _, exists := d.Cell["0|"+puUnknownSIM]; exists {
+		t.Fatalf("unknown SIM bucket was not reconciled in tick: %v", d.Cell)
+	}
+	if got := d.Cell["2|中国移动"]; got[0]+got[1] != 30*(1<<20) {
+		t.Fatalf("slot2 reconciled cell=%v, want 30MiB", got)
+	}
+
+	// 校验报表: 最多只有卡1、卡2 两张卡片, 严禁出现第 3 张卡片, 且卡2 输出 custom_name="中国移不动"
+	rep := e.report("cycle", t0.Add(2*time.Minute))
+	if rep["max_slots"] != 2 {
+		t.Fatalf("max_slots=%v, want 2", rep["max_slots"])
+	}
+	bySim := rep["by_sim"].([]map[string]interface{})
+	if len(bySim) != 2 {
+		t.Fatalf("by_sim must have strictly 2 cards on dual-SIM phone, got %d: %+v", len(bySim), bySim)
+	}
+	if bySim[0]["slot"] != 1 || bySim[0]["carrier"] != "中国联通" {
+		t.Errorf("card1 mismatch: %+v", bySim[0])
+	}
+	if _, hasCustom := bySim[0]["custom_name"]; hasCustom {
+		t.Errorf("card1 should not have custom_name: %+v", bySim[0])
+	}
+	if bySim[1]["slot"] != 2 || bySim[1]["carrier"] != "中国移动" || bySim[1]["custom_name"] != "中国移不动" ||
+		bySim[1]["cycle_used"] != uint64(30*(1<<20)) || bySim[1]["is_default_data"] != true {
+		t.Errorf("card2 mismatch: %+v", bySim[1])
+	}
+	if rep["unattributed_cell_bytes"] != uint64(0) || rep["unattributed_cycle_bytes"] != uint64(0) {
+		t.Errorf("unexpected unattributed bytes: cell=%v cycle=%v", rep["unattributed_cell_bytes"], rep["unattributed_cycle_bytes"])
+	}
+
+	// 3) 历史遗留双卡同周期均大量耗流 + 历史 "0|蜂窝(未知卡)" + 脏槽位 "3|逍遥游":
+	// 硬护栏严禁渲染第 3 张卡, 未归属字节汇总在 unattributed_*
+	legacyDay := newPuDay("20260918")
+	legacyDay.Cell["0|"+puUnknownSIM] = [2]uint64{5 * (1 << 20), 0}
+	legacyDay.Cell["1|中国联通"] = [2]uint64{100 * (1 << 20), 0}
+	legacyDay.Cell["2|中国移动"] = [2]uint64{200 * (1 << 20), 0}
+	legacyDay.Cell["3|逍遥游"] = [2]uint64{3 * (1 << 20), 0}
+	if err := puSaveDay(dir, legacyDay); err != nil {
+		t.Fatal(err)
+	}
+	rep2 := e.report("cycle", t0.Add(3*time.Minute))
+	bySim2 := rep2["by_sim"].([]map[string]interface{})
+	if len(bySim2) != 2 {
+		t.Fatalf("hard guardrail violated: want 2 cards, got %d (%+v)", len(bySim2), bySim2)
+	}
+	for _, card := range bySim2 {
+		s := card["slot"].(int)
+		if s < 1 || s > 2 {
+			t.Fatalf("illegal slot %d leaked into by_sim", s)
+		}
+	}
+	wantUnattrib := uint64(8 * (1 << 20))
+	if rep2["unattributed_cycle_bytes"] != wantUnattrib || rep2["unattributed_cell_bytes"] != wantUnattrib {
+		t.Fatalf("unattributed bytes got cell=%v cycle=%v, want %d",
+			rep2["unattributed_cell_bytes"], rep2["unattributed_cycle_bytes"], wantUnattrib)
+	}
+
+	// 4) 单物理卡在位确定性归并: 拔掉卡1仅留卡2在位时, 历史 "0|蜂窝(未知卡)" 自动归并进唯一在位物理卡2
+	singleDay := newPuDay("20260919")
+	singleDay.Cell["0|"+puUnknownSIM] = [2]uint64{12 * (1 << 20), 0}
+	_ = os.Remove(puDayPath(dir, "20260918"))
+	if err := puSaveDay(dir, singleDay); err != nil {
+		t.Fatal(err)
+	}
+	curProbe = puSIMProbe{
+		Active:     puSIM{Slot: 2, Carrier: "中国移动", CustomName: "中国移不动", SubID: 9, Source: "isub"},
+		Slots:      map[int]puSIM{2: {Slot: 2, Carrier: "中国移动", CustomName: "中国移不动", SubID: 9, Source: "isub"}},
+		SlotsKnown: true,
+		MaxSlots:   2,
+	}
+	e.tick(t0.Add(10 * time.Minute))
+	rep3 := e.report("cycle", t0.Add(10*time.Minute))
+	bySim3 := rep3["by_sim"].([]map[string]interface{})
+	if len(bySim3) != 1 || bySim3[0]["slot"] != 2 || bySim3[0]["cycle_used"] != uint64(42*(1<<20)) {
+		t.Fatalf("single-SIM deterministic reconcile failed: %+v", bySim3)
+	}
+	if rep3["unattributed_cycle_bytes"] != uint64(0) {
+		t.Fatalf("expected 0 unattributed after single-SIM reconcile, got %v", rep3["unattributed_cycle_bytes"])
+	}
+}
+
+func TestPhoneUsageLockFreeSubprocessAndPendingDaysRetry(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "data"), 0o755)
+	defer clockForget(dir)
+
+	loc := time.FixedZone("CST", 8*3600)
+	tDay1 := time.Date(2026, 9, 30, 23, 58, 0, 0, loc)
+	tDay2 := time.Date(2026, 10, 1, 0, 1, 0, 0, loc)
+
+	ctr := map[string][2]uint64{"rmnet_data0": {100, 100}, "wlan2": {0, 0}}
+	var eng *puEngine
+	upstreamChecks := 0
+	simChecks := 0
+
+	eng = newPuEngine(dir, puEnv{
+		readNetDev:   func() ([]byte, error) { return fakeNetDev(ctr), nil },
+		hotspotIface: func() string { return "wlan2" },
+		upstreamInfo: func() puUpInfo {
+			upstreamChecks++
+			if !eng.mu.TryLock() {
+				t.Errorf("dead-law-4 violation: upstreamInfo() called while holding eng.mu")
+			} else {
+				eng.mu.Unlock()
+			}
+			return puUpInfo{Local: "rmnet_data0"}
+		},
+		simProbe: func() puSIMProbe {
+			simChecks++
+			if !eng.mu.TryLock() {
+				t.Errorf("dead-law-4 violation: simProbe() called while holding eng.mu")
+			} else {
+				eng.mu.Unlock()
+			}
+			return puSIMProbe{
+				Active:     puSIM{Slot: 1, Carrier: "中国联通", SubID: 2, Source: "isub"},
+				Slots:      map[int]puSIM{1: {Slot: 1, Carrier: "中国联通", SubID: 2, Source: "isub"}},
+				SlotsKnown: true,
+				MaxSlots:   2,
+			}
+		},
+		bootID: func() string { return "boot-lockfree" },
+	})
+
+	// 23:58 建基线 + 23:59 记一笔流量(尚未 flush 落盘)
+	eng.tick(tDay1)
+	ctr["rmnet_data0"] = [2]uint64{100 + 4096, 100 + 2048}
+	eng.tick(tDay1.Add(time.Minute))
+	if upstreamChecks == 0 || simChecks == 0 {
+		t.Fatalf("expected callbacks to run: upstream=%d sim=%d", upstreamChecks, simChecks)
+	}
+
+	// 制造磁盘写失败(在目标文件路径建一个同名非空目录, 使 os.Rename 必败), 验证:
+	// 1. 跨零点 tick 不会丢失 20260930 脏账(保留在 pendingDays 中);
+	// 2. puWriteAtomic 失败后立即清理 .tmp.* 孤儿文件!
+	blockerDir := puDayPath(dir, "20260930")
+	if err := os.MkdirAll(filepath.Join(blockerDir, "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctr["rmnet_data0"] = [2]uint64{100 + 8192, 100 + 4096}
+	eng.tick(tDay2)
+
+	ents, _ := os.ReadDir(filepath.Join(dir, "data"))
+	for _, en := range ents {
+		if strings.Contains(en.Name(), ".tmp.") {
+			t.Fatalf("orphan tmp file leaked on write failure: %s", en.Name())
+		}
+	}
+	// 即使未落盘, 内存查询 days 仍能完整读出昨日 20260930 的 4096+2048 字节
+	gotDays := eng.days(tDay1, tDay2)
+	if len(gotDays) != 2 || gotDays[0].Date != "20260930" || gotDays[0].Cell["1|中国联通"] != ([2]uint64{4096, 2048}) {
+		t.Fatalf("pendingDays lost across midnight write failure: %+v", gotDays)
+	}
+
+	// 解除写阻碍后, 下一轮 flush 重试成功落盘并清空 pendingDays
+	_ = os.RemoveAll(blockerDir)
+	eng.flush(tDay2.Add(time.Minute))
+	persisted, ok := puLoadDay(dir, "20260930")
+	if !ok || persisted.Cell["1|中国联通"] != ([2]uint64{4096, 2048}) {
+		t.Fatalf("retry flush failed to persist 20260930: ok=%v day=%+v", ok, persisted)
+	}
+	eng.mu.Lock()
+	pendLeft := len(eng.pendingDays)
+	eng.mu.Unlock()
+	if pendLeft != 0 {
+		t.Fatalf("pendingDays should be empty after successful retry, got %d", pendLeft)
+	}
+}
+
 
