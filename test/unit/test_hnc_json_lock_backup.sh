@@ -11,13 +11,17 @@ test_start "hnc_json add-array-unique: concurrent direct callers do not lose ent
 mkdir -p "$HNC_TEST_DIR/run"
 printf '%s\n' '{"version":1,"blacklist":[]}' > "$HNC_TEST_DIR/data/rules.json"
 for i in 1 2 3 4 5 6; do
-    HNC="$HNC_TEST_DIR" sh "$HNC_JSON_BIN" add-array-unique "$HNC_TEST_DIR/data/rules.json" blacklist "aa:bb:cc:dd:ee:0$i" >/dev/null 2>&1 &
+    ( HNC="$HNC_TEST_DIR" sh "$HNC_JSON_BIN" add-array-unique "$HNC_TEST_DIR/data/rules.json" blacklist "aa:bb:cc:dd:ee:0$i" >"$HNC_TEST_DIR/run/w.$i.log" 2>&1; echo "rc=$?" >>"$HNC_TEST_DIR/run/w.$i.log" ) &
 done
 wait
 content=$(cat "$HNC_TEST_DIR/data/rules.json")
 n=$(printf '%s' "$content" | grep -o 'aa:bb:cc:dd:ee:0' | wc -l | tr -d ' ')
+diag=""
+if [ "$n" != "6" ]; then
+    diag=" logs=$(head -c 600 "$HNC_TEST_DIR"/run/w.*.log 2>/dev/null | tr '\n' '|')"
+fi
 assert_json_valid "$HNC_TEST_DIR/data/rules.json" && \
-    assert_eq "6" "$n" "all 6 concurrent adds must survive (content: $content)" && test_pass
+    assert_eq "6" "$n" "all 6 concurrent adds must survive (content: $content$diag)" && test_pass
 
 test_start "hnc_json prunes backups per file (HNC_JSON_BACKUP_KEEP)"
 mkdir -p "$HNC_TEST_DIR/run"

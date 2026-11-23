@@ -263,7 +263,10 @@ jobs:
         # "bin/hnc_dpid missing"(CI 构建期产物,preflight 跑在构建前),
         # 该项已在 ci_preflight.sh 内降为 warn —— 现在 fail 就是真问题,
         # 必须拦住构建。
-        run: sh ./bin/ci_preflight.sh
+        run: |
+          sh ./bin/ci_preflight.sh
+          sh ./test/run_all.sh unit/test_hnc_json_lock_backup
+          sh ./test/run_all.sh unit/test_v533_json_single
 
       # v5.9.0: Go 静态检查与单元测试(含 64 位原子字段 8 字节对齐断言与 shm 测试)。host GOOS 跑。
       - name: Go vet + test (hnc_httpd + dpid)

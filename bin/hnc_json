@@ -128,6 +128,7 @@ _acquire_lock_dir() {
 # set_top 写回」整段放进锁里(v5.11: 读在锁外时两个并发 add 会互相覆盖丢一条);
 # mkdir 锁不可重入, 所以 set_top 内部再 acquire_lock 时直接复用。
 _LOCK_HELD=0
+_FLOCK_HELD=0
 _release_locks() {
   if [ "$_LOCK_HELD" = "1" ]; then
     _cur_owner="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
@@ -136,6 +137,11 @@ _release_locks() {
     fi
   fi
   _LOCK_HELD=0
+  if [ "$_FLOCK_HELD" = "1" ]; then
+    flock -u 9 9>&9 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+    _FLOCK_HELD=0
+  fi
 }
 
 # v5.11: 退出时顺带清掉本进程的临时候选文件(被信号打断时不再残留 .hnc_json.$$)。
@@ -147,7 +153,26 @@ _on_exit() {
 acquire_lock() {
   [ "$_LOCK_HELD" = "1" ] && return 0
   mkdir -p "$HNC_BASE/run" 2>/dev/null || true
-  _acquire_lock_dir "$LOCKDIR" || return 1
+  # v6.1.0-rc.4: 优先在内核 VFS 层用 flock 排他排队(9>&9 兼容 Android mksh FD_CLOEXEC),
+  # 零轮询唤醒、零多核拆锁竞态; 内层仍维护 json.lock 目录以兼容外部只读状态断言。
+  if command -v flock >/dev/null 2>&1; then
+    if ( exec 9>"$HNC_BASE/run/.json_fd" ) 2>/dev/null; then
+      exec 9>"$HNC_BASE/run/.json_fd"
+      if flock -x 9 9>&9 2>/dev/null; then
+        _FLOCK_HELD=1
+      else
+        exec 9>&- 2>/dev/null || true
+      fi
+    fi
+  fi
+  if ! _acquire_lock_dir "$LOCKDIR"; then
+    if [ "$_FLOCK_HELD" = "1" ]; then
+      flock -u 9 9>&9 2>/dev/null || true
+      exec 9>&- 2>/dev/null || true
+      _FLOCK_HELD=0
+    fi
+    return 1
+  fi
   _LOCK_HELD=1
   # v5.11: sh 里 INT/TERM 的 trap 执行完并不退出, 放锁只在 EXIT 做一次, 信号只负责 exit。
   trap '_on_exit' EXIT
@@ -494,15 +519,14 @@ prune_backups() {
 set_top() {
   target="$1"; key="$2"; value="$3"; typ="${4:-str}"
   [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
-  lit="$(json_literal "$value" "$typ")" || return $?
 
   target_dir="$(dirname "$target")"
   target_base="$(basename "$target")"
   mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
+  acquire_lock || return 1
+  lit="$(json_literal "$value" "$typ")" || return $?
   [ -f "$target" ] || printf '{}\n' > "$target"
   validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
-
-  acquire_lock || return 1
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
   bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json.$$"
@@ -842,7 +866,17 @@ array_add_unique() {
   lit="$(json_literal "$value" str)" || return $?
   # v5.11: 读-改-写整段持锁(见 _LOCK_HELD 注释), 防并发 add 丢条目
   acquire_lock || return 1
-  current="$(get_top "$target" "$key" 2>/dev/null || true)"
+  if [ ! -f "$target" ]; then
+    current="[]"
+  else
+    _gt_rc=0
+    current="$(get_top "$target" "$key")" || _gt_rc=$?
+    if [ "$_gt_rc" -eq 3 ]; then
+      current="[]"
+    elif [ "$_gt_rc" -ne 0 ]; then
+      return "$_gt_rc"
+    fi
+  fi
   case "$current" in
     \[*\]) ;;
     "") current="[]" ;;
@@ -885,7 +919,17 @@ array_del_value() {
   [ -n "$value" ] || { echo "hnc_json: empty array value" >&2; return 2; }
   # v5.11: 读-改-写整段持锁, 防并发 del 与 add 互相覆盖
   acquire_lock || return 1
-  current="$(get_top "$target" "$key" 2>/dev/null || true)"
+  if [ ! -f "$target" ]; then
+    current="[]"
+  else
+    _gt_rc=0
+    current="$(get_top "$target" "$key")" || _gt_rc=$?
+    if [ "$_gt_rc" -eq 3 ]; then
+      current="[]"
+    elif [ "$_gt_rc" -ne 0 ]; then
+      return "$_gt_rc"
+    fi
+  fi
   case "$current" in
     \[*\]) ;;
     "") current="[]" ;;
