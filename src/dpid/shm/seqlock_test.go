@@ -5,12 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func sampleDevices() []DeviceSlot {
@@ -42,7 +44,33 @@ func sampleDevices() []DeviceSlot {
 	}
 }
 
+func assertStruct64BitAlignment(t *testing.T, rt reflect.Type, baseOff uintptr, prefix string) {
+	t.Helper()
+	u64Atom := reflect.TypeOf((*atomic.Uint64)(nil)).Elem()
+	i64Atom := reflect.TypeOf((*atomic.Int64)(nil)).Elem()
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		absOff := baseOff + sf.Offset
+		switch {
+		case sf.Type.Kind() == reflect.Uint64 || sf.Type.Kind() == reflect.Int64 || sf.Type == u64Atom || sf.Type == i64Atom:
+			if absOff%8 != 0 {
+				t.Fatalf("%s.%s (%s) at offset=%d is not 8-byte aligned", prefix, sf.Name, sf.Type, absOff)
+			}
+		case sf.Type.Kind() == reflect.Struct:
+			assertStruct64BitAlignment(t, sf.Type, absOff, prefix+"."+sf.Name)
+		case sf.Type.Kind() == reflect.Array && sf.Type.Elem().Kind() == reflect.Struct && sf.Type.Len() > 0:
+			elemType := sf.Type.Elem()
+			for idx := 0; idx < sf.Type.Len() && idx < 4; idx++ {
+				assertStruct64BitAlignment(t, elemType, absOff+uintptr(idx)*elemType.Size(), prefix+"."+sf.Name)
+			}
+		}
+	}
+}
+
 func TestSeqLockWireLayoutInvariants(t *testing.T) {
+	if SchemaVersion != 3 || Version != 3 {
+		t.Fatalf("unexpected SchemaVersion=%d Version=%d, want 3", SchemaVersion, Version)
+	}
 	if FileSize != 16384 || HeaderSize != 64 || SlotSize != 8160 || DeviceSlotSize != 64 || MaxDevices != 126 {
 		t.Fatalf("unexpected geometry: FileSize=%d HeaderSize=%d SlotSize=%d DeviceSlotSize=%d MaxDevices=%d",
 			FileSize, HeaderSize, SlotSize, DeviceSlotSize, MaxDevices)
@@ -50,6 +78,19 @@ func TestSeqLockWireLayoutInvariants(t *testing.T) {
 	if SlotHeaderSize+MaxDevices*DeviceSlotSize > slotEndSeqOff {
 		t.Fatalf("device table overflows slotEndSeqOff: %d > %d", SlotHeaderSize+MaxDevices*DeviceSlotSize, slotEndSeqOff)
 	}
+
+	// Verify 32-bit/64-bit Go struct 8-byte alignment for all 64-bit fields and array strides.
+	if unsafe.Sizeof(Header{})%8 != 0 {
+		t.Fatalf("Header sizeof=%d is not a multiple of 8 bytes", unsafe.Sizeof(Header{}))
+	}
+	if unsafe.Sizeof(DeviceSlot{})%8 != 0 {
+		t.Fatalf("DeviceSlot sizeof=%d is not a multiple of 8 bytes", unsafe.Sizeof(DeviceSlot{}))
+	}
+	assertStruct64BitAlignment(t, reflect.TypeOf(Header{}), 0, "Header")
+	assertStruct64BitAlignment(t, reflect.TypeOf(DeviceSlot{}), 0, "DeviceSlot")
+	assertStruct64BitAlignment(t, reflect.TypeOf(Snapshot{}), 0, "Snapshot")
+	assertStruct64BitAlignment(t, reflect.TypeOf((*Writer)(nil)).Elem(), 0, "Writer")
+	assertStruct64BitAlignment(t, reflect.TypeOf((*Reader)(nil)).Elem(), 0, "Reader")
 
 	// Verify every 64-bit wire offset in top header and both latch slots is % 8 == 0.
 	hdr64Offsets := []int{16, 24, 32}
@@ -64,6 +105,9 @@ func TestSeqLockWireLayoutInvariants(t *testing.T) {
 			if (base+rel)%8 != 0 {
 				t.Fatalf("slot %d 64-bit offset %d not 8-byte aligned", slotIdx, base+rel)
 			}
+		}
+		if (base+60)%4 != 0 {
+			t.Fatalf("slot %d HostFlows 32-bit offset %d not 4-byte aligned", slotIdx, base+60)
 		}
 		for i := 0; i < MaxDevices; i++ {
 			devBase := base + SlotHeaderSize + i*DeviceSlotSize
@@ -105,24 +149,26 @@ func TestSeqLockMmapAndFallbackRoundTrip(t *testing.T) {
 			t.Fatalf("initial ReadInto: %v", err)
 		}
 		if string(snap.Header.Magic[:]) != Magic ||
-			snap.Header.Version != SchemaVersion ||
+			snap.Header.Version != 3 ||
 			snap.Header.HeaderSize != HeaderSize ||
 			snap.Header.DeviceSlotSize != DeviceSlotSize ||
 			snap.Header.SlotSize != SlotSize ||
 			snap.Header.EndianTag != EndianTag ||
+			snap.Header.ActiveFlows != 0 ||
+			snap.Header.HostFlows != 0 ||
 			snap.Header.DeviceCount != 0 {
 			t.Fatalf("unexpected initial header: %+v", snap.Header)
 		}
 
 		devs := sampleDevices()
 		mono1 := MonotonicNs()
-		if err := w.Write(mono1, 42, 7, devs); err != nil {
-			t.Fatalf("Write #1: %v", err)
+		if err := w.WriteWithHostFlows(mono1, 42, 230, 7, 0x5, devs); err != nil {
+			t.Fatalf("WriteWithHostFlows #1: %v", err)
 		}
 		if err := r.ReadInto(&snap); err != nil {
 			t.Fatalf("ReadInto #1: %v", err)
 		}
-		if snap.Header.UpdatedMonoNs != mono1 || snap.Header.ActiveFlows != 42 || snap.Header.TotalLeaks != 7 {
+		if snap.Header.UpdatedMonoNs != mono1 || snap.Header.ActiveFlows != 42 || snap.Header.HostFlows != 230 || snap.Header.TotalLeaks != 7 || snap.Header.Flags != 0x5 {
 			t.Fatalf("header mismatch: %+v", snap.Header)
 		}
 		got := snap.ValidDevices()
@@ -139,20 +185,32 @@ func TestSeqLockMmapAndFallbackRoundTrip(t *testing.T) {
 			t.Fatalf("dev[1] mismatch: %+v", got[1])
 		}
 
-		// Second write flips to opposite latch slot and preserves monotonic progression.
-		devs[0].RxBytes += 100000
+		// Second write flips to opposite latch slot via WriteWithHostFlows (0 hotspot devices, 185 host flows).
 		mono2 := MonotonicNs()
-		if err := w.Write(mono2, 55, 9, devs[:1]); err != nil {
-			t.Fatalf("Write #2: %v", err)
+		if err := w.WriteWithHostFlows(mono2, 0, 185, 9, 0, nil); err != nil {
+			t.Fatalf("WriteWithHostFlows #2: %v", err)
 		}
 		if err := r.ReadInto(&snap); err != nil {
 			t.Fatalf("ReadInto #2: %v", err)
 		}
-		if snap.Header.DeviceCount != 1 || snap.Header.ActiveFlows != 55 || snap.Header.TotalLeaks != 9 {
+		if snap.Header.DeviceCount != 0 || snap.Header.ActiveFlows != 0 || snap.Header.HostFlows != 185 || snap.Header.TotalLeaks != 9 {
 			t.Fatalf("header #2 mismatch: %+v", snap.Header)
 		}
-		if snap.Devices[1] != (DeviceSlot{}) {
-			t.Fatalf("stale tail device slot not cleared: %+v", snap.Devices[1])
+		if snap.Devices[0] != (DeviceSlot{}) || snap.Devices[1] != (DeviceSlot{}) {
+			t.Fatalf("stale tail device slots not cleared: %+v %+v", snap.Devices[0], snap.Devices[1])
+		}
+
+		// Backward-compatible Write wrapper sets HostFlows=0.
+		devs[0].RxBytes += 100000
+		mono3 := MonotonicNs()
+		if err := w.Write(mono3, 55, 11, devs[:1]); err != nil {
+			t.Fatalf("Write #3: %v", err)
+		}
+		if err := r.ReadInto(&snap); err != nil {
+			t.Fatalf("ReadInto #3: %v", err)
+		}
+		if snap.Header.DeviceCount != 1 || snap.Header.ActiveFlows != 55 || snap.Header.HostFlows != 0 || snap.Header.TotalLeaks != 11 {
+			t.Fatalf("header #3 mismatch: %+v", snap.Header)
 		}
 	}
 }
@@ -262,6 +320,41 @@ func TestSeqLockHotUpgradeSchemaMismatchAndTruncation(t *testing.T) {
 		}
 		if _, err := OpenReaderPath(p, false); !errors.Is(err, ErrSchemaMismatch) {
 			t.Fatalf("expected ErrSchemaMismatch for Version=1, got %v", err)
+		}
+	})
+
+	t.Run("version_2_with_current_magic_and_writer_auto_upgrade", func(t *testing.T) {
+		raw := makeValidRaw(t)
+		binary.LittleEndian.PutUint32(raw[8:12], 2)
+		for sIdx := 0; sIdx < 2; sIdx++ {
+			sOff := HeaderSize + sIdx*SlotSize
+			binary.LittleEndian.PutUint32(raw[sOff+44:sOff+48], 2)
+		}
+		p := filepath.Join(t.TempDir(), DefaultFileName)
+		if err := os.WriteFile(p, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, fb := range []bool{false, true} {
+			if _, err := OpenReaderPath(p, fb); !errors.Is(err, ErrSchemaMismatch) {
+				t.Fatalf("fallback=%v: expected ErrSchemaMismatch for Version=2, got %v", fb, err)
+			}
+		}
+
+		// Opening Writer on legacy v2 file must automatically wipe and rebuild to SchemaVersion=3.
+		w, err := OpenWriterPath(p, false)
+		if err != nil {
+			t.Fatalf("OpenWriterPath v2->v3 auto-upgrade failed: %v", err)
+		}
+		defer w.Close()
+
+		r, err := OpenReaderPath(p, false)
+		if err != nil {
+			t.Fatalf("OpenReaderPath after v2->v3 upgrade failed: %v", err)
+		}
+		defer r.Close()
+		snap, err := r.Read()
+		if err != nil || snap.Header.Version != 3 || snap.Header.DeviceCount != 0 {
+			t.Fatalf("expected clean upgraded SchemaVersion=3 snapshot, got snap=%+v err=%v", snap.Header, err)
 		}
 	})
 
@@ -431,7 +524,7 @@ func TestSeqLockZeroDirtyFramePollutionAndMax126ConcurrentStress(t *testing.T) {
 			Flags:       FlagOnline | FlagIPv4,
 		}
 	}
-	if err := w.Write(MonotonicNs(), 150, 3, many); err != nil {
+	if err := w.WriteWithHostFlows(MonotonicNs(), 150, 260, 3, 0, many); err != nil {
 		t.Fatal(err)
 	}
 
@@ -439,8 +532,8 @@ func TestSeqLockZeroDirtyFramePollutionAndMax126ConcurrentStress(t *testing.T) {
 	if err := r.ReadInto(&snap); err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.ValidDevices()) != MaxDevices {
-		t.Fatalf("capped devices=%d want %d", len(snap.ValidDevices()), MaxDevices)
+	if len(snap.ValidDevices()) != MaxDevices || snap.Header.HostFlows != 260 {
+		t.Fatalf("capped devices=%d want %d, hostFlows=%d want 260", len(snap.ValidDevices()), MaxDevices, snap.Header.HostFlows)
 	}
 
 	// Zero-allocation & sub-microsecond read check when mmapped.
@@ -474,6 +567,7 @@ func TestSeqLockZeroDirtyFramePollutionAndMax126ConcurrentStress(t *testing.T) {
 		for step := uint64(1); !stop.Load(); step++ {
 			cnt := int(step%MaxDevices) + 1
 			flows := uint32((step % 97) + 1)
+			hostFlows := flows*7 + 3
 			leaks := uint64(flows) * 13
 			for idx := 0; idx < cnt; idx++ {
 				rx := step*1000 + uint64(idx)
@@ -485,7 +579,7 @@ func TestSeqLockZeroDirtyFramePollutionAndMax126ConcurrentStress(t *testing.T) {
 					Flags:       FlagOnline,
 				}
 			}
-			_ = w.Write(MonotonicNs(), flows, leaks, batch[:cnt])
+			_ = w.WriteWithHostFlows(MonotonicNs(), flows, hostFlows, leaks, 0, batch[:cnt])
 			runtime.Gosched()
 		}
 	}()
@@ -502,8 +596,10 @@ func TestSeqLockZeroDirtyFramePollutionAndMax126ConcurrentStress(t *testing.T) {
 				}
 				devs := local.ValidDevices()
 				if len(devs) > 0 && devs[0].MAC[1] == 0xaa {
-					if local.Header.TotalLeaks != uint64(local.Header.ActiveFlows)*13 {
-						t.Errorf("torn header invariant: flows=%d leaks=%d", local.Header.ActiveFlows, local.Header.TotalLeaks)
+					if local.Header.TotalLeaks != uint64(local.Header.ActiveFlows)*13 ||
+						local.Header.HostFlows != local.Header.ActiveFlows*7+3 {
+						t.Errorf("torn header invariant: flows=%d hostFlows=%d leaks=%d",
+							local.Header.ActiveFlows, local.Header.HostFlows, local.Header.TotalLeaks)
 						return
 					}
 					baseStep := devs[0].RxBytes / 1000

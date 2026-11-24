@@ -13,10 +13,15 @@ const (
 	MaxCapacity        = 2000
 	DefaultCooldownSec = 300
 
-	TypePhone    = "PHONE"
-	TypeDeviceID = "DEVICE_ID"
-	TypeGPS      = "GPS"
-	TypeMACAddr  = "MAC_ADDR"
+	TypePhone      = "PHONE"
+	TypeDeviceID   = "DEVICE_ID"
+	TypeGPS        = "GPS"
+	TypeMACAddr    = "MAC_ADDR"
+	TypeCredential = "CREDENTIAL"
+	TypeIDCard     = "ID_CARD"
+
+	OriginHotspot = "hotspot"
+	OriginHost    = "host"
 )
 
 // LeakEvent represents a single cleartext privacy leak event (or aggregated
@@ -26,6 +31,10 @@ type LeakEvent struct {
 	FirstSeen  int64  `json:"first_seen"`
 	LastSeen   int64  `json:"last_seen"`
 	Ts         int64  `json:"ts"`
+	Origin     string `json:"origin,omitempty"`
+	UID        int    `json:"uid,omitempty"`
+	Pkg        string `json:"pkg,omitempty"`
+	AppName    string `json:"app_name,omitempty"`
 	MAC        string `json:"mac"`
 	ClientIP   string `json:"client_ip,omitempty"`
 	SrcIP      string `json:"src_ip,omitempty"`
@@ -56,6 +65,10 @@ func defaultLabelForType(leakType string) string {
 		return "精准定位坐标"
 	case TypeMACAddr:
 		return "硬件 MAC 地址"
+	case TypeCredential:
+		return "账号凭据/Token"
+	case TypeIDCard:
+		return "身份证号"
 	default:
 		return leakType
 	}
@@ -163,13 +176,44 @@ func (r *RingBuffer) Clear() {
 	r.mu.Unlock()
 }
 
+func canonicalOrigin(o string) string {
+	if strings.EqualFold(strings.TrimSpace(o), OriginHost) {
+		return OriginHost
+	}
+	return OriginHotspot
+}
+
+func sameEventSubject(a, b LeakEvent) bool {
+	oa := canonicalOrigin(a.Origin)
+	ob := canonicalOrigin(b.Origin)
+	if oa != ob {
+		return false
+	}
+	if oa == OriginHost && a.MAC == "" && b.MAC == "" {
+		return a.UID == b.UID && a.Pkg == b.Pkg
+	}
+	return a.MAC == b.MAC
+}
+
 // Record inserts or aggregates ev using (mac + dst_host + leak_type + raw_value)
-// over the configured cooldown window. Returns the updated event and isNewAlert.
+// for hotspot traffic or (uid/pkg + dst_host + leak_type + raw_value) for host
+// traffic when MAC is empty, over the configured cooldown window.
+// Returns the updated event and isNewAlert.
 func (r *RingBuffer) Record(ev LeakEvent, now time.Time) (LeakEvent, bool) {
 	nowUnix := now.Unix()
 	if nowUnix <= 0 {
 		nowUnix = time.Now().Unix()
 	}
+	switch strings.ToLower(strings.TrimSpace(ev.Origin)) {
+	case OriginHost:
+		ev.Origin = OriginHost
+	case OriginHotspot:
+		ev.Origin = OriginHotspot
+	default:
+		ev.Origin = ""
+	}
+	ev.Pkg = strings.TrimSpace(ev.Pkg)
+	ev.AppName = strings.TrimSpace(ev.AppName)
 	ev.MAC = strings.ToLower(strings.TrimSpace(ev.MAC))
 	if ev.SrcIP == "" && ev.ClientIP != "" {
 		ev.SrcIP = ev.ClientIP
@@ -201,7 +245,7 @@ func (r *RingBuffer) Record(ev LeakEvent, now time.Time) (LeakEvent, bool) {
 			phys := (r.head + i) % r.cap
 			cur := &r.buf[phys]
 			if cur.LeakType == ev.LeakType &&
-				cur.MAC == ev.MAC &&
+				sameEventSubject(*cur, ev) &&
 				cur.DstHost == ev.DstHost &&
 				sameRawValueForType(ev.LeakType, cur.RawValue, ev.RawValue) {
 				dt := nowUnix - cur.LastSeen
@@ -210,6 +254,18 @@ func (r *RingBuffer) Record(ev LeakEvent, now time.Time) (LeakEvent, bool) {
 					if nowUnix > cur.LastSeen {
 						cur.LastSeen = nowUnix
 						cur.Ts = nowUnix
+					}
+					if ev.Origin != "" {
+						cur.Origin = ev.Origin
+					}
+					if ev.UID > 0 {
+						cur.UID = ev.UID
+					}
+					if ev.Pkg != "" {
+						cur.Pkg = ev.Pkg
+					}
+					if ev.AppName != "" {
+						cur.AppName = ev.AppName
 					}
 					if ev.RawSnippet != "" {
 						cur.RawSnippet = ev.RawSnippet
@@ -342,10 +398,14 @@ func (r *RingBuffer) SnapshotChronological() []LeakEvent {
 }
 
 func sameRawValueForType(leakType, a, b string) bool {
-	if leakType == TypeMACAddr {
+	switch leakType {
+	case TypeMACAddr:
 		return normalizeMACCompare(a) == normalizeMACCompare(b)
+	case TypeIDCard:
+		return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+	default:
+		return a == b
 	}
-	return a == b
 }
 
 func normalizeMACCompare(s string) string {

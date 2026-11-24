@@ -502,7 +502,7 @@
     radial-gradient(90% 80% at 92% 100%,rgba(0,122,255,.12) 0%,transparent 62%),
     var(--card);
 }
-[data-glass="liquid"] .hero>div:not(.hero-div):not(.hero-spark-hud){
+[data-glass="liquid"] .hero:not(.v6-hero)>div:not(.hero-div):not(.hero-spark-hud){
   padding:11px 13px;
   border-radius:19px;
   background:rgba(255,255,255,.46);
@@ -577,7 +577,7 @@
     radial-gradient(42% 36% at 18% 82%,rgba(16,185,129,.20) 0%,transparent 72%),
     linear-gradient(145deg,#060b14 0%,#0b1526 52%,#081120 100%)!important;
 }
-:root[data-glass="liquid"][data-theme="dark"] .hero>div:not(.hero-div):not(.hero-spark-hud),
+:root[data-glass="liquid"][data-theme="dark"] .hero:not(.v6-hero)>div:not(.hero-div):not(.hero-spark-hud),
 :root[data-glass="liquid"][data-theme="dark"] .ctrl,
 :root[data-glass="liquid"][data-theme="dark"] .cc-tile,
 :root[data-glass="liquid"][data-theme="dark"] .scard-rows>.row,
@@ -633,7 +633,7 @@
 [data-glass="liquid"] .brand-title{font-size:20px;letter-spacing:-.6px;font-weight:750;color:var(--text-1);background:none;flex:none}
 [data-glass="liquid"] .brand-sub{font-size:8px;font-weight:550;line-height:1.5;letter-spacing:.6px;white-space:normal;max-width:82px;opacity:.8}
 [data-glass="liquid"] .htitle{bottom:20px;font-size:15px;letter-spacing:-.3px}
-[data-glass="liquid"] .page{padding:calc(env(safe-area-inset-top,0px) + 78px) 20px calc(env(safe-area-inset-bottom,0px) + 120px)}
+[data-glass="liquid"] .page{padding:calc(env(safe-area-inset-top,0px) + 78px) 20px calc(148px + env(safe-area-inset-bottom,0px))}
 [data-glass="liquid"] .av,[data-glass="frosted"] .av{width:42px;height:42px;border-radius:14px;background:linear-gradient(145deg,rgba(255,255,255,.72),rgba(219,234,249,.38));box-shadow:inset 0 1px 0 rgba(255,255,255,.86),0 4px 10px -7px rgba(18,42,88,.18)}
 .av>svg{width:20px;height:20px;color:#1d6fd8;stroke-width:1.75}
 :root[data-theme="dark"] .av>svg{color:#60a5fa}
@@ -756,7 +756,7 @@
 }
 
 /* 3. 修复液态玻璃隐藏 .hero-div 后「设备页 Hero」与「应用页 .ahero .stats」列宽挤压成 1px 的 Bug */
-[data-glass="liquid"] .hero{
+[data-glass="liquid"] .hero:not(.v6-hero){
   grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;
 }
 [data-glass="liquid"] .ahero .stats,
@@ -1282,13 +1282,13 @@
   letter-spacing:.05em;
   color:var(--cy-accent);
 }
-[data-style="cyber"] .hero{
+[data-style="cyber"] .hero:not(.v6-hero){
   grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;
   gap:10px;
   padding:15px;
 }
 [data-style="cyber"] .hero-div{display:none}
-[data-style="cyber"] .hero>div:not(.hero-div):not(.hero-spark-hud),
+[data-style="cyber"] .hero:not(.v6-hero)>div:not(.hero-div):not(.hero-spark-hud),
 [data-style="cyber"] .ahero .stats>div:not(.hero-div){
   padding:11px 13px;
   border-radius:6px;
@@ -2196,15 +2196,21 @@ html.has-wallpaper[data-glass="frosted"]{
 /* 嵌套子层统一接入 --lg-sub / --lg-sub-2 动态插值 */
 :root[data-glass="liquid"] .ctrl,
 :root[data-glass="liquid"] .cc-tile,
+:root[data-glass="liquid"] .v6-conn-pill,
+:root[data-glass="liquid"] .v6-ov-cell,
+:root[data-glass="liquid"] .v6-fw-btn:not(.on),
 :root[data-glass="liquid"] .scard-rows>.row,
 :root[data-glass="liquid"] .scard-rows>.row-wrap,
-:root[data-glass="liquid"] .hero>div:not(.hero-div):not(.hero-spark-hud),
+:root[data-glass="liquid"] .hero:not(.v6-hero)>div:not(.hero-div):not(.hero-spark-hud),
 :root[data-glass="liquid"] .ahero .stats>div:not(.hero-div),
 :root[data-glass="frosted"] .ctrl,
 :root[data-glass="frosted"] .cc-tile,
+:root[data-glass="frosted"] .v6-conn-pill,
+:root[data-glass="frosted"] .v6-ov-cell,
+:root[data-glass="frosted"] .v6-fw-btn:not(.on),
 :root[data-glass="frosted"] .scard-rows>.row,
 :root[data-glass="frosted"] .scard-rows>.row-wrap,
-:root[data-glass="frosted"] .hero>div:not(.hero-div):not(.hero-spark-hud),
+:root[data-glass="frosted"] .hero:not(.v6-hero)>div:not(.hero-div):not(.hero-spark-hud),
 :root[data-glass="frosted"] .ahero .stats>div:not(.hero-div){
   background:var(--lg-sub)!important;
   box-shadow:var(--lg-rim-inner)!important;
@@ -2604,7 +2610,8 @@ html.has-wallpaper[data-theme="dark"] .chip:not(.on),
 :root[data-glass="frosted"] .brand-title{font-size:20px;letter-spacing:-.6px;font-weight:750;color:var(--text-1);background:none;flex:none}
 :root[data-glass="frosted"] .brand-sub{font-size:8px;font-weight:550;line-height:1.5;letter-spacing:.6px;white-space:normal;max-width:82px;opacity:.8}
 :root[data-glass="frosted"] .htitle{bottom:20px;font-size:15px;letter-spacing:-.3px}
-:root[data-glass="frosted"] .hero{grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;padding:18px 18px 15px;border-radius:24px}
+:root[data-glass="frosted"] .hero{border-radius:24px}
+:root[data-glass="frosted"] .hero:not(.v6-hero){grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;padding:18px 18px 15px}
 :root[data-glass="frosted"] .hero-div,:root[data-glass="frosted"] .ahero .stats>.hero-div{display:none}
 :root[data-glass="frosted"] .ahero .stats{grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}
 @media (max-width:540px){
@@ -2724,16 +2731,36 @@ html.has-wallpaper:not([data-style]):not([data-glass]) .glass{
   background:rgba(14,22,38,calc(.38 + var(--gx-up,0)*.32 - var(--gx-dn,0)*.16))!important;
 }
 
-/* 8) 卡片内文字微对比衬线（绝不污染顶栏深底白字与底栏 #tabs .tab） */
+/* 8) 卡片内文字微对比衬线与浅色壁纸次要文字对比度增强 */
 :root[data-has-wp="1"][data-glass] .scard-h b,
+:root[data-has-wp="1"][data-glass] .scard-head b,
 :root[data-has-wp="1"][data-glass] .dev-name .nm,
 :root[data-has-wp="1"][data-glass] .ctrl-t,
 :root[data-has-wp="1"][data-glass] .row .t,
 :root[data-has-wp="1"][data-glass] .cc-txt b{
   text-shadow:0 .5px 0 rgba(255,255,255,.42);
 }
+:root[data-has-wp="1"]:not([data-theme="dark"]) .sub,
+:root[data-has-wp="1"]:not([data-theme="dark"]) .note:not(.warn):not(.err),
+:root[data-has-wp="1"]:not([data-theme="dark"]) .scard-h small,
+:root[data-has-wp="1"]:not([data-theme="dark"]) .scard-head small,
+:root[data-has-wp="1"]:not([data-theme="dark"]) .v6-hero-sub,
+:root[data-has-wp="1"]:not([data-theme="dark"]) .row .s{
+  color:rgba(20,30,48,.80);
+  text-shadow:0 .5px 0 rgba(255,255,255,.52);
+}
 @media (prefers-color-scheme: dark){
+  :root[data-has-wp="1"]:not([data-theme="light"]) .sub,
+  :root[data-has-wp="1"]:not([data-theme="light"]) .note:not(.warn):not(.err),
+  :root[data-has-wp="1"]:not([data-theme="light"]) .scard-h small,
+  :root[data-has-wp="1"]:not([data-theme="light"]) .scard-head small,
+  :root[data-has-wp="1"]:not([data-theme="light"]) .v6-hero-sub,
+  :root[data-has-wp="1"]:not([data-theme="light"]) .row .s{
+    color:rgba(226,236,248,.82);
+    text-shadow:0 1px 2px rgba(2,6,18,.48);
+  }
   :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .scard-h b,
+  :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .scard-head b,
   :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .dev-name .nm,
   :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .ctrl-t,
   :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .row .t,
@@ -2742,6 +2769,7 @@ html.has-wallpaper:not([data-style]):not([data-glass]) .glass{
   }
 }
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .scard-h b,
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .scard-head b,
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .dev-name .nm,
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .ctrl-t,
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .row .t,
@@ -2789,7 +2817,7 @@ html,body{
 :root[data-style="apple"] .page,
 :root[data-glass] .page,
 :root[data-style="cyber"] .page{
-  padding-bottom:calc(env(safe-area-inset-bottom,0px) + 148px)!important;
+  padding-bottom:calc(148px + env(safe-area-inset-bottom,0px))!important;
 }
 body::after{
   content:"";
@@ -4321,9 +4349,9 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
 /* 窄屏与宿主内嵌预览顶栏防拥挤排布：区分 3 列玻璃 Hero 与 5 列分割线 Hero */
 @media (max-width: 460px) {
   .header #sig-pill:not([hidden]) + #mode-pill { display: none !important; }
-  [data-glass] .hero { grid-template-columns: minmax(0, 1.12fr) minmax(0, 1.12fr) minmax(74px, .82fr) !important; gap: 8px !important; }
-  :root:not([data-glass]) .hero { grid-template-columns: minmax(0, 1.12fr) 1px minmax(0, 1.12fr) 1px minmax(72px, .82fr) !important; }
-  [data-glass] .hero > div:not(.hero-div):not(.hero-spark-hud) { padding: 10px 10px !important; }
+  [data-glass] .hero:not(.v6-hero) { grid-template-columns: minmax(0, 1.12fr) minmax(0, 1.12fr) minmax(74px, .82fr) !important; gap: 8px !important; }
+  :root:not([data-glass]) .hero:not(.v6-hero) { grid-template-columns: minmax(0, 1.12fr) 1px minmax(0, 1.12fr) 1px minmax(72px, .82fr) !important; }
+  [data-glass] .hero:not(.v6-hero) > div:not(.hero-div):not(.hero-spark-hud) { padding: 10px 10px !important; }
   .hero .hero-v { font-size: 23px !important; }
 }
 
@@ -4386,8 +4414,6 @@ body::after {
 :root[data-glass="liquid"] .filter.glass::before,
 :root[data-glass="liquid"] .gops.glass::before,
 :root[data-glass="liquid"] .search.glass::before,
-:root[data-glass="liquid"] .v6-card.glass::before,
-:root[data-glass="liquid"] .lgd-panel.glass::before,
 :root[data-glass="liquid"] .seg.glass::before,
 :root[data-glass="liquid"] .sheet .glass::before {
   display: none !important;
@@ -4554,17 +4580,18 @@ html[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]),
 :root[data-glass][data-theme="dark"] .hero {
   background: radial-gradient(110% 80% at 12% 0%, rgba(10, 132, 255, .06) 0%, transparent 56%), var(--card) !important;
 }
-:root[data-glass][data-theme="dark"] .hero > div:not(.hero-div):not(.hero-spark-hud),
+:root[data-glass][data-theme="dark"] .hero:not(.v6-hero) > div:not(.hero-div):not(.hero-spark-hud),
 :root[data-glass][data-theme="dark"] .ahero .stats > div:not(.hero-div),
 :root[data-glass][data-theme="dark"] .ctrl,
 :root[data-glass][data-theme="dark"] .cc-tile:not(.on),
 :root[data-glass][data-theme="dark"] .scard-rows > .row,
 :root[data-glass][data-theme="dark"] .scard-rows > .row-wrap,
+:root[data-glass][data-theme="dark"] .v6-conn-pill,
+:root[data-glass][data-theme="dark"] .v6-ov-cell,
+:root[data-glass][data-theme="dark"] .v6-fw-btn:not(.on),
 :root[data-glass][data-theme="dark"] .v6-kpi,
 :root[data-glass][data-theme="dark"] .v6-num-box,
 :root[data-glass][data-theme="dark"] .v6-flow-item,
-:root[data-glass][data-theme="dark"] .v6-calm-empty,
-:root[data-glass][data-theme="dark"] .v6-bento:not(.on),
 :root[data-glass][data-theme="dark"] .v6-dev-pill:not(.on):not(.is-auto),
 :root[data-glass][data-theme="dark"] .lgd-summary-line,
 :root[data-glass][data-theme="dark"] .lgd-ctrl-bar,
@@ -4620,15 +4647,13 @@ html[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]),
 }
 :root[data-theme="dark"]:not([data-style="cyber"]) .seg,
 :root[data-theme="dark"]:not([data-style="cyber"]) .seg.glass,
-:root[data-theme="dark"]:not([data-style="cyber"]) .seg.small,
-:root[data-theme="dark"]:not([data-style="cyber"]) .v6-subtabs {
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg.small {
   background: rgba(255, 255, 255, .065) !important;
   border: 0 !important;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, .42), 0 0 0 .5px rgba(255, 255, 255, .06) !important;
 }
 :root[data-theme="dark"]:not([data-style="cyber"]) .seg .thumb,
-:root[data-theme="dark"]:not([data-style="cyber"]) .seg.small .thumb,
-:root[data-theme="dark"]:not([data-style="cyber"]) .v6-subtab.on {
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg.small .thumb {
   background: #3A3D4A !important;
   color: #FFFFFF !important;
   box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .18), 0 2px 8px rgba(0, 0, 0, .45) !important;
@@ -4705,13 +4730,6 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
   -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
   backdrop-filter: blur(20px) saturate(180%) !important;
   box-shadow: var(--lg-rim), var(--lg-drop) !important;
-}
-:root[data-glass="frosted"]:not([data-theme="dark"]) .v6-bento.on,
-:root[data-glass="liquid"]:not([data-theme="dark"]) .v6-bento.on {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .85), 0 8px 20px -8px rgba(0, 122, 255, .25) !important;
-}
-:root[data-glass][data-theme="dark"] .v6-bento.on {
-  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .18), 0 8px 22px -8px rgba(0, 0, 0, .55) !important;
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
@@ -4866,13 +4884,13 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
   --rx: #38BDF8;
   --tx: #F59E0B;
 }
-:root[data-style="cyber"] .v6-card,
-:root[data-style="cyber"] .lgd-panel,
 :root[data-style="cyber"] .sgrp.scard,
 :root[data-style="cyber"] .dpv-inline-wrap {
   border-radius: 6px !important;
 }
-:root[data-style="cyber"] .v6-bento,
+:root[data-style="cyber"] .v6-conn-pill,
+:root[data-style="cyber"] .v6-ov-cell,
+:root[data-style="cyber"] .v6-fw-btn,
 :root[data-style="cyber"] .lgd-item,
 :root[data-style="cyber"] .v6-kpi,
 :root[data-style="cyber"] .v6-lat-cmp,
@@ -4883,23 +4901,8 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
 :root[data-style="cyber"] .dev-v6-strip {
   border-radius: 4px !important;
 }
-:root[data-style="cyber"] .v6-bento {
-  border: 1px solid var(--stroke) !important;
-  background: var(--input) !important;
-  position: relative;
-}
-:root[data-style="cyber"] .v6-bento.on {
-  border-color: var(--cy-accent, #38BDF8) !important;
-  background: var(--card-2) !important;
-  box-shadow: inset 3px 0 0 var(--cy-accent, #38BDF8), 0 6px 18px -8px rgba(56, 189, 248, .35) !important;
-}
-@supports (background: color-mix(in srgb, #000 50%, transparent)) {
-  :root[data-style="cyber"] .v6-bento.on {
-    background: color-mix(in srgb, var(--cy-accent, #38BDF8) 14%, var(--card-solid)) !important;
-  }
-}
-:root[data-style="cyber"] .v6-bento-txt b,
 :root[data-style="cyber"] .v6-kpi b,
+:root[data-style="cyber"] .v6-ov-cell b,
 :root[data-style="cyber"] .dpv-kpi-num,
 :root[data-style="cyber"] .sig-pill {
   font-family: var(--mono);
@@ -4975,17 +4978,18 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
-   10.7 HNC v6.0 全站按钮比例收敛、微晶克制高光与三处真机视口像素级精修
-   1) 收敛 [data-style="apple"]/.btn 50px/17px 巨型胶囊与 .55 塑料白反光 → 39px/13.5px/12px 哑光微晶棱边 (.24)
-   2) 热点设备本月排行：补齐离线空心灰圈占位 (.rk-dot.off)，01~08 设备名严丝合缝垂直对齐
-   3) DPI 顶部总览卡：眉栏状态解耦 + 识别模式/覆盖率圆环双列零断字防孤字换行
-   4) 自训工作台：引擎原理内收至右上胶囊，双操作钮对称网格，底部规则中心入口卡防底栏遮挡
+   10.7 HNC v6.1 全站按钮比例收敛、微晶克制高光与三处真机视口像素级精修
    ─────────────────────────────────────────────────────────────────────────── */
 .page,
 [data-style="apple"] .page,
 [data-glass="liquid"] .page,
 [data-glass="frosted"] .page {
-  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 128px) !important;
+  padding-bottom: calc(148px + env(safe-area-inset-bottom, 0px)) !important;
+}
+.hero.v6-hero {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 11px !important;
 }
 
 /* 1) 全站按钮尺寸层级与高光克制化（覆盖 apple.css 50px/17px 与 liquid.css 999px/.55 过曝） */
@@ -5010,8 +5014,8 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
 /* 卡片内控制区主次按钮统一 39px/12px，横幅、合并条与未知域名行保持 33px 紧凑比例 */
 [data-style="apple"] .ctrl .btn,
 [data-glass] .ctrl .btn,
-[data-style="apple"] .v6-card .btns > .btn,
-[data-glass] .v6-card .btns > .btn {
+[data-style="apple"] .scard .btns > .btn,
+[data-glass] .scard .btns > .btn {
   height: 39px !important;
   font-size: 13.5px !important;
   padding: 0 14px !important;
@@ -5526,9 +5530,9 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   <div class="htitle" id="htitle" aria-hidden="true"></div>
   <button class="sig-pill press" id="sig-pill" type="button" hidden aria-label="热点本机实时信号"></button>
   <span class="sample" id="mode-pill" hidden></span>
-  <button class="hbtn press" id="v6-nav-btn" type="button" aria-label="智能护航与隐私安检" title="智能护航 · 隐私明文安检"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".15"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/><path d="M9 12.2 11.2 14.4 15.4 9.8"/></svg><span class="hbadge" id="lgd-badge" hidden>0</span></button>
-  <button class="hbtn press" id="bell" aria-label="告警"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.2a6 6 0 0 0-12 0c0 6.6-2.8 8.6-2.8 8.6h17.6S18 14.8 18 8.2Z" fill="currentColor" fill-opacity=".14"/><path d="M18 8.2a6 6 0 0 0-12 0c0 6.6-2.8 8.6-2.8 8.6h17.6S18 14.8 18 8.2Z"/><path d="M13.8 20.4a2.1 2.1 0 0 1-3.6 0"/></svg><span class="hbadge" id="bell-n" hidden>0</span></button>
-  <button class="hbtn press" id="theme-btn" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.8"/><path d="M12 3.2a8.8 8.8 0 0 1 0 17.6Z" fill="currentColor" fill-opacity=".82" stroke="none"/></svg></button>
+  <button class="hbtn press" id="v6-nav-btn" type="button" aria-label="智能护航与隐私安检" title="智能护航 · 隐私明文安检"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".15"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/><path d="M9 12.2 11.2 14.4 15.4 9.8"/></svg><span class="hbadge" id="lgd-badge" hidden>0</span></button>
+  <button class="hbtn press" id="bell" aria-label="告警"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.2a6 6 0 0 0-12 0c0 6.6-2.8 8.6-2.8 8.6h17.6S18 14.8 18 8.2Z" fill="currentColor" fill-opacity=".14"/><path d="M18 8.2a6 6 0 0 0-12 0c0 6.6-2.8 8.6-2.8 8.6h17.6S18 14.8 18 8.2Z"/><path d="M13.8 20.4a2.1 2.1 0 0 1-3.6 0"/></svg><span class="hbadge" id="bell-n" hidden>0</span></button>
+  <button class="hbtn press" id="theme-btn" aria-label="切换主题"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.8"/><path d="M12 3.2a8.8 8.8 0 0 1 0 17.6Z" fill="currentColor" fill-opacity=".82" stroke="none"/></svg></button>
 </header>
 
 <main class="pages" id="pages">
@@ -5548,7 +5552,7 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
 <div class="sheet" id="sheet" role="dialog" aria-modal="true"><div class="grab"></div><div id="sheet-body"></div></div>
 <div class="v6-drawer-scrim" id="v6-scalpel-scrim"></div>
 <aside class="v6-drawer glass" id="v6-scalpel-drawer" role="dialog" aria-modal="true" aria-label="活跃连接管理与异常断流" hidden><div class="grab"></div><div id="v6-scalpel-body"></div></aside>
-<div class="toast" id="toast" role="status" aria-live="polite"><svg id="toast-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span id="toast-t"></span></div>
+<div class="toast" id="toast" role="status" aria-live="polite"><svg id="toast-ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span id="toast-t"></span></div>
 <div class="undo-pill" id="undo-pill" role="region" aria-label="操作撤销提示" aria-live="polite" hidden><span class="undo-ic" id="undo-ic" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><span class="undo-msg" id="undo-msg"></span><button type="button" class="btn pri press undo-btn" id="undo-btn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg><span id="undo-btn-t">撤销</span></button><button type="button" class="undo-x press" id="undo-x" aria-label="关闭提示"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
 
 <script src="hyalite.js"></script>

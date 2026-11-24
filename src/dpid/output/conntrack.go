@@ -857,3 +857,450 @@ func parseConntrackLine(line string) (proto, state string, ok bool) {
 	}
 	return proto, state, true
 }
+
+// ConntrackClient describes a confirmed downstream hotspot client for flow attribution.
+type ConntrackClient struct {
+	MAC string
+	IPs []string
+}
+
+// ConntrackFlowOptions configures orthogonal classification of conntrack entries
+// into downstream hotspot forwarding flows vs. phone-local host flows.
+type ConntrackFlowOptions struct {
+	// HotspotActive reports whether hotspot sharing is active. When false (or when
+	// zero confirmed downstream clients are online), HotspotFlows is strictly 0.
+	HotspotActive bool
+	// Clients lists confirmed online downstream hotspot clients (MAC != "" or confirmed client IPs).
+	Clients []ConntrackClient
+	// InactiveClientIPs optionally lists recently offline downstream client IPs so
+	// lingering conntrack entries from disconnected hotspot clients do not pollute HostFlows.
+	InactiveClientIPs []string
+	// GatewayIPs optionally lists local gateway/interface IPs on the phone.
+	GatewayIPs []string
+	// HotspotNets optionally lists active hotspot subnets (e.g. 192.168.43.0/24).
+	HotspotNets []*net.IPNet
+}
+
+// ConntrackFlowSplit holds the orthogonal TCP/UDP flow counts from a conntrack scan.
+type ConntrackFlowSplit struct {
+	HotspotFlows   uint32            // Confirmed downstream client forwarding TCP/UDP flows
+	HostFlows      uint32            // Phone-local non-loopback active TCP/UDP flows
+	MgmtExcluded   uint32            // Downstream gateway management flows (:53/:67/:68/:8443/:8444/:8080)
+	LoopbackFlows  uint32            // Loopback (127.0.0.0/8, ::1) TCP/UDP flows
+	PerClientFlows map[string]uint32 // Per-client forwarding flows keyed by lowercase MAC
+}
+
+// ConntrackClassifier classifies conntrack lines in a single streaming pass.
+type ConntrackClassifier struct {
+	hotspotEnabled bool
+	onlineByIP     map[string]string
+	inactiveByIP   map[string]struct{}
+	gatewayIPs     map[string]struct{}
+	hotspotNets    []*net.IPNet
+	perClient      map[string]uint32
+	hotspotFlows   uint32
+	hostFlows      uint32
+	mgmtExcluded   uint32
+	loopbackFlows  uint32
+}
+
+const anonClientMarker = "*"
+
+// NewConntrackClassifier builds a streaming orthogonal flow classifier for ReadConntrackLines.
+func NewConntrackClassifier(opts ConntrackFlowOptions) *ConntrackClassifier {
+	c := &ConntrackClassifier{
+		onlineByIP:   make(map[string]string, len(opts.Clients)*2),
+		inactiveByIP: make(map[string]struct{}, len(opts.InactiveClientIPs)),
+		gatewayIPs:   make(map[string]struct{}, len(opts.GatewayIPs)),
+		hotspotNets:  opts.HotspotNets,
+		perClient:    make(map[string]uint32, len(opts.Clients)),
+	}
+	for _, g := range opts.GatewayIPs {
+		if _, key := parseNormCTIP(g); key != "" {
+			c.gatewayIPs[key] = struct{}{}
+		}
+	}
+	for _, rawIP := range opts.InactiveClientIPs {
+		if _, key := parseNormCTIP(rawIP); key != "" {
+			c.inactiveByIP[key] = struct{}{}
+		}
+	}
+
+	onlineClients := 0
+	for _, cl := range opts.Clients {
+		mac := strings.ToLower(strings.TrimSpace(cl.MAC))
+		tag := mac
+		if tag == "" {
+			tag = anonClientMarker
+		}
+		addedAnyIP := false
+		for _, rawIP := range cl.IPs {
+			_, key := parseNormCTIP(rawIP)
+			if key == "" {
+				continue
+			}
+			if _, isGw := c.gatewayIPs[key]; isGw {
+				continue
+			}
+			if opts.HotspotActive {
+				c.onlineByIP[key] = tag
+				delete(c.inactiveByIP, key)
+				addedAnyIP = true
+			} else {
+				c.inactiveByIP[key] = struct{}{}
+			}
+		}
+		if opts.HotspotActive && (mac != "" || addedAnyIP) && addedAnyIP {
+			onlineClients++
+		}
+	}
+	c.hotspotEnabled = opts.HotspotActive && onlineClients > 0
+	return c
+}
+
+// ClassifyConntrackLines classifies a slice of conntrack text lines into orthogonal
+// HotspotFlows and HostFlows counts.
+func ClassifyConntrackLines(lines []string, opts ConntrackFlowOptions) ConntrackFlowSplit {
+	clf := NewConntrackClassifier(opts)
+	for _, line := range lines {
+		clf.ObserveLine(line)
+	}
+	return clf.Result()
+}
+
+// ObserveLine inspects one conntrack entry line and updates HotspotFlows or HostFlows.
+func (c *ConntrackClassifier) ObserveLine(line string) {
+	if c == nil {
+		return
+	}
+	p, ok := parseConntrackTupleLine(line)
+	if !ok {
+		return
+	}
+	oSrc, oSrcKey := parseNormCTIP(p.origSrc)
+	oDst, oDstKey := parseNormCTIP(p.origDst)
+	if oSrc == nil || oDst == nil {
+		return
+	}
+	rSrc, rSrcKey := parseNormCTIP(p.replySrc)
+	rDst, rDstKey := parseNormCTIP(p.replyDst)
+
+	// 1. Check whether either endpoint belongs to a confirmed online downstream client.
+	if c.hotspotEnabled && len(c.onlineByIP) > 0 {
+		if macTag, srvPort, peerIP, hit := c.matchOnlineClient(
+			oSrc, oSrcKey, oDst, oDstKey, p.origSPort, p.origDPort,
+			rSrc, rSrcKey, rDst, rDstKey, p.replySPort, p.replyDPort,
+		); hit {
+			if c.isGatewayMgmtFlow(srvPort, p.origSPort, p.origDPort, peerIP, oDst, rSrc) {
+				c.mgmtExcluded++
+				return
+			}
+			c.hotspotFlows++
+			if macTag != "" && macTag != anonClientMarker {
+				c.perClient[macTag]++
+			}
+			return
+		}
+	}
+
+	// 2. Lingering flows belonging to offline/inactive hotspot clients (or hotspot subnet
+	// peers distinct from the phone's own gateway IPs) must NOT inflate HostFlows, and
+	// when 0 clients are online HotspotFlows remains strictly 0.
+	if c.isInactiveDownstreamEndpoint(oSrc, oSrcKey) ||
+		c.isInactiveDownstreamEndpoint(oDst, oDstKey) ||
+		c.isInactiveDownstreamEndpoint(rSrc, rSrcKey) ||
+		c.isInactiveDownstreamEndpoint(rDst, rDstKey) {
+		return
+	}
+
+	// 3. Exclude loopback (127.0.0.0/8, ::1) and unspecified (0.0.0.0, ::) pseudo-flows.
+	if isLoopbackCTIP(oSrc) || isLoopbackCTIP(oDst) || isLoopbackCTIP(rSrc) || isLoopbackCTIP(rDst) {
+		c.loopbackFlows++
+		return
+	}
+	if oSrc.IsUnspecified() || oDst.IsUnspecified() {
+		return
+	}
+
+	// 4. Orthogonal phone-local active TCP/UDP flow.
+	c.hostFlows++
+}
+
+// Result returns the accumulated orthogonal flow counts.
+func (c *ConntrackClassifier) Result() ConntrackFlowSplit {
+	if c == nil {
+		return ConntrackFlowSplit{}
+	}
+	out := ConntrackFlowSplit{
+		HotspotFlows:  c.hotspotFlows,
+		HostFlows:     c.hostFlows,
+		MgmtExcluded:  c.mgmtExcluded,
+		LoopbackFlows: c.loopbackFlows,
+	}
+	if !c.hotspotEnabled {
+		out.HotspotFlows = 0
+	}
+	if len(c.perClient) > 0 && c.hotspotEnabled {
+		out.PerClientFlows = make(map[string]uint32, len(c.perClient))
+		for k, v := range c.perClient {
+			out.PerClientFlows[k] = v
+		}
+	}
+	return out
+}
+
+func (c *ConntrackClassifier) matchOnlineClient(
+	oSrc net.IP, oSrcKey string,
+	oDst net.IP, oDstKey string,
+	oSPort, oDPort uint16,
+	rSrc net.IP, rSrcKey string,
+	rDst net.IP, rDstKey string,
+	rSPort, rDPort uint16,
+) (macTag string, srvPort uint16, peerIP net.IP, hit bool) {
+	if tag, ok := c.onlineByIP[oSrcKey]; ok {
+		return tag, oDPort, oDst, true
+	}
+	if tag, ok := c.onlineByIP[oDstKey]; ok {
+		return tag, oSPort, oSrc, true
+	}
+	if rDstKey != "" {
+		if tag, ok := c.onlineByIP[rDstKey]; ok {
+			port := oDPort
+			if port == 0 {
+				port = rSPort
+			}
+			return tag, port, oDst, true
+		}
+	}
+	if rSrcKey != "" {
+		if tag, ok := c.onlineByIP[rSrcKey]; ok {
+			port := oSPort
+			if port == 0 {
+				port = rDPort
+			}
+			return tag, port, oSrc, true
+		}
+	}
+	return "", 0, nil, false
+}
+
+func (c *ConntrackClassifier) isInactiveDownstreamEndpoint(ip net.IP, key string) bool {
+	if ip == nil || key == "" {
+		return false
+	}
+	if _, isGw := c.gatewayIPs[key]; isGw {
+		return false
+	}
+	if _, ok := c.inactiveByIP[key]; ok {
+		return true
+	}
+	if len(c.hotspotNets) > 0 && len(c.gatewayIPs) > 0 {
+		for _, n := range c.hotspotNets {
+			if n != nil && n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isGatewayMgmtPort(port uint16) bool {
+	switch port {
+	case 53, 67, 68, 8443, 8444, 8080:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *ConntrackClassifier) isGatewayMgmtFlow(srvPort, origSPort, origDPort uint16, peerIP, origDst, replySrc net.IP) bool {
+	if origSPort == 67 || origSPort == 68 || origDPort == 67 || origDPort == 68 {
+		return true
+	}
+	if !isGatewayMgmtPort(srvPort) {
+		return false
+	}
+	if c.isLocalGatewayIP(peerIP) {
+		return true
+	}
+	// Detect iptables PREROUTING REDIRECT hijacking to the phone's local daemon/DNS port:
+	// original destination was public (e.g. 8.8.8.8:53), but reply source is a local/gateway IP.
+	if replySrc != nil && origDst != nil && !replySrc.Equal(origDst) && c.isLocalGatewayIP(replySrc) {
+		return true
+	}
+	return false
+}
+
+func (c *ConntrackClassifier) isLocalGatewayIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if len(c.gatewayIPs) > 0 {
+		if _, ok := c.gatewayIPs[ip.String()]; ok {
+			return true
+		}
+	}
+	for _, n := range c.hotspotNets {
+		if n != nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsLoopback() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		ip.Equal(net.IPv4bcast)
+}
+
+func parseNormCTIP(s string) (net.IP, string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, ""
+	}
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return nil, ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4, v4.String()
+	}
+	return ip, ip.String()
+}
+
+func isLoopbackCTIP(ip net.IP) bool {
+	return ip != nil && ip.IsLoopback()
+}
+
+type parsedCTTupleLine struct {
+	proto      string
+	origSrc    string
+	origDst    string
+	origSPort  uint16
+	origDPort  uint16
+	replySrc   string
+	replyDst   string
+	replySPort uint16
+	replyDPort uint16
+}
+
+func parseConntrackTupleLine(line string) (parsedCTTupleLine, bool) {
+	var out parsedCTTupleLine
+	line = strings.TrimSpace(line)
+	if line == "" || line[0] == '#' {
+		return out, false
+	}
+
+	tokIdx := 0
+	protoTokIdx := -1
+	inReply := false
+
+	for i := 0; i < len(line); {
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+			i++
+		}
+		if i >= len(line) {
+			break
+		}
+		start := i
+		for i < len(line) && line[i] != ' ' && line[i] != '\t' {
+			i++
+		}
+		tok := line[start:i]
+
+		if tokIdx == 0 {
+			switch {
+			case strings.EqualFold(tok, "ipv4") || strings.EqualFold(tok, "ipv6"):
+				protoTokIdx = 2
+			case strings.EqualFold(tok, "tcp") || tok == "6":
+				out.proto = "tcp"
+			case strings.EqualFold(tok, "udp") || tok == "17":
+				out.proto = "udp"
+			default:
+				return out, false
+			}
+			tokIdx++
+			continue
+		}
+		if tokIdx == protoTokIdx {
+			switch {
+			case strings.EqualFold(tok, "tcp") || tok == "6":
+				out.proto = "tcp"
+			case strings.EqualFold(tok, "udp") || tok == "17":
+				out.proto = "udp"
+			default:
+				return out, false
+			}
+			tokIdx++
+			continue
+		}
+		tokIdx++
+
+		eq := strings.IndexByte(tok, '=')
+		if eq <= 0 {
+			continue
+		}
+		k, v := tok[:eq], tok[eq+1:]
+		switch k {
+		case "src":
+			if out.origSrc == "" {
+				out.origSrc = v
+			} else if out.replySrc == "" {
+				inReply = true
+				out.replySrc = v
+			}
+		case "dst":
+			if !inReply {
+				if out.origDst == "" {
+					out.origDst = v
+				}
+			} else if out.replyDst == "" {
+				out.replyDst = v
+			}
+		case "sport":
+			if p, ok := parsePortU16(v); ok {
+				if !inReply {
+					if out.origSPort == 0 {
+						out.origSPort = p
+					}
+				} else if out.replySPort == 0 {
+					out.replySPort = p
+				}
+			}
+		case "dport":
+			if p, ok := parsePortU16(v); ok {
+				if !inReply {
+					if out.origDPort == 0 {
+						out.origDPort = p
+					}
+				} else if out.replyDPort == 0 {
+					out.replyDPort = p
+				}
+			}
+		}
+	}
+
+	if out.proto == "" || out.origSrc == "" || out.origDst == "" {
+		return out, false
+	}
+	return out, true
+}
+
+func parsePortU16(s string) (uint16, bool) {
+	if len(s) == 0 || len(s) > 5 {
+		return 0, false
+	}
+	var n uint32
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + uint32(c-'0')
+	}
+	if n > 65535 {
+		return 0, false
+	}
+	return uint16(n), true
+}

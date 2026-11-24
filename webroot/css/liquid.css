@@ -5,9 +5,10 @@
    v5.30 玻璃浓度(iOS 27 的「清透 ↔ 着色」): 各层填充的不透明度 = 标准值 + --gx-up × (到着色的差) − --gx-dn × (到清透的差);
    两个量由 fx.js applyGlassTint 按设置里的滑块写在 <html> 上(0–1, 一个为 0), 都为 0 = 标准(即旧版数值)。 */
 :root[data-glass="liquid"]{
-  --bg:#F8F9FC; --ap-grouped:#F8F9FC; --card:rgba(255,255,255,calc(.62 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.24)); --card-2:rgba(255,255,255,calc(.74 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.24)); --card-solid:#fff;
+  --bg:#F8F9FC; --ap-grouped:#F8F9FC; --card:rgba(255,255,255,calc(.62 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.24)); --card-bg:var(--card); --card-2:rgba(255,255,255,calc(.74 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.24)); --card-solid:#fff;
   --input:rgba(118,118,128,.10); --ap-inset:rgba(118,118,128,.08); --ap-fill-2:rgba(120,120,128,.18);
   --lg-fill:rgba(255,255,255,calc(.26 + var(--gx-up,0)*.56 - var(--gx-dn,0)*.16)); --lg-fill-2:rgba(255,255,255,calc(.5 + var(--gx-up,0)*.40 - var(--gx-dn,0)*.22)); --lg-tint:rgba(255,255,255,calc(.34 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.16));
+  --lg-sub:rgba(255,255,255,calc(.44 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.14)); --lg-sub-2:rgba(255,255,255,calc(.52 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14));
   --lg-rim:inset 0 1px 0 #fff,inset 0 2px 3px -2px rgba(255,255,255,.9),inset 0 -1px 0 rgba(255,255,255,.45),inset 1px 0 0 rgba(255,255,255,.7),inset -1px 0 0 rgba(255,255,255,.7),0 0 0 .5px rgba(20,30,60,.16),0 0 0 1.5px rgba(20,30,60,.04);
   --lg-drop:0 12px 32px -10px rgba(30,45,90,.20),0 2px 6px rgba(30,45,90,.06);
   --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.84) 0%,rgba(255,255,255,.16) 32%,rgba(255,255,255,0) 55%);
@@ -15,9 +16,10 @@
 }
 @media (prefers-color-scheme: dark){
   :root[data-glass="liquid"]:not([data-theme="light"]){
-    --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,calc(.50 + var(--gx-up,0)*.38 - var(--gx-dn,0)*.22)); --card-2:rgba(56,56,64,calc(.56 + var(--gx-up,0)*.34 - var(--gx-dn,0)*.22)); --card-solid:#1C1C1E;
+    --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,calc(.50 + var(--gx-up,0)*.38 - var(--gx-dn,0)*.22)); --card-bg:var(--card); --card-2:rgba(56,56,64,calc(.56 + var(--gx-up,0)*.34 - var(--gx-dn,0)*.22)); --card-solid:#1C1C1E;
     --input:rgba(118,118,128,.22); --ap-inset:rgba(118,118,128,.16);
     --lg-fill:rgba(40,40,48,calc(.30 + var(--gx-up,0)*.54 - var(--gx-dn,0)*.16)); --lg-fill-2:rgba(60,60,70,calc(.46 + var(--gx-up,0)*.42 - var(--gx-dn,0)*.20)); --lg-tint:rgba(255,255,255,calc(.12 + var(--gx-up,0)*.10 - var(--gx-dn,0)*.06));
+    --lg-sub:rgba(16,24,40,calc(.46 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.14)); --lg-sub-2:rgba(20,30,48,calc(.52 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14));
     --lg-rim:inset 0 1px 0 rgba(255,255,255,.38),inset 0 2px 3px -2px rgba(255,255,255,.22),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.16),inset -1px 0 0 rgba(255,255,255,.16),0 0 0 .5px rgba(0,0,0,.72),0 0 0 1.5px rgba(0,0,0,.2);
     --lg-drop:0 14px 36px -10px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
     --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.22) 0%,rgba(255,255,255,.04) 32%,rgba(255,255,255,0) 55%);
@@ -25,9 +27,10 @@
   }
 }
 :root[data-glass="liquid"][data-theme="dark"]{
-  --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,calc(.50 + var(--gx-up,0)*.38 - var(--gx-dn,0)*.22)); --card-2:rgba(56,56,64,calc(.56 + var(--gx-up,0)*.34 - var(--gx-dn,0)*.22)); --card-solid:#1C1C1E;
+  --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,calc(.50 + var(--gx-up,0)*.38 - var(--gx-dn,0)*.22)); --card-bg:var(--card); --card-2:rgba(56,56,64,calc(.56 + var(--gx-up,0)*.34 - var(--gx-dn,0)*.22)); --card-solid:#1C1C1E;
   --input:rgba(118,118,128,.22); --ap-inset:rgba(118,118,128,.16);
   --lg-fill:rgba(40,40,48,calc(.30 + var(--gx-up,0)*.54 - var(--gx-dn,0)*.16)); --lg-fill-2:rgba(60,60,70,calc(.46 + var(--gx-up,0)*.42 - var(--gx-dn,0)*.20)); --lg-tint:rgba(255,255,255,calc(.12 + var(--gx-up,0)*.10 - var(--gx-dn,0)*.06));
+  --lg-sub:rgba(16,24,40,calc(.46 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.14)); --lg-sub-2:rgba(20,30,48,calc(.52 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14));
   --lg-rim:inset 0 1px 0 rgba(255,255,255,.38),inset 0 2px 3px -2px rgba(255,255,255,.22),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.16),inset -1px 0 0 rgba(255,255,255,.16),0 0 0 .5px rgba(0,0,0,.72),0 0 0 1.5px rgba(0,0,0,.2);
   --lg-drop:0 14px 36px -10px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
   --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.22) 0%,rgba(255,255,255,.04) 32%,rgba(255,255,255,0) 55%);
@@ -114,99 +117,69 @@
 /* 系统开了「降低透明度」: 一律按着色处理(盖过档位写在 <html> 上的值) */
 @media (prefers-reduced-transparency: reduce){ :root[data-glass="liquid"]{--gx-up:1!important;--gx-dn:0!important} }
 /* ==========================================================================
- * HNC v6.0.0 · Vector — 液态玻璃 120fps GPU 合成层减负与状态色防吃字保护
+ * HNC v6.1.0-rc.5 · 液态玻璃 120fps GPU 合成层减负与微晶内嵌层统一变量继承
  * ========================================================================== */
 [data-glass="liquid"] .glass,
-[data-glass="liquid"] .v6-card,
-[data-glass="liquid"] .v6-hero-card,
-[data-glass="liquid"] .lgd-panel,
 [data-glass="liquid"] .sgrp.scard,
 [data-glass="liquid"] .dev {
   contain: layout style;
 }
 
-/* 卡片内部子组件免除二次嵌套 backdrop-filter；严格使用 :not() 保护激活态/警示色按钮绝不白底白字隐身 */
+/* 卡片内部子组件统一继承 --lg-sub，免除二次嵌套 backdrop-filter */
+[data-glass="liquid"] .v6-conn-pill,
+[data-glass="liquid"] .v6-ov-cell,
 [data-glass="liquid"] .v6-kpi,
-[data-glass="liquid"] .v6-num-box,
 [data-glass="liquid"] .v6-flow-item,
-[data-glass="liquid"] .v6-calm-empty,
-[data-glass="liquid"] .v6-bento:not(.on),
-[data-glass="liquid"] .v6-subtabs,
 [data-glass="liquid"] .v6-dev-pill:not(.on):not(.is-auto),
-[data-glass="liquid"] .v6-mini-btn:not(.pri):not(.dan):not(.warn):not(.ok),
 [data-glass="liquid"] .lgd-summary-line,
-[data-glass="liquid"] .lgd-ctrl-bar,
 [data-glass="liquid"] .lgd-item,
 [data-glass="liquid"] .lgd-tchip:not(.on),
-[data-glass="liquid"] .lgd-act-btn:not(.dan):not(.warn):not(.ok),
 [data-glass="liquid"] .lgd-search-mini,
-[data-glass="liquid"] .v6-drawer .v6-tuple-row {
+[data-glass="liquid"] .v6-drawer .v6-tuple-row,
+[data-glass="liquid"] .v6-fw-btn:not(.on) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   border: 0;
-  background: rgba(255, 255, 255, .48);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .82), 0 0 0 .5px rgba(20, 30, 60, .07);
+  background: var(--lg-sub);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .72), 0 0 0 .5px rgba(20, 30, 60, .06);
 }
 
+:root[data-glass="liquid"][data-theme="dark"] .v6-conn-pill,
+:root[data-glass="liquid"][data-theme="dark"] .v6-ov-cell,
 :root[data-glass="liquid"][data-theme="dark"] .v6-kpi,
-:root[data-glass="liquid"][data-theme="dark"] .v6-num-box,
 :root[data-glass="liquid"][data-theme="dark"] .v6-flow-item,
-:root[data-glass="liquid"][data-theme="dark"] .v6-calm-empty,
-:root[data-glass="liquid"][data-theme="dark"] .v6-bento:not(.on),
-:root[data-glass="liquid"][data-theme="dark"] .v6-subtabs,
 :root[data-glass="liquid"][data-theme="dark"] .v6-dev-pill:not(.on):not(.is-auto),
-:root[data-glass="liquid"][data-theme="dark"] .v6-mini-btn:not(.pri):not(.dan):not(.warn):not(.ok),
 :root[data-glass="liquid"][data-theme="dark"] .lgd-summary-line,
-:root[data-glass="liquid"][data-theme="dark"] .lgd-ctrl-bar,
 :root[data-glass="liquid"][data-theme="dark"] .lgd-item,
 :root[data-glass="liquid"][data-theme="dark"] .lgd-tchip:not(.on),
-:root[data-glass="liquid"][data-theme="dark"] .lgd-act-btn:not(.dan):not(.warn):not(.ok),
 :root[data-glass="liquid"][data-theme="dark"] .lgd-search-mini,
-:root[data-glass="liquid"][data-theme="dark"] .v6-drawer .v6-tuple-row {
-  background: rgba(16, 24, 40, .52);
-  box-shadow: inset 0 1px 0 rgba(220, 238, 255, .14), 0 0 0 .5px rgba(190, 225, 255, .10);
+:root[data-glass="liquid"][data-theme="dark"] .v6-drawer .v6-tuple-row,
+:root[data-glass="liquid"][data-theme="dark"] .v6-fw-btn:not(.on) {
+  background: var(--lg-sub);
+  box-shadow: inset 0 1px 0 rgba(220, 238, 255, .12), 0 0 0 .5px rgba(190, 225, 255, .09);
 }
 @media (prefers-color-scheme: dark) {
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-conn-pill,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-ov-cell,
   :root[data-glass="liquid"]:not([data-theme="light"]) .v6-kpi,
-  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-num-box,
   :root[data-glass="liquid"]:not([data-theme="light"]) .v6-flow-item,
-  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-calm-empty,
-  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-bento:not(.on),
-  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-subtabs,
   :root[data-glass="liquid"]:not([data-theme="light"]) .v6-dev-pill:not(.on):not(.is-auto),
-  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-mini-btn:not(.pri):not(.dan):not(.warn):not(.ok),
   :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-summary-line,
-  :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-ctrl-bar,
   :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-item,
   :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-tchip:not(.on),
-  :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-act-btn:not(.dan):not(.warn):not(.ok),
   :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-search-mini,
-  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-drawer .v6-tuple-row {
-    background: rgba(16, 24, 40, .52);
-    box-shadow: inset 0 1px 0 rgba(220, 238, 255, .14), 0 0 0 .5px rgba(190, 225, 255, .10);
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-drawer .v6-tuple-row,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-fw-btn:not(.on) {
+    background: var(--lg-sub);
+    box-shadow: inset 0 1px 0 rgba(220, 238, 255, .12), 0 0 0 .5px rgba(190, 225, 255, .09);
   }
 }
 
 [data-glass="liquid"] .lgd-tchip.on {
-  background: linear-gradient(180deg, #2B93FF, #0A74F5) !important;
+  background: linear-gradient(180deg, #1982FF 0%, #006CE6 100%) !important;
   color: #fff !important;
   border-color: transparent !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 4px 12px -4px rgba(0, 122, 255, .55);
-}
-[data-glass="liquid"] .v6-subtab.on {
-  background: rgba(255, 255, 255, .92);
-  color: var(--blue);
-  box-shadow: var(--lg-rim), 0 3px 10px rgba(30, 45, 90, .14);
-}
-:root[data-glass="liquid"][data-theme="dark"] .v6-subtab.on {
-  background: rgba(110, 115, 130, .48);
-  color: #fff;
-}
-@media (prefers-color-scheme: dark) {
-  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-subtab.on {
-    background: rgba(110, 115, 130, .48);
-    color: #fff;
-  }
+  box-shadow: inset 0 .75px 0 rgba(255, 255, 255, .24), 0 4px 12px -4px rgba(0, 110, 230, .32);
 }
 
 [data-glass="liquid"] .v6-drawer,
@@ -227,16 +200,14 @@
   background: var(--card-solid);
 }
 
-/* 自定义花哨壁纸下的高可读性文字对比度保护 */
-:root[data-has-wp="1"][data-glass] .v6-card-t,
-:root[data-has-wp="1"][data-glass] .v6-hero-headline b,
-:root[data-has-wp="1"][data-glass] .v6-kpi b,
+/* 自定义壁纸下护航主标题与统计对比度保护 */
+:root[data-has-wp="1"][data-glass] .v6-hero-title,
+:root[data-has-wp="1"][data-glass] .v6-conn-pill b,
 :root[data-has-wp="1"][data-glass] .lgd-dev {
   text-shadow: 0 .5px 0 rgba(255, 255, 255, .46);
 }
-:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-card-t,
-:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-hero-headline b,
-:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-kpi b,
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-hero-title,
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-conn-pill b,
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .lgd-dev {
   text-shadow: 0 1px 2px rgba(2, 6, 18, .62);
 }

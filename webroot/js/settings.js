@@ -401,9 +401,79 @@ function rmacPolicyHtml(c) {
   var isoRow = sItem(['indigo', 'isolate'], '热点客户端互访隔离 (AP Isolation)', '在转发层阻断热点内客户端之间的互相扫描与私自投屏，不影响各自正常上网', toggle(rp.client_isolation === true || c.client_isolation_enabled === true, 'data-set="client-iso" aria-label="热点客户端互访隔离"'));
   return sFold('rmacpol', ['green', 'rmac'], '随机 MAC 无感继承与槽位回收', (rp.auto_inherit !== false ? '≥' + num(rp.auto_inherit_score, 85) + '分无感继承 · 新设备零阻断放行' : '手动合并 · 新设备零阻断放行'), body, val(rp.auto_inherit !== false ? '无感继承' : '手动', rp.auto_inherit !== false ? 'ok' : '')) + isoRow;
 }
+var SET_VAULT = { lastSha: '', lastCount: 0, lastRestored: 0 };
+function setDualFlowStats(lv, rs) {
+  lv = lv || {}; rs = rs || {};
+  var onCnt = S.hotspot.active === false ? 0 : S.devices.filter(function (d) { return d.online; }).length;
+  var hsFlows = 0;
+  if (S.hotspot.active !== false && onCnt > 0) {
+    if (lv.hotspot_flows != null) hsFlows = Math.max(0, Math.round(num(lv.hotspot_flows, 0)));
+    else if (rs.hotspot_flows != null) hsFlows = Math.max(0, Math.round(num(rs.hotspot_flows, 0)));
+    else {
+      Object.keys(S.connCounts || {}).forEach(function (m) {
+        var d = devBy(m);
+        if (d && d.online) hsFlows += Math.max(0, Math.round(num(S.connCounts[m] && S.connCounts[m].n, 0)));
+      });
+    }
+  }
+  var hostFlows = 0;
+  if (lv.host_flows != null) hostFlows = Math.max(0, Math.round(num(lv.host_flows, 0)));
+  else if (rs.host_flows != null) hostFlows = Math.max(0, Math.round(num(rs.host_flows, 0)));
+  else if (S.self && S.self.apps_by_uid && typeof S.self.apps_by_uid === 'object') {
+    Object.keys(S.self.apps_by_uid).forEach(function (u) {
+      hostFlows += Math.max(0, Math.round(num(S.self.apps_by_uid[u] && S.self.apps_by_uid[u].active_conns, 0)));
+    });
+  }
+  return { hs: hsFlows, host: hostFlows, text: '热点连接 ' + hsFlows + ' · 本机连接 ' + hostFlows };
+}
+function setDualTempStats(lv, rs) {
+  var th = (lv && lv.thermo && typeof lv.thermo === 'object') ? lv.thermo
+    : ((window.V6 && V6.thermo && typeof V6.thermo === 'object') ? V6.thermo
+    : ((rs && rs.thermo && typeof rs.thermo === 'object') ? rs.thermo : null));
+  var bat = th && th.battery && typeof th.battery === 'object' ? th.battery : null;
+  var shellAvail = !!(th && (th.shell_temp_available === true || (bat && bat.shell_temp_available === true)));
+  var shellC = num(th && (th.shell_temp_c != null ? th.shell_temp_c : (bat && bat.shell_temp_c)), 0);
+  var batC = num(th && (th.battery_temp_c != null ? th.battery_temp_c : (bat && bat.temp_c)), 0);
+  var effC = num(th && th.temp_c, shellAvail && shellC > 0 ? shellC : batC);
+  var spoof = !!(th && (th.battery_spoof_suspected === true || (bat && bat.battery_spoof_suspected === true)));
+  if (shellAvail && shellC > 0 && batC > 0) {
+    return {
+      hasTemp: true,
+      shortText: effC.toFixed(1) + '°C',
+      label: '机身 ' + shellC.toFixed(1) + '°C · 电池 ' + batC.toFixed(1) + '°C',
+      sub: spoof ? '检测到电池锁温特征 · 已切换机身热区真实温度为准' : '机身热区与电池双传感器实时温度',
+      cls: effC >= 45 ? 'bad' : (effC >= 42 ? 'warn' : 'ok')
+    };
+  }
+  if (effC > 0 && effC < 95) {
+    return {
+      hasTemp: true,
+      shortText: effC.toFixed(1) + '°C',
+      label: effC.toFixed(1) + '°C',
+      sub: '设备实时热区与电池温控采样',
+      cls: effC >= 45 ? 'bad' : (effC >= 42 ? 'warn' : 'ok')
+    };
+  }
+  return { hasTemp: false, shortText: '正常', label: '待采样', sub: '温控传感器按需低功耗采样', cls: '' };
+}
+function setVaultRowsHtml() {
+  var vSha = SET_VAULT.lastSha || (window.V6 && V6.vault && V6.vault.last_sha256) || '';
+  var vCnt = SET_VAULT.lastCount || (window.V6 && V6.vault && V6.vault.last_file_count) || 0;
+  var vRes = SET_VAULT.lastRestored || (window.V6 && V6.vault && V6.vault.last_restored) || 0;
+  var expSub = '一键打包设备备注、限速规则、本机防火墙与护航配置 JSON（自动剔除登录凭据）' +
+    (vSha ? (' · 摘要 ' + esc(String(vSha).slice(0, 12)) + '…' + (vCnt ? ' (' + vCnt + ' 项)' : '')) : '');
+  var impSub = '选择备份 JSON 快照或粘贴内容，校验 SHA256 后原子恢复整机配置' +
+    (vRes ? (' · 最近已恢复 ' + vRes + ' 项') : '');
+  return '<button type="button" class="row" data-set-vault="export">' + gi('blue', 'box') +
+      '<span class="tx"><div class="t">配置保险箱 · 导出全量快照</div><div class="s">' + expSub + '</div></span><span class="hint-a">导出</span></button>' +
+    '<button type="button" class="row" data-set-vault="import">' + gi('green', 'refresh') +
+      '<span class="tx"><div class="t">配置保险箱 · 恢复整机配置</div><div class="s">' + impSub + '</div></span><span class="hint-a">恢复</span></button>' +
+    '<input id="set-vault-file" type="file" accept=".json,application/json" hidden>';
+}
 function renderSettings(anim1) {
   var c = S.cfg || {}, ac = S.alertCfg || {}, mq = ac.monthly_quota || {}, an = ac.anomaly_traffic || {}, ud = ac.unknown_device || {}, sla = S.sla || {}, rs = S.runStatus || {};
   var gsOn = c.global_shaper_enabled === true, hsAuto = c.hotspot_autostart === true, lv = S.live || {};
+  var flowSt = setDualFlowStats(lv, rs), tempSt = setDualTempStats(lv, rs);
   var groups = [];
   var scR = scRep(), scW = scR ? (num((scR.summary || {}).fail) ? 'fail' : num((scR.summary || {}).warn) ? 'warn' : 'ok') : '';
   groups.push(['诊断', sBtn([scW === 'fail' ? 'red' : scW === 'warn' ? 'orange' : 'green', 'check'], '自检报告', SC.running ? '正在自检…' : scR ? scAgo(scR.generated_at) + '生成 · ' + scSumTxt(scR.summary) : '一键检查限速能力、防火墙、热点、IPv6、时间等，约 20 秒', 'sc-open', scR ? '查看' : '一键自检') + sFold('logs', ['gray', 'doc'], '运行日志', 'service · hotspotd · dpid · iptables/tc 等',
@@ -464,19 +534,23 @@ function renderSettings(anim1) {
       '<div class="note">在防火墙层直接断开不允许的设备；蜂窝网络上任何模式都连不上。本机和 KSU 里的 WebUI 永远可用。设置会把你自己锁在外面时会被拒绝。' + (c.webui_access.firewall ? '<br>防火墙状态：' + esc(c.webui_access.firewall) : '') + '</div>' +
       '<button class="btn pri wide press" data-act="webacc-save">保存</button>', val({ all: '全部', allowlist: '白名单', local_only: '仅本机' }[c.webui_access.mode || 'all'] || '—')) : '') +
     sFold('tokens', ['gray', 'dev'], '已授权设备', '管理能远程访问的设备' + (IS_LOCAL ? '' : ' · 撤销只能在本机操作'), '<div id="tokens-list" class="note">展开后加载</div>')]);
-  groups.push(['运行状态', (!S.runStatus ? sItem(['gray', 'cpu'], '运行状态', '后端暂未提供 /api/run_status', val('—')) :
-    sItem(['green', 'cpu'], 'hotspotd 进程', rs.hotspotd_pid ? 'pid ' + rs.hotspotd_pid + (rs.hotspotd_rss_kb ? ' · ' + Math.round(rs.hotspotd_rss_kb / 1024) + ' MB' : '') : '未运行', val(rs.hotspotd === 'up' ? '运行中' : '未运行', rs.hotspotd === 'up' ? 'ok' : 'bad')) +
-    sItem(['purple', 'layers'], 'tc 规则数', 'qdisc + class（热点接口 + IFB）', val(num(rs.tc_rules))) +
-    sItem(['orange', 'shield'], 'iptables 规则', 'mangle 表里 HNC 的 MARK 规则', val(num(rs.ipt_rules))) +
-    sItem(['blue', 'heart'], '看门狗 watchdog', '规则巡检 / 进程保活 / 定时开关热点' + (rs.watchdog_pid ? ' · pid ' + rs.watchdog_pid : '') + (num(rs.watchdog_hb_age) > 120 ? ' · 心跳 ' + num(rs.watchdog_hb_age) + ' 秒未更新' : ''),
-      val(num(rs.watchdog) > 0 ? (num(rs.watchdog_hb_age) > 120 ? '可能卡住' : '正常') : '未运行', num(rs.watchdog) > 0 && !(num(rs.watchdog_hb_age) > 120) ? 'ok' : 'bad'))) + scStatusRows()]);
+  groups.push(['运行状态',
+    sItem(['cyan', 'link'], '活跃连接分流', '热点转发流与本机应用套接字正交分离（关热点不影响本机计数）', val(esc(flowSt.text), flowSt.hs > 0 || flowSt.host > 0 ? 'ok' : '')) +
+    sItem(['orange', 'thermo'], '真实机身与电池温度', esc(tempSt.sub), val(esc(tempSt.label), tempSt.cls)) +
+    (!S.runStatus ? sItem(['gray', 'cpu'], '守护进程运行态', '后端暂未提供 /api/run_status', val('—')) :
+      sItem(['green', 'cpu'], 'hotspotd 进程', rs.hotspotd_pid ? 'pid ' + rs.hotspotd_pid + (rs.hotspotd_rss_kb ? ' · ' + Math.round(rs.hotspotd_rss_kb / 1024) + ' MB' : '') : '未运行', val(rs.hotspotd === 'up' ? '运行中' : '未运行', rs.hotspotd === 'up' ? 'ok' : 'bad')) +
+      sItem(['purple', 'layers'], 'tc 规则数', 'qdisc + class（热点接口 + IFB）', val(num(rs.tc_rules))) +
+      sItem(['orange', 'shield'], 'iptables 规则', 'mangle 表里 HNC 的 MARK 规则', val(num(rs.ipt_rules))) +
+      sItem(['blue', 'heart'], '看门狗 watchdog', '规则巡检 / 进程保活 / 定时开关热点' + (rs.watchdog_pid ? ' · pid ' + rs.watchdog_pid : '') + (num(rs.watchdog_hb_age) > 120 ? ' · 心跳 ' + num(rs.watchdog_hb_age) + ' 秒未更新' : ''),
+        val(num(rs.watchdog) > 0 ? (num(rs.watchdog_hb_age) > 120 ? '可能卡住' : '正常') : '未运行', num(rs.watchdog) > 0 && !(num(rs.watchdog_hb_age) > 120) ? 'ok' : 'bad'))) + scStatusRows()]);
   var nz = function (v) { return v == null ? '未统计' : String(v); }, slaCls = function (v) { return v == null ? '' : num(v) ? 'warn' : 'ok'; };
   groups.push(['运行健康', statsHealthHtml() + (!S.sla ? sItem(['gray', 'heart'], '运行健康', '暂无数据', val('—')) :
     sItem(['gray', 'refresh'], 'dpid 重启 / 近期崩溃', '累计重启 · 近期崩溃循环', val(nz(sla.dpid_restart_count) + ' / ' + nz(sla.dpid_crash_recent), num(sla.dpid_crash_recent) ? 'warn' : '')) +
     sItem(['gray', 'layers'], 'watchdog 全量重建', 'tc 树被整体重建的次数', val(nz(sla.watchdog_full_restore_count), slaCls(sla.watchdog_full_restore_count))) +
     sItem(['gray', 'tool'], 'tc 修复失败 / 上行失败', '自修复熔断 · 上行 IFB/police 失败', val(nz(sla.tc_repair_fail_count) + ' / ' + nz(sla.uplink_fail_count), sla.tc_repair_fail_count == null && sla.uplink_fail_count == null ? '' : num(sla.tc_repair_fail_count) + num(sla.uplink_fail_count) ? 'warn' : 'ok')) +
     sItem(['gray', 'flask'], '能力降级标记', 'qos_fallback / uplink_unsupported', val([sla.qos_fallback_active ? 'QoS 兼容链路' : '', sla.uplink_unsupported ? '上行不支持' : ''].filter(Boolean).join(' · ') || '无', sla.qos_fallback_active || sla.uplink_unsupported ? 'warn' : 'ok')))]);
-  groups.push(['维护', sBtn(['blue', 'refresh'], '重启 HNC 服务', '重新启动所有后台管控与识别服务（已设好的规则不会丢失，耗时约几秒）', 'svc-restart', '重启', 'danger') +
+  groups.push(['维护', setVaultRowsHtml() +
+    sBtn(['blue', 'refresh'], '重启 HNC 服务', '重新启动所有后台管控与识别服务（已设好的规则不会丢失，耗时约几秒）', 'svc-restart', '重启', 'danger') +
     sFold('ttl', ['orange', 'refresh'], '离线规则自动清理', num(c.stale_rule_ttl_days, 30) ? '设备离线超过 ' + num(c.stale_rule_ttl_days, 30) + ' 天后，自动删掉它的限速/延迟规则' : '已关闭 · 离线设备的规则永久保留',
       '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="ttl-days" type="number" min="0" max="3650" value="' + num(c.stale_rule_ttl_days, 30) + '"><span class="u">天</span></span><button class="btn pri press" data-act="ttl-save">保存</button></div><div class="note">填 0 = 永不自动清理。黑名单不受影响。</div>',
       val(num(c.stale_rule_ttl_days, 30) ? num(c.stale_rule_ttl_days, 30) + ' 天' : '关闭')) +
@@ -530,7 +604,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-rc.4', HNC_UI_VC = '6009304', HNC_UI_DATE = '2026-11-23';
+  var HNC_UI_VER = 'v6.1.0-rc.5', HNC_UI_VC = '6009305', HNC_UI_DATE = '2026-11-24';
   var bVer = cleanVer(l.backend_version, HNC_UI_VER);
   var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -569,10 +643,10 @@ function renderSettings(anim1) {
       gMap['告警'] || '')
   ];
   var v6LgHits = num(window.V6 && V6.lg && V6.lg.total_hits);
-  var v6TempS = (window.V6 && V6.thermo && V6.thermo.temp_c > 0) ? (V6.thermo.temp_c.toFixed(1) + '°C') : '正常';
+  var v6TempS = tempSt.hasTemp ? tempSt.shortText : '正常';
   var advCards = [
-    scard('scard-v6', ['blue', 'vector'], '智能护航与配置备份',
-      '游戏通话优先 · 后台更新限速 · 温控保护（' + esc(v6TempS) + '）· 隐私安检（' + v6LgHits + ' 条）',
+    scard('scard-v6', ['blue', 'vector'], '智能护航与本机守护',
+      '游戏通话优先 · 本机管控 · 温控保护（' + esc(v6TempS) + '）· 隐私安检（' + v6LgHits + ' 条）',
       (function(){ var _rv = cleanVer(l.backend_version, HNC_UI_VER); var _short = _rv.replace(/^(v\d+\.\d+)\.\d+-(alpha|beta|rc)\.?(\d+).*$/i, function(_, m, c, n){ return m + ' ' + (c.toLowerCase() === 'rc' ? 'RC' + n : c.charAt(0).toUpperCase() + n); }); return '<span class="badge b-acc" title="' + esc(_rv) + '">' + esc(_short) + '</span>'; })(),
       typeof v6SettingsBodyHtml === 'function' ? v6SettingsBodyHtml() : ''),
     scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
@@ -636,11 +710,11 @@ function renderSettings(anim1) {
       scR ? '<span class="badge ' + (scW === 'fail' ? 'b-red' : scW === 'warn' ? 'b-warn' : 'b-ok') + '">' + esc(scSumTxt(scR.summary)) + '</span>' : '<span class="badge b-gray">可自检</span>',
       gMap['诊断'] || ''),
     scard('scard-stat', ['blue', 'heart'], '运行状态与统计健康',
-      '守护进程 · tc ' + num(rs.tc_rules) + ' 条 / iptables ' + num(rs.ipt_rules) + ' 条 · 流量对账与 SLA',
+      esc(flowSt.text) + (tempSt.hasTemp ? ' · ' + esc(tempSt.label) : '') + ' · tc ' + num(rs.tc_rules) + ' / ipt ' + num(rs.ipt_rules),
       '<span class="badge ' + (rs.hotspotd === 'up' ? 'b-ok' : 'b-gray') + '">' + (rs.hotspotd === 'up' ? '运行正常' : '状态') + '</span>',
       (gMap['运行状态'] || '') + (gMap['运行健康'] || '')),
-    scard('scard-maint', ['orange', 'tool'], '维护、备份与轮询功耗',
-      '刷新模式（' + ({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode]) + '）· 服务重启 · 导出规则与诊断包',
+    scard('scard-maint', ['orange', 'tool'], '维护、配置保险箱与功耗',
+      '配置保险箱（快照导出/恢复）· 刷新模式（' + ({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode]) + '）· 诊断导出',
       '<span class="badge b-acc">' + ({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode]) + '</span>',
       (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
     scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
@@ -1309,7 +1383,7 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.4';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.5';
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
@@ -2724,3 +2798,176 @@ if (typeof window !== 'undefined') {
     renderSelfCheckSummaryHtml: dpvRenderSelfCheckSummaryHtml
   };
 }
+
+/* ═══ 配置保险箱 · 导出全量快照与原子恢复 (/api/backup) ═══ */
+var SET_VAULT_BOUND = false;
+function setVaultSyncMeta(sha, cnt, restored) {
+  if (sha != null) SET_VAULT.lastSha = String(sha || '');
+  if (cnt != null) SET_VAULT.lastCount = Math.max(0, Math.round(num(cnt, 0)));
+  if (restored != null) SET_VAULT.lastRestored = Math.max(0, Math.round(num(restored, 0)));
+  if (typeof window !== 'undefined' && window.V6 && window.V6.vault && typeof window.V6.vault === 'object') {
+    if (sha != null) window.V6.vault.last_sha256 = SET_VAULT.lastSha;
+    if (cnt != null) window.V6.vault.last_file_count = SET_VAULT.lastCount;
+    if (restored != null) window.V6.vault.last_restored = SET_VAULT.lastRestored;
+  }
+}
+function setVaultExport(btn) {
+  var p = api.get('/api/backup', null, { timeout: 10000 }).then(function (res) {
+    if (!res || typeof res !== 'object' || res.ok === false || !res.files) {
+      throw new Error((res && res.error) || '备份导出载荷无效');
+    }
+    var verTag = String(res.module_version || 'v6.1.0-rc.5').replace(/[^a-zA-Z0-9._-]+/g, '-');
+    var tsTag = Math.floor(Date.now() / 1000);
+    var fn = 'hnc-backup-' + verTag + '-' + tsTag + '.json';
+    var raw = JSON.stringify(res, null, 2);
+    var sha = String(res.sha256 || '');
+    var cnt = num(res.file_count, Object.keys(res.files || {}).length);
+    setVaultSyncMeta(sha, cnt, null);
+    if (S.page === 'settings') renderSettings(false);
+    if (KSU && !window.__HNC_MOCK_META) {
+      var base = (typeof API_BASE === 'string' && API_BASE) ? API_BASE : 'http://127.0.0.1:8765';
+      return shell('mkdir -p /sdcard/Download && curl -fsSL ' + sq(base + '/api/backup?download=1') + ' -o ' + sq('/sdcard/Download/' + fn) + ' && echo ok').then(function () {
+        toast('配置快照已存到 /sdcard/Download/' + fn + (sha ? ' · SHA256 ' + sha.slice(0, 8) + '…' : ''));
+      }, function () {
+        sheet('<h3>配置保险箱快照</h3><div class="sub">' + esc(fn) + (sha ? ' · SHA256 ' + esc(sha.slice(0, 12)) + '…' : '') + '</div>' +
+          '<textarea class="textarea" readonly id="sv-exp-txt">' + esc(raw) + '</textarea>' +
+          '<div class="btns" style="margin-top:12px"><button class="btn sec press" data-close>关闭</button><button class="btn pri press" id="sv-exp-copy">复制 JSON</button></div>', { tall: true });
+        var cpBtn = $('#sv-exp-copy');
+        if (cpBtn) cpBtn.onclick = function () { copyText(raw).then(function (ok) { toast(ok ? '已复制整机备份 JSON' : '复制失败', ok ? 'ok' : 'err'); }); };
+      });
+    }
+    var downloaded = false;
+    try {
+      var blob = new Blob([raw], { type: 'application/json;charset=utf-8' });
+      var u = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = u;
+      a.download = fn;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(u); }, 3000);
+      downloaded = true;
+    } catch (_) {}
+    if (downloaded) {
+      toast('配置快照已导出 · ' + fn + (sha ? ' · SHA256 ' + sha.slice(0, 8) + '…' : ''));
+    } else {
+      copyText(raw).then(function (ok) {
+        toast(ok ? '已复制备份快照到剪贴板 · ' + cnt + ' 项配置' : '浏览器不支持直接下载，请检查权限', ok ? 'ok' : 'warn');
+      });
+    }
+  }).catch(function (e) {
+    toast('导出配置快照失败：' + errText(e), 'err');
+  });
+  return btn ? busyWhile(btn, p) : p;
+}
+function setVaultParseBundle(txt) {
+  var s = String(txt || '').trim();
+  if (!s) throw new Error('请先选择备份 JSON 文件或粘贴快照内容');
+  if (s.length > 4 * 1024 * 1024) throw new Error('备份文件超过 4 MB 上限');
+  var parsed;
+  try { parsed = JSON.parse(s); } catch (e) { throw new Error('备份 JSON 语法错误：' + e.message); }
+  if (!parsed || typeof parsed !== 'object' || !parsed.files || typeof parsed.files !== 'object') {
+    throw new Error('不是有效的 HNC 整机备份快照（缺少 files 清单）');
+  }
+  if (!parsed.sha256 || typeof parsed.sha256 !== 'string') {
+    throw new Error('备份快照缺少 SHA256 完整性摘要');
+  }
+  return parsed;
+}
+function setVaultConfirmAndRestore(parsed, srcLabel) {
+  var cnt = num(parsed.file_count, Object.keys(parsed.files || {}).length);
+  var sha = String(parsed.sha256 || '');
+  var ver = String(parsed.module_version || '未知版本');
+  return confirmSheet(
+    '原子恢复整机配置？',
+    '即将校验并恢复备份快照' + (srcLabel ? '（<b>' + esc(srcLabel) + '</b>）' : '') + '：<br>' +
+    '· 来源版本：<b>' + esc(ver) + '</b> · 共 <b>' + cnt + '</b> 项配置<br>' +
+    '· SHA256：<span class="mono">' + esc(sha.slice(0, 16)) + '…</span><br><br>' +
+    '后端将在完整校验单文件与总表 SHA256 及业务护栏后原子替换配置（当前远程登录会话与热点密码不会被清空）。',
+    '校验并恢复',
+    { safe: false }
+  ).then(function (ok) {
+    if (!ok) return false;
+    return api.post('/api/backup', parsed, { timeout: 12000 }).then(function (res) {
+      if (res && res.ok === false) throw new Error(res.error || '配置恢复失败');
+      var restoredCnt = num(res && res.restored_count, cnt);
+      setVaultSyncMeta(res && res.sha256 ? res.sha256 : sha, cnt, restoredCnt);
+      toast('整机配置已原子恢复 · 共 ' + restoredCnt + ' 项生效');
+      return Promise.all([
+        typeof loadSettingsData === 'function' ? loadSettingsData().catch(function () {}) : null,
+        typeof globalRefresh === 'function' ? Promise.resolve(globalRefresh()).catch(function () {}) : null
+      ]).then(function () {
+        if (S.page === 'settings') renderSettings(false);
+        return true;
+      });
+    }).catch(function (e) {
+      toast('恢复整机配置失败：' + errText(e), 'err');
+      return false;
+    });
+  });
+}
+function setVaultOpenImportSheet() {
+  sheet(
+    '<h3>恢复整机配置</h3>' +
+    '<div class="sub">选择之前导出的 <code>hnc-backup-*.json</code> 快照文件，或直接将备份 JSON 粘贴到下方。恢复前会自动校验 SHA256 完整性。</div>' +
+    '<button type="button" class="btn sec wide press" id="sv-pick-btn" style="margin-bottom:10px">' + ico('doc') + '选择本地备份 JSON 文件</button>' +
+    '<textarea class="textarea" id="sv-paste-txt" rows="6" placeholder="或直接在此粘贴整机备份 JSON 内容…"></textarea>' +
+    '<div class="btns" style="margin-top:12px"><button type="button" class="btn sec press" data-close>取消</button><button type="button" class="btn pri press" id="sv-apply-btn">校验并恢复</button></div>',
+    { kind: 'set-vault-import' }
+  );
+  var pickBtn = $('#sv-pick-btn'), applyBtn = $('#sv-apply-btn');
+  if (pickBtn) {
+    pickBtn.onclick = function () {
+      var fi = $('#set-vault-file');
+      if (fi) { fi.value = ''; fi.click(); }
+    };
+  }
+  if (applyBtn) {
+    applyBtn.onclick = function () {
+      var ta = $('#sv-paste-txt');
+      var parsed;
+      try { parsed = setVaultParseBundle(ta ? ta.value : ''); }
+      catch (e) { toast(errText(e), 'err'); return; }
+      setVaultConfirmAndRestore(parsed, '粘贴的快照');
+    };
+  }
+}
+function setVaultBindGlobalDelegate() {
+  if (SET_VAULT_BOUND || typeof document === 'undefined') return;
+  SET_VAULT_BOUND = true;
+  document.addEventListener('click', function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target.closest('[data-set-vault]') : null;
+    if (!t) return;
+    ev.preventDefault();
+    var act = t.getAttribute('data-set-vault');
+    if (act === 'export') setVaultExport(t);
+    else if (act === 'import') setVaultOpenImportSheet();
+  });
+  document.addEventListener('change', function (ev) {
+    var fi = ev.target;
+    if (!fi || fi.id !== 'set-vault-file') return;
+    var file = fi.files && fi.files[0];
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024) {
+      toast('备份文件超过 4 MB 上限', 'err');
+      fi.value = '';
+      return;
+    }
+    var fname = String(file.name || 'hnc-backup.json');
+    var fr = new FileReader();
+    fr.onload = function () {
+      fi.value = '';
+      var parsed;
+      try { parsed = setVaultParseBundle(String(fr.result || '')); }
+      catch (e) { toast(errText(e), 'err'); return; }
+      setVaultConfirmAndRestore(parsed, fname);
+    };
+    fr.onerror = function () {
+      fi.value = '';
+      toast('读取备份文件失败', 'err');
+    };
+    fr.readAsText(file);
+  });
+}
+setVaultBindGlobalDelegate();

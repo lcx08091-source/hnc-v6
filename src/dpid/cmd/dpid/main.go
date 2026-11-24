@@ -176,18 +176,22 @@ type shmDevEntry struct {
 // shmRuntimeTracker aggregates downstream client slots without contending on output.Writer.
 type shmRuntimeTracker struct {
 	// Placed at offset 0 for 32-bit ARM 64-bit atomic alignment.
-	conntrackFlows atomic.Uint64
-	sleeping       atomic.Bool
+	conntrackHotspotFlows atomic.Uint64
+	conntrackHostFlows    atomic.Uint64
+	conntrackUpdatedUnix  atomic.Int64
+	sleeping              atomic.Bool
 
-	mu   sync.Mutex
-	devs map[[6]byte]*shmDevEntry
-	poke chan struct{}
+	mu            sync.Mutex
+	devs          map[[6]byte]*shmDevEntry
+	ctClientFlows map[[6]byte]uint32
+	poke          chan struct{}
 }
 
 func newSHMRuntimeTracker() *shmRuntimeTracker {
 	return &shmRuntimeTracker{
-		devs: make(map[[6]byte]*shmDevEntry, shm.MaxDevices),
-		poke: make(chan struct{}, 1),
+		devs:          make(map[[6]byte]*shmDevEntry, shm.MaxDevices),
+		ctClientFlows: make(map[[6]byte]uint32, shm.MaxDevices),
+		poke:          make(chan struct{}, 1),
 	}
 }
 
@@ -202,8 +206,9 @@ func (t *shmRuntimeTracker) notifyPoke() {
 }
 
 func (t *shmRuntimeTracker) resetIdle(clearDevs bool) {
-	t.conntrackFlows.Store(0)
+	t.conntrackHotspotFlows.Store(0)
 	t.mu.Lock()
+	clear(t.ctClientFlows)
 	if clearDevs {
 		clear(t.devs)
 	} else {
@@ -214,6 +219,28 @@ func (t *shmRuntimeTracker) resetIdle(clearDevs bool) {
 	t.mu.Unlock()
 }
 
+func isGatewayMgmtPacket(remoteIP string, port uint16) bool {
+	if port == 67 || port == 68 {
+		return true
+	}
+	switch port {
+	case 53, 8443, 8444, 8080:
+	default:
+		return false
+	}
+	ip := net.ParseIP(strings.TrimSpace(remoteIP))
+	if ip == nil {
+		return false
+	}
+	return ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsLoopback() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		ip.Equal(net.IPv4bcast)
+}
+
 func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isUDP bool, port uint16, pktBytes int, txFromClient bool, nowUnix int64) {
 	macBytes, ok := shm.ParseMAC(macRaw)
 	if !ok {
@@ -221,7 +248,7 @@ func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isU
 	}
 	v4, v6, isV4, isV6 := shm.ParseIPAddr(clientIP)
 	var fhash uint64
-	if remoteIP != "" && port > 0 {
+	if remoteIP != "" && port > 0 && !isGatewayMgmtPacket(remoteIP, port) {
 		h := fnv.New64a()
 		if isUDP {
 			_, _ = h.Write([]byte{'U'})
@@ -303,20 +330,79 @@ func (t *shmRuntimeTracker) markLeak(macRaw string) {
 	t.notifyPoke()
 }
 
-func (t *shmRuntimeTracker) snapshot(nowUnix int64) (slots []shm.DeviceSlot, activeFlows uint32) {
+func (t *shmRuntimeTracker) conntrackClients(nowUnix int64) (online []output.ConntrackClient, inactiveIPs []string) {
+	if t == nil {
+		return nil, nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, d := range t.devs {
+		var ips []string
+		if d.ipv4 != ([4]byte{}) {
+			ips = append(ips, net.IPv4(d.ipv4[0], d.ipv4[1], d.ipv4[2], d.ipv4[3]).String())
+		}
+		if d.ipv6 != ([16]byte{}) {
+			ips = append(ips, net.IP(d.ipv6[:]).String())
+		}
+		if len(ips) == 0 {
+			continue
+		}
+		if nowUnix-d.lastSeen <= shmOnlineWindowSec {
+			slot := shm.DeviceSlot{MAC: d.mac}
+			online = append(online, output.ConntrackClient{
+				MAC: slot.MACString(),
+				IPs: ips,
+			})
+		} else {
+			inactiveIPs = append(inactiveIPs, ips...)
+		}
+	}
+	return online, inactiveIPs
+}
+
+func (t *shmRuntimeTracker) updateConntrackSplit(split output.ConntrackFlowSplit, nowUnix int64) {
+	if t == nil {
+		return
+	}
+	t.conntrackHotspotFlows.Store(uint64(split.HotspotFlows))
+	t.conntrackHostFlows.Store(uint64(split.HostFlows))
+	t.conntrackUpdatedUnix.Store(nowUnix)
+
+	t.mu.Lock()
+	clear(t.ctClientFlows)
+	for macStr, cnt := range split.PerClientFlows {
+		if mb, ok := shm.ParseMAC(macStr); ok && cnt > 0 {
+			t.ctClientFlows[mb] = cnt
+		}
+	}
+	t.mu.Unlock()
+}
+
+func (t *shmRuntimeTracker) snapshot(nowUnix int64, act activity.Snapshot) (slots []shm.DeviceSlot, hotspotFlows uint32, hostFlows uint32) {
+	hotspotZero := act.OK && (!act.Hotspot || act.Clients <= 0)
+
 	t.mu.Lock()
 	slots = make([]shm.DeviceSlot, 0, len(t.devs))
 	var sumFlows uint32
+	onlineCount := 0
 	for _, d := range t.devs {
 		for fk, ts := range d.flows {
 			if nowUnix-ts > shmFlowTTLSec {
 				delete(d.flows, fk)
 			}
 		}
-		af := uint32(len(d.flows))
-		sumFlows += af
+		isOnline := !act.HotspotOff() && nowUnix-d.lastSeen <= shmOnlineWindowSec
+		var af uint32
+		if isOnline && !hotspotZero {
+			onlineCount++
+			af = uint32(len(d.flows))
+			if ctAF := t.ctClientFlows[d.mac]; ctAF > af {
+				af = ctAF
+			}
+			sumFlows += af
+		}
 		var flags uint32
-		if nowUnix-d.lastSeen <= shmOnlineWindowSec {
+		if isOnline {
 			flags |= shm.FlagOnline
 		}
 		if d.ipv4 != ([4]byte{}) {
@@ -349,11 +435,21 @@ func (t *shmRuntimeTracker) snapshot(nowUnix int64) (slots []shm.DeviceSlot, act
 		return string(slots[i].MAC[:]) < string(slots[j].MAC[:])
 	})
 
-	ct := uint32(t.conntrackFlows.Load())
-	if ct > sumFlows {
-		return slots, ct
+	hostFlows = uint32(t.conntrackHostFlows.Load())
+	ctHotspot := uint32(t.conntrackHotspotFlows.Load())
+
+	if hotspotZero {
+		return slots, 0, hostFlows
 	}
-	return slots, sumFlows
+	if onlineCount == 0 && ctHotspot == 0 {
+		return slots, 0, hostFlows
+	}
+	if ctHotspot > sumFlows {
+		hotspotFlows = ctHotspot
+	} else if onlineCount > 0 {
+		hotspotFlows = sumFlows
+	}
+	return slots, hotspotFlows, hostFlows
 }
 
 // resolveAppLabelDex locates the app-label dex helper. Prefers a file next
@@ -541,6 +637,12 @@ func main() {
 
 	bumpStartCount(cfg.RunDir) // rc42: 持久 lifetime 启动计数, 供 /api/sla
 
+	// v5.13: IP→域名反查表提前初始化, 供 SHM conntrack KeepAlive、本机自抓包 DNS/HTTP 与主抓包共用。
+	ipNames := output.NewIPNameTable()
+	ipNames.SetPath(filepath.Join(cfg.RunDir, ipNameFileName))
+	sw.SetIPNameTable(ipNames) // v5.18: RecordFlow 域名兜底(取代 nDPI ip_to_host.json)
+	go flushEvery(ctx, 10*time.Second, "dpi_ipname", ipNames.Flush)
+
 	// v6.0.0 Vector: LeakGuard 明文隐私嗅探引擎 + 16KB 双槽 seqcount_latch 共享内存快照。
 	leakEngine := leakguard.NewEngine(cfg.RunDir)
 	seedKnownARPClients(leakEngine)
@@ -559,10 +661,17 @@ func main() {
 		log.Printf("WARN: shm writer unavailable (%s): %v", shm.FilePath(cfg.RunDir), shmErr)
 	} else {
 		defer func() { _ = shmWriter.Close() }()
+		scanConntrackOrthogonal(cfg, sw, ipNames, shmTracker)
 		publishSHM := func() {
-			slots, af := shmTracker.snapshot(time.Now().Unix())
-			monoNs := shm.MonotonicNs()
-			if werr := shmWriter.Write(monoNs, af, leakEngine.TotalLeaks(), slots); werr != nil {
+			nowUnix := time.Now().Unix()
+			act := actReader.Get()
+			if !act.ShmShouldSleep() && nowUnix-shmTracker.conntrackUpdatedUnix.Load() >= 10 {
+				scanConntrackOrthogonal(cfg, sw, ipNames, shmTracker)
+			}
+			devSlots, hotspotFlows, hostFlows := shmTracker.snapshot(nowUnix, act)
+			totalLeaks := leakEngine.TotalLeaks()
+			var hdrFlags uint32
+			if werr := shmWriter.WriteWithHostFlows(shm.MonotonicNs(), hotspotFlows, hostFlows, totalLeaks, hdrFlags, devSlots); werr != nil {
 				log.Printf("WARN: shm write: %v", werr)
 			}
 		}
@@ -810,8 +919,8 @@ func main() {
 		}
 	}()
 
-	// v5.6.0-rc1: self-iface AF_PACKET capture supervisor.
-	go runSelfCaptures(ctx, cfg, selfAttrib, func() string {
+	// v5.6.0-rc1 + v6.1.0: self-iface AF_PACKET capture supervisor (TLS SNI + HTTP LeakGuard + DNS ipNames).
+	go runSelfCaptures(ctx, cfg, selfAttrib, ipNames, leakEngine, func() string {
 		if cur := resolveCurrentIface(cfg); cur != "" {
 			return cur
 		}
@@ -827,16 +936,12 @@ func main() {
 		return err == nil
 	})
 
-	// v5.13: 被动设备识别器 + IP→域名反查表。
+	// v5.13: 被动设备识别器。
 	devID := output.NewDeviceIdentifier()
 	devID.SetPath(filepath.Join(cfg.RunDir, devIDFileName))
 	_ = devID.Load()
 	sw.SetDeviceIdentifier(devID)
-	ipNames := output.NewIPNameTable()
-	ipNames.SetPath(filepath.Join(cfg.RunDir, ipNameFileName))
-	sw.SetIPNameTable(ipNames) // v5.18: RecordFlow 域名兜底(取代 nDPI ip_to_host.json)
 	go flushEvery(ctx, 15*time.Second, "dpi_devid", devID.Flush)
-	go flushEvery(ctx, 10*time.Second, "dpi_ipname", ipNames.Flush)
 	// v6.x DPI v2: 每连接 ClientHello 指纹(五元组 → JA4/ALPN/SNI 归类)
 	flowLog = output.NewFlowLog()
 	flowLog.SetPath(filepath.Join(cfg.RunDir, flowLogFileName))
@@ -906,6 +1011,141 @@ func seedKnownARPClients(eng *leakguard.Engine) {
 		if len(fields) >= 4 {
 			eng.RegisterKnownMAC(fields[3])
 		}
+	}
+}
+
+var conntrackScanMu sync.Mutex
+
+func localInterfaceIPs(iface string) []string {
+	if iface == "" {
+		return nil
+	}
+	ifc, err := net.InterfaceByName(iface)
+	if err != nil || ifc == nil {
+		return nil
+	}
+	addrs, err := ifc.Addrs()
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		switch v := a.(type) {
+		case *net.IPNet:
+			if v.IP != nil {
+				out = append(out, v.IP.String())
+			}
+		case *net.IPAddr:
+			if v.IP != nil {
+				out = append(out, v.IP.String())
+			}
+		}
+	}
+	return out
+}
+
+func appendARPClientsForIface(iface string, existing []output.ConntrackClient) []output.ConntrackClient {
+	if iface == "" {
+		return existing
+	}
+	b, err := os.ReadFile("/proc/net/arp")
+	if err != nil {
+		return existing
+	}
+	seenIP := make(map[string]struct{}, len(existing)*2)
+	for _, c := range existing {
+		for _, ip := range c.IPs {
+			seenIP[ip] = struct{}{}
+		}
+	}
+	lines := strings.Split(string(b), "\n")
+	for i := 1; i < len(lines); i++ {
+		fields := strings.Fields(lines[i])
+		if len(fields) < 6 || fields[5] != iface || fields[2] == "0x0" {
+			continue
+		}
+		ipStr := strings.TrimSpace(fields[0])
+		macBytes, ok := shm.ParseMAC(fields[3])
+		if !ok || net.ParseIP(ipStr) == nil {
+			continue
+		}
+		if _, dup := seenIP[ipStr]; dup {
+			continue
+		}
+		seenIP[ipStr] = struct{}{}
+		slot := shm.DeviceSlot{MAC: macBytes}
+		existing = append(existing, output.ConntrackClient{
+			MAC: slot.MACString(),
+			IPs: []string{ipStr},
+		})
+	}
+	return existing
+}
+
+func scanConntrackOrthogonal(
+	cfg Config,
+	sw *output.Writer,
+	ipNames *output.IPNameTable,
+	shmTracker *shmRuntimeTracker,
+) {
+	conntrackScanMu.Lock()
+	defer conntrackScanMu.Unlock()
+
+	now := time.Now()
+	nowUnix := now.Unix()
+	act := actReader.Get()
+
+	apIface := resolveCurrentIface(cfg)
+	if apIface != "" && !isIfaceAliveUp(apIface) {
+		apIface = ""
+	}
+
+	var onlineClients []output.ConntrackClient
+	var inactiveIPs []string
+	if shmTracker != nil {
+		onlineClients, inactiveIPs = shmTracker.conntrackClients(nowUnix)
+	}
+	var gatewayIPs []string
+	var hotspotNets []*net.IPNet
+	if apIface != "" {
+		gatewayIPs = localInterfaceIPs(apIface)
+		hotspotNets = ifaceNetsFn(apIface)
+		onlineClients = appendARPClientsForIface(apIface, onlineClients)
+	}
+
+	hotspotActive := apIface != "" && (!act.OK || (act.Hotspot && act.Clients > 0))
+	clf := output.NewConntrackClassifier(output.ConntrackFlowOptions{
+		HotspotActive:     hotspotActive,
+		Clients:           onlineClients,
+		InactiveClientIPs: inactiveIPs,
+		GatewayIPs:        gatewayIPs,
+		HotspotNets:       hotspotNets,
+	})
+
+	active := make(map[string]struct{}, 256)
+	dot := make(map[string]struct{})
+	r := output.ReadConntrackLines(func(line string) {
+		clf.ObserveLine(line)
+		if d := output.ConntrackOrigDst(line); d != "" {
+			active[d] = struct{}{}
+		}
+		if k := output.ConntrackDoTKey(line); k != "" {
+			dot[k] = struct{}{}
+		}
+	})
+
+	split := clf.Result()
+	if sw != nil {
+		sw.UpdateConntrack(r.Available, r.Readable, r.Path, int(split.HotspotFlows))
+		if r.Readable {
+			sw.ObserveDoTFlows(dot)
+		}
+	}
+	if r.Readable && shmTracker != nil {
+		shmTracker.updateConntrackSplit(split, nowUnix)
+	}
+	if ipNames != nil {
+		ipNames.KeepAlive(active, now)
 	}
 }
 
@@ -1220,34 +1460,11 @@ func runCapture(
 			}
 		}(h)
 
-		// rc29: conntrack telemetry, refreshed every 15s.
+		// rc29 + v6.1.0: orthogonal conntrack telemetry (hotspotFlows vs hostFlows), refreshed every 15s.
 		attemptWG.Add(1)
 		go func() {
 			defer attemptWG.Done()
-			tk := time.NewTicker(15 * time.Second)
-			defer tk.Stop()
-			scan := func() {
-				active := make(map[string]struct{}, 256)
-				dot := make(map[string]struct{})
-				r := output.ReadConntrackLines(func(line string) {
-					if d := output.ConntrackOrigDst(line); d != "" {
-						active[d] = struct{}{}
-					}
-					if k := output.ConntrackDoTKey(line); k != "" {
-						dot[k] = struct{}{}
-					}
-				})
-				sw.UpdateConntrack(r.Available, r.Readable, r.Path, r.Flows)
-				if r.Readable && r.Flows >= 0 {
-					shmTracker.conntrackFlows.Store(uint64(r.Flows))
-				}
-				if r.Readable {
-					sw.ObserveDoTFlows(dot)
-				}
-				ipNames.KeepAlive(active, time.Now())
-			}
-			scan()
-			tk.Stop()
+			scanConntrackOrthogonal(cfg, sw, ipNames, shmTracker)
 			for {
 				t := time.NewTimer(activity.ConntrackEvery(actReader.Get()))
 				select {
@@ -1255,7 +1472,7 @@ func runCapture(
 					t.Stop()
 					return
 				case <-t.C:
-					scan()
+					scanConntrackOrthogonal(cfg, sw, ipNames, shmTracker)
 				}
 			}
 		}()

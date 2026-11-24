@@ -1,9 +1,9 @@
 # HNC 兼容性矩阵与实测边界说明
 
-**当前版本**: v6.1.0-rc.4
-**最后更新**: 2026-11-23
+**当前版本**: v6.1.0-rc.5
+**最后更新**: 2026-11-24
 
-本文件遵循「实测一分说一分，未实测绝不夸大承诺」的工程原则，将 HNC `v6.1.0-rc.4` 的平台兼容性严格划分为**基准真机实测验证**、**源码级防御护栏（待对应真机回报）**与**明确不支持或受宿主内核硬限制**三层证据边界。当任何底层能力在当前设备上不可用时，后端与 WebUI 均如实返回 `supported: false` / `available: false` 与具体原因码，绝不伪造成功状态。
+本文件遵循「实测一分说一分，未实测绝不夸大承诺」的工程原则，将 HNC `v6.1.0-rc.5` 的平台兼容性严格划分为**基准真机实测验证**、**源码级防御护栏（待对应真机回报）**与**明确不支持或受宿主内核硬限制**三层证据边界。当任何底层能力在当前设备上不可用时，后端与 WebUI 均如实返回 `supported: false` / `available: false` 与具体原因码，绝不伪造成功状态。
 
 ## 一、已在基准真机完整实测验证（Tier 1 实证基线）
 
@@ -33,18 +33,27 @@
    - 所有需经 `app_process` 执行的系统命令（`content`、`settings`、`cmd`、`am`）均完整保留宿主 `BOOTCLASSPATH`、`SYSTEMSERVERCLASSPATH` 与 `ANDROID_*` 环境变量，根除空环境导致的静默空输出。
 6. **`32MB tmpfs` 瞬态内存盘与持久化目录物理隔离**：
    - 实测验证 `/data/local/hnc/run` 挂载 `32MB tmpfs` 零闪存磨损运行，跨月 SIM 流量账单与本机真值自训练样本已全量迁入持久化 `/data/local/hnc/data/stats/` 与 `/data/local/hnc/data/self_studio/`，配齐硬配额轮转与原子写失败即删 `.tmp` 孤儿清理。
+7. **ColorOS 16 / Kernel 6.6 GKI 本机 `netd_shared` BPF 只读流量感知与 Android 14+ 多维功耗归因**：
+   - 实测以 `BPF_F_RDONLY` 只读方式打开 `/sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map`（`4B` UID Key）与 `map_netd_uid_counterset_map`，实现按需 8 秒短租约的本机应用实时网速与前后台流量拆分；配合流式 `dumpsys batterystats --charged` 单飞解析，稳定提取 Android 16 多状态后台/息屏耗电（`mAh`）、Partial Wakelock 与射频唤醒排行。
+8. **电池温度伪装模块（如 `fopbatt` `-10°C` 偏置）下的机身壳温防致盲校准**：
+   - 针对刷入快充/性能模块（如 `fopbatt` 将 `/sys/class/power_supply/battery/temp` 人为偏置 `-10°C`）导致单电芯读数失真的场景，已实测通过 `/sys/class/thermal` 机身壳温传感器（`shell_*` / `skin*`）与电芯温度双源交叉校准识别偏置，自动切入真实机身壳温基准驱动 `ThermoCruise`，并在热点待机时保持零副作用只读实时刷新。
+9. **Android 13~16 本机四档防火墙、SDK Sandbox（`uid + 10000`）协同与本机连接手术刀**：
+   - 实测验证 `filter/OUTPUT` `HNC_SELF_UID` 四档策略（放行 / 仅禁明文 HTTP / 禁移动数据 / 全局禁网）、`HNC_SELF_DNS` 直连 `:53` 封堵及 `HNC_SCALPEL_HOST`（`SOCK_DESTROY` + 五元组秒断/冻结），通过 `./bin/self_firewall_sync.sh` 自动联动封禁 Android 13+ 伴生 `sdk_sandbox` UID（`uid + 10000`）并严守六道防自锁门禁。
 
 ## 二、已按 AOSP / 内核源码实现防御护栏、待对应机型实机反馈验证（Tier 2 防御适配）
 
-以下芯片平台、定制 ROM 与特殊硬件拓扑已依据 AOSP 源码、内核公开接口与离线夹具单元测试编写了非破坏性防御护栏（所有 `sysfs` / `procfs` / 命令调用均严格校验存在性与返回码，失败即安全退避），但**尚未在对应实体手机上逐台跑完完整长稳测试，欢迎持有对应机型的用户反馈诊断日志**：
+以下芯片平台、跨代 Android 版本、定制 ROM 与特殊硬件拓扑已依据 AOSP 源码、内核公开接口与离线夹具单元测试编写了非破坏性防御护栏（所有 `sysfs` / `procfs` / `bpffs` / 命令调用均严格校验存在性与返回码，失败即安全退避），但**尚未在所有跨代机型上逐台跑完完整长稳测试，欢迎持有对应机型的用户反馈诊断日志**：
 
 | 适配领域 | 目标平台 / 场景示例 | 已落地的代码防御护栏 | 待实机核验重点 |
 |---|---|---|---|
+| **`netd_shared` BPF Map Schema 跨代兼容** | Android 12 ~ 16 不同 GKI 分支与厂商定制内核 | 同时适配新一代 `map_netd_app_uid_stats_map`（`4B` `uint32 uid` Key）与旧版 Android 12 / 分支内核的 `map_netd_stats_map_A` / `map_netd_stats_map_B`（`16B` `{uid, tag, cntSet, ifaceIndex}` 复合 Key 聚合）；全程强制 `BPF_F_RDONLY` 只读打开，若无权限、未挂载 `bpffs` 或键值尺寸异构，自动无感降级至 `dumpsys netstats --uid` 并如实标注实时速率受限原因 | Android 12 / 13 早期非 GKI 定制内核中 `netd_shared` Map 路径命名与 SELinux 只读访问边界 |
+| **`batterystats` 跨版本功耗拆分与回退** | Android 14 ~ 16 多状态模型 vs Android 9 ~ 13 传统模型 | 流式解析器在 Android 14+ 提取前台、后台与息屏分项 `mAh`；在仅输出合并总 `Estimated power use` 的 Android 9 ~ 13 上严格执行诚实回退，仅展示真实总 `mAh` 及精确 Wakelock / Alarm / 射频唤醒计数，绝不按流量比例伪造后台 `mAh` | 各厂商定制 ROM 对 `dumpsys batterystats --charged` 功耗字段的裁剪或格式扩展 |
+| **电池低温伪装与异构壳温交叉校准** | 刷入 `fopbatt` 等 `-10°C` 电池温度偏置模块机型、双电芯串联机型 | `ThermoCruise` 自动归一化毫摄氏度、十分之一度与摄氏度三量纲并熔断越出 `[-20°C, 100°C]` 的离群读数；同步扫描 `shell_front`/`shell_frame`/`shell_back`/`skin*` 等机身壳温节点交叉比对，电芯被模块人为拉低时自动由壳温接管防致盲，无壳温节点机型安全回退电芯温度 | 不同品牌机型（小米 / vivo / 三星 / Pixel）机身表皮 `thermal_zone` `type` 命名覆盖度 |
+| **Android 13+ SDK Sandbox UID 协同管控** | Android 13 ~ 16（含多用户 / 应用分身 `userId * 100000`）及 Android 9 ~ 12 回退 | 对常规应用 UID（`appId` 位于 `10000..19999`）自动推导同用户伴生沙盒 UID（`uid + 10000`，即 `appId` `20000..29999`）同步施加 `HNC_SELF_UID` 四档规则，封堵广告 SDK 借独立沙盒进程逃逸禁网；Android 12 及以下无该沙盒进程，规则保持幂等无副作用 | 多开分身环境下宿主 ROM 自定义双开用户区间（如 `999` 用户）与沙盒 UID 的映射一致性 |
 | **联发科天玑硬件加速** | 天玑 8000 / 9000 系列 (`ccmniN` 上游、`ap0` 热点口) | `./bin/hnc_mtk_hwnat.sh` 与 `./bin/hnc_offload_guard.sh` 按需探测 `/proc/hnat`、`/sys/kernel/debug/hnat`、`mtk_ppe` 与 `mddp` 节点；仅在节点可写时压制并在恢复时写回原值，高通机型绝不触碰 | 不同厂商天玑内核下 `mddp` / `hnat` 开关节点的实际权限与命名差异 |
 | **三星 / 谷歌 / 展锐平台** | Samsung Exynos (`DIT`, `swlan0`)、Google Pixel Tensor (`wlan1`/`ap0`/`gti*`)、紫光展锐 (`seth_lteN`/`sipa_ethN`) | `./bin/hnc_iface.sh` 与 `iface_patterns.go` 同步维护多芯片蜂窝口与 AP 接口匹配表；Exynos `DIT` 状态仅在对应节点存在时执行探测与压制 | Exynos `DIT` 旁路压制深度、Pixel 新一代 `gti*` 热点桥接计数及展锐网卡命名完整性 |
 | **小米 MIUI / 澎湃 OS 规则共存** | 小米 / 红米 MIUI 14+、HyperOS 1/2 | 防火墙与 `tc` 操作严格限定在 `HNC_*` 独立子链与归属标记内，绝不清空系统 `miui_net_*` 规则；`hnc_watchdog` 巡检发现外部守护清理挂载钩子时自动幂等补挂 | `miui_netd` 在省电模式切换或网络重连时是否周期冲刷 `mangle` 高位 `CONNMARK` |
 | **单芯片同名 `wlan0` 热点门控** | 部分老旧或入门单路 Wi-Fi 芯片机型（开热点自动断开 Wi-Fi，复用 `wlan0` 做 AP） | `./bin/hnc_iface.sh` 仅在 `dumpsys tethering` 或 `softap` 权威源明确报告且无默认路由时标记 `wlan0_ap: true`，守护层保留严格安全门控防止向正在充当本机上游 STA 的 `wlan0` 误挂限速 | 单接口 `wlan0` AP 机型在开关热点瞬间的状态切换时序与防自锁边界 |
-| **异构电芯与热区三量纲换算** | 双电芯串联、第三方内核或特殊 BMS 驱动机型 | `ThermoCruise` 读取温度节点时自动区分毫摄氏度（如 `42000`）、十分之一度（如 `420`）与摄氏度（如 `42`），并对超出 `[-20°C, 100°C]` 的离群读数立即熔断跳过 | 个别厂商私有 `thermal_zone` 虚拟标定值与真实电池包温度的偏差幅度 |
 | **多 Root 框架与跨端浏览器** | KernelSU / KernelSU-Next / APatch (`SuperKey`) / Magisk 26+ / 32 位 `armeabi-v7a` Magisk | `./bin/hnc_compat.sh` 自动识别四大 Root 框架与各自 `busybox`；`./action.sh` 与 `./bin/pair_gen.sh` 支持免输配对进入；CSS 补齐 Chromium 83–110 回退，TLS 证书有效期 `<=397` 天兼容 iOS Safari | 不同 APatch 版本 WebView 桥接差异及老旧 32 位 ARMv7 机型的内核 Netlink 特性裁剪情况 |
 
 ## 三、明确不支持或受宿主内核硬限制的场景（Tier 3 硬边界）

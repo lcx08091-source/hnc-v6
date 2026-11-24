@@ -87,6 +87,11 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 		active = true
 	}
 
+	hsFlows, hostFlows := scalpelLiveFlowCounts(s, active, online)
+	if !active || online == 0 {
+		hsFlows = 0
+	}
+
 	resp := map[string]interface{}{
 		"hotspot_active":       active,
 		"iface":                iface,
@@ -94,6 +99,9 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 		"hotspot_ip":           ip,
 		"online":               online,
 		"total":                total,
+		"active_flows":         int(hsFlows),
+		"hotspot_flows":        int(hsFlows),
+		"host_flows":           int(hostFlows),
 		"rx_bps":               rxBps,
 		"tx_bps":               txBps,
 		"devices_sig":          liveDevicesSig(devices, active, iface),

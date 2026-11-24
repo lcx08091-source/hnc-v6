@@ -17,9 +17,9 @@
   }
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.4', VCODE = String(META.versionCode || '6009304');
+  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.5', VCODE = String(META.versionCode || '6009305');
   var GB = 1073741824, MB = 1048576, KB = 1024;
-  var IFACE = 'wlan2', GW = '192.168.43.1';
+  var IFACE = 'wlan2', GW = '192.168.43.1', MOCK_HS_ACTIVE = true;
 
   /* ═════════════ 小工具 ═════════════ */
   function now() { return Math.floor(Date.now() / 1000); }
@@ -208,7 +208,7 @@
     });
   }
   function liveApps(d) {
-    if (!d.online || !d.live.length) return [];
+    if (!MOCK_HS_ACTIVE || !d.online || !d.live.length) return [];
     var tot = d.cur[0] + d.cur[1];
     return d.live.map(function (x) {
       var c = appCat(x[0]);
@@ -216,11 +216,11 @@
     }).filter(function (a) { return a.bps > 0; }).sort(function (a, b) { return b.bps - a.bps; });
   }
   function devRow(d) {
-    var e = effective(d), t = now();
+    var e = effective(d), t = now(), isOn = MOCK_HS_ACTIVE && d.online;
     var r = {
       mac: d.mac, ip: d.ip, hostname: d.hostname, hostname_src: d.hostname_src, vendor: d.vendor, iface: IFACE,
-      status: d.status, online: d.online, last_seen: d.online ? t - 1 - (hashStr(d.mac) % 3) : d.last_seen,
-      rx_bps: d.online ? d.cur[0] : 0, tx_bps: d.online ? d.cur[1] : 0, rx_bytes: round(d.rx_bytes), tx_bytes: round(d.tx_bytes),
+      status: d.status, online: isOn, last_seen: isOn ? t - 1 - (hashStr(d.mac) % 3) : d.last_seen,
+      rx_bps: isOn ? d.cur[0] : 0, tx_bps: isOn ? d.cur[1] : 0, rx_bytes: round(d.rx_bytes), tx_bytes: round(d.tx_bytes),
       randomized_mac: !!d.randomized_mac, mark_id: d.mark_id,
       limit_enabled: d.limit_enabled !== false && (d.down_mbps > 0 || d.up_mbps > 0), down_mbps: d.down_mbps, up_mbps: d.up_mbps,
       delay_enabled: d.delay_ms > 0 || d.jitter_ms > 0 || d.loss_pct > 0, delay_ms: d.delay_ms, jitter_ms: d.jitter_ms, loss_pct: d.loss_pct,
@@ -230,9 +230,9 @@
       dpi_apps: d.hist.slice(0, 5).map(function (id, i) { return { id: id, name: appName(id), category: appCat(id), confidence: i < 3 ? 'high' : 'med', count: 40 - i * 7 }; }),
       live_apps: liveApps(d)
     };
-    if (d.online && d.fg) r.fg = d.fg;
-    if (d.online && d.traffic_type) r.traffic_type = d.traffic_type;
-    if (d.online && d.live_call) r.live_call = d.live_call;
+    if (isOn && d.fg) r.fg = d.fg;
+    if (isOn && d.traffic_type) r.traffic_type = d.traffic_type;
+    if (isOn && d.live_call) r.live_call = d.live_call;
     if (d.vpn) r.vpn = d.vpn;
     if (d.merge_suggestion) r.merge_suggestion = d.merge_suggestion;
     if (d.auto_inherited_from) {
@@ -255,22 +255,26 @@
   }
   function ipNum(ip) { var a = String(ip).split('.'); return a.length === 4 ? ((+a[0]) * 16777216 + (+a[1]) * 65536 + (+a[2]) * 256 + (+a[3])) : 0; }
   function devSig() {
-    return hashStr(DEVS.map(function (d) {
-      return [d.mac, d.ip, d.online, d.status, d.down_mbps, d.up_mbps, d.delay_ms, d.jitter_ms, d.loss_pct, d.sqm_enabled, d.whitelist, d.app_qos, d.hostname,
+    return hashStr((MOCK_HS_ACTIVE ? '1#' : '0#') + DEVS.map(function (d) {
+      return [d.mac, d.ip, MOCK_HS_ACTIVE && d.online, d.status, d.down_mbps, d.up_mbps, d.delay_ms, d.jitter_ms, d.loss_pct, d.sqm_enabled, d.whitelist, d.app_qos, d.hostname,
         JSON.stringify(d.quota || ''), JSON.stringify(d.schedule || ''), JSON.stringify(d.app_time_limits), JSON.stringify(d.category_blocks), d.merge_suggestion ? 1 : 0, schedIdx(d)].join('|');
     }).join('#') + '@' + JSON.stringify(ALIASES)).toString(16) + 'c0ffee';
   }
   function devicesPayload() {
     stepRates();
     var rows = DEVS.slice().sort(function (a, b) { return ipNum(a.ip) - ipNum(b.ip); }).map(devRow);
-    return { devices: rows, whitelist_mode: CFG.whitelist_mode, remote_enabled: CFG.remote_enabled, hotspot_active: true, hotspot_iface: IFACE, hotspot_ip: GW, devices_sig: devSig() };
+    return { devices: rows, whitelist_mode: CFG.whitelist_mode, remote_enabled: CFG.remote_enabled, hotspot_active: MOCK_HS_ACTIVE, hotspot_iface: MOCK_HS_ACTIVE ? IFACE : '', hotspot_ip: MOCK_HS_ACTIVE ? GW : '', devices_sig: devSig() };
   }
   function liveSummary() {
     stepRates();
     var on = 0, rx = 0, tx = 0;
-    DEVS.forEach(function (d) { if (d.online) { on++; rx += d.cur[0]; tx += d.cur[1]; } });
-    return { hotspot_active: true, iface: IFACE, hotspot_iface: IFACE, hotspot_ip: GW, iface_method: 'tethering', online: on, total: DEVS.length,
-      rx_bps: rx, tx_bps: tx, devices_sig: devSig(), backend_version: VER, backend_version_code: VCODE, autorate: AUTORATE };
+    if (MOCK_HS_ACTIVE) {
+      DEVS.forEach(function (d) { if (d.online) { on++; rx += d.cur[0]; tx += d.cur[1]; } });
+    }
+    var hsFlows = (MOCK_HS_ACTIVE && on > 0) ? 46 : 0;
+    var hostFlows = typeof v6MockComputeHostFlows === 'function' ? v6MockComputeHostFlows() : 84;
+    return { hotspot_active: MOCK_HS_ACTIVE, iface: MOCK_HS_ACTIVE ? IFACE : '', hotspot_iface: MOCK_HS_ACTIVE ? IFACE : '', hotspot_ip: MOCK_HS_ACTIVE ? GW : '', iface_method: 'tethering', online: on, total: DEVS.length,
+      rx_bps: rx, tx_bps: tx, hotspot_flows: hsFlows, host_flows: hostFlows, devices_sig: devSig(), backend_version: VER, backend_version_code: VCODE, autorate: AUTORATE };
   }
 
   /* ═════════════ 配置 / 告警 / 模板 等全局状态 ═════════════ */
@@ -646,7 +650,9 @@
   }
   function connCounts() {
     var c = {};
-    DEVS.forEach(function (d) { if (d.online) { var r = devConns(d); c[d.mac] = { n: r.total + 3 + hashStr(d.mac) % 9, bps: r.bps }; } });
+    if (MOCK_HS_ACTIVE) {
+      DEVS.forEach(function (d) { if (d.online) { var r = devConns(d); c[d.mac] = { n: r.total + 3 + hashStr(d.mac) % 9, bps: r.bps }; } });
+    }
     return { ok: true, counts: c, readable: true, acct: true };
   }
 
@@ -702,26 +708,26 @@
     });
     var idb = 0.89;
     var MOCK_L3_SUBS = [
-      'hnc-curated-v6.1.0-rc.4-dedup#00-core-meta',
-      'hnc-curated-v6.1.0-rc.4#01-short-video', 'hnc-curated-v6.1.0-rc.4#02-video-live', 'hnc-curated-v6.1.0-rc.4#03-social-im',
-      'hnc-curated-v6.1.0-rc.4#04-games-cn', 'hnc-curated-v6.1.0-rc.4#05-games-global', 'hnc-curated-v6.1.0-rc.4#06-shopping-life',
-      'hnc-curated-v6.1.0-rc.4#07-music-audio', 'hnc-curated-v6.1.0-rc.4#08-reading-news', 'hnc-curated-v6.1.0-rc.4#09-office-edu',
-      'hnc-curated-v6.1.0-rc.4#10-cloud-drive', 'hnc-curated-v6.1.0-rc.4#11-finance-bank', 'hnc-curated-v6.1.0-rc.4#12-travel-map',
-      'hnc-curated-v6.1.0-rc.4#13-ai-tools', 'hnc-curated-v6.1.0-rc.4#14-dev-tech', 'hnc-curated-v6.1.0-rc.4#15-app-stores',
-      'hnc-curated-v6.1.0-rc.4#16-oem-vendors', 'hnc-curated-v6.1.0-rc.4#17-iot-smart', 'hnc-curated-v6.1.0-rc.4#18-tv-ott',
-      'hnc-curated-v6.1.0-rc.4#19-carrier-isp', 'hnc-curated-v6.1.0-rc.4#20-gov-public', 'hnc-curated-v6.1.0-rc.4#21-auto-ev',
-      'hnc-curated-v6.1.0-rc.4#22-health-sport', 'hnc-curated-v6.1.0-rc.4#23-food-retail', 'hnc-curated-v6.1.0-rc.4#24-social-global',
-      'hnc-curated-v6.1.0-rc.4#25-stream-global', 'hnc-curated-v6.1.0-rc.4#26-browser-search', 'hnc-curated-v6.1.0-rc.4#27-mail-collab',
-      'hnc-curated-v6.1.0-rc.4#28-security-dns', 'hnc-curated-v6.1.0-rc.4#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.4#30-cdn-infra',
-      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.4#47-v2fly-b',
-      'hnc-curated-v6.1.0-rc.4#95-system-updates', 'hnc-curated-v6.1.0-rc.4#96-system-updates-v6'
+      'hnc-curated-v6.1.0-rc.5-dedup#00-core-meta',
+      'hnc-curated-v6.1.0-rc.5#01-short-video', 'hnc-curated-v6.1.0-rc.5#02-video-live', 'hnc-curated-v6.1.0-rc.5#03-social-im',
+      'hnc-curated-v6.1.0-rc.5#04-games-cn', 'hnc-curated-v6.1.0-rc.5#05-games-global', 'hnc-curated-v6.1.0-rc.5#06-shopping-life',
+      'hnc-curated-v6.1.0-rc.5#07-music-audio', 'hnc-curated-v6.1.0-rc.5#08-reading-news', 'hnc-curated-v6.1.0-rc.5#09-office-edu',
+      'hnc-curated-v6.1.0-rc.5#10-cloud-drive', 'hnc-curated-v6.1.0-rc.5#11-finance-bank', 'hnc-curated-v6.1.0-rc.5#12-travel-map',
+      'hnc-curated-v6.1.0-rc.5#13-ai-tools', 'hnc-curated-v6.1.0-rc.5#14-dev-tech', 'hnc-curated-v6.1.0-rc.5#15-app-stores',
+      'hnc-curated-v6.1.0-rc.5#16-oem-vendors', 'hnc-curated-v6.1.0-rc.5#17-iot-smart', 'hnc-curated-v6.1.0-rc.5#18-tv-ott',
+      'hnc-curated-v6.1.0-rc.5#19-carrier-isp', 'hnc-curated-v6.1.0-rc.5#20-gov-public', 'hnc-curated-v6.1.0-rc.5#21-auto-ev',
+      'hnc-curated-v6.1.0-rc.5#22-health-sport', 'hnc-curated-v6.1.0-rc.5#23-food-retail', 'hnc-curated-v6.1.0-rc.5#24-social-global',
+      'hnc-curated-v6.1.0-rc.5#25-stream-global', 'hnc-curated-v6.1.0-rc.5#26-browser-search', 'hnc-curated-v6.1.0-rc.5#27-mail-collab',
+      'hnc-curated-v6.1.0-rc.5#28-security-dns', 'hnc-curated-v6.1.0-rc.5#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.5#30-cdn-infra',
+      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.5#47-v2fly-b',
+      'hnc-curated-v6.1.0-rc.5#95-system-updates', 'hnc-curated-v6.1.0-rc.5#96-system-updates-v6'
     ];
     return {
       available: true,
       state: {
         schema_version: '2.0', generated_at: t - 2, version: VER, mode: 'af_packet', interface: IFACE, tls_reassembly: true, ipv6_capture: true, offload_hint: false,
         uptime_s: round(up), stats: stats, clients: clients, client_count: Object.keys(clients).length, health: 'ok', rebind_count: 1,
-        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true,
+        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true, dfp_rule_version: 'hnc-dfp-v6.1.0-rc.5',
         conntrack_available: true, conntrack_readable: true, conntrack_path: '/proc/net/nf_conntrack', conntrack_flows: 412,
         unidentified_ratio: { total_bytes: round(sumDays(1)), identified_bytes: round(sumDays(1) * idb), ratio: 1 - idb },
         evidence_summary: { total: 48211 + round(up / 10), by_source: { sni: 31022, dns: 12840, ja4: 2210, ip_owner: 2139 } },
@@ -1170,6 +1176,9 @@
       stepMockSignal(false);
       var l = liveSummary();
       l.signal = clone(MOCK_SIGNAL);
+      if (typeof v6ThermoPayload === 'function') l.thermo = v6ThermoPayload();
+      if (typeof v6SelfFirewallSummary === 'function') l.self_firewall = v6SelfFirewallSummary();
+      if (typeof v6HostGuardianSummary === 'function') l.host_guardian = v6HostGuardianSummary();
       if (typeof v6ArbiterPayload === 'function') {
         var arb = v6ArbiterPayload();
         l.arbiter = arb;
@@ -1245,8 +1254,12 @@
     '/api/sla': function () { return { generated_at: now(), dpid_restart_count: 3, dpid_crash_recent: 0, dpid_guard_heartbeat_age_s: 2, watchdog_full_restore_count: 1, tc_repair_fail_count: 0, uplink_fail_count: 0, qos_fallback_active: false, uplink_unsupported: false }; },
     '/api/metrics': function () { return { instrumented: false, mode: 'live-read', backend_version: VER, compat: 'hotfix16.8-live-api' }; },
     '/api/autorate': function () { AUTORATE.updated_at = now(); return AUTORATE; },
-    '/api/iface_info': function () { return { iface: IFACE, ip: GW, gateway: GW, network: '192.168.43.1/24' }; },
-    '/api/run_status': function () { return { hotspotd: 'up', hotspotd_pid: 4127, hotspotd_rss_kb: 11840, tc_rules: 46, ipt_rules: 31, watchdog: 1, watchdog_pid: 4203, watchdog_kind: 'go', watchdog_hb_age: 14 }; },
+    '/api/iface_info': function () { return { iface: MOCK_HS_ACTIVE ? IFACE : '', ip: MOCK_HS_ACTIVE ? GW : '', gateway: MOCK_HS_ACTIVE ? GW : '', network: '192.168.43.1/24' }; },
+    '/api/run_status': function () {
+      var hsF = MOCK_HS_ACTIVE ? 46 : 0;
+      var hoF = typeof v6MockComputeHostFlows === 'function' ? v6MockComputeHostFlows() : 84;
+      return { hotspotd: 'up', hotspotd_pid: 4127, hotspotd_rss_kb: 11840, tc_rules: MOCK_HS_ACTIVE ? 46 : 0, ipt_rules: 31, watchdog: 1, watchdog_pid: 4203, watchdog_kind: 'go', watchdog_hb_age: 14, hotspot_flows: hsF, host_flows: hoF, thermo: typeof v6ThermoPayload === 'function' ? v6ThermoPayload() : null };
+    },
     '/api/sim': function () { return { ok: true, enabled: SIM.enabled, count: SIM.devices.length, seed: 20261008, presets: ['busy', 'home', 'idle'], types: ['tv', 'phone', 'laptop', 'tablet', 'game', 'iot', 'pc'], mac_prefix: '02:5e:00:', max: 32, devices: SIM.devices }; },
     '/api/selfcheck': function () { return selfcheck(); },
     '/api/dataplane_verify': function (q) { return dataplaneVerifyPayload({ goroutineleak: bool(q.goroutineleak), reset_baseline: bool(q.reset_baseline), iface: q.iface, trigger: 'query_param', manual: false }); },
@@ -1550,8 +1563,8 @@
     hotspot_save: function (p) { if (p.ssid) CFG.hotspot_ssid = p.ssid; if (p.delay_sec) CFG.hotspot_delay_sec = +p.delay_sec; if (p.autostart) CFG.hotspot_autostart = bool(p.autostart); return 'config saved'; },
     hotspot_iface_set: function (p) { CFG.hotspot_iface = p.iface || ''; return p.iface ? 'preferred hotspot iface set to ' + p.iface : 'hotspot iface set to auto'; },
     hotspot_schedule_set: function (p) { CFG.hotspot_time_enable = bool(p.time_enable); CFG.hotspot_charging_only = bool(p.charging_only); if (p.start) CFG.hotspot_time_start = p.start; if (p.end) CFG.hotspot_time_end = p.end; return ''; },
-    hotspot_start: function () { return '已触发启动，正在后台拉起热点（请稍候）'; },
-    hotspot_stop: function () { return '演示模式：热点保持开启'; },
+    hotspot_start: function () { MOCK_HS_ACTIVE = true; return '热点已拉起（' + IFACE + '），本机与热点双栈守护同步就绪'; },
+    hotspot_stop: function () { MOCK_HS_ACTIVE = false; return '热点已关闭，本机守护继续独立运行'; },
     stale_ttl_set: function (p) { CFG.stale_rule_ttl_days = +p.days || 0; return ''; },
     flywheel_exclude_set: function (p) { var l = CFG.flywheel_exclude_user; if (p.op === 'add') { if (l.indexOf(p.pkg) < 0) l.push(p.pkg); } else CFG.flywheel_exclude_user = l.filter(function (x) { return x !== p.pkg; }); return ''; },
     quic_block_set: function (p) { CFG.quic_block = bool(p && p.enabled); return 'QUIC_BLOCK=' + (CFG.quic_block ? 'on iface=wlan2' : 'off'); },
@@ -1704,13 +1717,24 @@
     dpi_rebind: function () { return 'rebind requested'; },
     restart_service: function () { return 'restart scheduled'; },
     cleanup_all: function () { return 'safe release scheduled'; },
-    json_doctor_repair: function () { return '已校验并修复全部核心 JSON 配置文件（0 个异常残留）'; }
+    json_doctor_repair: function () { return '已校验并修复全部核心 JSON 配置文件（0 个异常残留）'; },
+    self_firewall_set: function (p) { return J(v6ApplySelfFirewallMutation(Object.assign({ action: 'self_firewall_set' }, p || {}))); },
+    self_firewall_remove: function (p) { return J(v6ApplySelfFirewallMutation(Object.assign({ action: 'self_firewall_remove' }, p || {}))); },
+    self_firewall_clear: function (p) { return J(v6ApplySelfFirewallMutation(Object.assign({ action: 'self_firewall_clear' }, p || {}))); },
+    self_dns_block: function (p) { return J(v6ApplySelfFirewallMutation(Object.assign({ action: 'self_dns_block' }, p || {}))); },
+    self_dns_unblock: function (p) { return J(v6ApplySelfFirewallMutation(Object.assign({ action: 'self_dns_unblock' }, p || {}))); }
   };
   function doAction(body) {
     var name = body && body.action, p = (body && body.params) || {}, fn = ACT[name];
     if (!fn) return { ok: true, detail: '' };
     try { var det = fn(p); return det ? { ok: true, detail: det } : { ok: true }; }
-    catch (e) { if (e && e.status != null) return { ok: false, error: e.message, detail: '' }; throw e; }
+    catch (e) {
+      if (e && e.status != null) {
+        var dStr = (e.body && e.body.detail) ? String(e.body.detail) : '';
+        return { ok: false, error: e.message, detail: dStr };
+      }
+      throw e;
+    }
   }
   var POST = {
     '/api/action': doAction,
@@ -1730,7 +1754,7 @@
   };
 
 
-  /* ═════════════ HNC v6.1.0-rc.4 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
+  /* ═════════════ HNC v6.1.0-rc.5 · 本机+热点双栈守护、防火墙与 LeakGuard 仿真层 ═════════════ */
   function v6MockInfraGuard(host) {
     var h = String(host || '').trim().toLowerCase();
     if (!h) return null;
@@ -1755,6 +1779,662 @@
     return '';
   }
 
+  var V6_PROTECTED_PKGS = [
+    'com.agy',
+    'com.android.webview',
+    'com.google.android.webview',
+    'com.rifsxd.ksunext',
+    'com.sukisu.ultra',
+    'com.topjohnwu.magisk',
+    'io.github.vvb2060.magisk',
+    'me.bmax.apatch',
+    'me.weishu.kernelsu'
+  ];
+
+  var V6_HOST_APPS_CATALOG = [
+    {
+      uid: 10234, pkg: 'com.ss.android.ugc.aweme', app_name: '抖音', is_system: false,
+      state: 'foreground', rx_bps: 1480000, tx_bps: 64000,
+      bg_rx: 298 * MB, bg_tx: 22 * MB, fg_rx: 1840 * MB, fg_tx: 96 * MB, wifi_share: 0.72,
+      active_conns: 18, top_domains: ['v26-dy.douyinvod.com', 'api5-normal-lq.amemv.com', 'p26-sign.douyinpic.com'],
+      cleartext_flags: [],
+      power: { total_mah: 312.4, fg_mah: 248.6, bg_mah: 52.8, fgs_mah: 11.0, cached_mah: 4.2, screen_off_mah: 31.4,
+        wl_ms: 486000, wl_bg_ms: 342000, wl_cnt: 46, top_wl: [{ name: 'AwemePushWakeLock', duration_ms: 214000, count: 29 }, { name: 'TTNetBgSync', duration_ms: 128000, count: 17 }],
+        radio_ms: 740000, radio_cnt: 38, wifi_ms: 1920000, wifi_scan: 4, cpu_tot_ms: 910000, cpu_fg_ms: 730000, cpu_bg_ms: 180000,
+        alarms: 34, top_alarms: [{ name: 'com.ss.android.message.HEARTBEAT', count: 22 }, { name: 'com.bytedance.push.KEEP_ALIVE', count: 12 }], jobs_ms: 96000, jobs_cnt: 14 }
+    },
+    {
+      uid: 10198, pkg: 'com.tencent.mm', app_name: '微信', is_system: false,
+      state: 'foreground', rx_bps: 92000, tx_bps: 38000,
+      bg_rx: 386 * MB, bg_tx: 94 * MB, fg_rx: 612 * MB, fg_tx: 148 * MB, wifi_share: 0.65,
+      active_conns: 14, top_domains: ['szextshort.weixin.qq.com', 'mmsns.qpic.cn', 'wx.qlogo.cn'],
+      cleartext_flags: [],
+      power: { total_mah: 286.2, fg_mah: 164.0, bg_mah: 98.4, fgs_mah: 23.8, cached_mah: 6.1, screen_off_mah: 64.2,
+        wl_ms: 924000, wl_bg_ms: 782000, wl_cnt: 118, top_wl: [{ name: 'MicroMsg.MMWakerLock', duration_ms: 540000, count: 84 }, { name: 'Mars.CoreWakeLock', duration_ms: 242000, count: 34 }],
+        radio_ms: 1280000, radio_cnt: 96, wifi_ms: 2460000, wifi_scan: 9, cpu_tot_ms: 840000, cpu_fg_ms: 490000, cpu_bg_ms: 350000,
+        alarms: 88, top_alarms: [{ name: 'com.tencent.mm.ALARM_ACTION', count: 61 }, { name: 'com.tencent.mm.push.SYNC', count: 27 }], jobs_ms: 142000, jobs_cnt: 19 }
+    },
+    {
+      uid: 10318, pkg: 'com.kuaishou.nebula', app_name: '快手极速版', is_system: false,
+      state: 'background', rx_bps: 184000, tx_bps: 26000,
+      bg_rx: 684 * MB, bg_tx: 58 * MB, fg_rx: 192 * MB, fg_tx: 18 * MB, wifi_share: 0.58,
+      active_conns: 11, top_domains: ['txmov2.a.kwimgs.com', 'log-sdk.ad-nebula-demo.cn', 'api.gifshow.com'],
+      cleartext_flags: ['http_cleartext', 'tracker_sdk'],
+      power: { total_mah: 194.8, fg_mah: 56.2, bg_mah: 126.6, fgs_mah: 12.0, cached_mah: 3.4, screen_off_mah: 78.5,
+        wl_ms: 1140000, wl_bg_ms: 1060000, wl_cnt: 92, top_wl: [{ name: 'KwaiBgPreloadLock', duration_ms: 760000, count: 58 }, { name: 'NebulaAdReportLock', duration_ms: 300000, count: 34 }],
+        radio_ms: 1520000, radio_cnt: 74, wifi_ms: 1380000, wifi_scan: 12, cpu_tot_ms: 620000, cpu_fg_ms: 170000, cpu_bg_ms: 450000,
+        alarms: 67, top_alarms: [{ name: 'com.kuaishou.nebula.PRELOAD_VIDEO', count: 43 }, { name: 'com.kwai.ad.TRACK_REPORT', count: 24 }], jobs_ms: 310000, jobs_cnt: 31 }
+    },
+    {
+      uid: 10356, pkg: 'com.cloudalbum.sync', app_name: '相册云盘备份', is_system: false,
+      state: 'background', rx_bps: 14000, tx_bps: 420000,
+      bg_rx: 84 * MB, bg_tx: 1120 * MB, fg_rx: 42 * MB, fg_tx: 34 * MB, wifi_share: 0.44,
+      active_conns: 8, top_domains: ['up-z2.qiniup.com', 'ocr-legacy.album-verify.cn'],
+      cleartext_flags: ['http_cleartext', 'bg_silent_uplink'],
+      power: { total_mah: 148.5, fg_mah: 18.0, bg_mah: 114.5, fgs_mah: 16.0, cached_mah: 1.8, screen_off_mah: 82.0,
+        wl_ms: 1380000, wl_bg_ms: 1340000, wl_cnt: 41, top_wl: [{ name: 'AlbumOriginalUploadWakeLock', duration_ms: 1090000, count: 26 }, { name: 'ExifIndexJobLock', duration_ms: 250000, count: 15 }],
+        radio_ms: 1690000, radio_cnt: 52, wifi_ms: 1640000, wifi_scan: 2, cpu_tot_ms: 530000, cpu_fg_ms: 50000, cpu_bg_ms: 480000,
+        alarms: 29, top_alarms: [{ name: 'com.cloudalbum.sync.NIGHT_UPLOAD', count: 29 }], jobs_ms: 680000, jobs_cnt: 22 }
+    },
+    {
+      uid: 10294, pkg: 'com.weather.fastcalendar', app_name: '极速天气日历', is_system: false,
+      state: 'background', rx_bps: 18500, tx_bps: 9400,
+      bg_rx: 246 * MB, bg_tx: 64 * MB, fg_rx: 11 * MB, fg_tx: 3 * MB, wifi_share: 0.48,
+      active_conns: 9, top_domains: ['api-plain.fastcalendar-sdk.cn', 'sdk.mob-analytics-tracker.cn'],
+      cleartext_flags: ['http_cleartext', 'dns_direct', 'tracker_sdk'],
+      power: { total_mah: 96.4, fg_mah: 6.2, bg_mah: 84.2, fgs_mah: 6.0, cached_mah: 1.2, screen_off_mah: 58.6,
+        wl_ms: 820000, wl_bg_ms: 805000, wl_cnt: 134, top_wl: [{ name: 'FastCalLocPollLock', duration_ms: 560000, count: 92 }, { name: 'AdSdkBeaconWakeLock', duration_ms: 245000, count: 42 }],
+        radio_ms: 1120000, radio_cnt: 108, wifi_ms: 640000, wifi_scan: 28, cpu_tot_ms: 340000, cpu_fg_ms: 22000, cpu_bg_ms: 318000,
+        alarms: 112, top_alarms: [{ name: 'com.weather.fastcalendar.LOC_TICK', count: 76 }, { name: 'cn.mob.sdk.BEACON_WAKE', count: 36 }], jobs_ms: 240000, jobs_cnt: 45 }
+    },
+    {
+      uid: 10311, pkg: 'tv.danmaku.bili', app_name: '哔哩哔哩', is_system: false,
+      state: 'background', rx_bps: 36000, tx_bps: 4200,
+      bg_rx: 168 * MB, bg_tx: 14 * MB, fg_rx: 920 * MB, fg_tx: 38 * MB, wifi_share: 0.81,
+      active_conns: 7, top_domains: ['upos-sz-mirrorcos.bilivideo.com', 'api.bilibili.com'],
+      cleartext_flags: [],
+      power: { total_mah: 142.0, fg_mah: 112.4, bg_mah: 24.6, fgs_mah: 5.0, cached_mah: 2.5, screen_off_mah: 11.2,
+        wl_ms: 210000, wl_bg_ms: 145000, wl_cnt: 19, top_wl: [{ name: 'IjkMediaPlayerWakeLock', duration_ms: 145000, count: 19 }],
+        radio_ms: 320000, radio_cnt: 16, wifi_ms: 1180000, wifi_scan: 1, cpu_tot_ms: 480000, cpu_fg_ms: 410000, cpu_bg_ms: 70000,
+        alarms: 14, top_alarms: [{ name: 'tv.danmaku.bili.PUSH_HEARTBEAT', count: 14 }], jobs_ms: 42000, jobs_cnt: 6 }
+    },
+    {
+      uid: 10287, pkg: 'com.autonavi.minimap', app_name: '高德地图', is_system: false,
+      state: 'background', rx_bps: 8200, tx_bps: 3100,
+      bg_rx: 52 * MB, bg_tx: 16 * MB, fg_rx: 134 * MB, fg_tx: 22 * MB, wifi_share: 0.35,
+      active_conns: 6, top_domains: ['m5.amap.com', 'webrd01.is.autonavi.com'],
+      cleartext_flags: [],
+      power: { total_mah: 88.6, fg_mah: 54.0, bg_mah: 28.6, fgs_mah: 6.0, cached_mah: 1.4, screen_off_mah: 14.8,
+        wl_ms: 290000, wl_bg_ms: 180000, wl_cnt: 27, top_wl: [{ name: 'AMapLocationWakeLock', duration_ms: 180000, count: 27 }],
+        radio_ms: 490000, radio_cnt: 24, wifi_ms: 420000, wifi_scan: 19, cpu_tot_ms: 270000, cpu_fg_ms: 190000, cpu_bg_ms: 80000,
+        alarms: 18, top_alarms: [{ name: 'com.amap.api.location.APS_ALARM', count: 18 }], jobs_ms: 38000, jobs_cnt: 8 }
+    },
+    {
+      uid: 10388, pkg: 'mark.via', app_name: 'Via 浏览器', is_system: false,
+      state: 'background', rx_bps: 0, tx_bps: 0,
+      bg_rx: 6 * MB, bg_tx: 1 * MB, fg_rx: 118 * MB, fg_tx: 9 * MB, wifi_share: 0.76,
+      active_conns: 4, top_domains: ['developer.mozilla.org', 'cdnjs.cloudflare.com'],
+      cleartext_flags: [],
+      power: { total_mah: 24.2, fg_mah: 21.8, bg_mah: 2.4, fgs_mah: 0, cached_mah: 0.8, screen_off_mah: 0.6,
+        wl_ms: 18000, wl_bg_ms: 4000, wl_cnt: 3, top_wl: [],
+        radio_ms: 64000, radio_cnt: 5, wifi_ms: 260000, wifi_scan: 0, cpu_tot_ms: 92000, cpu_fg_ms: 86000, cpu_bg_ms: 6000,
+        alarms: 0, top_alarms: [], jobs_ms: 0, jobs_cnt: 0 }
+    },
+    {
+      uid: 10045, pkg: 'com.heytap.market', app_name: '软件商店', is_system: true,
+      state: 'background', rx_bps: 4200, tx_bps: 1100,
+      bg_rx: 312 * MB, bg_tx: 11 * MB, fg_rx: 28 * MB, fg_tx: 3 * MB, wifi_share: 0.92,
+      active_conns: 3, top_domains: ['api-cn.store.heytapmobi.com'],
+      cleartext_flags: [],
+      power: { total_mah: 34.6, fg_mah: 4.2, bg_mah: 30.4, fgs_mah: 0, cached_mah: 1.1, screen_off_mah: 19.2,
+        wl_ms: 240000, wl_bg_ms: 230000, wl_cnt: 14, top_wl: [{ name: 'MarketAutoUpdateJob', duration_ms: 230000, count: 14 }],
+        radio_ms: 110000, radio_cnt: 8, wifi_ms: 520000, wifi_scan: 0, cpu_tot_ms: 145000, cpu_fg_ms: 15000, cpu_bg_ms: 130000,
+        alarms: 9, top_alarms: [{ name: 'com.heytap.market.DAILY_CHECK', count: 9 }], jobs_ms: 210000, jobs_cnt: 9 }
+    },
+    {
+      uid: 1000, pkg: 'android', app_name: 'Android 系统', is_system: true,
+      state: 'foreground', rx_bps: 1600, tx_bps: 900,
+      bg_rx: 24 * MB, bg_tx: 8 * MB, fg_rx: 12 * MB, fg_tx: 4 * MB, wifi_share: 0.70,
+      active_conns: 4, top_domains: ['connectivitycheck.gstatic.com', 'time.android.com'],
+      cleartext_flags: [],
+      power: { total_mah: 62.0, fg_mah: 18.0, bg_mah: 44.0, fgs_mah: 0, cached_mah: 0, screen_off_mah: 24.5,
+        wl_ms: 410000, wl_bg_ms: 360000, wl_cnt: 64, top_wl: [{ name: 'NetworkStats', duration_ms: 190000, count: 40 }, { name: 'AnyMotionDetector', duration_ms: 170000, count: 24 }],
+        radio_ms: 220000, radio_cnt: 19, wifi_ms: 680000, wifi_scan: 6, cpu_tot_ms: 380000, cpu_fg_ms: 90000, cpu_bg_ms: 290000,
+        alarms: 31, top_alarms: [{ name: 'android.content.syncmanager.SYNC_ALARM', count: 31 }], jobs_ms: 85000, jobs_cnt: 16 }
+    }
+  ];
+
+  var V6_SELF_FW = {
+    updated_at: T - 120,
+    apply_commits: 3,
+    guard_rejects: 0,
+    uid_rules: {
+      '10356': {
+        uid: 10356,
+        sdk_sandbox_uid: 20356,
+        pkg: 'com.cloudalbum.sync',
+        app_name: '相册云盘备份',
+        mode: 'block_cellular',
+        block_targets: [],
+        updated_at: T - 320
+      }
+    },
+    blocked_domains: {
+      'ad-beacon.legacy-push-demo.cn': 1
+    }
+  };
+
+  function v6FindHostAppMeta(uid, fallbackPkg, fallbackName) {
+    for (var i = 0; i < V6_HOST_APPS_CATALOG.length; i++) {
+      if (V6_HOST_APPS_CATALOG[i].uid === uid) return V6_HOST_APPS_CATALOG[i];
+    }
+    return { uid: uid, pkg: fallbackPkg || ('uid.' + uid), app_name: fallbackName || fallbackPkg || ('UID ' + uid), is_system: uid < 10000 };
+  }
+
+  function v6SelfFirewallSnapshot() {
+    var rules = Object.keys(V6_SELF_FW.uid_rules).map(function (k) { return clone(V6_SELF_FW.uid_rules[k]); }).sort(function (a, b) { return a.uid - b.uid; });
+    var doms = Object.keys(V6_SELF_FW.blocked_domains).sort();
+    return {
+      ok: true,
+      updated_at: V6_SELF_FW.updated_at,
+      uid_rules: rules,
+      blocked_domains: doms,
+      protected_packages: V6_PROTECTED_PKGS.slice(),
+      uid_rule_count: rules.length,
+      blocked_domain_count: doms.length
+    };
+  }
+
+  function v6SelfFirewallSummary() {
+    var rules = Object.keys(V6_SELF_FW.uid_rules).map(function (k) { return V6_SELF_FW.uid_rules[k]; });
+    var domCnt = Object.keys(V6_SELF_FW.blocked_domains).length;
+    var ctCnt = 0, cellCnt = 0, allCnt = 0;
+    rules.forEach(function (r) {
+      if (r.mode === 'block_cleartext') ctCnt++;
+      else if (r.mode === 'block_cellular') cellCnt++;
+      else if (r.mode === 'block_all') allCnt++;
+    });
+    return {
+      active: rules.length > 0 || domCnt > 0,
+      uid_rule_count: rules.length,
+      blocked_domain_count: domCnt,
+      block_cleartext_apps: ctCnt,
+      block_cellular_apps: cellCnt,
+      block_all_apps: allCnt,
+      apply_commits: V6_SELF_FW.apply_commits,
+      guard_rejects: V6_SELF_FW.guard_rejects,
+      updated_at: V6_SELF_FW.updated_at
+    };
+  }
+
+  function v6ApplySelfFirewallMutation(req) {
+    req = req || {};
+    var act = String(req.action || '').trim().toLowerCase();
+    if (!act) {
+      if (req.uid != null && req.uid !== '') act = 'self_firewall_set';
+      else if (req.domain || req.dst_host) act = 'self_dns_block';
+    }
+    if (act === 'set' || act === 'self_firewall_set') {
+      var uid = round(+(req.uid != null ? req.uid : -1));
+      if (!(uid >= 0)) throw err('bad params', 400, { reason_code: 'bad params', detail: 'uid is required' });
+      if (uid < 10000) throw err('protected_uid', 400, { reason_code: 'protected_uid', detail: '系统核心 UID (<10000) 受防自锁红线保护，禁止封禁' });
+      var meta = v6FindHostAppMeta(uid, String(req.pkg || req.package || '').trim(), String(req.app_name || '').trim());
+      var pkgName = String(req.pkg || req.package || meta.pkg || '').trim();
+      if (V6_PROTECTED_PKGS.indexOf(pkgName) >= 0) {
+        throw err('protected_package', 400, { reason_code: 'protected_package', detail: '受保护的管理器 / 系统 WebView 包名禁止封禁：' + pkgName });
+      }
+      var mode = String(req.mode || 'allow').trim().toLowerCase();
+      if (mode === 'allow' || mode === 'off' || mode === 'none') {
+        delete V6_SELF_FW.uid_rules[String(uid)];
+      } else if (mode === 'block_cleartext' || mode === 'block_cellular' || mode === 'block_all') {
+        var targets = [];
+        if (Array.isArray(req.block_targets)) targets = req.block_targets.map(String).filter(Boolean);
+        else if (typeof req.block_targets === 'string' && req.block_targets.trim()) {
+          targets = req.block_targets.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+        }
+        V6_SELF_FW.uid_rules[String(uid)] = {
+          uid: uid,
+          sdk_sandbox_uid: (uid >= 10000 && uid <= 19999) ? uid + 10000 : 0,
+          pkg: pkgName,
+          app_name: String(req.app_name || meta.app_name || pkgName),
+          mode: mode,
+          block_targets: targets,
+          updated_at: now()
+        };
+      } else {
+        throw err('bad params', 400, { reason_code: 'bad params', detail: 'invalid mode: ' + mode });
+      }
+      V6_SELF_FW.updated_at = now();
+      V6_SELF_FW.apply_commits += 1;
+      return v6SelfFirewallSnapshot();
+    }
+    if (act === 'remove' || act === 'self_firewall_remove') {
+      var rUid = round(+(req.uid != null ? req.uid : -1));
+      if (!(rUid >= 10000)) throw err('bad params', 400, { reason_code: 'bad params', detail: 'valid app uid >= 10000 is required' });
+      delete V6_SELF_FW.uid_rules[String(rUid)];
+      V6_SELF_FW.updated_at = now();
+      V6_SELF_FW.apply_commits += 1;
+      return v6SelfFirewallSnapshot();
+    }
+    if (act === 'clear' || act === 'self_firewall_clear') {
+      var sc = String(req.scope || 'all').trim().toLowerCase();
+      if (sc === 'uid' || sc === 'uid_rules') V6_SELF_FW.uid_rules = {};
+      else if (sc === 'dns' || sc === 'domains') V6_SELF_FW.blocked_domains = {};
+      else { V6_SELF_FW.uid_rules = {}; V6_SELF_FW.blocked_domains = {}; }
+      V6_SELF_FW.updated_at = now();
+      V6_SELF_FW.apply_commits += 1;
+      return v6SelfFirewallSnapshot();
+    }
+    if (act === 'dns_block' || act === 'self_dns_block') {
+      var dom = String(req.domain || req.dst_host || '').trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+      if (!dom) throw err('bad params', 400, { reason_code: 'bad params', detail: 'domain is required' });
+      var ig = v6MockInfraGuard(dom);
+      if (ig && ig.level === 'hard_block') {
+        V6_SELF_FW.guard_rejects += 1;
+        throw err('guard_hard_block', 409, {
+          guard_level: 'hard_block',
+          requires_confirm: false,
+          vendor: ig.label,
+          domain: dom,
+          detail: '系统联网探测与公共 DNS 核心域禁止拦截：' + dom
+        });
+      }
+      if (ig && ig.level === 'warn_confirm' && !bool(req.force)) {
+        V6_SELF_FW.guard_rejects += 1;
+        throw err('guard_warn_confirm', 409, {
+          guard_level: 'warn_confirm',
+          requires_confirm: true,
+          vendor: ig.label,
+          domain: dom,
+          detail: '该域名属于「' + ig.label + '」共享底座，拦截可能连带影响多款本机应用，确认后可强制下发。'
+        });
+      }
+      V6_SELF_FW.blocked_domains[dom] = 1;
+      V6_SELF_FW.updated_at = now();
+      V6_SELF_FW.apply_commits += 1;
+      return v6SelfFirewallSnapshot();
+    }
+    if (act === 'dns_unblock' || act === 'self_dns_unblock') {
+      var udom = String(req.domain || req.dst_host || '').trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+      if (!udom) throw err('bad params', 400, { reason_code: 'bad params', detail: 'domain is required' });
+      delete V6_SELF_FW.blocked_domains[udom];
+      V6_SELF_FW.updated_at = now();
+      V6_SELF_FW.apply_commits += 1;
+      return v6SelfFirewallSnapshot();
+    }
+    throw err('bad params', 400, { detail: 'action must be self_firewall_set|self_firewall_remove|self_firewall_clear|self_dns_block|self_dns_unblock' });
+  }
+
+  function v6MockIsSelfDomainBlocked(dom) {
+    var h = String(dom || '').trim().toLowerCase();
+    if (!h) return false;
+    var keys = Object.keys(V6_SELF_FW.blocked_domains);
+    for (var i = 0; i < keys.length; i++) {
+      var b = keys[i];
+      if (h === b || h.slice(-(b.length + 1)) === '.' + b) return true;
+    }
+    return false;
+  }
+
+  function v6MockComputeHostFlows() {
+    var total = 0;
+    V6_HOST_APPS_CATALOG.forEach(function (a) {
+      var rule = V6_SELF_FW.uid_rules[String(a.uid)];
+      if (rule && rule.mode === 'block_all') return;
+      total += a.active_conns;
+    });
+    return total;
+  }
+
+  function v6LocalAppsTrafficPayload(q) {
+    q = q || {};
+    var period = String(q.period || 'boot').trim().toLowerCase();
+    if (['boot', 'today', '24h', '7d', '30d', 'cycle', 'month'].indexOf(period) < 0) period = 'boot';
+    var netF = String(q.net || 'all').trim().toLowerCase();
+    if (netF === 'cellular' || netF === 'mobile') netF = 'cell';
+    if (['all', 'wifi', 'cell'].indexOf(netF) < 0) netF = 'all';
+    var sortRaw = String(q.sort || 'rate').trim().toLowerCase();
+    var sortBy = sortRaw;
+    if (sortRaw === 'live' || sortRaw === 'bps') sortBy = 'rate';
+    else if (sortRaw === 'bg') sortBy = 'bg_bytes';
+    else if (sortRaw === 'total') sortBy = 'total_bytes';
+    var includeSystem = bool(q.include_system);
+    var pMul = period === 'today' ? 0.62 : (period === '24h' ? 0.78 : (period === '7d' ? 4.3 : (period === '30d' || period === 'cycle' || period === 'month' ? 14.6 : 1.0)));
+
+    var rows = [];
+    var sumRxBps = 0, sumTxBps = 0, sumTotB = 0, sumBgB = 0, sumFgB = 0, activeConnApps = 0;
+    V6_HOST_APPS_CATALOG.forEach(function (a) {
+      if (!includeSystem && a.is_system) return;
+      var rule = V6_SELF_FW.uid_rules[String(a.uid)] || null;
+      var fwMode = rule ? rule.mode : 'allow';
+      var netShare = netF === 'wifi' ? a.wifi_share : (netF === 'cell' ? (1 - a.wifi_share) : 1.0);
+      var isBlockedNow = fwMode === 'block_all' || (fwMode === 'block_cellular' && netF === 'cell');
+      var jitter = 0.88 + ((hashStr(a.pkg + Math.floor(Date.now() / 2000)) % 25) / 100);
+      var rxBps = isBlockedNow ? 0 : round(a.rx_bps * jitter * (netF === 'all' ? 1 : netShare));
+      var txBps = isBlockedNow ? 0 : round(a.tx_bps * jitter * (netF === 'all' ? 1 : netShare));
+      var bgRx = round(a.bg_rx * pMul * netShare);
+      var bgTx = round(a.bg_tx * pMul * netShare);
+      var fgRx = round(a.fg_rx * pMul * netShare);
+      var fgTx = round(a.fg_tx * pMul * netShare);
+      var bgTot = bgRx + bgTx;
+      var fgTot = fgRx + fgTx;
+      var totB = bgTot + fgTot;
+      var bgPct = totB > 0 ? round((bgTot * 1000) / totB) / 10 : 0;
+      var conns = isBlockedNow ? 0 : a.active_conns;
+      var flags = (a.cleartext_flags || []).filter(function (fl) {
+        if (fwMode === 'block_all') return false;
+        if (fwMode === 'block_cleartext' && fl === 'http_cleartext') return false;
+        return true;
+      });
+      var row = {
+        uid: a.uid,
+        package: a.pkg,
+        pkg: a.pkg,
+        app_name: a.app_name,
+        name: a.app_name,
+        is_system: a.is_system,
+        current_state: a.state,
+        rx_bps: rxBps,
+        tx_bps: txBps,
+        total_bps: rxBps + txBps,
+        bg_rx_bytes: bgRx,
+        bg_tx_bytes: bgTx,
+        bg_total_bytes: bgTot,
+        fg_rx_bytes: fgRx,
+        fg_tx_bytes: fgTx,
+        fg_total_bytes: fgTot,
+        total_bytes: totB,
+        bg_ratio_pct: bgPct,
+        active_conns: conns,
+        top_domains: a.top_domains.filter(function (dm) { return !v6MockIsSelfDomainBlocked(dm); }),
+        cleartext_flags: flags,
+        firewall_mode: fwMode
+      };
+      rows.push(row);
+      sumRxBps += rxBps;
+      sumTxBps += txBps;
+      sumTotB += totB;
+      sumBgB += bgTot;
+      sumFgB += fgTot;
+      if (conns > 0) activeConnApps++;
+    });
+
+    rows.sort(function (a, b) {
+      if (sortBy === 'bg_bytes') return (b.bg_total_bytes - a.bg_total_bytes) || (b.total_bytes - a.total_bytes);
+      if (sortRaw === 'bg_ratio') return (b.bg_ratio_pct - a.bg_ratio_pct) || (b.bg_total_bytes - a.bg_total_bytes);
+      if (sortRaw === 'conns') return (b.active_conns - a.active_conns) || (b.total_bps - a.total_bps);
+      if (sortBy === 'total_bytes') return (b.total_bytes - a.total_bytes) || (b.total_bps - a.total_bps);
+      return (b.total_bps - a.total_bps) || (b.total_bytes - a.total_bytes);
+    });
+
+    var overallBgPct = sumTotB > 0 ? round((sumBgB * 1000) / sumTotB) / 10 : 0;
+    return {
+      ok: true,
+      available: true,
+      generated_at: now(),
+      period: period,
+      net: netF,
+      sort: sortBy,
+      include_system: includeSystem,
+      rate_source: 'ebpf_uid_map',
+      history_source: period === 'boot' ? 'netstats_ebpf_hybrid' : 'netstats_full',
+      rate_warming_up: false,
+      bg_split_available: true,
+      lease_ttl_ms: 8000,
+      summary: {
+        total_rx_bps: sumRxBps,
+        total_tx_bps: sumTxBps,
+        total_bps: sumRxBps + sumTxBps,
+        total_bytes: sumTotB,
+        bg_total_bytes: sumBgB,
+        fg_total_bytes: sumFgB,
+        bg_ratio_pct: overallBgPct,
+        app_count: rows.length,
+        active_conn_apps: activeConnApps
+      },
+      apps: rows
+    };
+  }
+
+  function v6LocalAppsPowerPayload(q) {
+    q = q || {};
+    var sortRaw = String(q.sort || 'bg_mah').trim().toLowerCase();
+    var sortBy = sortRaw;
+    if (sortRaw === 'wakelock_bg_ms') sortBy = 'wakelock_ms';
+    else if (sortRaw === 'mobile_radio_active_ms') sortBy = 'radio_ms';
+    else if (sortRaw === 'wakeup_alarms_count') sortBy = 'alarms';
+    if (['bg_mah', 'screen_off_mah', 'total_mah', 'wakelock_ms', 'radio_ms', 'cpu_bg_ms', 'alarms'].indexOf(sortBy) < 0) sortBy = 'bg_mah';
+    var includeSystem = bool(q.include_system);
+
+    var rows = [];
+    V6_HOST_APPS_CATALOG.forEach(function (a) {
+      if (!includeSystem && a.is_system) return;
+      var pw = a.power;
+      var fwRule = V6_SELF_FW.uid_rules[String(a.uid)];
+      rows.push({
+        uid: a.uid,
+        package: a.pkg,
+        pkg: a.pkg,
+        app_name: a.app_name,
+        name: a.app_name,
+        is_system: a.is_system,
+        firewall_mode: fwRule ? fwRule.mode : 'allow',
+        total_mah: pw.total_mah,
+        fg_mah: pw.fg_mah,
+        bg_mah: pw.bg_mah,
+        fgs_mah: pw.fgs_mah,
+        cached_mah: pw.cached_mah,
+        screen_off_mah: pw.screen_off_mah,
+        bg_mah_available: true,
+        bg_components_mah: {
+          cpu: round(pw.bg_mah * 38) / 100,
+          mobile_radio: round(pw.bg_mah * 44) / 100,
+          wifi: round(pw.bg_mah * 18) / 100
+        },
+        wakelock_partial_ms: pw.wl_ms,
+        wakelock_bg_ms: pw.wl_bg_ms,
+        wakelock_count: pw.wl_cnt,
+        top_wakelocks: clone(pw.top_wl),
+        mobile_radio_active_ms: pw.radio_ms,
+        mobile_radio_wakeup_count: pw.radio_cnt,
+        wifi_running_ms: pw.wifi_ms,
+        wifi_bg_scan_count: pw.wifi_scan,
+        cpu_total_ms: pw.cpu_tot_ms,
+        cpu_fg_ms: pw.cpu_fg_ms,
+        cpu_bg_ms: pw.cpu_bg_ms,
+        wakeup_alarms_count: pw.alarms,
+        top_wakeup_alarms: clone(pw.top_alarms),
+        bg_jobs_ms: pw.jobs_ms,
+        bg_jobs_count: pw.jobs_cnt
+      });
+    });
+
+    rows.sort(function (a, b) {
+      if (sortBy === 'screen_off_mah') return (b.screen_off_mah - a.screen_off_mah) || (b.total_mah - a.total_mah);
+      if (sortBy === 'total_mah') return (b.total_mah - a.total_mah) || (b.bg_mah - a.bg_mah);
+      if (sortBy === 'wakelock_ms') return (b.wakelock_bg_ms - a.wakelock_bg_ms) || (b.wakelock_partial_ms - a.wakelock_partial_ms);
+      if (sortBy === 'radio_ms') return (b.mobile_radio_active_ms - a.mobile_radio_active_ms) || (b.bg_mah - a.bg_mah);
+      if (sortBy === 'cpu_bg_ms') return (b.cpu_bg_ms - a.cpu_bg_ms) || (b.cpu_total_ms - a.cpu_total_ms);
+      if (sortBy === 'alarms') return (b.wakeup_alarms_count - a.wakeup_alarms_count) || (b.bg_mah - a.bg_mah);
+      return (b.bg_mah - a.bg_mah) || (b.total_mah - a.total_mah);
+    });
+
+    return {
+      ok: true,
+      available: true,
+      generated_at: now() - 8,
+      cached: false,
+      refresh_throttled: false,
+      sort: sortBy,
+      include_system: includeSystem,
+      power_model_format: 'a14_multi_state',
+      bg_mah_available: true,
+      screen_off_mah_available: true,
+      app_count: rows.length,
+      device_summary: {
+        battery_capacity_mah: 5000,
+        computed_drain_mah: 1184.5,
+        actual_discharge_mah: 1240.0,
+        total_discharge_mah: 1240.0,
+        screen_off_discharge_mah: 186.4,
+        screen_on_discharge_mah: 1053.6,
+        time_on_battery_ms: 34200000,
+        screen_off_on_battery_ms: 21600000,
+        deep_doze_pct: 84.2
+      },
+      apps: rows
+    };
+  }
+
+  function v6LocalAppsPrivacyAuditPayload(q) {
+    q = q || {};
+    var includeSystem = bool(q.include_system);
+    var seedFindings = [
+      {
+        risk_type: 'http_cleartext',
+        severity: 'high',
+        uid: 10294,
+        package: 'com.weather.fastcalendar',
+        app_name: '极速天气日历',
+        is_system: false,
+        app_state: 'background',
+        proto: 'tcp',
+        remote_ip: '112.80.144.28',
+        remote_port: 80,
+        domain: 'api-plain.fastcalendar-sdk.cn',
+        owner_org: '国内第三方云节点',
+        up_bytes: 48 * KB,
+        down_bytes: 164 * KB,
+        up_bps: 1420,
+        detail: '明文 HTTP 未加密传输至 api-plain.fastcalendar-sdk.cn (112.80.144.28):80'
+      },
+      {
+        risk_type: 'dns_direct',
+        severity: 'high',
+        uid: 10294,
+        package: 'com.weather.fastcalendar',
+        app_name: '极速天气日历',
+        is_system: false,
+        app_state: 'background',
+        proto: 'udp',
+        remote_ip: '114.114.114.114',
+        remote_port: 53,
+        domain: '',
+        owner_org: '114DNS',
+        up_bytes: 14 * KB,
+        down_bytes: 29 * KB,
+        up_bps: 320,
+        detail: '绕过系统 netd DNS 代理直连外部明文 DNS 114.114.114.114:53'
+      },
+      {
+        risk_type: 'http_cleartext',
+        severity: 'high',
+        uid: 10318,
+        package: 'com.kuaishou.nebula',
+        app_name: '快手极速版',
+        is_system: false,
+        app_state: 'background',
+        proto: 'tcp',
+        remote_ip: '116.196.72.51',
+        remote_port: 80,
+        domain: 'log-sdk.ad-nebula-demo.cn',
+        owner_org: '广告归因云服务',
+        up_bytes: 92 * KB,
+        down_bytes: 28 * KB,
+        up_bps: 1860,
+        detail: '明文 HTTP 未加密传输至 log-sdk.ad-nebula-demo.cn (116.196.72.51):80'
+      },
+      {
+        risk_type: 'tracker_sdk',
+        severity: 'medium',
+        uid: 10318,
+        package: 'com.kuaishou.nebula',
+        app_name: '快手极速版',
+        is_system: false,
+        app_state: 'background',
+        proto: 'tcp',
+        remote_ip: '116.196.72.51',
+        remote_port: 443,
+        domain: 'sdk.mob-analytics-tracker.cn',
+        owner_org: '移动广告监测 SDK',
+        sdk_name: 'MobAnalytics 行为追踪 SDK',
+        up_bytes: 210 * KB,
+        down_bytes: 64 * KB,
+        up_bps: 940,
+        detail: '连接第三方追踪/广告 SDK [MobAnalytics 行为追踪 SDK] (sdk.mob-analytics-tracker.cn)'
+      },
+      {
+        risk_type: 'bg_silent_uplink',
+        severity: 'medium',
+        uid: 10356,
+        package: 'com.cloudalbum.sync',
+        app_name: '相册云盘备份',
+        is_system: false,
+        app_state: 'background',
+        proto: 'tcp',
+        remote_ip: '123.56.91.40',
+        remote_port: 443,
+        domain: 'up-z2.qiniup.com',
+        owner_org: '对象存储云节点',
+        up_bytes: 184 * MB,
+        down_bytes: 3 * MB,
+        up_bps: 386000,
+        detail: '应用处于后台静默状态持续向 up-z2.qiniup.com:443 外发数据'
+      }
+    ];
+
+    var summary = {
+      cleartext_http_conns: 0,
+      direct_dns_conns: 0,
+      tracker_sdk_conns: 0,
+      bg_active_conns: 0,
+      risky_apps_count: 0
+    };
+    var riskySet = {};
+    var findings = [];
+    seedFindings.forEach(function (f) {
+      if (!includeSystem && f.is_system) return;
+      var rule = V6_SELF_FW.uid_rules[String(f.uid)];
+      var fwMode = rule ? rule.mode : 'allow';
+      if (fwMode === 'block_all') return;
+      if (fwMode === 'block_cleartext' && f.risk_type === 'http_cleartext') return;
+      if (f.domain && v6MockIsSelfDomainBlocked(f.domain)) return;
+      var copy = clone(f);
+      copy.firewall_mode = fwMode;
+      findings.push(copy);
+      riskySet[String(copy.uid)] = 1;
+      if (copy.risk_type === 'http_cleartext') summary.cleartext_http_conns++;
+      else if (copy.risk_type === 'dns_direct') summary.direct_dns_conns++;
+      else if (copy.risk_type === 'tracker_sdk') summary.tracker_sdk_conns++;
+      else if (copy.risk_type === 'bg_silent_uplink') summary.bg_active_conns++;
+    });
+    summary.risky_apps_count = Object.keys(riskySet).length;
+    return {
+      ok: true,
+      available: true,
+      generated_at: now(),
+      self_capture_enabled: SELF_ON.toggle,
+      self_capture_mode: STUDIO_MODE || 'smart_screen',
+      summary: summary,
+      findings: findings
+    };
+  }
+
+  function v6HostGuardianSummary() {
+    var tr = v6LocalAppsTrafficPayload({ period: 'boot', net: 'all', include_system: false });
+    var pa = v6LocalAppsPrivacyAuditPayload({ include_system: false });
+    return {
+      lease_active: true,
+      rate_warming_up: false,
+      tracked_apps: tr.apps.length,
+      total_rx_bps: tr.summary.total_rx_bps,
+      total_tx_bps: tr.summary.total_tx_bps,
+      power_cached: true,
+      privacy_cached: true,
+      risky_apps_count: pa.summary.risky_apps_count
+    };
+  }
+
   var V6_LG_STATE = {
     notify_enabled: true,
     lockscreen_mask: true,
@@ -1765,11 +2445,36 @@
       { id: 'ig_seed_1', scope: 'host_type', dst_host: 'weather-sdk.demo-cdn.cn', leak_type: 'GPS', mac: '', note: '天气组件定位更新', created_at: T - 600 }
     ],
     undo_stack: [
-      { id: 'ub_seed_1', dst_host: 'adtrack-legacy.example.cn', kind: 'domain', also_ip: '106.11.43.88', macs: ['6a:0e:55:b1:9c:42'], created_at: T - 260 }
+      { id: 'ub_seed_1', dst_host: 'adtrack-legacy.example.cn', kind: 'domain', target_scope: 'hotspot', also_ip: '106.11.43.88', macs: ['6a:0e:55:b1:9c:42'], created_at: T - 260 }
     ],
     events: [
       {
+        id: 'lg_host_01',
+        origin: 'host',
+        ts: T - 12,
+        uid: 10294,
+        package: 'com.weather.fastcalendar',
+        app_name: '极速天气日历',
+        mac: '',
+        device_name: '本机 · 极速天气日历',
+        src_ip: '10.68.14.92',
+        src_port: 46812,
+        dst_ip: '112.80.144.28',
+        dst_port: 80,
+        proto: 'tcp',
+        leak_type: 'TOKEN',
+        raw_value: 'tk_live_98a1c7f204e6b319d502cc81',
+        dst_host: 'api-plain.fastcalendar-sdk.cn',
+        hit_count: 2,
+        method: 'POST',
+        path: '/v1/sync/profile',
+        user_agent: 'okhttp/4.11.0',
+        is_blocked: false,
+        raw_snippet: 'POST /v1/sync/profile HTTP/1.1\r\nHost: api-plain.fastcalendar-sdk.cn\r\nUser-Agent: okhttp/4.11.0\r\nX-Auth-Token: tk_live_98a1c7f204e6b319d502cc81\r\nContent-Type: application/json\r\n\r\n{"city":"310000","token":"tk_live_98a1c7f204e6b319d502cc81"}'
+      },
+      {
         id: 'lg_v6_01',
+        origin: 'hotspot',
         ts: T - 18,
         mac: '0a:7f:3c:41:9e:21',
         device_name: '小米 14',
@@ -1789,7 +2494,32 @@
         raw_snippet: 'POST /v2/collect?mobile=13800138000&channel=mi HTTP/1.1\r\nHost: sdk-report.example-ad.cn\r\nUser-Agent: Dalvik/2.1.0 (Linux; U; Android 15; Xiaomi 14)\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nuid=demo_9021&phone=13800138000&net=wifi'
       },
       {
+        id: 'lg_host_02',
+        origin: 'host',
+        ts: T - 35,
+        uid: 10318,
+        package: 'com.kuaishou.nebula',
+        app_name: '快手极速版',
+        mac: '',
+        device_name: '本机 · 快手极速版',
+        src_ip: '10.68.14.92',
+        src_port: 49104,
+        dst_ip: '116.196.72.51',
+        dst_port: 80,
+        proto: 'tcp',
+        leak_type: 'DEVICE_ID',
+        raw_value: 'android_id_77c3e9104b28f605',
+        dst_host: 'log-sdk.ad-nebula-demo.cn',
+        hit_count: 4,
+        method: 'GET',
+        path: '/ad/report?aid=android_id_77c3e9104b28f605&net=5g',
+        user_agent: 'Dalvik/2.1.0 (Linux; Android 15)',
+        is_blocked: false,
+        raw_snippet: 'GET /ad/report?aid=android_id_77c3e9104b28f605&net=5g HTTP/1.1\r\nHost: log-sdk.ad-nebula-demo.cn\r\nUser-Agent: Dalvik/2.1.0 (Linux; Android 15)'
+      },
+      {
         id: 'lg_v6_02',
+        origin: 'hotspot',
         ts: T - 47,
         mac: '3a:91:d4:6b:02:5f',
         device_name: 'MacBook Pro',
@@ -1809,7 +2539,32 @@
         raw_snippet: 'GET /v1/workspace/ping HTTP/1.1\r\nHost: legacy-api.devtool-sync.net\r\nUser-Agent: curl/8.7.1\r\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.demo_v6_token\r\nAccept: */*'
       },
       {
+        id: 'lg_host_03',
+        origin: 'host',
+        ts: T - 89,
+        uid: 10356,
+        package: 'com.cloudalbum.sync',
+        app_name: '相册云盘备份',
+        mac: '',
+        device_name: '本机 · 相册云盘备份',
+        src_ip: '10.68.14.92',
+        src_port: 43922,
+        dst_ip: '123.56.91.40',
+        dst_port: 80,
+        proto: 'tcp',
+        leak_type: 'ID_CARD',
+        raw_value: '11010119900307451X',
+        dst_host: 'ocr-legacy.album-verify.cn',
+        hit_count: 1,
+        method: 'POST',
+        path: '/ocr/cert_check',
+        user_agent: 'AlbumSync/4.2.0',
+        is_blocked: false,
+        raw_snippet: 'POST /ocr/cert_check HTTP/1.1\r\nHost: ocr-legacy.album-verify.cn\r\nUser-Agent: AlbumSync/4.2.0\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nid_no=11010119900307451X&scene=realname_backup'
+      },
+      {
         id: 'lg_v6_03',
+        origin: 'hotspot',
         ts: T - 112,
         mac: 'd2:6e:4a:8c:15:f3',
         device_name: '192.168.43.96',
@@ -1831,6 +2586,7 @@
       },
       {
         id: 'lg_v6_04',
+        origin: 'hotspot',
         ts: T - 265,
         mac: '6a:0e:55:b1:9c:42',
         device_name: '客厅电视',
@@ -1851,6 +2607,7 @@
       },
       {
         id: 'lg_v6_05',
+        origin: 'hotspot',
         ts: T - 490,
         mac: '7e:c4:19:20:5a:8b',
         device_name: '小爱音箱',
@@ -1887,27 +2644,52 @@
     });
   }
 
-  function v6LeakGuardPayload() {
-    var totalHits = 0, devMap = {};
-    var visibleEvents = V6_LG_STATE.events.filter(function (ev) { return !v6MockEventWhitelisted(ev); });
-    visibleEvents.forEach(function (ev) {
-      totalHits += (ev.hit_count || 1);
-      if (ev.mac || ev.src_ip) devMap[ev.mac || ev.src_ip] = 1;
+  function v6LeakGuardPayload(q) {
+    var scope = String((q && q.scope) || 'all').trim().toLowerCase();
+    if (scope !== 'hotspot' && scope !== 'host') scope = 'all';
+    var totalHits = 0, hsHits = 0, hostHits = 0, devMap = {}, appMap = {};
+    var allVisible = V6_LG_STATE.events.filter(function (ev) { return !v6MockEventWhitelisted(ev); });
+    allVisible.forEach(function (ev) {
+      var hits = ev.hit_count || 1;
+      var org = ev.origin === 'host' ? 'host' : 'hotspot';
+      totalHits += hits;
+      if (org === 'host') {
+        hostHits += hits;
+        if (ev.uid || ev.package) appMap[String(ev.uid || ev.package)] = 1;
+      } else {
+        hsHits += hits;
+        if (ev.mac || ev.src_ip) devMap[ev.mac || ev.src_ip] = 1;
+      }
       if (!ev.infra_guard) {
         var ig = v6MockInfraGuard(ev.dst_host);
         if (ig) ev.infra_guard = ig;
       }
-      ev.is_blocked = !!V6_LG_STATE.blocked_set[String(ev.dst_host || '').toLowerCase()] || !!V6_LG_STATE.blocked_set[String(ev.dst_ip || '').toLowerCase()];
+      var dlow = String(ev.dst_host || '').toLowerCase();
+      var iplow = String(ev.dst_ip || '').toLowerCase();
+      var uidRule = ev.uid ? V6_SELF_FW.uid_rules[String(ev.uid)] : null;
+      ev.is_blocked = org === 'host'
+        ? (v6MockIsSelfDomainBlocked(dlow) || !!(uidRule && (uidRule.mode === 'block_all' || uidRule.mode === 'block_cleartext')))
+        : (!!V6_LG_STATE.blocked_set[dlow] || !!V6_LG_STATE.blocked_set[iplow]);
     });
-    var blkCnt = Object.keys(V6_LG_STATE.blocked_set).filter(function (k) { return !/^\d+\.\d+\.\d+\.\d+$/.test(k); }).length;
-    var affectedCnt = Object.keys(devMap).length;
+    var filteredEvents = scope === 'all' ? allVisible : allVisible.filter(function (ev) {
+      return (ev.origin === 'host' ? 'host' : 'hotspot') === scope;
+    });
+    var blkCnt = Object.keys(V6_LG_STATE.blocked_set).filter(function (k) { return !/^\d+\.\d+\.\d+\.\d+$/.test(k) && k.indexOf(':') < 0; }).length;
+    var selfBlkCnt = Object.keys(V6_SELF_FW.blocked_domains).length;
+    var affectedDevs = Object.keys(devMap).length;
+    var affectedApps = Object.keys(appMap).length;
     var igCnt = V6_LG_STATE.ignore_rules.length;
     var undoCnt = V6_LG_STATE.undo_stack.length;
     return {
       ok: true,
+      scope: scope,
       total_hits: totalHits,
-      affected_devices: affectedCnt,
+      hotspot_hits: hsHits,
+      host_hits: hostHits,
+      affected_devices: affectedDevs,
+      affected_apps: affectedApps,
       blocked_domains: blkCnt,
+      self_blocked_domains: selfBlkCnt,
       ignore_rules_cnt: igCnt,
       config: {
         notify_enabled: V6_LG_STATE.notify_enabled,
@@ -1917,15 +2699,19 @@
       },
       stats: {
         total_hits: totalHits,
-        affected_devices: affectedCnt,
+        hotspot_hits: hsHits,
+        host_hits: hostHits,
+        affected_devices: affectedDevs,
+        affected_apps: affectedApps,
         blocked_domains: blkCnt,
+        self_blocked_domains: selfBlkCnt,
         ignore_rules_cnt: igCnt,
         undo_count: undoCnt
       },
       ignore_rules: V6_LG_STATE.ignore_rules.slice(),
       undo_stack: V6_LG_STATE.undo_stack.slice(),
       undo_count: undoCnt,
-      events: visibleEvents
+      events: filteredEvents
     };
   }
 
@@ -1941,7 +2727,7 @@
   function v6ExpressPayload() {
     var escorted = [];
     var reasons = {};
-    if (V6_EXP_STATE.enabled) {
+    if (V6_EXP_STATE.enabled && MOCK_HS_ACTIVE) {
       V6_EXP_STATE.forced_macs.forEach(function (m) {
         if (escorted.indexOf(m) < 0) escorted.push(m);
         reasons[m] = '手动常驻锁定零排队护航 (PRIO 0)';
@@ -1959,7 +2745,7 @@
         }
       }
     }
-    var active = V6_EXP_STATE.enabled && escorted.length > 0;
+    var active = V6_EXP_STATE.enabled && MOCK_HS_ACTIVE && escorted.length > 0;
     return {
       ok: true,
       enabled: V6_EXP_STATE.enabled,
@@ -2020,7 +2806,7 @@
 
   function v6LeashPayload() {
     var graceBytes = V6_UL_STATE.grace_mb * MB;
-    var computed = V6_UL_STATE.sessions.map(function (s) {
+    var computed = !MOCK_HS_ACTIVE ? [] : V6_UL_STATE.sessions.map(function (s) {
       var copy = clone(s);
       copy.grace_remaining_bytes = Math.max(0, graceBytes - copy.down_bytes);
       if (copy.paused) {
@@ -2056,16 +2842,22 @@
     stage1_temp_c: 42,
     stage2_temp_c: 45,
     low_bat_pct: 20,
-    temp_c: 39.6,
-    capacity_pct: 78,
+    shell_temp_c: 31.2,
+    battery_temp_c: 30.8,
+    shell_temp_available: true,
+    battery_spoof_suspected: false,
+    capacity_pct: 82,
     is_charging: false,
     bat_status: 'Discharging'
   };
 
   function v6ThermoPayload() {
     var exActive = v6ExpressPayload().active;
-    var tc = round((V6_TH_STATE.temp_c + Math.sin(Date.now() / 45000) * 0.3) * 10) / 10;
-    var rawStg = tc >= V6_TH_STATE.stage2_temp_c ? 2 : (tc >= V6_TH_STATE.stage1_temp_c ? 1 : 0);
+    var wave = Math.sin(Date.now() / 45000) * 0.2;
+    var shellTc = round((V6_TH_STATE.shell_temp_c + wave) * 10) / 10;
+    var batTc = round((V6_TH_STATE.battery_temp_c + wave * 0.8) * 10) / 10;
+    var effTc = V6_TH_STATE.shell_temp_available ? shellTc : batTc;
+    var rawStg = effTc >= V6_TH_STATE.stage2_temp_c ? 2 : (effTc >= V6_TH_STATE.stage1_temp_c ? 1 : 0);
     var exempt = V6_TH_STATE.is_charging || exActive;
     var effStg = !V6_TH_STATE.enabled ? 0 : (rawStg === 2 && exempt ? 1 : rawStg);
     return {
@@ -2075,9 +2867,18 @@
       stage1_temp_c: V6_TH_STATE.stage1_temp_c,
       stage2_temp_c: V6_TH_STATE.stage2_temp_c,
       low_bat_pct: V6_TH_STATE.low_bat_pct,
+      temp_c: effTc,
+      battery_temp_c: batTc,
+      shell_temp_c: shellTc,
+      shell_temp_available: V6_TH_STATE.shell_temp_available,
+      battery_spoof_suspected: V6_TH_STATE.battery_spoof_suspected,
       battery: {
         available: true,
-        temp_c: tc,
+        temp_c: batTc,
+        battery_temp_c: batTc,
+        shell_temp_c: shellTc,
+        shell_temp_available: V6_TH_STATE.shell_temp_available,
+        battery_spoof_suspected: V6_TH_STATE.battery_spoof_suspected,
         capacity_pct: V6_TH_STATE.capacity_pct,
         status: V6_TH_STATE.bat_status,
         is_charging: V6_TH_STATE.is_charging
@@ -2100,7 +2901,8 @@
     ]
   };
 
-  function v6BuildScalpelFlows(filterMac, filterIp) {
+  function v6BuildScalpelFlows(q) {
+    q = q || {};
     stepRates();
     var nowSec = now();
     V6_SC_STATE.frozen_rules = V6_SC_STATE.frozen_rules.filter(function (r) { return r.expires_at > nowSec; });
@@ -2109,29 +2911,49 @@
       frozenMap[r.proto + '|' + r.src_ip + '|' + r.dst_ip + '|' + r.dport] = r.expires_at;
     });
 
-    var seedFlows = [
-      { flow_key: 'sc_01', mac: '0a:7f:3c:41:9e:21', device_name: '小米 14', proto: 'udp', src_ip: '192.168.43.23', sport: 55120, dst_ip: '183.3.226.35', dport: 10012, domain: 'pvp.qq.com', app_name: '王者荣耀', state: 'ASSURED', down_bps: 148000, up_bps: 72000, down_bytes: 18 * MB, up_bytes: 7 * MB },
-      { flow_key: 'sc_02', mac: '0a:7f:3c:41:9e:21', device_name: '小米 14', proto: 'tcp', src_ip: '192.168.43.23', sport: 51428, dst_ip: '114.118.24.66', dport: 80, domain: 'sdk-report.example-ad.cn', app_name: '广告遥测 SDK', state: 'ESTABLISHED', down_bps: 4200, up_bps: 1800, down_bytes: 64 * KB, up_bytes: 28 * KB },
-      { flow_key: 'sc_03', mac: '3a:91:d4:6b:02:5f', device_name: 'MacBook Pro', proto: 'udp', src_ip: '192.168.43.31', sport: 60412, dst_ip: '119.147.82.44', dport: 3480, domain: 'avc.meeting.qq.com', app_name: '腾讯会议', state: 'ASSURED', down_bps: 680000, up_bps: 520000, down_bytes: 192 * MB, up_bytes: 148 * MB },
-      { flow_key: 'sc_04', mac: '3a:91:d4:6b:02:5f', device_name: 'MacBook Pro', proto: 'tcp', src_ip: '192.168.43.31', sport: 58310, dst_ip: '120.55.89.14', dport: 80, domain: 'legacy-api.devtool-sync.net', app_name: '命令行工具', state: 'ESTABLISHED', down_bps: 2400, up_bps: 1200, down_bytes: 42 * KB, up_bytes: 19 * KB },
-      { flow_key: 'sc_05', mac: '1e:52:a8:0c:77:3d', device_name: 'iPad Air', proto: 'quic', src_ip: '192.168.43.45', sport: 52890, dst_ip: '111.225.148.29', dport: 443, domain: 'v26-dy.douyinvod.com', app_name: '抖音', state: 'ASSURED', down_bps: 1940000, up_bps: 68000, down_bytes: 412 * MB, up_bytes: 14 * MB },
-      { flow_key: 'sc_06', mac: '5e:20:b7:3a:c4:18', device_name: '任天堂 Switch', proto: 'tcp', src_ip: '192.168.43.52', sport: 49218, dst_ip: '104.111.42.88', dport: 443, domain: 'atum.hac.lp1.d4c.nintendo.net', app_name: '任天堂 eShop', state: 'ESTABLISHED', down_bps: 185000, up_bps: 9200, down_bytes: 648 * MB, up_bytes: 9 * MB },
-      { flow_key: 'sc_07', mac: '6a:0e:55:b1:9c:42', device_name: '客厅电视', proto: 'quic', src_ip: '192.168.43.67', sport: 43106, dst_ip: '36.110.188.72', dport: 443, domain: 'data.video.iqiyi.com', app_name: '爱奇艺', state: 'ASSURED', down_bps: 2310000, up_bps: 42000, down_bytes: 1120 * MB, up_bytes: 21 * MB },
-      { flow_key: 'sc_08', mac: '6a:0e:55:b1:9c:42', device_name: '客厅电视', proto: 'tcp', src_ip: '192.168.43.67', sport: 39820, dst_ip: '106.11.43.88', dport: 80, domain: 'adtrack-legacy.example.cn', app_name: '电视开屏 SDK', state: 'TIME_WAIT', down_bps: 0, up_bps: 0, down_bytes: 128 * KB, up_bytes: 24 * KB },
-      { flow_key: 'sc_09', mac: 'a6:5b:0f:93:7e:24', device_name: 'ThinkPad', proto: 'udp', src_ip: '192.168.43.84', sport: 51820, dst_ip: '203.0.113.18', dport: 51820, domain: 'wg-gateway.corp-demo.net', app_name: 'VPN/代理隧道', state: 'ASSURED', down_bps: 540000, up_bps: 145000, down_bytes: 186 * MB, up_bytes: 52 * MB },
-      { flow_key: 'sc_10', mac: 'd2:6e:4a:8c:15:f3', device_name: '192.168.43.96', proto: 'tcp', src_ip: '192.168.43.96', sport: 44912, dst_ip: '180.97.33.108', dport: 80, domain: 'weather-loc.iot-probe.cn', app_name: '天气定位组件', state: 'ESTABLISHED', down_bps: 1600, up_bps: 800, down_bytes: 18 * KB, up_bytes: 9 * KB }
+    var hsFlows = !MOCK_HS_ACTIVE ? [] : [
+      { flow_key: 'sc_01', scope: 'hotspot', mac: '0a:7f:3c:41:9e:21', device_name: '小米 14', proto: 'udp', src_ip: '192.168.43.23', sport: 55120, dst_ip: '183.3.226.35', dport: 10012, domain: 'pvp.qq.com', app_name: '王者荣耀', state: 'ASSURED', down_bps: 148000, up_bps: 72000, down_bytes: 18 * MB, up_bytes: 7 * MB, cleartext_risk: false },
+      { flow_key: 'sc_02', scope: 'hotspot', mac: '0a:7f:3c:41:9e:21', device_name: '小米 14', proto: 'tcp', src_ip: '192.168.43.23', sport: 51428, dst_ip: '114.118.24.66', dport: 80, domain: 'sdk-report.example-ad.cn', app_name: '广告遥测 SDK', state: 'ESTABLISHED', down_bps: 4200, up_bps: 1800, down_bytes: 64 * KB, up_bytes: 28 * KB, cleartext_risk: true },
+      { flow_key: 'sc_03', scope: 'hotspot', mac: '3a:91:d4:6b:02:5f', device_name: 'MacBook Pro', proto: 'udp', src_ip: '192.168.43.31', sport: 60412, dst_ip: '119.147.82.44', dport: 3480, domain: 'avc.meeting.qq.com', app_name: '腾讯会议', state: 'ASSURED', down_bps: 680000, up_bps: 520000, down_bytes: 192 * MB, up_bytes: 148 * MB, cleartext_risk: false },
+      { flow_key: 'sc_04', scope: 'hotspot', mac: '3a:91:d4:6b:02:5f', device_name: 'MacBook Pro', proto: 'tcp', src_ip: '192.168.43.31', sport: 58310, dst_ip: '120.55.89.14', dport: 80, domain: 'legacy-api.devtool-sync.net', app_name: '命令行工具', state: 'ESTABLISHED', down_bps: 2400, up_bps: 1200, down_bytes: 42 * KB, up_bytes: 19 * KB, cleartext_risk: true },
+      { flow_key: 'sc_05', scope: 'hotspot', mac: '1e:52:a8:0c:77:3d', device_name: 'iPad Air', proto: 'quic', src_ip: '192.168.43.45', sport: 52890, dst_ip: '111.225.148.29', dport: 443, domain: 'v26-dy.douyinvod.com', app_name: '抖音', state: 'ASSURED', down_bps: 1940000, up_bps: 68000, down_bytes: 412 * MB, up_bytes: 14 * MB, cleartext_risk: false },
+      { flow_key: 'sc_06', scope: 'hotspot', mac: '5e:20:b7:3a:c4:18', device_name: '任天堂 Switch', proto: 'tcp', src_ip: '192.168.43.52', sport: 49218, dst_ip: '104.111.42.88', dport: 443, domain: 'atum.hac.lp1.d4c.nintendo.net', app_name: '任天堂 eShop', state: 'ESTABLISHED', down_bps: 185000, up_bps: 9200, down_bytes: 648 * MB, up_bytes: 9 * MB, cleartext_risk: false },
+      { flow_key: 'sc_07', scope: 'hotspot', mac: '6a:0e:55:b1:9c:42', device_name: '客厅电视', proto: 'quic', src_ip: '192.168.43.67', sport: 43106, dst_ip: '36.110.188.72', dport: 443, domain: 'data.video.iqiyi.com', app_name: '爱奇艺', state: 'ASSURED', down_bps: 2310000, up_bps: 42000, down_bytes: 1120 * MB, up_bytes: 21 * MB, cleartext_risk: false },
+      { flow_key: 'sc_08', scope: 'hotspot', mac: '6a:0e:55:b1:9c:42', device_name: '客厅电视', proto: 'tcp', src_ip: '192.168.43.67', sport: 39820, dst_ip: '106.11.43.88', dport: 80, domain: 'adtrack-legacy.example.cn', app_name: '电视开屏 SDK', state: 'TIME_WAIT', down_bps: 0, up_bps: 0, down_bytes: 128 * KB, up_bytes: 24 * KB, cleartext_risk: true },
+      { flow_key: 'sc_09', scope: 'hotspot', mac: 'a6:5b:0f:93:7e:24', device_name: 'ThinkPad', proto: 'udp', src_ip: '192.168.43.84', sport: 51820, dst_ip: '203.0.113.18', dport: 51820, domain: 'wg-gateway.corp-demo.net', app_name: 'VPN/代理隧道', state: 'ASSURED', down_bps: 540000, up_bps: 145000, down_bytes: 186 * MB, up_bytes: 52 * MB, cleartext_risk: false },
+      { flow_key: 'sc_10', scope: 'hotspot', mac: 'd2:6e:4a:8c:15:f3', device_name: '192.168.43.96', proto: 'tcp', src_ip: '192.168.43.96', sport: 44912, dst_ip: '180.97.33.108', dport: 80, domain: 'weather-loc.iot-probe.cn', app_name: '天气定位组件', state: 'ESTABLISHED', down_bps: 1600, up_bps: 800, down_bytes: 18 * KB, up_bytes: 9 * KB, cleartext_risk: true }
     ];
 
-    var fMac = String(filterMac || '').toLowerCase();
-    var fIp = String(filterIp || '').trim();
+    var hostFlows = [
+      { flow_key: 'sc_h01', scope: 'host', uid: 10234, package: 'com.ss.android.ugc.aweme', pkg: 'com.ss.android.ugc.aweme', host_app_name: '抖音', mac: '', device_name: '本机 · 抖音', proto: 'quic', src_ip: '10.68.14.92', sport: 48210, dst_ip: '111.225.148.62', dport: 443, domain: 'v26-dy.douyinvod.com', app_name: '抖音', state: 'ASSURED', down_bps: 1420000, up_bps: 58000, down_bytes: 680 * MB, up_bytes: 28 * MB, cleartext_risk: false },
+      { flow_key: 'sc_h02', scope: 'host', uid: 10198, package: 'com.tencent.mm', pkg: 'com.tencent.mm', host_app_name: '微信', mac: '', device_name: '本机 · 微信', proto: 'tcp', src_ip: '10.68.14.92', sport: 41908, dst_ip: '183.47.102.19', dport: 443, domain: 'szextshort.weixin.qq.com', app_name: '微信', state: 'ESTABLISHED', down_bps: 84000, up_bps: 32000, down_bytes: 210 * MB, up_bytes: 64 * MB, cleartext_risk: false },
+      { flow_key: 'sc_h03', scope: 'host', uid: 10294, package: 'com.weather.fastcalendar', pkg: 'com.weather.fastcalendar', host_app_name: '极速天气日历', mac: '', device_name: '本机 · 极速天气日历', proto: 'tcp', src_ip: '10.68.14.92', sport: 46812, dst_ip: '112.80.144.28', dport: 80, domain: 'api-plain.fastcalendar-sdk.cn', app_name: '极速天气日历', state: 'ESTABLISHED', down_bps: 12400, up_bps: 6200, down_bytes: 18 * MB, up_bytes: 4 * MB, cleartext_risk: true },
+      { flow_key: 'sc_h04', scope: 'host', uid: 10294, package: 'com.weather.fastcalendar', pkg: 'com.weather.fastcalendar', host_app_name: '极速天气日历', mac: '', device_name: '本机 · 极速天气日历', proto: 'udp', src_ip: '10.68.14.92', sport: 53914, dst_ip: '114.114.114.114', dport: 53, domain: '', app_name: '极速天气日历 (直连DNS)', state: 'UNREPLIED', down_bps: 900, up_bps: 420, down_bytes: 120 * KB, up_bytes: 64 * KB, cleartext_risk: true },
+      { flow_key: 'sc_h05', scope: 'host', uid: 10318, package: 'com.kuaishou.nebula', pkg: 'com.kuaishou.nebula', host_app_name: '快手极速版', mac: '', device_name: '本机 · 快手极速版', proto: 'tcp', src_ip: '10.68.14.92', sport: 49104, dst_ip: '116.196.72.51', dport: 80, domain: 'log-sdk.ad-nebula-demo.cn', app_name: '快手极速版', state: 'ESTABLISHED', down_bps: 28000, up_bps: 9600, down_bytes: 46 * MB, up_bytes: 11 * MB, cleartext_risk: true },
+      { flow_key: 'sc_h06', scope: 'host', uid: 10356, package: 'com.cloudalbum.sync', pkg: 'com.cloudalbum.sync', host_app_name: '相册云盘备份', mac: '', device_name: '本机 · 相册云盘备份', proto: 'tcp', src_ip: '10.68.14.92', sport: 43980, dst_ip: '123.56.91.40', dport: 443, domain: 'up-z2.qiniup.com', app_name: '相册云盘备份', state: 'ESTABLISHED', down_bps: 12000, up_bps: 392000, down_bytes: 24 * MB, up_bytes: 840 * MB, cleartext_risk: false }
+    ];
+
+    var fScope = String(q.scope || 'all').trim().toLowerCase();
+    if (fScope !== 'hotspot' && fScope !== 'host') fScope = 'all';
+    var fMac = String(q.mac || '').toLowerCase();
+    var fIp = String(q.ip || '').trim();
+    var fUid = (q.uid != null && q.uid !== '') ? round(+q.uid) : -1;
+
+    var seedFlows = fScope === 'hotspot' ? hsFlows : (fScope === 'host' ? hostFlows : hsFlows.concat(hostFlows));
     var out = [];
     seedFlows.forEach(function (f) {
       var pNorm = (f.proto === 'udp' || f.proto === 'quic') ? 'udp' : 'tcp';
       var k5 = pNorm + '|' + f.src_ip + ':' + f.sport + '|' + f.dst_ip + ':' + f.dport;
       if (V6_SC_STATE.killed_keys[k5]) return;
-      if (f.domain && V6_LG_STATE.blocked_set[String(f.domain).toLowerCase()]) return;
+      if (f.domain && (V6_LG_STATE.blocked_set[String(f.domain).toLowerCase()] || v6MockIsSelfDomainBlocked(f.domain))) return;
+      if (f.scope === 'host' && f.uid) {
+        var fwR = V6_SELF_FW.uid_rules[String(f.uid)];
+        if (fwR && fwR.mode === 'block_all') return;
+        if (fwR && fwR.mode === 'block_cleartext' && (f.dport === 80 || f.dport === 8080 || f.dport === 8000)) return;
+      }
       if (fMac && f.mac !== fMac) return;
       if (fIp && f.src_ip !== fIp) return;
+      if (fUid >= 0 && f.uid !== fUid) return;
       var k4 = pNorm + '|' + f.src_ip + '|' + f.dst_ip + '|' + f.dport;
       var copy = clone(f);
       if (frozenMap[k4]) {
@@ -2149,11 +2971,21 @@
   }
 
   function v6ScalpelPayload(q) {
-    var flows = v6BuildScalpelFlows(q && q.mac, q && q.ip);
+    q = q || {};
+    var flows = v6BuildScalpelFlows(q);
+    var isScoped = (q.scope && String(q.scope).toLowerCase() !== 'all') || q.mac || q.ip || (q.uid != null && q.uid !== '');
+    var countSrc = isScoped ? v6BuildScalpelFlows({ scope: 'all' }) : flows;
+    var hsCnt = 0, hostCnt = 0;
+    countSrc.forEach(function (f) { if (f.scope === 'host') hostCnt++; else hsCnt++; });
     return {
       ok: true,
       readable: true,
+      scope: String(q.scope || 'all').toLowerCase(),
       total: flows.length,
+      hotspot_flows: hsCnt,
+      host_flows: hostCnt,
+      hotspot_total: hsCnt,
+      host_total: hostCnt,
       cut_total: V6_SC_STATE.cut_total,
       active_rules: V6_SC_STATE.frozen_rules,
       flows: flows
@@ -2281,7 +3113,7 @@
         label: '发热温控巡航',
         down_mbps: 40,
         up_mbps: 15,
-        reason_zh: '电芯 ' + th.battery.temp_c.toFixed(1) + '°C 温控巡航保护（压速至 40 Mbps 降温）',
+        reason_zh: '机身 ' + th.temp_c.toFixed(1) + '°C 温控巡航保护（压速至 40 Mbps 降温）',
         active: true
       });
     }
@@ -2325,9 +3157,9 @@
   function v6MultiIfacePayload() {
     return {
       ok: true,
-      primary_downstream: IFACE,
-      shape_targets: [IFACE, 'ap_br_wlan2'],
-      dual_band_or_mlo: true,
+      primary_downstream: MOCK_HS_ACTIVE ? IFACE : '',
+      shape_targets: MOCK_HS_ACTIVE ? [IFACE, 'ap_br_wlan2'] : [],
+      dual_band_or_mlo: MOCK_HS_ACTIVE,
       usb_tether_active: false,
       lan_fastlane_class: '1:fffe',
       lan_fastlane_gbps: 2.5,
@@ -2357,6 +3189,29 @@
     var lv = GET['/api/live']({});
     var dv = GET['/api/devices']();
     var arb = v6ArbiterPayload();
+    var hgSum = v6HostGuardianSummary();
+    var sfSum = v6SelfFirewallSummary();
+    var lgPay = v6LeakGuardPayload({ scope: 'all' });
+    var exPay = v6ExpressPayload();
+    var ulPay = v6LeashPayload();
+    var thPay = v6ThermoPayload();
+    var scPay = v6ScalpelPayload({});
+    var v6Mod = {
+      leakguard: lgPay,
+      express: exPay,
+      update_leash: ulPay,
+      thermo: thPay,
+      scalpel: scPay,
+      self_firewall: sfSum
+    };
+    var packPay = {
+      blackbox: v6BlackboxPayload(),
+      multi_iface: v6MultiIfacePayload(),
+      native_subtrees: v6SubtreesPayload(),
+      host_guardian: hgSum,
+      self_firewall: sfSum,
+      arbiter: arb
+    };
     return {
       ok: true,
       version: VER,
@@ -2385,27 +3240,37 @@
       offload_status: GET['/api/offload_status'](),
       app_limits: GET['/api/app_limits'](),
       templates: GET['/api/templates'](),
-      leakguard: v6LeakGuardPayload(),
-      express: v6ExpressPayload(),
-      update_leash: v6LeashPayload(),
-      thermo: v6ThermoPayload(),
-      scalpel: v6ScalpelPayload({}),
+      leakguard: lgPay,
+      express: exPay,
+      update_leash: ulPay,
+      thermo: thPay,
+      scalpel: scPay,
+      host_guardian: hgSum,
+      self_firewall: sfSum,
       arbiter: arb,
+      v6: v6Mod,
       extensions: {
-        arbiter: arb
+        v6: v6Mod,
+        v6_pack: packPay,
+        arbiter: arb,
+        host_guardian: hgSum,
+        self_firewall: sfSum
       },
-      v6_pack: {
-        blackbox: v6BlackboxPayload(),
-        multi_iface: v6MultiIfacePayload(),
-        native_subtrees: v6SubtreesPayload(),
-        arbiter: arb
-      }
+      v6_pack: packPay
     };
   };
-  GET['/api/leakguard/events'] = function () { return v6LeakGuardPayload(); };
+  GET['/api/leakguard/events'] = function (q) { return v6LeakGuardPayload(q || {}); };
   GET['/api/leakguard/whitelist'] = function () {
     return { ok: true, ignore_rules: V6_LG_STATE.ignore_rules.slice(), ignore_rules_cnt: V6_LG_STATE.ignore_rules.length };
   };
+  GET['/api/local_apps/traffic'] = function (q) { return v6LocalAppsTrafficPayload(q || {}); };
+  GET['/api/v6/local_apps/traffic'] = GET['/api/local_apps/traffic'];
+  GET['/api/local_apps/power'] = function (q) { return v6LocalAppsPowerPayload(q || {}); };
+  GET['/api/v6/local_apps/power'] = GET['/api/local_apps/power'];
+  GET['/api/local_apps/privacy_audit'] = function (q) { return v6LocalAppsPrivacyAuditPayload(q || {}); };
+  GET['/api/v6/local_apps/privacy_audit'] = GET['/api/local_apps/privacy_audit'];
+  GET['/api/local_apps/firewall'] = function () { return v6SelfFirewallSnapshot(); };
+  GET['/api/v6/local_apps/firewall'] = GET['/api/local_apps/firewall'];
   GET['/api/v6/express'] = function () { return v6ExpressPayload(); };
   GET['/api/v6/update_leash'] = function () { return v6LeashPayload(); };
   GET['/api/v6/thermo'] = function () { return v6ThermoPayload(); };
@@ -2424,18 +3289,20 @@
     };
   };
   GET['/api/backup'] = function () {
+    var fwSnap = v6SelfFirewallSnapshot();
     return {
       schema_version: 'hnc.backup.v6',
       module_version: VER,
       module_version_code: VCODE,
       exported_at: now(),
-      file_count: 16,
+      file_count: 17,
       sha256: V6_VAULT_SHA,
       files: {
         'rules.json': rulesJson(),
         'vector_express.json': { enabled: V6_EXP_STATE.enabled, auto_detect: V6_EXP_STATE.auto_detect, forced_macs: V6_EXP_STATE.forced_macs },
         'update_leash.json': { enabled: V6_UL_STATE.enabled, grace_mb: V6_UL_STATE.grace_mb, leash_kbps: V6_UL_STATE.leash_kbps },
-        'thermo_cruise.json': { enabled: V6_TH_STATE.enabled, stage1_temp_c: V6_TH_STATE.stage1_temp_c, stage2_temp_c: V6_TH_STATE.stage2_temp_c }
+        'thermo_cruise.json': { enabled: V6_TH_STATE.enabled, stage1_temp_c: V6_TH_STATE.stage1_temp_c, stage2_temp_c: V6_TH_STATE.stage2_temp_c },
+        'self_firewall.json': { version: 1, updated_at: fwSnap.updated_at, uid_rules: fwSnap.uid_rules, blocked_domains: fwSnap.blocked_domains }
       }
     };
   };
@@ -2459,6 +3326,9 @@
     });
   }
 
+  POST['/api/local_apps/firewall'] = function (b) { return v6ApplySelfFirewallMutation(b || {}); };
+  POST['/api/v6/local_apps/firewall'] = POST['/api/local_apps/firewall'];
+
   POST['/api/leakguard/config'] = function (b) {
     v6AssertAllowedKeys(b, ['capacity', 'cooldown_sec', 'notify_enabled', 'lockscreen_mask']);
     if (b && typeof b.notify_enabled === 'boolean') V6_LG_STATE.notify_enabled = b.notify_enabled;
@@ -2480,7 +3350,7 @@
     return { ok: true };
   };
   POST['/api/leakguard/whitelist'] = function (b) {
-    v6AssertAllowedKeys(b, ['action', 'id', 'scope', 'dst_host', 'leak_type', 'mac', 'note']);
+    v6AssertAllowedKeys(b, ['action', 'id', 'scope', 'dst_host', 'leak_type', 'mac', 'note', 'origin', 'uid', 'package']);
     var act = String((b && b.action) || 'add').toLowerCase();
     if (act === 'clear') {
       var rmAll = V6_LG_STATE.ignore_rules.length;
@@ -2528,38 +3398,65 @@
     return { ok: true, action: 'add', rule: item, ignore_rules: V6_LG_STATE.ignore_rules.slice() };
   };
   POST['/api/leakguard/block-domain'] = function (b) {
-    v6AssertAllowedKeys(b, ['action', 'dst_host', 'mac', 'force', 'also_ip']);
+    v6AssertAllowedKeys(b, ['action', 'dst_host', 'mac', 'force', 'also_ip', 'target_scope', 'scope', 'origin', 'uid', 'package']);
+    var actRaw = String((b && b.action) || 'block').trim().toLowerCase();
+    if (actRaw !== 'block' && actRaw !== 'unblock') throw err('action must be block|unblock', 400);
+    var unb = actRaw === 'unblock';
     var host = String((b && b.dst_host) || '').trim().toLowerCase();
     if (!host) throw err('missing dst_host', 400);
     var isIp = /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.indexOf(':') >= 0;
     var kind = isIp ? 'ip' : 'domain';
     var alsoIp = String((b && b.also_ip) || '').trim().toLowerCase();
     if (alsoIp === host) alsoIp = '';
-    var unb = !!(b && b.action === 'unblock');
-    var targetMac = String((b && b.mac) || '').toLowerCase();
+    var targetMac = String((b && b.mac) || '').trim().toLowerCase();
     if (targetMac === 'all' || targetMac === '*') targetMac = '';
-    var targetMacs = targetMac ? [targetMac] : DEVS.map(function (d) { return d.mac; });
+    var reqScope = String((b && b.scope) || '').trim().toLowerCase();
+    var rawTs = String((b && (b.target_scope || b.origin)) || '').trim().toLowerCase();
+    if (!rawTs && reqScope === 'host') rawTs = 'host';
+    var evHit = V6_LG_STATE.events.filter(function (x) { return String(x.dst_host || '').toLowerCase() === host; })[0];
+    var targetScope = rawTs || ((evHit && evHit.origin === 'host' && !targetMac && !reqScope) ? 'host' : 'hotspot');
+    if (targetScope !== 'hotspot' && targetScope !== 'host' && targetScope !== 'both') {
+      throw err('target_scope must be hotspot|host|both', 400);
+    }
+    if (reqScope && reqScope !== 'device' && reqScope !== 'global' && reqScope !== 'host') {
+      throw err('scope must be device|global', 400);
+    }
+    if (targetScope === 'hotspot' && reqScope !== 'global' && !targetMac) {
+      throw err('missing_mac', 400, {
+        reason_code: 'missing_mac',
+        detail: '非全局封禁必须指定有效的目标设备 mac（如需全热点封禁请显式传 scope:"global"，或仅封本机传 target_scope:"host"）'
+      });
+    }
+    if (targetScope === 'host' && isIp) {
+      throw err('target_scope=host (HNC_SELF_DNS) requires a domain name', 400);
+    }
+    var doHotspot = targetScope === 'hotspot' || targetScope === 'both';
+    var doHost = targetScope === 'host' || targetScope === 'both';
+    var targetMacs = doHotspot ? (targetMac ? [targetMac] : DEVS.map(function (d) { return d.mac; })) : [];
     var skippedSharedIp = false;
     var skippedVendor = '';
     var blockedAlsoIp = '';
+    var undoId = '';
     if (!unb) {
-      var evHit = V6_LG_STATE.events.filter(function (x) { return String(x.dst_host || '').toLowerCase() === host; })[0];
       var ig = (evHit && evHit.infra_guard) || v6MockInfraGuard(host);
       if (ig && ig.level === 'hard_block') {
         throw err('核心公共基础设施域名禁止封禁', 409, {
           guard_level: 'hard_block',
+          target_scope: targetScope,
           provider: ig.label,
-          reason_zh: '该域名属于系统联网探测或核心公共服务，封禁会导致连接设备出现 Wi-Fi 断网叹号，建议改用「忽略误报」。'
+          reason_zh: '该域名属于系统联网探测或核心公共服务，封禁会导致联网异常，建议改用「忽略误报」。'
         });
       }
       if (ig && ig.level === 'warn_confirm' && !(b && b.force)) {
         throw err('共享公共底座封禁需二次确认', 409, {
           guard_level: 'warn_confirm',
+          requires_confirm: true,
+          target_scope: targetScope,
           provider: ig.label,
           reason_zh: '该域名属于「' + ig.label + '」多应用共用节点，封禁后可能连带影响使用同一加速节点的其他正常应用。'
         });
       }
-      if (alsoIp) {
+      if (doHotspot && alsoIp && kind === 'domain') {
         skippedVendor = v6MockSharedCdnIpVendor(alsoIp, ig);
         if (skippedVendor) {
           skippedSharedIp = true;
@@ -2567,38 +3464,77 @@
           blockedAlsoIp = alsoIp;
         }
       }
-      V6_LG_STATE.blocked_set[host] = 1;
-      if (blockedAlsoIp) V6_LG_STATE.blocked_set[blockedAlsoIp] = 1;
-      v6SyncDeviceBlocksForTarget(host, targetMac, true, 'LeakGuard 反制');
-      if (blockedAlsoIp) v6SyncDeviceBlocksForTarget(blockedAlsoIp, targetMac, true, 'LeakGuard 关联 IP');
-      V6_LG_STATE.undo_stack = V6_LG_STATE.undo_stack.filter(function (u) { return String(u.dst_host || '').toLowerCase() !== host; });
+      if (doHotspot) {
+        V6_LG_STATE.blocked_set[host] = 1;
+        if (blockedAlsoIp) V6_LG_STATE.blocked_set[blockedAlsoIp] = 1;
+        v6SyncDeviceBlocksForTarget(host, targetMac, true, 'LeakGuard 反制');
+        if (blockedAlsoIp) v6SyncDeviceBlocksForTarget(blockedAlsoIp, targetMac, true, 'LeakGuard 关联 IP');
+      }
+      if (doHost && !isIp) {
+        V6_SELF_FW.blocked_domains[host] = 1;
+        V6_SELF_FW.updated_at = now();
+      }
+      var effUndoScope = (targetScope === 'both' && isIp) ? 'hotspot' : targetScope;
+      undoId = 'ub_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+      V6_LG_STATE.undo_stack = V6_LG_STATE.undo_stack.filter(function (u) {
+        var us = String(u.target_scope || u.origin || 'hotspot').toLowerCase();
+        return !(String(u.dst_host || '').toLowerCase() === host && us === effUndoScope);
+      });
       V6_LG_STATE.undo_stack.push({
-        id: 'ub_' + Date.now(),
+        id: undoId,
         dst_host: host,
         kind: kind,
-        also_ip: blockedAlsoIp,
-        macs: targetMacs.slice(),
+        target_scope: effUndoScope,
+        origin: effUndoScope === 'host' ? 'host' : 'hotspot',
+        also_ip: doHotspot ? blockedAlsoIp : '',
+        macs: doHotspot ? targetMacs.slice() : [],
         created_at: now()
       });
       while (V6_LG_STATE.undo_stack.length > 10) V6_LG_STATE.undo_stack.shift();
     } else {
-      delete V6_LG_STATE.blocked_set[host];
-      if (alsoIp) delete V6_LG_STATE.blocked_set[alsoIp];
-      v6SyncDeviceBlocksForTarget(host, targetMac, false);
-      if (alsoIp) v6SyncDeviceBlocksForTarget(alsoIp, targetMac, false);
-      V6_LG_STATE.undo_stack = V6_LG_STATE.undo_stack.filter(function (u) { return String(u.dst_host || '').toLowerCase() !== host; });
+      if (doHotspot) {
+        delete V6_LG_STATE.blocked_set[host];
+        if (alsoIp) delete V6_LG_STATE.blocked_set[alsoIp];
+        v6SyncDeviceBlocksForTarget(host, targetMac, false);
+        if (alsoIp) v6SyncDeviceBlocksForTarget(alsoIp, targetMac, false);
+      }
+      if (doHost) {
+        delete V6_SELF_FW.blocked_domains[host];
+        V6_SELF_FW.updated_at = now();
+      }
+      var nextStack = [];
+      V6_LG_STATE.undo_stack.forEach(function (u) {
+        if (String(u.dst_host || '').toLowerCase() !== host) { nextStack.push(u); return; }
+        var us = String(u.target_scope || u.origin || 'hotspot').toLowerCase();
+        if (targetScope === 'both' || us === targetScope) return;
+        if (us === 'both') {
+          var rem = targetScope === 'host' ? 'hotspot' : 'host';
+          var copyU = clone(u);
+          copyU.target_scope = rem;
+          copyU.origin = rem === 'host' ? 'host' : 'hotspot';
+          if (rem === 'host') { copyU.macs = []; copyU.also_ip = ''; }
+          nextStack.push(copyU);
+          return;
+        }
+        nextStack.push(u);
+      });
+      V6_LG_STATE.undo_stack = nextStack;
     }
     var resp = {
       ok: true,
       action: unb ? 'unblock' : 'block',
+      target_scope: targetScope,
       kind: kind,
+      origin: targetScope === 'host' ? 'host' : 'hotspot',
       dst_host: host,
       is_blocked: !unb,
-      macs: targetMacs,
-      applied_cnt: targetMacs.length,
+      self_blocked: !!(kind === 'domain' && V6_SELF_FW.blocked_domains[host]),
+      macs: doHotspot ? targetMacs : [],
+      applied_cnt: (doHotspot ? targetMacs.length : 0) + (doHost && !isIp ? 1 : 0),
       skipped_shared_ip: skippedSharedIp,
       undo_count: V6_LG_STATE.undo_stack.length
     };
+    if (undoId) resp.undo_id = undoId;
     if (skippedSharedIp) {
       resp.skipped_ip = alsoIp;
       resp.skipped_ip_vendor = skippedVendor;
@@ -2607,22 +3543,55 @@
     return resp;
   };
   POST['/api/leakguard/undo-block'] = function (b) {
-    v6AssertAllowedKeys(b, ['id']);
+    v6AssertAllowedKeys(b, ['id', 'target_scope']);
+    var reqTs = String((b && b.target_scope) || '').trim().toLowerCase();
+    if (reqTs && reqTs !== 'hotspot' && reqTs !== 'host' && reqTs !== 'both') {
+      throw err('target_scope must be hotspot|host|both', 400);
+    }
     if (!V6_LG_STATE.undo_stack.length) throw err('当前没有可撤销的封禁记录', 400);
     var uid = String((b && b.id) || '').trim();
-    var idx = V6_LG_STATE.undo_stack.length - 1;
-    if (uid) {
-      idx = -1;
-      for (var i = V6_LG_STATE.undo_stack.length - 1; i >= 0; i--) {
-        if (V6_LG_STATE.undo_stack[i].id === uid) { idx = i; break; }
-      }
-      if (idx < 0) throw err('指定的封禁撤销记录不存在', 400);
+    var idx = -1;
+    for (var i = V6_LG_STATE.undo_stack.length - 1; i >= 0; i--) {
+      var cur = V6_LG_STATE.undo_stack[i];
+      if (uid && cur.id !== uid) continue;
+      var es = String(cur.target_scope || cur.origin || 'hotspot').toLowerCase();
+      var okScope = (!reqTs || reqTs === 'both') ||
+        (reqTs === 'host' && (es === 'host' || es === 'both')) ||
+        (reqTs === 'hotspot' && (es === 'hotspot' || es === 'both'));
+      if (okScope) { idx = i; break; }
     }
-    var popped = V6_LG_STATE.undo_stack.splice(idx, 1)[0];
-    var macsToUnblock = (popped && Array.isArray(popped.macs)) ? popped.macs : [];
-    if (popped) {
-      var ph = String(popped.dst_host || '').toLowerCase();
-      var pip = String(popped.also_ip || '').toLowerCase();
+    if (idx < 0) throw err('指定的封禁撤销记录不存在', 400);
+
+    var entry = clone(V6_LG_STATE.undo_stack[idx]);
+    var origScope = String(entry.target_scope || entry.origin || 'hotspot').toLowerCase();
+    var undoHotspot = origScope === 'hotspot' || origScope === 'both';
+    var undoHost = origScope === 'host' || origScope === 'both';
+    var executedScope = origScope;
+
+    if (reqTs === 'host' && origScope === 'both') {
+      undoHotspot = false;
+      undoHost = true;
+      executedScope = 'host';
+      V6_LG_STATE.undo_stack[idx].target_scope = 'hotspot';
+      V6_LG_STATE.undo_stack[idx].origin = 'hotspot';
+    } else if (reqTs === 'hotspot' && origScope === 'both') {
+      undoHotspot = true;
+      undoHost = false;
+      executedScope = 'hotspot';
+      V6_LG_STATE.undo_stack[idx].target_scope = 'host';
+      V6_LG_STATE.undo_stack[idx].origin = 'host';
+      V6_LG_STATE.undo_stack[idx].macs = [];
+      V6_LG_STATE.undo_stack[idx].also_ip = '';
+    } else {
+      V6_LG_STATE.undo_stack.splice(idx, 1);
+    }
+
+    var ph = String(entry.dst_host || '').toLowerCase();
+    var pip = String(entry.also_ip || '').toLowerCase();
+    var macsToUnblock = (undoHotspot && Array.isArray(entry.macs)) ? entry.macs.slice() : [];
+    var applied = 0;
+
+    if (undoHotspot && ph) {
       delete V6_LG_STATE.blocked_set[ph];
       if (pip) delete V6_LG_STATE.blocked_set[pip];
       if (macsToUnblock.length) {
@@ -2630,19 +3599,36 @@
           v6SyncDeviceBlocksForTarget(ph, m, false);
           if (pip) v6SyncDeviceBlocksForTarget(pip, m, false);
         });
+        applied += macsToUnblock.length;
       } else {
         v6SyncDeviceBlocksForTarget(ph, '', false);
         if (pip) v6SyncDeviceBlocksForTarget(pip, '', false);
       }
     }
+    if (undoHost && ph) {
+      var stillHasHost = V6_LG_STATE.undo_stack.some(function (u) {
+        var us = String(u.target_scope || u.origin || 'hotspot').toLowerCase();
+        return String(u.dst_host || '').toLowerCase() === ph && (us === 'host' || us === 'both');
+      });
+      if (!stillHasHost) {
+        delete V6_SELF_FW.blocked_domains[ph];
+        V6_SELF_FW.updated_at = now();
+      }
+      applied += 1;
+    }
+
+    entry.target_scope = executedScope;
     return {
       ok: true,
-      undone: popped,
-      dst_host: popped ? popped.dst_host : '',
-      kind: (popped && popped.kind) || 'domain',
-      also_ip: (popped && popped.also_ip) || '',
+      undo_id: entry.id,
+      target_scope: executedScope,
+      self_blocked: !!(ph && V6_SELF_FW.blocked_domains[ph]),
+      undone: entry,
+      dst_host: entry.dst_host || '',
+      kind: entry.kind || 'domain',
+      also_ip: undoHotspot ? (entry.also_ip || '') : '',
       macs: macsToUnblock,
-      applied_cnt: macsToUnblock.length,
+      applied_cnt: applied,
       remaining_undo: V6_LG_STATE.undo_stack.length
     };
   };
@@ -2692,11 +3678,11 @@
     if (b && b.mode === 'cut_freeze_15m') {
       var k4 = pNorm + '|' + sip + '|' + dip + '|' + dp;
       V6_SC_STATE.frozen_rules = V6_SC_STATE.frozen_rules.filter(function (r) { return r.key !== k4; });
-      V6_SC_STATE.frozen_rules.push({ key: k4, proto: pNorm, src_ip: sip, dst_ip: dip, dport: dp, expires_at: now() + 900 });
+      V6_SC_STATE.frozen_rules.push({ key: k4, proto: pNorm, src_ip: sip, dst_ip: dip, dport: dp, scope: (b && b.scope) || 'hotspot', uid: b && b.uid ? round(+b.uid) : 0, expires_at: now() + 900 });
     } else if (sp > 0) {
       V6_SC_STATE.killed_keys[pNorm + '|' + sip + ':' + sp + '|' + dip + ':' + dp] = 1;
     }
-    return { ok: true, mode: (b && b.mode) || 'cut_once', cut_total: V6_SC_STATE.cut_total, active_rules: V6_SC_STATE.frozen_rules.length };
+    return { ok: true, mode: (b && b.mode) || 'cut_once', scope: (b && b.scope) || 'hotspot', cut_total: V6_SC_STATE.cut_total, active_rules: V6_SC_STATE.frozen_rules.length };
   };
   POST['/api/v6/blackbox'] = function (b) {
     var act = (b && b.action) || 'sample_now';
@@ -2713,11 +3699,44 @@
     return v6SubtreesPayload();
   };
   POST['/api/backup'] = function (b) {
-    if (b && b.schema_version && b.schema_version !== 'hnc.backup.v6') {
+    if (b && b.schema_version && !/^(hnc\.backup\.v6(\.0|\.1)?|6\.0|6\.1)$/.test(String(b.schema_version).trim())) {
       throw err('unsupported backup schema_version', 400);
     }
-    var cnt = (b && b.files && typeof b.files === 'object') ? Object.keys(b.files).length : (round(+(b && b.file_count) || 16));
-    return { ok: true, restored_count: Math.max(1, cnt), sha256: (b && b.sha256) || V6_VAULT_SHA };
+    var files = (b && b.files && typeof b.files === 'object') ? b.files : null;
+    if (files) {
+      var sfRaw = files['self_firewall.json'] != null ? files['self_firewall.json'] : files['v6_self_firewall.json'];
+      if (typeof sfRaw === 'string') {
+        try { sfRaw = JSON.parse(sfRaw); } catch (_) { sfRaw = null; }
+      }
+      if (sfRaw && typeof sfRaw === 'object') {
+        if (Array.isArray(sfRaw.uid_rules)) {
+          var nextRules = {};
+          sfRaw.uid_rules.forEach(function (r) {
+            if (r && r.uid >= 10000 && r.mode && r.mode !== 'allow') {
+              nextRules[String(r.uid)] = clone(r);
+            }
+          });
+          V6_SELF_FW.uid_rules = nextRules;
+        }
+        if (Array.isArray(sfRaw.blocked_domains)) {
+          var nextDoms = {};
+          sfRaw.blocked_domains.forEach(function (d) {
+            var dn = String(d || '').trim().toLowerCase();
+            if (dn) nextDoms[dn] = 1;
+          });
+          V6_SELF_FW.blocked_domains = nextDoms;
+        } else if (sfRaw.blocked_domains && typeof sfRaw.blocked_domains === 'object') {
+          var nextDomsObj = {};
+          Object.keys(sfRaw.blocked_domains).forEach(function (d) {
+            if (sfRaw.blocked_domains[d]) nextDomsObj[String(d).trim().toLowerCase()] = 1;
+          });
+          V6_SELF_FW.blocked_domains = nextDomsObj;
+        }
+        V6_SELF_FW.updated_at = now();
+      }
+    }
+    var cnt = files ? Object.keys(files).length : (round(+(b && b.file_count) || 17));
+    return { ok: true, restored_count: Math.max(1, cnt), dataplane_reloaded: true, sha256: (b && b.sha256) || V6_VAULT_SHA };
   };
   POST['/api/restore'] = POST['/api/backup'];
 

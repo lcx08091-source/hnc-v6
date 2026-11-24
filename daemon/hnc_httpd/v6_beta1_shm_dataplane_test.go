@@ -41,6 +41,11 @@ func mustParseIPv4Bytes(t *testing.T, s string) [4]byte {
 
 func writeTestShmFrame(t *testing.T, runDir string, slots []shm.DeviceSlot, activeFlows uint32, totalLeaks uint64) {
 	t.Helper()
+	writeTestShmFrameWithHost(t, runDir, slots, activeFlows, 0, totalLeaks)
+}
+
+func writeTestShmFrameWithHost(t *testing.T, runDir string, slots []shm.DeviceSlot, hotspotFlows, hostFlows uint32, totalLeaks uint64) {
+	t.Helper()
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir runDir: %v", err)
 	}
@@ -50,12 +55,15 @@ func writeTestShmFrame(t *testing.T, runDir string, slots []shm.DeviceSlot, acti
 	}
 	defer func() { _ = w.Close() }()
 
-	if err := w.Write(shm.MonotonicNs(), activeFlows, totalLeaks, slots); err != nil {
-		t.Fatalf("shm.Writer.Write failed: %v", err)
+	if err := w.WriteWithHostFlows(shm.MonotonicNs(), hotspotFlows, hostFlows, totalLeaks, 0, slots); err != nil {
+		t.Fatalf("shm.Writer.WriteWithHostFlows failed: %v", err)
 	}
 }
 
 func TestCoreHubDpiShmSeqlockReadAndStandbyFallback(t *testing.T) {
+	if shm.SchemaVersion != 3 {
+		t.Fatalf("expected shm.SchemaVersion == 3, got %d", shm.SchemaVersion)
+	}
 	srv, _ := setupTestV6Server(t)
 	hub := srv.CoreHub()
 	defer hub.Close()
@@ -103,7 +111,7 @@ func TestCoreHubDpiShmSeqlockReadAndStandbyFallback(t *testing.T) {
 			Flags:       shm.FlagIPv4,
 		},
 	}
-	writeTestShmFrame(t, runDir, slotsV1, 12, 3)
+	writeTestShmFrameWithHost(t, runDir, slotsV1, 12, 230, 3)
 
 	snap := hub.RefreshSnapshotNow()
 	if !snap.Healthy {
@@ -113,11 +121,12 @@ func TestCoreHubDpiShmSeqlockReadAndStandbyFallback(t *testing.T) {
 	if ext["source"] != "shm_seqlock" || ext["attached"] != true {
 		t.Fatalf("expected source=shm_seqlock & attached=true, got %+v", ext)
 	}
-	if ext["device_count"] != uint32(3) || ext["active_flows"] != uint32(12) || ext["total_leaks"] != uint64(3) {
+	if ext["device_count"] != uint32(3) || ext["active_flows"] != uint32(12) ||
+		ext["hotspot_flows"] != uint32(12) || ext["host_flows"] != uint32(230) || ext["total_leaks"] != uint64(3) {
 		t.Fatalf("unexpected shm telemetry summary: %+v", ext)
 	}
-	if snap.Live.Online != 2 {
-		t.Fatalf("expected exactly 2 online devices (offline slot with RxBytes>0 must not resurrect), got %d", snap.Live.Online)
+	if snap.Live.Online != 2 || snap.Live.HotspotFlows != 12 || snap.Live.HostFlows != 230 {
+		t.Fatalf("expected Online=2 HotspotFlows=12 HostFlows=230, got %+v", snap.Live)
 	}
 
 	// 自定义未来假时间(偏离当前墙钟 >2s)自动回退 UpdatedUnixNs 判陈旧
@@ -128,11 +137,24 @@ func TestCoreHubDpiShmSeqlockReadAndStandbyFallback(t *testing.T) {
 
 	// 3. Re-create new inode -> automatic Reader reopen
 	_ = os.Remove(shm.FilePath(runDir))
-	writeTestShmFrame(t, runDir, slotsV1[:1], 21, 4)
+	writeTestShmFrameWithHost(t, runDir, slotsV1[:1], 21, 85, 4)
 	snapReopen := hub.RefreshSnapshotNow()
 	extReopen := snapReopen.Extensions["dpi_shm_vector"].(map[string]any)
-	if extReopen["source"] != "shm_seqlock" || extReopen["active_flows"] != uint32(21) {
-		t.Fatalf("expected seamless reopen onto new inode with active_flows=21, got %+v", extReopen)
+	if extReopen["source"] != "shm_seqlock" || extReopen["active_flows"] != uint32(21) ||
+		extReopen["hotspot_flows"] != uint32(21) || extReopen["host_flows"] != uint32(85) {
+		t.Fatalf("expected seamless reopen onto new inode with active_flows=21 host_flows=85, got %+v", extReopen)
+	}
+
+	// 3b. 当在线热点客户端数为 0 (或热点关闭) 时，hotspot_flows / active_flows 强制归零，绝不混入 230 条本机流
+	_ = os.WriteFile(filepath.Join(srv.hncDir, "data", "devices.json"), []byte(`{}`), 0o644)
+	_ = os.WriteFile(filepath.Join(runDir, "hnc_state"), []byte("INACTIVE\n"), 0o644)
+	writeTestShmFrameWithHost(t, runDir, slotsV1[2:3], 230, 230, 0)
+	snapZeroHS := hub.RefreshSnapshotNow()
+	extZeroHS := snapZeroHS.Extensions["dpi_shm_vector"].(map[string]any)
+	if snapZeroHS.Live.HotspotFlows != 0 || extZeroHS["hotspot_flows"] != uint32(0) || extZeroHS["active_flows"] != uint32(0) ||
+		snapZeroHS.Live.HostFlows != 230 || extZeroHS["host_flows"] != uint32(230) {
+		t.Fatalf("expected HotspotFlows=0 & HostFlows=230 when hotspot inactive/0 clients, got live=%+v ext=%+v",
+			snapZeroHS.Live, extZeroHS)
 	}
 
 	// 4. Corrupt short file -> safe fallback to json_fallback and LastError recorded on DpiShmBulkhead
@@ -297,6 +319,8 @@ func TestBeta1Atomic64StructAlignmentAssertions(t *testing.T) {
 	}{
 		{"flowScalpelEngine.seqGen", unsafe.Offsetof(zFS.seqGen)},
 		{"flowScalpelEngine.cutTotal", unsafe.Offsetof(zFS.cutTotal)},
+		{"flowScalpelEngine.guardBlocked", unsafe.Offsetof(zFS.guardBlocked)},
+		{"flowScalpelEngine.hostCutTotal", unsafe.Offsetof(zFS.hostCutTotal)},
 		{"JitterBlackbox.totalTicks", unsafe.Offsetof(zJB.totalTicks)},
 		{"JitterBlackbox.totalIncidents", unsafe.Offsetof(zJB.totalIncidents)},
 		{"JitterBlackbox.lastTickUnixMs", unsafe.Offsetof(zJB.lastTickUnixMs)},

@@ -1955,10 +1955,13 @@ func subprocEnvWithFallbackPath(extra ...string) []string {
 	if cur := strings.TrimSpace(os.Getenv("PATH")); cur != "" && cur != defaultSubprocSafePath {
 		pathVal = pathVal + ":" + cur
 	}
-	env := make([]string, 0, 1+len(extra))
-	env = append(env, "PATH="+pathVal)
-	env = append(env, extra...)
-	return env
+	if len(extra) == 0 {
+		return hubAppendAndroidEnv("PATH=" + pathVal)
+	}
+	base := make([]string, 0, 1+len(extra))
+	base = append(base, "PATH="+pathVal)
+	base = append(base, extra...)
+	return hubAppendAndroidEnv(base...)
 }
 
 // isXtablesWaitFlagError 识别各代 xtables/iptables 对 -w 2 或 -w 的不兼容报错特征

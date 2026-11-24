@@ -565,6 +565,13 @@ if [ -f "$HNC_DIR/bin/webui_guard.sh" ]; then
         || log "WARN: webui_guard apply failed (HTTP-level guard in hnc_httpd still active)"
 fi
 
+# ─── 本机应用防火墙与本机 DNS 拦截开机恢复 ────────────────────
+if [ -s "$DATA_DIR/self_firewall.json" ] && [ -f "$HNC_DIR/bin/self_firewall_sync.sh" ]; then
+    sh "$HNC_DIR/bin/self_firewall_sync.sh" apply >> "$HNC_DIR/logs/service.log" 2>&1 \
+        && log "self_firewall: restored persisted rules from $DATA_DIR/self_firewall.json" \
+        || log "WARN: self_firewall apply failed on boot (hnc_httpd will retry)"
+fi
+
 # ─── shell pre-launch hnc_httpd ─────────────────────
 launch_httpd_safe() {
     nohup "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" -hnc-dir "$HNC_DIR" \

@@ -773,7 +773,7 @@ cleanup() {
             $IP6T -t filter -X "$chain" 2>/dev/null
         done
     fi
-    # 兜底回收应用限速、应用 QoS 与 v6 战术子链(严格只删 HNC 自有链, 绝不触碰宿主 ROM 系统规则)
+    # 兜底回收应用限速、应用 QoS 与 v6 战术子链(严格只删 HNC 热点转发链, 绝不误拆本机 OUTPUT 持久防火墙或宿主 ROM 规则)
     for _T in "$IPT" "$(ipv6_mangle_ok && echo "$IP6T")"; do
         [ -z "$_T" ] && continue
         for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_QOS_MARK HNC_V6_EXPRESS HNC_V6_LEASH; do

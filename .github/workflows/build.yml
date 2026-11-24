@@ -185,7 +185,7 @@ jobs:
       # ─── Preflight checks (fail fast) ─────────────────────
       - name: Make scripts executable
         run: |
-          chmod 755 bin/*.sh bin/hnc_json service.sh post-fs-data.sh action.sh uninstall.sh customize.sh 2>/dev/null || true
+          chmod 755 bin/*.sh bin/self_firewall_sync.sh bin/hnc_json service.sh post-fs-data.sh action.sh uninstall.sh customize.sh 2>/dev/null || true
           chmod 755 daemon/hnc_httpd/build.sh daemon/hotspotd/build.sh daemon/clsact_ctl/build.sh daemon/tc_netlink/build.sh 2>/dev/null || true
           chmod 755 src/launcher/build.sh 2>/dev/null || true
           find bin test -name "*.sh" -exec chmod 755 {} \; 2>/dev/null || true
@@ -509,7 +509,7 @@ jobs:
 
       - name: Fix file permissions
         run: |
-          chmod 755 bin/*.sh 2>/dev/null || true
+          chmod 755 bin/*.sh bin/self_firewall_sync.sh 2>/dev/null || true
           chmod 755 bin/hotspotd bin/hnc_ipc bin/hnc_tc_ingress bin/hnc_clsact_ctl 2>/dev/null || true
           chmod 755 bin/hnc_dpid bin/hnc_watchdog bin/hnc_launcher bin/fork_probe 2>/dev/null || true
           chmod 755 bin/mdns_resolve 2>/dev/null || true
@@ -705,6 +705,10 @@ jobs:
               printf '%s\n' "$entries" | grep -qxF "$req_bin" \
                 || { echo "ERROR: $z missing required compiled component: $req_bin" >&2; exit 1; }
             done
+            if [ -f bin/self_firewall_sync.sh ]; then
+              printf '%s\n' "$entries" | grep -qxF "bin/self_firewall_sync.sh" \
+                || { echo "ERROR: $z missing required script: bin/self_firewall_sync.sh" >&2; exit 1; }
+            fi
           done
           HNC_EXPECT_ABI=arm64-v8a sh ./bin/artifact_sanity_check.sh "${{ env.OUT_ZIP }}"
           HNC_EXPECT_ABI=armeabi-v7a sh ./bin/artifact_sanity_check.sh "${{ env.OUT_ZIP_ARMV7 }}"

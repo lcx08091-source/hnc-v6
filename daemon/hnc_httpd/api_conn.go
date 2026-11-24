@@ -874,34 +874,159 @@ func (s *server) deviceIPsByMAC() map[string][]string {
 
 const connListCap = 150
 
+func scalpelClassifiedFlowToConnItem(fl scalpelClassifiedFlow) (map[string]interface{}, string) {
+	item := map[string]interface{}{
+		"scope":      fl.Scope,
+		"proto":      fl.Proto,
+		"src":        fl.SrcIP,
+		"dst":        fl.DstIP,
+		"sport":      fl.Sport,
+		"dport":      fl.Dport,
+		"up_bytes":   fl.UpBytes,
+		"down_bytes": fl.DownBytes,
+		"up_bps":     int64(fl.UpBps),
+		"down_bps":   int64(fl.DownBps),
+		"v6":         fl.IsV6,
+		"ttl":        fl.TTL,
+	}
+	if fl.State != "" {
+		item["state"] = fl.State
+	}
+	if fl.Unreplied {
+		item["unreplied"] = true
+	}
+	if fl.MAC != "" {
+		item["mac"] = fl.MAC
+		item["device_name"] = fl.DeviceName
+	}
+	label := ""
+	if fl.Domain != "" {
+		item["name"] = fl.Domain
+		if fl.DomainSrc != "" {
+			item["name_src"] = fl.DomainSrc
+		}
+		label = fl.Domain
+	}
+	if fl.JA4 != "" {
+		item["ja4"] = fl.JA4
+	}
+	if fl.AppName != "" {
+		item["app"] = fl.AppName
+		if fl.AppID != "" {
+			item["app_id"] = fl.AppID
+		}
+		if fl.AppSrc != "" {
+			item["app_src"] = fl.AppSrc
+		}
+		if fl.AppConf > 0 {
+			item["app_conf"] = round2(fl.AppConf)
+		}
+		if fl.IsSDK {
+			item["sdk"] = true
+		} else {
+			label = fl.AppName
+		}
+	}
+	if fl.OwnerJSON != nil {
+		item["owner"] = fl.OwnerJSON
+	}
+	if fl.Company != "" {
+		item["company"] = fl.Company
+	}
+	if fl.TrafficType != "" {
+		item["traffic_type"] = fl.TrafficType
+		item["traffic_conf"] = fl.TrafficConf
+	}
+	if svc := wellKnownSvc(fl.Proto, fl.Dport); svc != "" {
+		item["svc"] = svc
+		if label == "" {
+			label = svc
+		}
+	}
+	if isPrivateIP(fl.DstIP) {
+		item["local"] = true
+	}
+	if fl.Scope == scalpelHostScopeHost {
+		item["uid"] = fl.UID
+		item["package"] = fl.Package
+		item["host_app_name"] = fl.HostAppName
+		item["is_system"] = fl.IsSystem
+		item["cleartext_risk"] = fl.CleartextRisk
+		if fl.HostAppName != "" && (label == "" || label == "HTTPS" || label == "HTTP" || label == "QUIC / HTTP3") {
+			label = fl.HostAppName
+		}
+	}
+	if label == "" {
+		label = "未识别"
+	}
+	return item, label
+}
+
 func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "method not allowed"})
 		return
 	}
+	rawScope := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
+	if rawScope != "" && rawScope != scalpelHostScopeAll && rawScope != scalpelHostScopeHotspot && rawScope != scalpelHostScopeHost {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "invalid scope"})
+		return
+	}
+
 	// 标记连接面板处于活跃态(切换到 4s TTL; 面板关闭超过 15s 自动退回 8s 省电 TTL)
 	noteConnectionsPanelTouch()
 
+	hsActive, onlineCnt, _, _ := scalpelHotspotOnlineState(s)
+	hsFlows, hostFlows := scalpelLiveFlowCounts(s, hsActive, onlineCnt)
+	if !hsActive || onlineCnt == 0 {
+		hsFlows = 0
+	}
+
+	mac := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac")))
 	// 模拟环境: 模拟设备的连接明细直接合成(不读 conntrack)
-	if simResp, ok := s.simConnections(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac")))); ok {
+	if simResp, ok := s.simConnections(mac); ok {
+		simResp["hotspot_flows"] = int(hsFlows)
+		simResp["host_flows"] = int(hostFlows)
+		simResp["active_flows"] = int(hsFlows)
+		if rawScope != "" {
+			simResp["scope"] = rawScope
+		}
 		writeJSON(w, http.StatusOK, simResp)
 		return
 	}
+
 	sn := conntrackSnapshot()
-	base := map[string]interface{}{
-		"ok":       true,
-		"ts":       sn.at.Unix(),
-		"readable": sn.readable,
-		"acct":     sn.acct,
+	dualForHost := rawScope == scalpelHostScopeHost || rawScope == scalpelHostScopeAll
+	var dualSnap scalpelDualFlowSnapshot
+	if dualForHost {
+		dualSnap = scalpelCollectDualDomainFlows(s, nil, nil)
+		hsFlows = uint32(dualSnap.HotspotFlows)
+		hostFlows = uint32(dualSnap.HostFlows)
 	}
-	if !sn.readable {
+
+	readable := sn.readable
+	if dualForHost && dualSnap.Readable {
+		readable = true
+	}
+	base := map[string]interface{}{
+		"ok":            true,
+		"ts":            sn.at.Unix(),
+		"readable":      readable,
+		"acct":          sn.acct,
+		"active_flows":  int(hsFlows),
+		"hotspot_flows": int(hsFlows),
+		"host_flows":    int(hostFlows),
+	}
+	if rawScope != "" {
+		base["scope"] = rawScope
+	}
+	if !readable {
 		base["error"] = "conntrack 不可读: " + sn.err
 	}
 	ipsBy := s.deviceIPsByMAC()
-	mac := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac")))
 
 	if mac == "" {
-		// 汇总模式: 每台设备的连接数与总速率
+		// 汇总计数: 每台热点设备的连接数与总速率
 		owner := map[string]string{}
 		for m, ips := range ipsBy {
 			for _, ip := range ips {
@@ -925,6 +1050,108 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 		}
 		s.simMergeConnCounts(counts) // 模拟环境; 关闭时不动
 		base["counts"] = counts
+
+		if rawScope == scalpelHostScopeHost || rawScope == scalpelHostScopeAll {
+			type scopedRow struct {
+				m     map[string]interface{}
+				score float64
+				total uint64
+			}
+			var srows []scopedRow
+			appAgg := map[string]*struct {
+				n     int
+				b     uint64
+				bps   float64
+				label string
+			}{}
+			var totUp, totDn uint64
+			var totBps float64
+
+			appendClassified := func(list []scalpelClassifiedFlow) {
+				for _, fl := range list {
+					item, label := scalpelClassifiedFlowToConnItem(fl)
+					ag := appAgg[label]
+					if ag == nil {
+						ag = &struct {
+							n     int
+							b     uint64
+							bps   float64
+							label string
+						}{label: label}
+						appAgg[label] = ag
+					}
+					ag.n++
+					ag.b += fl.UpBytes + fl.DownBytes
+					ag.bps += fl.UpBps + fl.DownBps
+					totUp += fl.UpBytes
+					totDn += fl.DownBytes
+					totBps += fl.UpBps + fl.DownBps
+					srows = append(srows, scopedRow{
+						m:     item,
+						score: fl.UpBps + fl.DownBps,
+						total: fl.UpBytes + fl.DownBytes,
+					})
+				}
+			}
+
+			if rawScope == scalpelHostScopeAll && dualSnap.HotspotFlows > 0 {
+				appendClassified(dualSnap.HotspotList)
+			}
+			appendClassified(dualSnap.HostList)
+
+			sort.Slice(srows, func(i, j int) bool {
+				if srows[i].score != srows[j].score {
+					return srows[i].score > srows[j].score
+				}
+				return srows[i].total > srows[j].total
+			})
+			outConns := make([]map[string]interface{}, 0, len(srows))
+			for i, rw := range srows {
+				if i >= connListCap {
+					break
+				}
+				outConns = append(outConns, rw.m)
+			}
+			groups := make([]map[string]interface{}, 0, len(appAgg))
+			for _, ag := range appAgg {
+				groups = append(groups, map[string]interface{}{
+					"label": ag.label,
+					"n":     ag.n,
+					"bytes": ag.b,
+					"bps":   int64(ag.bps),
+				})
+			}
+			sort.Slice(groups, func(i, j int) bool {
+				bi, bj := groups[i]["bps"].(int64), groups[j]["bps"].(int64)
+				if bi != bj {
+					return bi > bj
+				}
+				return groups[i]["bytes"].(uint64) > groups[j]["bytes"].(uint64)
+			})
+			if len(groups) > 12 {
+				groups = groups[:12]
+			}
+			base["total"] = len(srows)
+			base["conns"] = outConns
+			base["groups"] = groups
+			base["up_bytes"] = totUp
+			base["down_bytes"] = totDn
+			base["bps"] = int64(totBps)
+		}
+
+		writeJSON(w, http.StatusOK, base)
+		return
+	}
+
+	if rawScope == scalpelHostScopeHost {
+		base["mac"] = mac
+		base["ips"] = []string{}
+		base["total"] = 0
+		base["conns"] = []map[string]interface{}{}
+		base["groups"] = []map[string]interface{}{}
+		base["up_bytes"] = uint64(0)
+		base["down_bytes"] = uint64(0)
+		base["bps"] = int64(0)
 		writeJSON(w, http.StatusOK, base)
 		return
 	}

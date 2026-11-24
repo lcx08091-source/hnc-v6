@@ -856,6 +856,8 @@ type VectorLiveSummary struct {
 	IfaceMethod   string         `json:"iface_method,omitempty"`
 	Online        int            `json:"online"`
 	Total         int            `json:"total"`
+	HotspotFlows  int            `json:"hotspot_flows"`
+	HostFlows     int            `json:"host_flows"`
 	RxBps         int64          `json:"rx_bps"`
 	TxBps         int64          `json:"tx_bps"`
 	Sim           bool           `json:"sim,omitempty"`
@@ -1180,6 +1182,7 @@ func (h *CoreHub) RefreshSnapshotNow() *WorldSnapshot {
 
 	allowAsyncSignal := h.loopActive.Load() && activityNow().WebUIActive
 	live := buildVectorLiveSummaryInternal(h.srv, now, shmRes, allowAsyncSignal)
+	calibrateCoreHubFlowCounts(h.srv, &live, &shmRes)
 	exts := collectVectorSyncProviders(h.srv)
 	if exts == nil {
 		exts = make(map[string]any, 2)
@@ -1244,11 +1247,42 @@ type dpiShmReadResult struct {
 	AgeMs          int64
 	DeviceCount    uint32
 	ActiveFlows    uint32
+	HotspotFlows   uint32
+	HostFlows      uint32
 	TotalLeaks     uint64
 	HeaderFlags    uint32
 	Source         string
 	FallbackReason string
 	ByMAC          map[string]dpiShmDeviceLive
+}
+
+func calibrateCoreHubFlowCounts(s *server, live *VectorLiveSummary, shmRes *dpiShmReadResult) {
+	if live == nil || shmRes == nil {
+		return
+	}
+	var hsFlows, hostFlows uint32
+	if shmRes.Valid {
+		hsFlows = shmRes.HotspotFlows
+		if hsFlows == 0 && shmRes.ActiveFlows > 0 {
+			hsFlows = shmRes.ActiveFlows
+		}
+		hostFlows = shmRes.HostFlows
+		if hostFlows == 0 && s != nil && s.hncDir != "" {
+			_, fallbackHost := scalpelCountSplitFlowsCached(s, live.HotspotActive, live.Online)
+			hostFlows = fallbackHost
+		}
+	} else if s != nil && s.hncDir != "" {
+		hsFlows, hostFlows = scalpelCountSplitFlowsCached(s, live.HotspotActive, live.Online)
+	}
+	// 当热点关闭或在线热点客户端数为 0 时，强制校准 HotspotFlows = 0，绝不把本机连接混入热点连接
+	if !live.HotspotActive || live.Online == 0 {
+		hsFlows = 0
+	}
+	shmRes.HotspotFlows = hsFlows
+	shmRes.ActiveFlows = hsFlows
+	shmRes.HostFlows = hostFlows
+	live.HotspotFlows = int(hsFlows)
+	live.HostFlows = int(hostFlows)
 }
 
 func (r dpiShmReadResult) toExtensionMap() map[string]any {
@@ -1261,7 +1295,9 @@ func (r dpiShmReadResult) toExtensionMap() map[string]any {
 		"mmapped":         r.Mmapped,
 		"seq":             r.Seq,
 		"device_count":    r.DeviceCount,
-		"active_flows":    r.ActiveFlows,
+		"active_flows":    r.HotspotFlows,
+		"hotspot_flows":   r.HotspotFlows,
+		"host_flows":      r.HostFlows,
 		"total_leaks":     r.TotalLeaks,
 		"flags":           r.HeaderFlags,
 		"updated_unix_ns": r.UpdatedUnixNs,
@@ -1535,6 +1571,8 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 			UpdatedUnixNs:  hdr.UpdatedUnixNs,
 			DeviceCount:    hdr.DeviceCount,
 			ActiveFlows:    hdr.ActiveFlows,
+			HotspotFlows:   hdr.ActiveFlows,
+			HostFlows:      hdr.HostFlows,
 			TotalLeaks:     hdr.TotalLeaks,
 			HeaderFlags:    hdr.Flags,
 			Source:         "json_fallback",
@@ -1564,6 +1602,8 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 				UpdatedUnixNs:  hdr.UpdatedUnixNs,
 				DeviceCount:    hdr.DeviceCount,
 				ActiveFlows:    hdr.ActiveFlows,
+				HotspotFlows:   hdr.ActiveFlows,
+				HostFlows:      hdr.HostFlows,
 				TotalLeaks:     hdr.TotalLeaks,
 				HeaderFlags:    hdr.Flags,
 				Source:         "json_fallback",
@@ -1591,6 +1631,8 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 			AgeMs:          ageMs,
 			DeviceCount:    hdr.DeviceCount,
 			ActiveFlows:    hdr.ActiveFlows,
+			HotspotFlows:   hdr.ActiveFlows,
+			HostFlows:      hdr.HostFlows,
 			TotalLeaks:     hdr.TotalLeaks,
 			HeaderFlags:    hdr.Flags,
 			Source:         "json_fallback",
@@ -1636,6 +1678,8 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 		AgeMs:         ageMs,
 		DeviceCount:   hdr.DeviceCount,
 		ActiveFlows:   hdr.ActiveFlows,
+		HotspotFlows:  hdr.ActiveFlows,
+		HostFlows:     hdr.HostFlows,
 		TotalLeaks:    hdr.TotalLeaks,
 		HeaderFlags:   hdr.Flags,
 		Source:        "shm_seqlock",
@@ -1938,6 +1982,8 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 	sum.TxBps = totalTx
 	sum.Sim = simLive
 	sum.Devices = devices
+	shmCopy := shmRes
+	calibrateCoreHubFlowCounts(s, &sum, &shmCopy)
 	return sum
 }
 

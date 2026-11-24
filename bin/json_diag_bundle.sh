@@ -6,7 +6,7 @@
 
 set +e
 
-HNC="${HNC:-/data/local/hnc}"
+HNC="${HNC:-${HNC_DIR:-/data/local/hnc}}"
 if [ -z "$MODDIR" ]; then [ -d /data/adb/modules/hotspot_net_ctl ] && MODDIR=/data/adb/modules/hotspot_net_ctl || MODDIR=/data/adb/modules/hotspot_network_control; fi
 BIN="$HNC/bin"
 RUN="$HNC/run"

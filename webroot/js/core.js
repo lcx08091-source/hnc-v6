@@ -171,7 +171,7 @@ var HNC_TAB_SVGS = {
 };
 function tabSvg(k, filled) {
   var item = HNC_TAB_SVGS[k] || HNC_TAB_SVGS.dev;
-  return '<svg class="tab-ic' + (filled ? ' is-fill' : '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (filled ? item.fill : item.out) + '</svg>';
+  return '<svg class="tab-ic' + (filled ? ' is-fill' : '') + '" width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (filled ? item.fill : item.out) + '</svg>';
 }
 
 /* 实时 0..4 格 5G / Wi-Fi 信号阶梯矢量图标 */
@@ -740,7 +740,9 @@ var HNC_BENTO_SVGS = {
   sqm: '<path d="M13.2 2.5 4.8 13.2h6.1l-.9 8.3 8.4-10.7h-6.1l.9-8.3Z" fill="currentColor" fill-opacity=".22"/><path d="M13.2 2.5 4.8 13.2h6.1l-.9 8.3 8.4-10.7h-6.1l.9-8.3Z"/>',
   appqos: '<polygon points="12 2.8 2.8 7.5 12 12.2 21.2 7.5 12 2.8" fill="currentColor" fill-opacity=".24"/><polygon points="12 2.8 2.8 7.5 12 12.2 21.2 7.5 12 2.8"/><path d="m2.8 12.2 9.2 4.7 9.2-4.7"/><path d="m2.8 16.8 9.2 4.7 9.2-4.7"/>',
   wl: '<path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".20"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/><path d="m8.8 12.1 2.2 2.2 4.4-4.6"/>',
-  conns: '<circle cx="12" cy="12" r="9" fill="currentColor" fill-opacity=".18"/><circle cx="12" cy="12" r="9"/><path d="M12 12 18.2 5.8"/><path d="M16.2 12a4.2 4.2 0 1 1-4.2-4.2"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>'
+  conns: '<circle cx="12" cy="12" r="9" fill="currentColor" fill-opacity=".18"/><circle cx="12" cy="12" r="9"/><path d="M12 12 18.2 5.8"/><path d="M16.2 12a4.2 4.2 0 1 1-4.2-4.2"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>',
+  leash: '<rect x="3" y="6.5" width="7.5" height="11" rx="3.6" fill="currentColor" fill-opacity=".20"/><rect x="13.5" y="6.5" width="7.5" height="11" rx="3.6" fill="currentColor" fill-opacity=".20"/><rect x="3" y="6.5" width="7.5" height="11" rx="3.6"/><rect x="13.5" y="6.5" width="7.5" height="11" rx="3.6"/><path d="M8.2 12h7.6"/>',
+  thermo: '<path d="M14 14.76V5.5a2 2 0 1 0-4 0v9.26a4 4 0 1 0 4 0Z" fill="currentColor" fill-opacity=".22"/><path d="M14 14.76V5.5a2 2 0 1 0-4 0v9.26a4 4 0 1 0 4 0Z"/><circle cx="12" cy="17.5" r="1.5" fill="currentColor" stroke="none"/><path d="M16.8 6h2.2M16.8 9.5h1.6"/>'
 };
 function bentoSvg(k) {
   var body = HNC_BENTO_SVGS[k] || HNC_BENTO_SVGS.conns;
@@ -1160,3 +1162,11 @@ function loadVectorSync(params, guardGen) {
     throw e;
   });
 }
+
+if (typeof window !== 'undefined' && typeof window.openV6Subtab !== 'function') {
+  window.openV6Subtab = function (tab, opts) {
+    window.__pendingV6Subtab = { tab: tab || 'escort', opts: opts || null };
+    if (typeof go === 'function') go('vector');
+  };
+}
+

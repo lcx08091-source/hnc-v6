@@ -449,6 +449,7 @@ function connCountText(d) {
 }
 function paintConnCounts() {
   S.devices.forEach(function (d) { var el = document.getElementById('ct-' + d.mac.replace(/:/g, '')); if (el) el.textContent = connCountText(d); });
+  var lf = document.getElementById('list-hs-flows'); if (lf) lf.textContent = devHotspotFlows();
 }
 function loadConnCounts() {
   return api.getSafe('/api/connections', null, null).then(function (r) { if (r && r.counts) { S.connCounts = r.counts; paintConnCounts(); } });
@@ -739,12 +740,40 @@ function resortIfNeeded() {
   var want = visibleDevs().map(function (d) { return d.mac; }).join('|');
   if (want !== screenOrder().join('|')) renderDevList(false);
 }
+function devHotspotFlows() {
+  var onCnt = S.devices.filter(function (d) { return d.online; }).length;
+  if (S.hotspot.active === false || onCnt <= 0) return 0;
+  var l = S.live || {};
+  if (l.hotspot_flows != null) return Math.max(0, Math.round(num(l.hotspot_flows, 0)));
+  var sumN = 0;
+  Object.keys(S.connCounts || {}).forEach(function (m) {
+    var d = devBy(m);
+    if (d && d.online) sumN += Math.max(0, Math.round(num(S.connCounts[m] && S.connCounts[m].n, 0)));
+  });
+  return sumN;
+}
+function devStandbyHostBtnHtml(asCardRow) {
+  if (asCardRow) {
+    return '<button type="button" class="glass row press" data-dev-host-jump="live" data-mkey="dev-host-standby" style="width:100%;text-align:left;padding:10px 14px;margin-bottom:2px;display:flex;align-items:center;gap:10px">' +
+      gi('green', 'screen') +
+      '<span class="tx"><div class="t" style="font-size:13px;font-weight:650">本机守护运行中 · 查看手机应用实时联网与后台耗电</div>' +
+      '<div class="s">当前热点 0 台在线（热点连接 0 条） · 点击直达本机管控中心</div></span>' +
+      ico('right', 'chev') + '</button>';
+  }
+  return '<div style="margin-top:12px;display:flex;justify-content:center">' +
+    '<button type="button" class="btn sec press" data-dev-host-jump="live" style="border-radius:999px;padding:7px 14px;font-size:12.5px;display:inline-flex;align-items:center;gap:6px">' +
+      '<span class="breathe" style="width:6px;height:6px;flex-shrink:0"></span>' +
+      '<span>本机守护运行中 · 查看手机应用实时联网与后台耗电</span>' +
+      ico('right', 'chev') +
+    '</button></div>';
+}
 function devListHtml() {
   if (!S.devLoaded) return '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
   var all = displayOrder(visibleDevs());
-  if (all.length) return all.map(devCard).join('');
+  var noOnline = S.hotspot.active === false || S.devices.filter(function (d) { return d.online; }).length === 0;
+  if (all.length) return (noOnline && !S.q ? devStandbyHostBtnHtml(true) : '') + all.map(devCard).join('');
   var msg = S.hotspot.active === false ? '热点未开启 · 在线设备会显示在这里' : S.q ? '没有匹配的设备，换个关键词试试' : S.filter === 'offline_rules' ? '没有留着规则的离线设备' : '暂无设备 · 连接热点后会出现在这里';
-  return '<div class="glass empty">' + msg + '</div>';
+  return '<div class="glass empty">' + msg + (noOnline && !S.q ? devStandbyHostBtnHtml(false) : '') + '</div>';
 }
 function freshText() {
   if (!S.connected) return { t: S.bootErr ? '未连接后端' : '正在连接 HNC 后端…', c: S.bootErr ? 'err' : '' };
@@ -800,14 +829,15 @@ function renderOffloadBanner() {
   el.hidden = !show;
 }
 function renderDevices(anim1) {
-  var l = S.live || {}, on = S.devices.filter(function (d) { return d.online; }).length;
+  var l = S.live || {}, on = S.hotspot.active === false ? 0 : S.devices.filter(function (d) { return d.online; }).length;
+  var hsFlows = devHotspotFlows();
   var fl = FILTERS.filter(function (f) { return f[0] === S.filter; })[0] || FILTERS[0];
   var h = '<div class="wrap' + (wide() ? ' dev-split' : '') + '"><div class="wrap" style="margin:0;max-width:none">' + bridgeBanner() + '<div id="sim-bn" style="display:contents">' + simBannerHtml() + '</div>' +
     '<div class="banner warn" id="offload-banner" hidden><span class="bi"><b>!</b></span><div style="min-width:0"><div class="bt">检测到硬件 offload 正在转发流量</div><div class="bm">系统的 BPF tether offload 可能绕过 tc，导致限速偏松。若限速失灵，可在系统设置里关闭热点硬件加速，或重开一次热点。</div></div><button class="bx" data-act="offload-dismiss" aria-label="忽略">×</button></div>' +
     '<div class="glass hero"><div><div class="hero-l">下行</div><div class="hero-v num"><span id="h-dn">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
     '<div><div class="hero-l">上行</div><div class="hero-v num"><span id="h-up">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
-    '<div class="right"><div class="hero-l"><span class="breathe' + (S.hotspot.active === false ? ' off' : '') + '" id="h-dot"></span><span id="h-state">' + (S.hotspot.active === false ? '热点关' : '在线') + '</span></div><div class="hero-v num"><span id="h-on">' + num(l.online, on) + '</span><span class="u">/ <span id="h-total">' + num(l.total, S.devices.length) + '</span><span class="dw"> 设备</span></span></div></div>' +
-    '<svg class="spark" id="spark" aria-label="近 60 秒下行速率"></svg></div>' +
+    '<div class="right"><div class="hero-l"><span class="breathe' + (S.hotspot.active === false ? ' off' : '') + '" id="h-dot"></span><span id="h-state">' + (S.hotspot.active === false ? '热点关' : '在线') + '</span></div><div class="hero-v num"><span id="h-on">' + (S.hotspot.active === false ? 0 : num(l.online, on)) + '</span><span class="u">/ <span id="h-total">' + num(l.total, S.devices.length) + '</span><span class="dw"> 设备</span></span></div></div>' +
+    '<svg class="spark" id="spark" width="300" height="40" aria-label="近 60 秒下行速率"></svg></div>' +
     '<div id="hero-limiter-slot" style="display:contents">' + activeLimiterBarHtml() + '</div>' +
     '<div class="fresh" id="fresh"></div>' + '<div id="v6-dev-strip-mount" style="display:contents">' + (typeof v6DevicesStripHtml === 'function' ? v6DevicesStripHtml() : '') + '</div>' +
     '<label class="glass search">' + ico('search') + '<input id="q" type="search" placeholder="搜索设备 · IP · MAC · 名称" value="' + esc(S.q) + '" autocomplete="off"></label>' +
@@ -826,7 +856,7 @@ function renderDevices(anim1) {
     '<div class="toolbar"><button class="chip press' + (S.batch ? ' on' : '') + '" data-act="batch">' + ico('box') + '批量</button><button class="chip press" data-act="tpl">' + ico('star') + '模板</button><button class="chip press" data-act="quick-health">' + ico('shield') + '省电体检</button></div>' +
     (S.batch ? '<div class="glass batchbar swap"><div class="top"><span>已选 <b class="num" id="picked-n">' + Object.keys(S.picked).length + '</b> 台</span><button class="hint-a" data-act="b-all">全选</button><button class="hint-a" data-act="b-none">清空</button><button class="hint-a" data-act="batch">退出</button></div>' +
       '<div class="btns"><button class="btn sec press" data-act="b-tpl">应用模板</button><button class="btn sec press" data-act="b-clear">清除限速</button><button class="btn sec press" data-act="b-cdelay">清除延迟</button><button class="btn dan press" data-act="b-block">加黑</button><button class="btn ok press" data-act="b-unblock">解黑</button></div></div>' : '') +
-    '<div class="sec"><span>设备列表</span><span class="r"><span id="list-on">' + on + '</span> 在线 · ' + (visibleDevs().length < S.devices.length ? ('当前显示 ' + visibleDevs().length + ' / 共 ' + S.devices.length) : ('共 ' + S.devices.length)) + '</span></div>' +
+    '<div class="sec"><span>设备列表</span><span class="r"><span id="list-on">' + on + '</span> 在线 · 热点连接 <span id="list-hs-flows">' + hsFlows + '</span> · ' + (visibleDevs().length < S.devices.length ? ('显示 ' + visibleDevs().length + ' / 共 ' + S.devices.length) : ('共 ' + S.devices.length)) + '</span></div>' +
     '<div class="dev-list' + (S.batch ? ' batch' : '') + '" id="dev-list">' + devListHtml() + '</div></div>' +
     (wide() ? '<div class="dev-side" id="dev-side">' + devSide() + '</div>' : '') + '</div>';
   var p = $('#p-devices');
@@ -842,7 +872,8 @@ function renderDevList(animate) {
   if (flip) $$('#dev-list > .dev').forEach(function (c) { before[c.getAttribute('data-dev')] = c.getBoundingClientRect().top; });
   // 卡片元素复用 → 正在输入的框、焦点、光标位置天然保留(此前整表 innerHTML 要先快照再还原)
   morph(list, devListHtml()); placeSegs(list); paintOnlineHours(); paintSimBanner();
-  var lo = $('#list-on'); if (lo) lo.textContent = S.devices.filter(function (d) { return d.online; }).length;
+  var lo = $('#list-on'); if (lo) lo.textContent = S.hotspot.active === false ? 0 : S.devices.filter(function (d) { return d.online; }).length;
+  var lf = $('#list-hs-flows'); if (lf) lf.textContent = devHotspotFlows();
   if (wide()) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); placeSegs(sd); } }
   if (animate) { stagger(list); return; }
   if (flip) $$('#dev-list > .dev').forEach(function (c) {
@@ -856,7 +887,8 @@ function paintHero(tw) {
   var l = S.live || {}, dn = num(l.rx_bps) / 1048576, up = num(l.tx_bps) / 1048576;
   if (tw) { tween($('#h-dn'), dn, 2); tween($('#h-up'), up, 2); }
   else if ($('#h-dn')) { $('#h-dn').textContent = dn.toFixed(2); $('#h-up').textContent = up.toFixed(2); }
-  if ($('#h-on')) { $('#h-on').textContent = num(l.online, 0); $('#h-total').textContent = num(l.total, S.devices.length); }
+  if ($('#h-on')) { $('#h-on').textContent = S.hotspot.active === false ? 0 : num(l.online, 0); $('#h-total').textContent = num(l.total, S.devices.length); }
+  var lf = $('#list-hs-flows'); if (lf) lf.textContent = devHotspotFlows();
   var dot = $('#h-dot'); if (dot) { dot.classList.toggle('off', S.hotspot.active === false); $('#h-state').textContent = S.hotspot.active === false ? '热点关' : '在线'; }
   paintLimiterBar();
 }
@@ -1155,4 +1187,21 @@ function setWhitelistMode(on, el) {
   });
 }
 
-
+(function bindDevHostEntryDelegate() {
+  if (typeof document === 'undefined' || document.__devHostEntryBound) return;
+  document.__devHostEntryBound = true;
+  document.addEventListener('click', function (ev) {
+    var t = typeof evEl === 'function' ? evEl(ev) : (ev && ev.target);
+    if (!t || typeof t.closest !== 'function') return;
+    var btn = t.closest('[data-dev-host-jump]');
+    if (!btn) return;
+    ev.preventDefault();
+    var md = btn.getAttribute('data-dev-host-jump') || 'live';
+    if (typeof haptic === 'function') haptic(8);
+    if (typeof window.openV6Subtab === 'function') {
+      window.openV6Subtab('host', { mode: md });
+    } else if (typeof go === 'function') {
+      go('vector');
+    }
+  });
+})();

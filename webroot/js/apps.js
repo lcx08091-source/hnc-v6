@@ -157,9 +157,9 @@ function renderApps(anim1) {
   var h = '<div class="wrap">' +
     '<div class="glass ahero"><div class="stats">' +
       '<div><div class="l">热点今日应用</div><div class="v num">' + hsAppCnt + '</div></div><div class="hero-div"></div>' +
-      '<div><div class="l">本机活跃应用</div><div class="v num">' + active + (rows.length > active ? '<small style="font-size:12px;color:var(--text-3)"> / ' + rows.length + '</small>' : '') + '</div></div><div class="hero-div"></div>' +
+      '<div class="press" data-apps-host-jump="live" role="button" tabindex="0" title="点击打开本机守护实时管控" style="cursor:pointer"><div class="l">本机活跃应用</div><div class="v num">' + active + (rows.length > active ? '<small style="font-size:12px;color:var(--text-3)"> / ' + rows.length + '</small>' : '') + '</div></div><div class="hero-div"></div>' +
       '<div><div class="l">待确认新规则</div><div class="v num" style="color:' + (pend ? 'var(--orange)' : 'var(--text-1)') + '">' + pend + '</div></div><div class="hero-div"></div>' +
-      '<div><div class="l">本机归因</div><div class="v" style="color:' + st[1] + '">' + st[0] + '</div></div></div>' +
+      '<div class="press" data-apps-host-jump="live" role="button" tabindex="0" title="实时网速 · 后台耗电耗流 · 本机防火墙" style="cursor:pointer"><div class="l">本机归因</div><div class="v" style="color:' + st[1] + '">' + st[0] + '</div></div></div>' +
       '<div class="foot2"><span class="breathe' + (self && self.enabled ? '' : ' off') + '"></span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + foot + '</span></div></div>' +
     seg('apps-sub', [['active', '活跃应用'], ['rules', '应用规则中心' + (pend ? ' · ' + pend : '')]], S.appsSub) +
     '<div class="subview" id="apps-sub">' + appsSub() + '</div></div>';
@@ -233,12 +233,18 @@ function appsSub() {
     var mx = Math.max.apply(null, rows.map(function (r) { return r.bytes; }).concat([1]));
     var fx = (S.cfg && S.cfg.flywheel_exclude_user) || [];
 
-    var hostHtml = !rows.length
-      ? '<div class="glass empty">' + (qStr && allRows.length ? '未找到匹配「' + esc(qStr) + '」的本机应用' : !self ? 'dpid 暂未上报本机数据' : !self.enabled ? '本机采样休眠中 · 亮屏后自动恢复，或前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 切换' : '采样器刚就绪 · 等待首批连接…') + '</div>'
-      : '<div class="sec"><span>热点手机本机应用 <small>UID 级真实套接字归因 · 点开可排除代理</small></span><button class="linkish" data-act="self-conns">此刻连接明细</button></div>' +
-        '<div class="glass rows">' + usr.slice(0, 50).map(function (r) { return appRow(r, mx); }).join('') + '</div>' +
-        (sys.length ? '<div class="glass' + (S.open.sysapps ? ' open' : '') + '" data-foldkey="sysapps"><button class="card-h" data-act="fold" data-key="sysapps">' + gi('gray', 'cpu') + '<span class="tx"><div class="t">本机系统与组件应用</div><div class="s">' + sys.length + ' 个 · 默认收起不污染规则库</div></span>' + ico('chev', 'chev') + '</button>' +
-          '<div class="fold"><div><div class="fold-in rows" style="border-top:1px solid var(--divider)">' + sys.slice(0, 80).map(function (r) { return appRow(r, mx); }).join('') + '</div></div></div></div>' : '');
+    var hostGuardEntryHtml = '<button type="button" class="glass row press" data-apps-host-jump="live" data-mkey="apps-host-guard-entry" style="width:100%;text-align:left;padding:10px 14px;display:flex;align-items:center;gap:10px">' +
+      gi('green', 'screen') +
+      '<span class="tx"><div class="t" style="font-size:13.5px;font-weight:650">本机守护中心</div><div class="s">实时网速 · 后台耗电耗流 · 本机防火墙</div></span>' +
+      '<span class="hint-a" style="display:inline-flex;align-items:center;gap:2px">前往' + ico('right', 'chev') + '</span></button>';
+
+    var hostHtml = '<div class="sec"><span>热点手机本机应用 <small>UID 级真实套接字归因 · 点开可排除代理</small></span><button class="linkish" data-act="self-conns">此刻连接明细</button></div>' +
+      hostGuardEntryHtml +
+      (!rows.length
+        ? '<div class="glass empty">' + (qStr && allRows.length ? '未找到匹配「' + esc(qStr) + '」的本机应用' : !self ? 'dpid 暂未上报本机数据' : !self.enabled ? '本机采样休眠中 · 亮屏后自动恢复，或前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 切换' : '采样器刚就绪 · 等待首批连接…') + '</div>'
+        : '<div class="glass rows">' + usr.slice(0, 50).map(function (r) { return appRow(r, mx); }).join('') + '</div>' +
+          (sys.length ? '<div class="glass' + (S.open.sysapps ? ' open' : '') + '" data-foldkey="sysapps"><button class="card-h" data-act="fold" data-key="sysapps">' + gi('gray', 'cpu') + '<span class="tx"><div class="t">本机系统与组件应用</div><div class="s">' + sys.length + ' 个 · 默认收起不污染规则库</div></span>' + ico('chev', 'chev') + '</button>' +
+            '<div class="fold"><div><div class="fold-in rows" style="border-top:1px solid var(--divider)">' + sys.slice(0, 80).map(function (r) { return appRow(r, mx); }).join('') + '</div></div></div></div>' : ''));
 
     var exclHtml = '<div class="glass' + (S.open.fwexcl ? ' open' : '') + '" data-foldkey="fwexcl"><button class="card-h" data-act="fold" data-key="fwexcl">' + gi('cyan', 'shield') + '<span class="tx"><div class="t">VPN / 代理导管排除名单</div><div class="s">不参与自动规则与原型学习的包名 · 已自定义 ' + fx.length + ' 个</div></span>' + ico('chev', 'chev') + '</button>' +
       '<div class="fold"><div><div class="fold-in set-body">' +
@@ -398,3 +404,23 @@ function excludeApp(pkg, name) {
     }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e) { toast(errText(e), 'err'); });
   });
 }
+
+(function bindAppsHostEntryDelegate() {
+  if (typeof document === 'undefined' || document.__appsHostEntryBound) return;
+  document.__appsHostEntryBound = true;
+  document.addEventListener('click', function (ev) {
+    var t = typeof evEl === 'function' ? evEl(ev) : (ev && ev.target);
+    if (!t || typeof t.closest !== 'function') return;
+    var btn = t.closest('[data-apps-host-jump]');
+    if (!btn) return;
+    ev.preventDefault();
+    var md = btn.getAttribute('data-apps-host-jump') || 'live';
+    if (typeof haptic === 'function') haptic(8);
+    if (typeof window.openV6Subtab === 'function') {
+      window.openV6Subtab('host', { mode: md });
+    } else if (typeof go === 'function') {
+      go('vector');
+    }
+  });
+})();
+

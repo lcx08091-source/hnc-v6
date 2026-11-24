@@ -89,6 +89,7 @@ func TestVcName(t *testing.T) {
 		"6009302": "6.1.0-rc.2",
 		"6009303": "6.1.0-rc.3",
 		"6009304": "6.1.0-rc.4",
+		"6009305": "6.1.0-rc.5",
 		"6010000": "6.1.0",
 		"6010002": "6.1.2",
 		"6019203": "6.2.0-beta.3",
@@ -133,7 +134,7 @@ func TestRollbackCorridorRC2And610(t *testing.T) {
 		t.Fatalf("rc.2 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
 	}
 
-	// 场景 1b: 当前候选版 6009304 (6.1.0-rc.4) 启动失败同样自动退回黄金底包 6000001 (6.0.1)
+	// 场景 1b: 6009304 (6.1.0-rc.4) 启动失败自动退回黄金底包 6000001 (6.0.1)
 	dirRC4 := t.TempDir()
 	dataRC4 := filepath.Join(dirRC4, "data")
 	if err := os.MkdirAll(dataRC4, 0o755); err != nil {
@@ -156,6 +157,31 @@ func TestRollbackCorridorRC2And610(t *testing.T) {
 	if it := scRollbackItem(c); it.Status != scWarn || it.Value != "已自动退回 6.0.1" ||
 		!strings.Contains(it.Detail, "检测到 6.1.0-rc.4 启动失败") {
 		t.Fatalf("rc.4 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
+	}
+
+	// 场景 1c: 当前候选版 6009305 (6.1.0-rc.5) 启动失败同样自动退回黄金底包 6000001 (6.0.1)
+	dirRC5 := t.TempDir()
+	dataRC5 := filepath.Join(dirRC5, "data")
+	if err := os.MkdirAll(dataRC5, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rc5JSON := `{"from":"6009305","to":"6000001","reason":"failstreak=6 restarts=0","at":1795400000,"action":"rolled_back"}`
+	if err := os.WriteFile(filepath.Join(dataRC5, "rollback.json"), []byte(rc5JSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataRC5, "rollback.pinned"), []byte("6009305\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sRC5 := &server{hncDir: dirRC5}
+	gotRC5 := sRC5.rollbackStatus()
+	if gotRC5 == nil || !gotRC5.Rolled || gotRC5.From != "6009305" || gotRC5.To != "6000001" ||
+		gotRC5.FromName != "6.1.0-rc.5" || gotRC5.ToName != "6.0.1" || !gotRC5.Pinned || gotRC5.Acknowledged {
+		t.Fatalf("rc.5 -> 6.0.1 rollbackStatus mismatch: %+v", gotRC5)
+	}
+	f.files[f.h("data", "rollback.json")] = rc5JSON
+	if it := scRollbackItem(c); it.Status != scWarn || it.Value != "已自动退回 6.0.1" ||
+		!strings.Contains(it.Detail, "检测到 6.1.0-rc.5 启动失败") {
+		t.Fatalf("rc.5 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
 	}
 
 	// 场景 2: 6010000 (6.1.0 正式版) 回退至 6000001 (6.0.1) 与后续预发布回退至 6010000 (6.1.0)

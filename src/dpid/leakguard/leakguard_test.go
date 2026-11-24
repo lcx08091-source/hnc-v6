@@ -547,3 +547,173 @@ func TestEngineSetIdleCheckThrottleAndPacketLazySync(t *testing.T) {
 		t.Fatal("expected ctrlTk to reset back to 1s once SetIdleCheck returns false")
 	}
 }
+
+func TestCredentialAndIDCardZeroFalsePositiveDetection(t *testing.T) {
+	dir := t.TempDir()
+	eng := NewEngine(dir)
+	defer eng.Close()
+
+	// Valid 3-part JWT: header={"alg":"HS256","typ":"JWT"}, payload={"sub":"10086","role":"admin"}
+	jwt := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMDA4NiIsInJvbGUiOiJhZG1pbiJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+
+	// 1. Authorization: Basic / Bearer + Cookie sid + Query api_key + Body password & JWT.
+	req1 := "POST /v1/auth/login?api_key=ak_live_9988776655 HTTP/1.1\r\n" +
+		"Host: auth.insecure.example\r\n" +
+		"Authorization: Bearer bearer_secret_token_2026\r\n" +
+		"Cookie: theme=dark; sid=sess_abcdef123456\r\n" +
+		"Content-Type: application/json\r\n\r\n" +
+		`{"password":"PlainPassword!99","password_required":true,"flag_pwd":{"password":true},"extra_jwt":"` + jwt + `","fake_jwt":"eyJnotjson.notjson.sig123456"}`
+
+	evs1, n1 := eng.ProcessSync(PacketInput{
+		Time:       time.Unix(1763600000, 0),
+		Origin:     OriginHost,
+		UID:        10234,
+		Pkg:        "com.example.shop",
+		AppName:    "示例商城",
+		ClientIP:   "10.45.12.8",
+		DstIP:      "203.0.113.66",
+		DstPort:    80,
+		RawPayload: []byte(req1),
+	})
+	if n1 != 5 || len(evs1) != 5 {
+		t.Fatalf("expected 5 CREDENTIAL hits (api_key, Authorization Bearer, sid, password, JWT), got n=%d evs=%+v", n1, evs1)
+	}
+	wantCreds := map[string]bool{
+		"ak_live_9988776655":                false,
+		"Bearer bearer_secret_token_2026":   false,
+		"sess_abcdef123456":                 false,
+		"PlainPassword!99":                  false,
+		jwt:                                 false,
+	}
+	for _, ev := range evs1 {
+		if ev.LeakType != TypeCredential || ev.LeakLabel != "账号凭据/Token" {
+			t.Fatalf("unexpected credential event type/label: %+v", ev)
+		}
+		if ev.Origin != OriginHost || ev.UID != 10234 || ev.Pkg != "com.example.shop" || ev.AppName != "示例商城" {
+			t.Fatalf("host metadata mismatch: %+v", ev)
+		}
+		if strings.Contains(ev.RawValue, "*") || strings.Contains(ev.RawSnippet, "***") {
+			t.Fatalf("forbidden masking in RawValue/RawSnippet: %+v", ev)
+		}
+		if _, ok := wantCreds[ev.RawValue]; !ok {
+			t.Fatalf("unexpected false-positive credential value %q in %+v", ev.RawValue, ev)
+		}
+		wantCreds[ev.RawValue] = true
+	}
+	for k, seen := range wantCreds {
+		if !seen {
+			t.Fatalf("missing expected credential hit %q", k)
+		}
+	}
+
+	// Short Authorization (<8 token chars) must NOT trigger.
+	reqShortAuth := "GET /ping HTTP/1.1\r\nHost: auth.insecure.example\r\nAuthorization: Bearer short7\r\n\r\n"
+	if evsShort, _ := eng.ProcessSync(PacketInput{RawPayload: []byte(reqShortAuth)}); len(evsShort) != 0 {
+		t.Fatalf("expected short Authorization (<8 chars) to be ignored, got %+v", evsShort)
+	}
+
+	// Authorization: Basic >=8 chars MUST trigger.
+	reqBasic := "GET /admin HTTP/1.1\r\nHost: auth.insecure.example\r\nAuthorization: Basic YWRtaW46MTIzNDU2\r\n\r\n"
+	evsBasic, _ := eng.ProcessSync(PacketInput{RawPayload: []byte(reqBasic)})
+	if len(evsBasic) != 1 || evsBasic[0].LeakType != TypeCredential || evsBasic[0].RawValue != "Basic YWRtaW46MTIzNDU2" {
+		t.Fatalf("expected Authorization Basic credential hit, got %+v", evsBasic)
+	}
+
+	// 2. ID_CARD: valid 18-digit Mainland China ID cards vs. 18-digit order numbers / invalid dates / bad MOD 11-2.
+	validIDWithX := "11010519491231002X"
+	validIDLeap := "440301200002290016" // check: 4*7+4*9+0+3*5+0+1*4+2*2+0+0+0+0+2*9+2*10+9*5+0+0+1*2 = 28+36+15+4+4+18+20+45+2 = 172; 172%11=7 -> idCardCheckMods[7]='5' (recompute exact below)
+	_ = validIDLeap
+	// Compute exact check char for 44030120000229001_: 172 % 11 == 7 -> '5'
+	validIDLeap = "440301200002290015"
+	if !ValidCNIDCard(validIDWithX) || !ValidCNIDCard(validIDLeap) || !ValidCNIDCard(strings.ToLower(validIDWithX)) {
+		t.Fatalf("ValidCNIDCard rejected valid IDs: %s, %s", validIDWithX, validIDLeap)
+	}
+
+	invalidIDs := []string{
+		"202611230001234560", // 18-digit order number (province 20 invalid)
+		"110105194912310021", // bad ISO 7064 MOD 11-2 check digit (should be X)
+		"110105199902290029", // non-leap year 1999-02-29 (even if check digit matches: sum=7+9+0+5+0+20+2+9+54+27+0+18+20+45+0+0+4=220; 220%11=0 -> '1')
+		"110105199902290021", // non-leap year 1999-02-29 WITH matching MOD 11-2 check digit '1'!
+		"110105199513010026", // invalid month 13
+		"110105188001010024", // out-of-range year 1880
+	}
+	for _, badID := range invalidIDs {
+		if ValidCNIDCard(badID) {
+			t.Fatalf("ValidCNIDCard(%q) must be false (anti-false-positive guardrail)", badID)
+		}
+	}
+
+	reqID := "POST /kyc/verify HTTP/1.1\r\nHost: kyc.example.cn\r\nContent-Type: application/json\r\n\r\n" +
+		`{"order_id":"202611230001234560","bad_leap":"110105199902290021","long_num":"9911010519491231002X88","id_card":"` + validIDWithX + `","memo":"户籍核验 ` + validIDLeap + ` 完成"}`
+	evsID, nID := eng.ProcessSync(PacketInput{
+		Time:       time.Unix(1763600010, 0),
+		Origin:     OriginHost,
+		UID:        10235,
+		Pkg:        "com.example.kyc",
+		RawPayload: []byte(reqID),
+	})
+	if nID != 2 || len(evsID) != 2 {
+		t.Fatalf("expected 2 ID_CARD hits (keyed + standalone, zero order-number false positives), got n=%d evs=%+v", nID, evsID)
+	}
+	for _, ev := range evsID {
+		if ev.LeakType != TypeIDCard || ev.LeakLabel != "身份证号" {
+			t.Fatalf("unexpected ID_CARD event: %+v", ev)
+		}
+		if ev.RawValue != validIDWithX && ev.RawValue != validIDLeap {
+			t.Fatalf("unexpected ID_CARD RawValue: %q", ev.RawValue)
+		}
+	}
+}
+
+func TestHostOriginPerAppDeduplicationAndCanonicalTypes(t *testing.T) {
+	for _, alias := range []string{"credential", "token", "password", "auth"} {
+		if got, ok := CanonicalIgnoreLeakType(alias); !ok || got != TypeCredential {
+			t.Fatalf("CanonicalIgnoreLeakType(%q) = (%q, %v), want (%q, true)", alias, got, ok, TypeCredential)
+		}
+	}
+	for _, alias := range []string{"id_card", "idcard"} {
+		if got, ok := CanonicalIgnoreLeakType(alias); !ok || got != TypeIDCard {
+			t.Fatalf("CanonicalIgnoreLeakType(%q) = (%q, %v), want (%q, true)", alias, got, ok, TypeIDCard)
+		}
+	}
+
+	rb := NewRingBuffer(64, 300)
+	t0 := time.Unix(1763601000, 0)
+
+	// App A (UID=10101, MAC="") and App B (UID=10102, MAC="") leak identical credential to same host:
+	// MUST NOT swallow each other despite MAC == ""!
+	evA1, newA1 := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10101,
+		Pkg:      "com.app.alpha",
+		AppName:  "Alpha",
+		DstHost:  "api.shared.example",
+		LeakType: TypeCredential,
+		RawValue: "secret123456",
+	}, t0)
+	evB1, newB1 := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10102,
+		Pkg:      "com.app.beta",
+		AppName:  "Beta",
+		DstHost:  "api.shared.example",
+		LeakType: TypeCredential,
+		RawValue: "secret123456",
+	}, t0.Add(5*time.Second))
+	if !newA1 || !newB1 || rb.Len() != 2 || evA1.ID == evB1.ID {
+		t.Fatalf("distinct host apps with empty MAC collided in RingBuffer: newA=%v newB=%v len=%d", newA1, newB1, rb.Len())
+	}
+
+	// Same App A repeating within cooldown window -> aggregates HitCount to 2.
+	evA2, newA2 := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10101,
+		Pkg:      "com.app.alpha",
+		DstHost:  "api.shared.example",
+		LeakType: TypeCredential,
+		RawValue: "secret123456",
+	}, t0.Add(20*time.Second))
+	if newA2 || evA2.HitCount != 2 || rb.Len() != 2 {
+		t.Fatalf("same host app should aggregate within cooldown: newA2=%v hit=%d len=%d", newA2, evA2.HitCount, rb.Len())
+	}
+}

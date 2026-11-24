@@ -85,6 +85,10 @@ func CanonicalIgnoreLeakType(raw string) (string, bool) {
 		return TypeGPS, true
 	case "mac_addr", "macaddr", "mac", "bssid", "wifi_mac":
 		return TypeMACAddr, true
+	case "credential", "token", "password", "auth":
+		return TypeCredential, true
+	case "id_card", "idcard":
+		return TypeIDCard, true
 	default:
 		return strings.ToUpper(low), true
 	}

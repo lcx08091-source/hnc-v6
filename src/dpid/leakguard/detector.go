@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"io"
 	"log"
 	"math"
@@ -27,15 +28,23 @@ const (
 )
 
 var (
-	phoneKeyRe = regexp.MustCompile(`(?i)(phone|mobile|tel|msisdn|user_?phone)`)
-	phoneValRe = regexp.MustCompile(`^(?:\+?86[- ]?)?(1[3-9]\d{9})$`)
-	macTokenRe = regexp.MustCompile(`(?i)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}`)
-	coordValRe = regexp.MustCompile(`^[+-]?\d{1,3}\.\d{4,12}$`)
+	phoneKeyRe        = regexp.MustCompile(`(?i)(phone|mobile|tel|msisdn|user_?phone)`)
+	phoneValRe        = regexp.MustCompile(`^(?:\+?86[- ]?)?(1[3-9]\d{9})$`)
+	macTokenRe        = regexp.MustCompile(`(?i)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}`)
+	coordValRe        = regexp.MustCompile(`^[+-]?\d{1,3}\.\d{4,12}$`)
+	credExactKeyRe    = regexp.MustCompile(`(?i)^(password|passwd|pwd|access_token|refresh_token|auth_token|api_key|apikey|app_secret|client_secret|session_id|sid)$`)
+	jwtTokenRe        = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}`)
+	idCardKeyRe       = regexp.MustCompile(`(?i)(id_?card|id_?no|cert_?no|sfz|identity)`)
+	idCardCandidateRe = regexp.MustCompile(`[1-9]\d{16}[0-9Xx]`)
 )
 
 // PacketInput describes a captured cleartext HTTP request fed into LeakGuard.
 type PacketInput struct {
 	Time       time.Time
+	Origin     string
+	UID        int
+	Pkg        string
+	AppName    string
 	ClientMAC  string
 	ClientIP   string
 	DstIP      string
@@ -49,6 +58,10 @@ type PacketInput struct {
 
 type packetJob struct {
 	ts        time.Time
+	origin    string
+	uid       int
+	pkg       string
+	appName   string
 	clientMAC string
 	clientIP  string
 	dstIP     string
@@ -349,6 +362,10 @@ func (e *Engine) Submit(in PacketInput) bool {
 	copy(job.raw[:n], in.RawPayload[:n])
 	job.rawLen = n
 	job.ts = in.Time
+	job.origin = in.Origin
+	job.uid = in.UID
+	job.pkg = in.Pkg
+	job.appName = in.AppName
 	job.clientMAC = in.ClientMAC
 	job.clientIP = in.ClientIP
 	job.dstIP = in.DstIP
@@ -445,6 +462,10 @@ func (e *Engine) processJob(job *packetJob) (newAlert bool, dirty bool) {
 	}
 	in := PacketInput{
 		Time:       job.ts,
+		Origin:     job.origin,
+		UID:        job.uid,
+		Pkg:        job.pkg,
+		AppName:    job.appName,
 		ClientMAC:  job.clientMAC,
 		ClientIP:   job.clientIP,
 		DstIP:      job.dstIP,
@@ -1004,6 +1025,13 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 		return false
 	}
 
+	normOrigin := strings.ToLower(strings.TrimSpace(in.Origin))
+	if normOrigin != OriginHost && normOrigin != OriginHotspot {
+		normOrigin = ""
+	}
+	normPkg := strings.TrimSpace(in.Pkg)
+	normAppName := strings.TrimSpace(in.AppName)
+
 	addHit := func(leakType, fieldKey, rawVal, searchHint string) {
 		if rawVal == "" {
 			return
@@ -1018,6 +1046,10 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 			hint = rawVal
 		}
 		out = append(out, LeakEvent{
+			Origin:     normOrigin,
+			UID:        in.UID,
+			Pkg:        normPkg,
+			AppName:    normAppName,
 			MAC:        strings.ToLower(strings.TrimSpace(in.ClientMAC)),
 			ClientIP:   in.ClientIP,
 			SrcIP:      in.ClientIP,
@@ -1091,6 +1123,23 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 				addHit(TypeMACAddr, keyTrim, macRaw, rawHint)
 			}
 		})
+
+		// 5. CREDENTIAL: exact credential/token/session parameter names or standard 3-part JWT.
+		if keyTrim != "" && credExactKeyRe.MatchString(keyTrim) && !isTrivialCredentialPlaceholder(valTrim) {
+			addHit(TypeCredential, keyTrim, valTrim, rawHint)
+		}
+		scanJWTTokens(valTrim, func(jwt string) {
+			addHit(TypeCredential, keyTrim, jwt, rawHint)
+		})
+
+		// 6. ID_CARD: parameter matching (?i)(id_?card|id_?no|cert_?no|sfz|identity) or standalone
+		// 18-digit Mainland China ID card verified by birth date + ISO 7064:1983.MOD 11-2 check char.
+		if keyTrim != "" && idCardKeyRe.MatchString(keyTrim) && ValidCNIDCard(valTrim) {
+			addHit(TypeIDCard, keyTrim, valTrim, rawHint)
+		}
+		scanIDCardTokens(valTrim, func(idRaw string) {
+			addHit(TypeIDCard, keyTrim, idRaw, rawHint)
+		})
 	}
 
 	scanFormEncoded(hp.rawQuery, func(k, v, rawSeg string) {
@@ -1112,6 +1161,12 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 			addHit(TypeMACAddr, "url_path", macRaw, path)
 		}
 	})
+	scanJWTTokens(pathOnly, func(jwt string) {
+		addHit(TypeCredential, "url_path", jwt, path)
+	})
+	scanIDCardTokens(pathOnly, func(idRaw string) {
+		addHit(TypeIDCard, "url_path", idRaw, path)
+	})
 
 	for _, hdr := range hp.headers {
 		hk, hv := hdr[0], hdr[1]
@@ -1120,6 +1175,13 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 			lowK == "accept-encoding" || lowK == "accept-language" ||
 			lowK == "connection" || lowK == "content-length" || lowK == "content-type" {
 			continue
+		}
+		if lowK == "authorization" {
+			decAuth := PercentDecode(hv, false)
+			if cred, ok := extractAuthHeaderCredential(decAuth); ok {
+				addHit(TypeCredential, hk, cred, hv)
+				continue
+			}
 		}
 		if lowK == "cookie" {
 			for _, part := range strings.Split(hv, ";") {
@@ -1160,6 +1222,12 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 			if isKnown(normMAC) {
 				addHit(TypeMACAddr, "", macRaw, macRaw)
 			}
+		})
+		scanJWTTokens(decodedBody, func(jwt string) {
+			addHit(TypeCredential, "", jwt, jwt)
+		})
+		scanIDCardTokens(decodedBody, func(idRaw string) {
+			addHit(TypeIDCard, "", idRaw, idRaw)
 		})
 	}
 
@@ -1482,11 +1550,198 @@ func normalizeValidMAC(s string) string {
 	return norm
 }
 
-func sameValueKey(leakType, v string) string {
-	if leakType == TypeMACAddr {
-		return normalizeMACCompare(v)
+var cnProvinceCodes = [100]bool{
+	11: true, 12: true, 13: true, 14: true, 15: true,
+	21: true, 22: true, 23: true,
+	31: true, 32: true, 33: true, 34: true, 35: true, 36: true, 37: true,
+	41: true, 42: true, 43: true, 44: true, 45: true, 46: true,
+	50: true, 51: true, 52: true, 53: true, 54: true,
+	61: true, 62: true, 63: true, 64: true, 65: true,
+	71: true, 81: true, 82: true, 83: true,
+}
+
+var (
+	idCardWeights   = [17]int{7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2}
+	idCardCheckMods = [11]byte{'1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'}
+)
+
+func isTrivialCredentialPlaceholder(v string) bool {
+	if v == "" {
+		return true
 	}
-	return v
+	switch strings.ToLower(v) {
+	case "true", "false", "null", "undefined", "nil", "none":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractAuthHeaderCredential(hv string) (string, bool) {
+	v := strings.TrimSpace(hv)
+	if v == "" {
+		return "", false
+	}
+	sp := strings.IndexAny(v, " \t")
+	if sp <= 0 {
+		return "", false
+	}
+	scheme := v[:sp]
+	if !strings.EqualFold(scheme, "basic") && !strings.EqualFold(scheme, "bearer") {
+		return "", false
+	}
+	cred := strings.TrimSpace(v[sp+1:])
+	if len(cred) < 8 || isTrivialCredentialPlaceholder(cred) {
+		return "", false
+	}
+	return v, true
+}
+
+func isBase64URLChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
+}
+
+func scanJWTTokens(s string, onMatch func(jwt string)) {
+	if len(s) < 16 || !strings.Contains(s, "eyJ") {
+		return
+	}
+	locs := jwtTokenRe.FindAllStringIndex(s, 8)
+	for _, loc := range locs {
+		start, end := loc[0], loc[1]
+		if start > 0 && isBase64URLChar(s[start-1]) {
+			continue
+		}
+		if end < len(s) && isBase64URLChar(s[end]) {
+			continue
+		}
+		cand := s[start:end]
+		if isValidJWTToken(cand) {
+			onMatch(cand)
+		}
+	}
+}
+
+func isValidJWTToken(tok string) bool {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	if !strings.HasPrefix(parts[0], "eyJ") || len(parts[1]) < 4 || len(parts[2]) < 4 {
+		return false
+	}
+	hdr, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	hdrTrim := bytes.TrimSpace(hdr)
+	if len(hdrTrim) < 2 || hdrTrim[0] != '{' || hdrTrim[len(hdrTrim)-1] != '}' || !utf8.Valid(hdrTrim) {
+		return false
+	}
+	hdrLow := strings.ToLower(string(hdrTrim))
+	if !strings.Contains(hdrLow, `"alg"`) && !strings.Contains(hdrLow, `"typ"`) &&
+		!strings.Contains(hdrLow, `"kid"`) && !strings.Contains(hdrLow, `"enc"`) {
+		return false
+	}
+	pay, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(pay) == 0 {
+		return false
+	}
+	if strings.HasPrefix(parts[1], "eyJ") {
+		payTrim := bytes.TrimSpace(pay)
+		if len(payTrim) < 2 || payTrim[0] != '{' || payTrim[len(payTrim)-1] != '}' {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidCNIDCard validates an 18-character Mainland China second-generation resident ID card
+// using province code checks, strict Gregorian birth date verification (including leap years),
+// and ISO 7064:1983.MOD 11-2 check-character arithmetic.
+func ValidCNIDCard(s string) bool {
+	if len(s) != 18 {
+		return false
+	}
+	sum := 0
+	for i := 0; i < 17; i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+		sum += int(c-'0') * idCardWeights[i]
+	}
+	last := s[17]
+	if last == 'x' {
+		last = 'X'
+	}
+	if !((last >= '0' && last <= '9') || last == 'X') {
+		return false
+	}
+	if last != idCardCheckMods[sum%11] {
+		return false
+	}
+
+	prov := int(s[0]-'0')*10 + int(s[1]-'0')
+	if prov < 0 || prov >= len(cnProvinceCodes) || !cnProvinceCodes[prov] {
+		return false
+	}
+
+	year := int(s[6]-'0')*1000 + int(s[7]-'0')*100 + int(s[8]-'0')*10 + int(s[9]-'0')
+	month := int(s[10]-'0')*10 + int(s[11]-'0')
+	day := int(s[12]-'0')*10 + int(s[13]-'0')
+	maxYear := time.Now().Year()
+	if maxYear < 2030 {
+		maxYear = 2030
+	}
+	if year < 1900 || year > maxYear {
+		return false
+	}
+	if month < 1 || month > 12 || day < 1 {
+		return false
+	}
+	daysInMonth := [13]int{0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+	if (year%4 == 0 && year%100 != 0) || (year%400 == 0) {
+		daysInMonth[2] = 29
+	}
+	if day > daysInMonth[month] {
+		return false
+	}
+	return true
+}
+
+func isAlphaNumASCII(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func scanIDCardTokens(s string, onMatch func(idRaw string)) {
+	if len(s) < 18 {
+		return
+	}
+	locs := idCardCandidateRe.FindAllStringIndex(s, 8)
+	for _, loc := range locs {
+		start, end := loc[0], loc[1]
+		if start > 0 && isAlphaNumASCII(s[start-1]) {
+			continue
+		}
+		if end < len(s) && isAlphaNumASCII(s[end]) {
+			continue
+		}
+		cand := s[start:end]
+		if ValidCNIDCard(cand) {
+			onMatch(cand)
+		}
+	}
+}
+
+func sameValueKey(leakType, v string) string {
+	switch leakType {
+	case TypeMACAddr:
+		return normalizeMACCompare(v)
+	case TypeIDCard:
+		return strings.ToUpper(strings.TrimSpace(v))
+	default:
+		return v
+	}
 }
 
 func buildReadableSnippet(src []byte, rawVal, fallbackNeedle string) string {

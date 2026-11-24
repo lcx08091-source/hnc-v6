@@ -39,6 +39,7 @@ func TestRC4Atomic64StructAlignment(t *testing.T) {
 		{"flowScalpelEngine.seqGen", unsafe.Offsetof(zSc.seqGen)},
 		{"flowScalpelEngine.cutTotal", unsafe.Offsetof(zSc.cutTotal)},
 		{"flowScalpelEngine.guardBlocked", unsafe.Offsetof(zSc.guardBlocked)},
+		{"flowScalpelEngine.hostCutTotal", unsafe.Offsetof(zSc.hostCutTotal)},
 	}
 	for _, c := range checks {
 		if c.offset%8 != 0 {

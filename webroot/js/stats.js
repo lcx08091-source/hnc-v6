@@ -109,12 +109,23 @@ function puBodyHtml() {
   h += '<div class="pu-tiles">' + [['蜂窝', g('cellular'), PU_C.cell], ['Wi-Fi', g('wifi'), PU_C.wifi], ['热点', g('hotspot'), PU_C.hotspot]].map(function (x) {
     return '<div class="pu-tile"><div class="l"><i style="background:' + x[2] + '"></i>' + x[0] + '</div><div class="v num">' + bytes(x[1]) + '</div></div>'; }).join('') + '</div>';
   var lo = g('local'), hs = g('hotspot'), tot = lo + hs;
-  if (tot > 0) {
-    var via = r.hotspot_via || {}, vt = function (k) { return num(via[k] && via[k].total); };
-    h += '<div><div class="split"><i style="width:' + (lo / tot * 100).toFixed(1) + '%;background:' + PU_C.local + '"></i><i style="width:' + (hs / tot * 100).toFixed(1) + '%;background:' + PU_C.hotspot + '"></i></div>' +
-      '<div class="split-l"><span><i style="background:' + PU_C.local + '"></i>本机 ' + bytes(lo) + ' · ' + Math.round(lo / tot * 100) + '%</span><span><i style="background:' + PU_C.hotspot + '"></i>热点 ' + bytes(hs) + ' · ' + Math.round(hs / tot * 100) + '%</span></div>' +
-      (vt('cell') || vt('wifi') ? '<div class="note" style="margin-top:4px">热点走的上游：蜂窝 ' + bytes(vt('cell')) + ' · Wi-Fi ' + bytes(vt('wifi')) + (vt('unknown') ? ' · 未知 ' + bytes(vt('unknown')) : '') + '</div>' : '') + '</div>';
-  }
+  var via = r.hotspot_via || {}, vt = function (k) { return num(via[k] && via[k].total); };
+  h += '<div>' +
+    (tot > 0 ? '<div class="split" style="margin-bottom:8px"><i style="width:' + (lo / tot * 100).toFixed(1) + '%;background:' + PU_C.local + '"></i><i style="width:' + (hs / tot * 100).toFixed(1) + '%;background:' + PU_C.hotspot + '"></i></div>' : '') +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+      '<button type="button" class="pu-tile press" data-stats-host-jump="traffic" title="点击查看本机应用前后台流量排行" style="text-align:left;cursor:pointer;width:100%">' +
+        '<div class="l" style="justify-content:space-between"><span style="display:inline-flex;align-items:center;gap:5px"><i style="width:8px;height:8px;border-radius:2px;background:' + PU_C.local + '"></i>本机流量' + (tot > 0 ? ' · ' + Math.round(lo / tot * 100) + '%' : '') + '</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.65;flex-shrink:0" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg></div>' +
+        '<div class="v num">' + bytes(lo) + '</div>' +
+        '<div style="font-size:11px;color:var(--text-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">查看应用后台耗流排行</div>' +
+      '</button>' +
+      '<div class="pu-tile">' +
+        '<div class="l"><i style="background:' + PU_C.hotspot + '"></i>热点流量' + (tot > 0 ? ' · ' + Math.round(hs / tot * 100) + '%' : '') + '</div>' +
+        '<div class="v num">' + bytes(hs) + '</div>' +
+        '<div style="font-size:11px;color:var(--text-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">下挂设备共享合计</div>' +
+      '</div>' +
+    '</div>' +
+    (tot > 0 && (vt('cell') || vt('wifi')) ? '<div class="note" style="margin-top:6px">热点走的上游：蜂窝 ' + bytes(vt('cell')) + ' · Wi-Fi ' + bytes(vt('wifi')) + (vt('unknown') ? ' · 未知 ' + bytes(vt('unknown')) : '') + '</div>' : '') +
+  '</div>';
   // 每天(今天按小时)堆叠: 蜂窝本机 / Wi-Fi 本机 / 热点。上游量含热点, 热点按蜂窝:Wi-Fi 比例从两者里扣掉, 三段相加 = 上游总量
   var rows = S.puPeriod === 'today' && Array.isArray(r.by_hour) ? r.by_hour.map(function (x) { return { l: pad2(num(x.h)) + ':00', c: num(x.cell), w: num(x.wifi), hs: num(x.hotspot) }; })
     : (r.by_day || []).map(function (x) { return { l: String(x.date || '').slice(5), c: num(x.cell), w: num(x.wifi), hs: num(x.hotspot) }; });
@@ -350,9 +361,9 @@ function dpiBody() {
 }
 function fmtN(n) { n = num(n); return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n)); }
 function sparkSvg(a, color) {
-  if (!a || a.length < 2) return '<svg class="spark-mini"></svg>';
+  if (!a || a.length < 2) return '<svg class="spark-mini" width="100" height="26"></svg>';
   var d = a.map(function (v, i) { return i ? Math.max(0, v - a[i - 1]) : 0; }).slice(1), mx = Math.max.apply(null, d) || 1, W = 100, H = 26, st = W / Math.max(1, d.length - 1);
-  return '<svg class="spark-mini" viewBox="0 0 100 26" preserveAspectRatio="none"><path d="' + d.map(function (v, i) { return (i ? 'L' : 'M') + (i * st).toFixed(1) + ' ' + (H - 2 - v / mx * (H - 5)).toFixed(1); }).join(' ') + '" fill="none" stroke="' + color + '" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>';
+  return '<svg class="spark-mini" width="100" height="26" viewBox="0 0 100 26" preserveAspectRatio="none"><path d="' + d.map(function (v, i) { return (i ? 'L' : 'M') + (i * st).toFixed(1) + ' ' + (H - 2 - v / mx * (H - 5)).toFixed(1); }).join(' ') + '" fill="none" stroke="' + color + '" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>';
 }
 function stRow(t, v, cls, s) { return '<div class="row"><span class="tx"><div class="t" style="font-weight:600">' + t + '</div>' + (s ? '<div class="s">' + s + '</div>' : '') + '</span><span class="v ' + (cls || '') + '">' + v + '</span></div>'; }
 function fmtDpiRuleVersionHtml(rawVer, dfpEnabled) {
@@ -399,7 +410,7 @@ function paintDpi() {
     '<div class="top"><div class="dpihero-mode-wrap"><div class="mode">' + esc(st ? (MODE_T[st.mode] || st.mode || '—') : inactiveMsg) + '</div></div><div id="dpi-ring-slot" class="dpi-ring-slot"></div></div>' +
     (st ? '<div class="note" style="margin-top:6px">' + esc(st.interface || '—') + ' · 运行 ' + hms(st.uptime_s) + (st.stall_seconds ? ' · 停滞 ' + st.stall_seconds + ' 秒' : '') + (st.blind_reason ? ' · ' + esc(st.blind_reason) : '') + ' · 客户端 ' + num(st.client_count) + '</div>' : '<div class="note" style="margin-top:6px">DPI 引擎未运行，暂不引用陈旧快照伪造实时活跃占比</div>') +
     '<div class="grid">' + [['packets', '已抓包', 'var(--blue)'], ['dns_events', 'DNS 事件', 'var(--cyan)'], ['tls_events', 'TLS 事件', 'var(--purple)'], ['kernel_drops', '内核丢包', 'var(--red)']].map(function (x) {
-      return '<div><div class="n num">' + (dpiAlive ? fmtN(s[x[0]]) : '—') + '</div><div class="l">' + x[1] + '</div>' + (dpiAlive ? sparkSvg(S.dpiSpark[x[0]], x[2]) : '<svg class="spark-mini"></svg>') + '</div>'; }).join('') + '</div>' +
+      return '<div><div class="n num">' + (dpiAlive ? fmtN(s[x[0]]) : '—') + '</div><div class="l">' + x[1] + '</div>' + (dpiAlive ? sparkSvg(S.dpiSpark[x[0]], x[2]) : '<svg class="spark-mini" width="100" height="26"></svg>') + '</div>'; }).join('') + '</div>' +
     '<div class="dpi-algo-bar">' +
       '<span class="dpi-algo-pill"><b>零样本</b> 8跳 CNAME 穿透</span>' +
       '<span class="dpi-algo-pill"><b>零样本</b> 120ms 时间因果突发传播</span>' +
@@ -750,3 +761,21 @@ function rulesAct(act) {
   }
 }
 
+(function bindStatsHostEntryDelegate() {
+  if (typeof document === 'undefined' || document.__statsHostEntryBound) return;
+  document.__statsHostEntryBound = true;
+  document.addEventListener('click', function (ev) {
+    var t = typeof evEl === 'function' ? evEl(ev) : (ev && ev.target);
+    if (!t || typeof t.closest !== 'function') return;
+    var btn = t.closest('[data-stats-host-jump]');
+    if (!btn) return;
+    ev.preventDefault();
+    var md = btn.getAttribute('data-stats-host-jump') || 'traffic';
+    if (typeof haptic === 'function') haptic(8);
+    if (typeof window.openV6Subtab === 'function') {
+      window.openV6Subtab('host', { mode: md });
+    } else if (typeof go === 'function') {
+      go('vector');
+    }
+  });
+})();

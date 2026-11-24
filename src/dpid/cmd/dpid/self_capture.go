@@ -38,15 +38,21 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/hex"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"hnc.io/dpid/capture"
+	"hnc.io/dpid/leakguard"
 	"hnc.io/dpid/output"
 )
 
@@ -164,7 +170,14 @@ func (lc *liveCap) getErr() string {
 //
 // On return, all live captures are cancelled and waited synchronously
 // (via defer cancelAll), so dpid shutdown is deterministic.
-func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAttribAggregator, getAPIface func() string) {
+func runSelfCaptures(
+	ctx context.Context,
+	cfg Config,
+	selfAttrib *output.SelfAttribAggregator,
+	ipNames *output.IPNameTable,
+	leakEngine *leakguard.Engine,
+	getAPIface func() string,
+) {
 	flagPath := filepath.Join(cfg.RunDir, "self_capture.enabled")
 
 	live := map[string]*liveCap{}
@@ -299,7 +312,7 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 				lc.setErr(prev.getErr())
 			}
 			live[c.Name] = lc
-			go runOneSelfCapture(childCtx, cfg, lc, selfAttrib)
+			go runOneSelfCapture(childCtx, cfg, lc, selfAttrib, ipNames, leakEngine)
 			log.Printf("self-capture[%s]: started (oper=%s, wifi=%v, cell=%v, rx=%d)",
 				c.Name, c.OperState, c.IsWiFi, c.IsCell, c.RxBytes)
 		}
@@ -380,7 +393,14 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 // In all cases, the reconciler will see this iface still present in
 // DiscoverSelfCandidates on the next tick and restart us — restarts
 // counter bumps to make this visible in dpi_state.json.
-func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib *output.SelfAttribAggregator) {
+func runOneSelfCapture(
+	ctx context.Context,
+	cfg Config,
+	lc *liveCap,
+	selfAttrib *output.SelfAttribAggregator,
+	ipNames *output.IPNameTable,
+	leakEngine *leakguard.Engine,
+) {
 	defer close(lc.done)
 
 	h, err := capture.Open(capture.Options{
@@ -405,63 +425,7 @@ func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib 
 	log.Printf("self-capture[%s]: capture handle open (linkType=%d)", lc.iface, h.LinkType())
 
 	err = h.Run(ctx, func(ev capture.Event) {
-		lc.packets.Add(1)
-		if ev.Bytes > 0 {
-			lc.rxBytes.Add(uint64(ev.Bytes))
-		}
-		switch ev.Kind {
-		case capture.EventTLSClientHello:
-			lc.tlsEvents.Add(1)
-			if ev.TLS.SNI == "" {
-				return
-			}
-			// In self traffic, our device is the TLS client, so the
-			// ClientHello travels src→dst. DstIP/DstPort identifies the
-			// remote endpoint we need to look up in /proc/net.
-			//
-			// LookupUID can return ok=false legitimately on startup
-			// (pkg cache hasn't warmed yet) or for very short-lived
-			// connections that established+SNI'd between two 5s
-			// sampler ticks. Both are silent skips — the next
-			// observation of the same conn will catch up.
-			// v5.24 T1: 第二个返回值 pkg 原本被丢弃, 现在接住给样本工厂用
-			// (LookupUID 内部同一次加锁就带回包名, 不必再调 PkgForUID)。
-			uid, pkg, ok := selfAttrib.LookupUID(ev.DstIP.String(), ev.DstPort)
-			if !ok {
-				return
-			}
-			// v5.6.0-rc2: ObserveSNI handles all three concerns in one call:
-			// store the SNI in selfAttrib (for WebUI), classify against the
-			// rule set (count hits for auto-expand evidence), and enqueue
-			// unmatched ones for auto-expansion consideration. See
-			// output/auto_expand.go.
-			selfAttrib.ObserveSNI(uid, ev.TLS.SNI, ev.Time.Unix())
-
-			// v5.24 T1: 追加一行「包名 + 这条连接的域名/指纹」带标签样本。
-			// 原有识别路径(上面)完全不变; 这里只多记一份标准答案。
-			// Observe 内部非阻塞(队列满即丢), 且未启用时是空操作。
-			observeLabelSample(output.LabelSampleInput{
-				Time:    ev.Time,
-				UID:     uid,
-				Pkg:     pkg,
-				SNI:     ev.TLS.SNI,
-				JA4:     ev.TLS.JA4,
-				ALPNs:   ev.TLS.ALPN,
-				DPort:   int(ev.DstPort),
-				QUIC:    ev.TLS.IsQUIC,
-				QTP:     ev.TLS.QTP,
-				ECH:     ev.TLS.ECH,
-				Partial: ev.TLS.Partial,
-				RIP:     ev.DstIP.String(),
-			})
-		case capture.EventDNS:
-			lc.dnsEvents.Add(1)
-			// DNS attribution intentionally not wired in v5.6 rc1.
-			// Routing DNS QName into RecordSNI would conflate the
-			// resolved name with the eventual TLS SNI; v5.7's candidate
-			// accumulator will handle unmatched DNS separately with
-			// proper provenance tracking.
-		}
+		dispatchSelfCaptureEvent(ev, lc, selfAttrib, ipNames, leakEngine)
 	})
 
 	if err != nil && err != context.Canceled {
@@ -471,5 +435,229 @@ func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib 
 		// 否则 Run 出错的情况会被计两次。
 	} else {
 		log.Printf("self-capture[%s]: run ended cleanly", lc.iface)
+	}
+}
+
+var procNetTCPPaths = []string{"/proc/net/tcp", "/proc/net/tcp6"}
+
+func dispatchSelfCaptureEvent(
+	ev capture.Event,
+	lc *liveCap,
+	selfAttrib *output.SelfAttribAggregator,
+	ipNames *output.IPNameTable,
+	leakEngine *leakguard.Engine,
+) {
+	if lc != nil {
+		lc.packets.Add(1)
+		if ev.Bytes > 0 {
+			lc.rxBytes.Add(uint64(ev.Bytes))
+		}
+	}
+
+	switch ev.Kind {
+	case capture.EventTLSClientHello:
+		if lc != nil {
+			lc.tlsEvents.Add(1)
+		}
+		if ev.TLS.SNI == "" {
+			return
+		}
+		dstIP := ""
+		if len(ev.DstIP) > 0 {
+			dstIP = ev.DstIP.String()
+		}
+		if ipNames != nil && dstIP != "" {
+			ipNames.RecordConnName(dstIP, ev.TLS.SNI, output.IPNameSrcSNI, ev.Time)
+		}
+		if selfAttrib == nil {
+			return
+		}
+		uid, pkg, ok := selfAttrib.LookupUID(dstIP, ev.DstPort)
+		if !ok {
+			return
+		}
+		selfAttrib.ObserveSNI(uid, ev.TLS.SNI, ev.Time.Unix())
+		observeLabelSample(output.LabelSampleInput{
+			Time:    ev.Time,
+			UID:     uid,
+			Pkg:     pkg,
+			SNI:     ev.TLS.SNI,
+			JA4:     ev.TLS.JA4,
+			ALPNs:   ev.TLS.ALPN,
+			DPort:   int(ev.DstPort),
+			QUIC:    ev.TLS.IsQUIC,
+			QTP:     ev.TLS.QTP,
+			ECH:     ev.TLS.ECH,
+			Partial: ev.TLS.Partial,
+			RIP:     dstIP,
+		})
+
+	case capture.EventHTTP:
+		if ev.HTTP == nil || len(ev.HTTP.RawPayload) == 0 {
+			return
+		}
+		var srcIP, dstIP string
+		if len(ev.SrcIP) > 0 {
+			srcIP = ev.SrcIP.String()
+		}
+		if len(ev.DstIP) > 0 {
+			dstIP = ev.DstIP.String()
+		}
+
+		dstHost := ev.HTTP.Host
+		if dstHost != "" && ipNames != nil && dstIP != "" {
+			ipNames.RecordConnName(dstIP, dstHost, output.IPNameSrcHTTP, ev.Time)
+		}
+		if dstHost == "" && ipNames != nil && dstIP != "" {
+			if e, ok := ipNames.Lookup(dstIP, ev.Time); ok && e.Name != "" {
+				dstHost = e.Name
+			}
+		}
+		if dstHost == "" {
+			dstHost = ev.HTTP.RawHost
+		}
+		if dstHost == "" {
+			dstHost = dstIP
+		}
+
+		var uid int
+		var pkg, appName string
+		if selfAttrib != nil {
+			var ok bool
+			uid, pkg, ok = selfAttrib.LookupUID(dstIP, ev.DstPort)
+			if !ok {
+				if u, found := lookupProcTCPUID(ev.SrcPort, ev.DstIP, ev.DstPort); found && u > 0 {
+					uid = u
+				}
+			}
+			if uid > 0 {
+				resolvedPkg, resolvedLabel := selfAttrib.DisplayForUID(uid)
+				if pkg == "" {
+					pkg = resolvedPkg
+				}
+				appName = resolvedLabel
+				if ev.HTTP.Host != "" {
+					selfAttrib.ObserveSNI(uid, ev.HTTP.Host, ev.Time.Unix())
+				}
+			}
+		}
+
+		if leakEngine != nil {
+			leakEngine.Submit(leakguard.PacketInput{
+				Time:       ev.Time,
+				Origin:     leakguard.OriginHost,
+				UID:        uid,
+				Pkg:        pkg,
+				AppName:    appName,
+				ClientIP:   srcIP,
+				DstIP:      dstIP,
+				DstPort:    ev.DstPort,
+				Method:     ev.HTTP.Method,
+				Path:       ev.HTTP.Path,
+				DstHost:    dstHost,
+				UserAgent:  ev.HTTP.UserAgent,
+				RawPayload: ev.HTTP.RawPayload,
+			})
+		}
+
+	case capture.EventDNS:
+		if lc != nil {
+			lc.dnsEvents.Add(1)
+		}
+		if ipNames != nil && ev.DNS.IsResponse {
+			if len(ev.DNS.Records) > 0 {
+				ipNames.RecordDNSAnswers(ev.DNS.QName, ev.DNS.Records, ev.Time)
+			} else if len(ev.DNS.Answers) > 0 {
+				ipNames.RecordDNS(ev.DNS.QName, ev.DNS.Answers, ev.DNS.TTL, ev.Time)
+			}
+		}
+	}
+}
+
+func lookupProcTCPUID(srcPort uint16, dstIP net.IP, dstPort uint16) (int, bool) {
+	if srcPort == 0 && dstPort == 0 {
+		return 0, false
+	}
+	var fallbackUID int
+	for _, p := range procNetTCPPaths {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		first := true
+		for sc.Scan() {
+			if first {
+				first = false
+				continue
+			}
+			fields := strings.Fields(sc.Text())
+			if len(fields) < 8 {
+				continue
+			}
+			_, lPort, ok1 := parseProcHexAddrPort(fields[1])
+			rIP, rPort, ok2 := parseProcHexAddrPort(fields[2])
+			if !ok1 || !ok2 {
+				continue
+			}
+			if dstPort != 0 && rPort != dstPort {
+				continue
+			}
+			if srcPort != 0 && lPort != srcPort {
+				continue
+			}
+			u, uerr := strconv.Atoi(fields[7])
+			if uerr != nil || u <= 0 {
+				continue
+			}
+			if len(dstIP) > 0 && rIP != nil && rIP.Equal(dstIP) {
+				_ = f.Close()
+				return u, true
+			}
+			if fallbackUID == 0 {
+				fallbackUID = u
+			}
+		}
+		_ = f.Close()
+	}
+	if fallbackUID > 0 {
+		return fallbackUID, true
+	}
+	return 0, false
+}
+
+func parseProcHexAddrPort(s string) (net.IP, uint16, bool) {
+	colon := strings.IndexByte(s, ':')
+	if colon <= 0 || colon+1 >= len(s) {
+		return nil, 0, false
+	}
+	p64, err := strconv.ParseUint(s[colon+1:], 16, 16)
+	if err != nil {
+		return nil, 0, false
+	}
+	rawHex := s[:colon]
+	switch len(rawHex) {
+	case 8:
+		var b [4]byte
+		if _, herr := hex.Decode(b[:], []byte(rawHex)); herr != nil {
+			return nil, 0, false
+		}
+		return net.IPv4(b[3], b[2], b[1], b[0]), uint16(p64), true
+	case 32:
+		var raw [16]byte
+		if _, herr := hex.Decode(raw[:], []byte(rawHex)); herr != nil {
+			return nil, 0, false
+		}
+		ip := make(net.IP, 16)
+		for w := 0; w < 4; w++ {
+			off := w * 4
+			ip[off] = raw[off+3]
+			ip[off+1] = raw[off+2]
+			ip[off+2] = raw[off+1]
+			ip[off+3] = raw[off]
+		}
+		return ip, uint16(p64), true
+	default:
+		return nil, 0, false
 	}
 }

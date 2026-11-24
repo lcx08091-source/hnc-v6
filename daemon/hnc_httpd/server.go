@@ -233,6 +233,14 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/exports", s.apiExportList)
 	mux.HandleFunc("/api/exports/", s.apiExportFile)
 
+	// v6.1: 本机守护核心只读引擎(eBPF 实时网速 + 前后台耗流、后台耗电/唤醒排行、L1 零抓包隐私安检)
+	mux.HandleFunc("/api/local_apps/traffic", s.apiLocalAppsTraffic)
+	mux.HandleFunc("/api/local_apps/power", s.apiLocalAppsPower)
+	mux.HandleFunc("/api/local_apps/privacy_audit", s.apiLocalAppsPrivacyAudit)
+	mux.HandleFunc("/api/v6/local_apps/traffic", s.apiLocalAppsTraffic)
+	mux.HandleFunc("/api/v6/local_apps/power", s.apiLocalAppsPower)
+	mux.HandleFunc("/api/v6/local_apps/privacy_audit", s.apiLocalAppsPrivacyAudit)
+
 	// v6.0.0 · Vector: 挂载四舱壁无锁快照聚合、五大王牌战术舱与截图全量特性包路由
 	s.RegisterCoreHubRoutes(mux)
 	s.registerV6FeatureRoutes(mux)
@@ -397,6 +405,10 @@ var v6RequiredAPIMarkers = []string{
 	"/api/v6/multi_iface",
 	"/api/v6/native_subtrees",
 	"/api/backup",
+	"/api/local_apps/traffic",
+	"/api/local_apps/power",
+	"/api/local_apps/privacy_audit",
+	"/api/local_apps/firewall",
 }
 
 // ═══ API: health check ═════════════════════════════════════════

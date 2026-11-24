@@ -413,3 +413,124 @@ func TestReadConntrackLines_NonPermOpenErrorStillFallsBackToCTNetlink(t *testing
 	}
 }
 
+func TestClassifyConntrackLines_ZeroClients230HostFlows(t *testing.T) {
+	lines := make([]string, 0, 240)
+	// Generate 230 active phone-local TCP/UDP IPv4+IPv6 flows (cellular/Wi-Fi).
+	for i := 0; i < 180; i++ {
+		port := 40000 + i
+		dstOctet := (i % 250) + 1
+		lines = append(lines,
+			"ipv4 2 tcp 6 431999 ESTABLISHED src=10.45.12.8 dst=203.0.113."+itoaTest(dstOctet)+
+				" sport="+itoaTest(port)+" dport=443 packets=8 bytes=1024 src=203.0.113."+itoaTest(dstOctet)+
+				" dst=10.45.12.8 sport=443 dport="+itoaTest(port)+" packets=9 bytes=4096 [ASSURED] mark=0 use=1",
+		)
+	}
+	for i := 0; i < 50; i++ {
+		port := 50000 + i
+		lines = append(lines,
+			"ipv6 10 udp 17 120 src=2409:8900:10::abcd dst=2400:3200::1 sport="+itoaTest(port)+
+				" dport=443 packets=4 bytes=512 src=2400:3200::1 dst=2409:8900:10::abcd sport=443 dport="+itoaTest(port)+
+				" packets=4 bytes=1200 [ASSURED] mark=0 use=1",
+		)
+	}
+	// Add loopback and non-TCP/UDP noise that must NOT be counted in either HotspotFlows or HostFlows.
+	lines = append(lines,
+		"ipv4 2 tcp 6 120 ESTABLISHED src=127.0.0.1 dst=127.0.0.1 sport=49100 dport=8444 packets=2 bytes=128 src=127.0.0.1 dst=127.0.0.1 sport=8444 dport=49100 packets=2 bytes=256 [ASSURED] mark=0 use=1",
+		"ipv4 2 udp 17 29 src=127.0.53.53 dst=127.0.0.1 sport=53100 dport=53 packets=1 bytes=60 [UNREPLIED] mark=0 use=1",
+		"ipv6 10 tcp 6 120 ESTABLISHED src=::1 dst=::1 sport=55100 dport=8080 packets=2 bytes=128 src=::1 dst=::1 sport=8080 dport=55100 packets=2 bytes=128 [ASSURED] mark=0 use=1",
+		"ipv4 2 icmp 1 29 src=10.45.12.8 dst=8.8.8.8 type=8 code=0 id=123 packets=1 bytes=84 [UNREPLIED] mark=0 use=1",
+	)
+
+	// Case A: Hotspot enabled, 0 downstream clients online -> HotspotFlows == 0, HostFlows == 230.
+	gotZeroOnline := ClassifyConntrackLines(lines, ConntrackFlowOptions{
+		HotspotActive: true,
+		Clients:       nil,
+	})
+	if gotZeroOnline.HotspotFlows != 0 || gotZeroOnline.HostFlows != 230 || gotZeroOnline.LoopbackFlows != 3 {
+		t.Fatalf("0 online clients mismatch: got %+v, want HotspotFlows=0 HostFlows=230 LoopbackFlows=3", gotZeroOnline)
+	}
+
+	// Case B: Hotspot disabled (even if stale client list is passed) -> HotspotFlows == 0, HostFlows == 230.
+	gotHotspotOff := ClassifyConntrackLines(lines, ConntrackFlowOptions{
+		HotspotActive: false,
+		Clients: []ConntrackClient{
+			{MAC: "3c:22:fb:11:22:33", IPs: []string{"192.168.43.20"}},
+		},
+	})
+	if gotHotspotOff.HotspotFlows != 0 || gotHotspotOff.HostFlows != 230 {
+		t.Fatalf("hotspot off mismatch: got %+v, want HotspotFlows=0 HostFlows=230", gotHotspotOff)
+	}
+}
+
+func TestClassifyConntrackLines_OrthogonalHotspotAndHostFlows(t *testing.T) {
+	_, hsNet, _ := net.ParseCIDR("192.168.43.0/24")
+	lines := []string{
+		// 3 downstream forwarding flows (client 1 IPv4 TCP 443, client 1 IPv4 TCP public :8080, client 2 IPv6 UDP 443):
+		"ipv4 2 tcp 6 431999 ESTABLISHED src=192.168.43.20 dst=93.184.216.34 sport=51001 dport=443 packets=10 bytes=1200 src=93.184.216.34 dst=10.45.12.8 sport=443 dport=51001 packets=12 bytes=8400 [ASSURED] mark=0 use=1",
+		"ipv4 2 tcp 6 431999 ESTABLISHED src=192.168.43.20 dst=198.51.100.77 sport=51002 dport=8080 packets=5 bytes=600 src=198.51.100.77 dst=10.45.12.8 sport=8080 dport=51002 packets=5 bytes=2400 [ASSURED] mark=0 use=1",
+		"ipv6 10 udp 17 120 src=2409:8a00:1::88 dst=2400:3200::1 sport=52001 dport=443 packets=6 bytes=900 src=2400:3200::1 dst=2409:8a00:1::88 sport=443 dport=52001 packets=8 bytes=3200 [ASSURED] mark=0 use=1",
+
+		// 6 pure gateway management flows (:53, :67, :68, :8443, :8444, :8080 to local gateway) -> excluded from both!
+		"ipv4 2 udp 17 29 src=192.168.43.20 dst=192.168.43.1 sport=53001 dport=53 packets=1 bytes=64 src=192.168.43.1 dst=192.168.43.20 sport=53 dport=53001 packets=1 bytes=128 mark=0 use=1",
+		"ipv4 2 udp 17 29 src=192.168.43.20 dst=192.168.43.1 sport=68 dport=67 packets=1 bytes=300 [UNREPLIED] mark=0 use=1",
+		"ipv4 2 udp 17 29 src=192.168.43.1 dst=192.168.43.20 sport=67 dport=68 packets=1 bytes=300 [UNREPLIED] mark=0 use=1",
+		"ipv4 2 tcp 6 120 ESTABLISHED src=192.168.43.20 dst=192.168.43.1 sport=54001 dport=8443 packets=8 bytes=1200 src=192.168.43.1 dst=192.168.43.20 sport=8443 dport=54001 packets=9 bytes=4200 [ASSURED] mark=0 use=1",
+		"ipv4 2 tcp 6 120 ESTABLISHED src=192.168.43.20 dst=192.168.43.1 sport=54002 dport=8444 packets=4 bytes=500 src=192.168.43.1 dst=192.168.43.20 sport=8444 dport=54002 packets=4 bytes=900 [ASSURED] mark=0 use=1",
+		"ipv4 2 tcp 6 120 ESTABLISHED src=192.168.43.20 dst=192.168.43.1 sport=54003 dport=8080 packets=4 bytes=500 src=192.168.43.1 dst=192.168.43.20 sport=8080 dport=54003 packets=4 bytes=900 [ASSURED] mark=0 use=1",
+
+		// 1 lingering flow from an offline hotspot client (192.168.43.99) -> neither HotspotFlows nor HostFlows:
+		"ipv4 2 tcp 6 300 ESTABLISHED src=192.168.43.99 dst=93.184.216.34 sport=59999 dport=443 packets=2 bytes=120 [ASSURED] mark=0 use=1",
+
+		// 4 phone-local active non-loopback flows (including phone's own upstream DNS :53):
+		"ipv4 2 tcp 6 431999 ESTABLISHED src=10.45.12.8 dst=1.1.1.1 sport=41001 dport=443 packets=12 bytes=1800 [ASSURED] mark=0 use=1",
+		"ipv4 2 udp 17 29 src=10.45.12.8 dst=223.5.5.5 sport=41002 dport=53 packets=1 bytes=64 [ASSURED] mark=0 use=1",
+		"ipv6 10 tcp 6 431999 ESTABLISHED src=2409:8900:10::abcd dst=2606:4700:4700::1111 sport=41003 dport=443 packets=5 bytes=800 [ASSURED] mark=0 use=1",
+		"tcp 6 120 ESTABLISHED src=192.168.1.55 dst=198.51.100.12 sport=41004 dport=443 packets=3 bytes=450 [ASSURED] use=1",
+
+		// 2 loopback flows -> excluded:
+		"ipv4 2 tcp 6 120 ESTABLISHED src=127.0.0.1 dst=127.0.0.1 sport=39001 dport=9090 packets=2 bytes=100 [ASSURED] mark=0 use=1",
+		"ipv6 10 tcp 6 120 ESTABLISHED src=::1 dst=::1 sport=39002 dport=9090 packets=2 bytes=100 [ASSURED] mark=0 use=1",
+	}
+
+	got := ClassifyConntrackLines(lines, ConntrackFlowOptions{
+		HotspotActive: true,
+		Clients: []ConntrackClient{
+			{MAC: "3c:22:fb:11:22:33", IPs: []string{"192.168.43.20"}},
+			{MAC: "AA:BB:CC:DD:EE:02", IPs: []string{"2409:8a00:1::88"}},
+		},
+		InactiveClientIPs: []string{"192.168.43.99"},
+		GatewayIPs:        []string{"192.168.43.1", "fe80::1"},
+		HotspotNets:       []*net.IPNet{hsNet},
+	})
+
+	if got.HotspotFlows != 3 {
+		t.Fatalf("HotspotFlows=%d, want 3 (got=%+v)", got.HotspotFlows, got)
+	}
+	if got.MgmtExcluded != 6 {
+		t.Fatalf("MgmtExcluded=%d, want 6 (got=%+v)", got.MgmtExcluded, got)
+	}
+	if got.HostFlows != 4 {
+		t.Fatalf("HostFlows=%d, want 4 (got=%+v)", got.HostFlows, got)
+	}
+	if got.LoopbackFlows != 2 {
+		t.Fatalf("LoopbackFlows=%d, want 2 (got=%+v)", got.LoopbackFlows, got)
+	}
+	if got.PerClientFlows["3c:22:fb:11:22:33"] != 2 || got.PerClientFlows["aa:bb:cc:dd:ee:02"] != 1 {
+		t.Fatalf("unexpected PerClientFlows: %+v", got.PerClientFlows)
+	}
+}
+
+func itoaTest(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+

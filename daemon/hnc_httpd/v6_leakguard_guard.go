@@ -875,3 +875,8 @@ func evaluateLeakBlockGuard(s *server, kind, normVal string) leakBlockGuardDecis
 	}
 	return evaluateLeakBlockDomainGuard(hncDir, normVal)
 }
+
+// evaluateScopedLeakBlockGuard 对热点/本机/双域封禁目标执行统一的三级基础设施与共享 CDN 防误杀评估。
+func evaluateScopedLeakBlockGuard(s *server, kind, normVal, _ string) leakBlockGuardDecision {
+	return evaluateLeakBlockGuard(s, kind, normVal)
+}

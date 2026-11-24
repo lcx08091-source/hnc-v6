@@ -1,28 +1,31 @@
 // Package bytestats - eBPF backend.
 //
 // Reads /sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map via raw
-// bpf(2) syscalls. Map is created by netd at boot on Android 12+, and
-// keyed by (uid, tag, counterSet, ifaceIndex). We aggregate by uid.
+// bpf(2) syscalls. Map is created by netd/Connectivity Mainline at boot on
+// Android 12+.
+//
+// Real-device verified schema on Android 12–16:
+//   - map_netd_app_uid_stats_map:
+//     KeySize = 4 (uint32_t uid only — NO tag/counterSet/ifaceIndex),
+//     ValueSize >= 32 (struct stats_value { uint64_t rxPackets, rxBytes, txPackets, txBytes; }),
+//     monotonically increasing since boot and never rotated/wiped (<0.2ms full scan).
+//   - Per-(uid, tag, counterSet, ifaceIndex) 16-byte keys live in
+//     map_netd_stats_map_A and map_netd_stats_map_B (see netd_detail_ebpf.go).
 //
 // We deliberately don't pull in github.com/cilium/ebpf — for this
-// narrow use case (open pinned map + iterate + lookup), the raw syscall
-// version is ~80 lines of focused code without an extra dependency.
-//
-// Map schema (defined in AOSP system/netd/bpf_progs/bpf_net_helpers.h):
-//
-//	struct stats_key { uint32_t uid, tag, counterSet, ifaceIndex; }  // 16 B
-//	struct stats_value { uint64_t rxPackets, rxBytes, txPackets, txBytes; }  // 32 B
+// narrow use case (open pinned map + info check + iterate + lookup), the raw
+// syscall version is compact and zero-dependency.
 //
 // Permission model on Android:
 //   - File at /sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map
 //   - Mode 0060 owned by root:net_bw_acct (group-only access)
-//   - SELinux type fs_bpf_net_shared
-//   - Root (CAP_DAC_OVERRIDE) bypasses DAC; SukiSU's `su:s0` domain
-//     typically passes MAC. If either gate fails, BPF_OBJ_GET returns
-//     EACCES and we fall back to dumpsys.
+//   - SELinux type fs_bpf_net_shared / fs_bpf_tethering
+//   - Opened with BPF_F_RDONLY (1<<3) first (falling back to 0 on older kernels).
+//   - Root (CAP_DAC_OVERRIDE) bypasses DAC; Magisk/KernelSU/APatch root domain
+//     passes MAC. If either gate fails, BPF_OBJ_GET returns EACCES and we fall
+//     back to dumpsys.
 //
 // Reference: https://source.android.com/docs/core/data/traffic-counters
-//            (Android's official cookbook for reading this exact map)
 
 package bytestats
 
@@ -46,27 +49,31 @@ const (
 	bpfMapLookupElem  = 1
 	bpfMapGetNextKey  = 4
 	bpfObjGet         = 7
-	bpfObjGetInfoByFD = 15 // v5.9.7: tethering map schema 校验用
+	bpfObjGetInfoByFD = 15 // v5.9.7: BPF map schema 校验用
+
+	// bpfFileFlagRdonly is Linux UAPI BPF_F_RDONLY (1U << 3) for read-only map fds.
+	bpfFileFlagRdonly uint32 = 1 << 3
 )
 
-// netdStatsKey is the key struct of the BPF map. Layout matches AOSP's
-// definition byte-for-byte (4*uint32, native endianness).
+// netdStatsKey holds the heap key buffer passed to bpf(2).
+// For map_netd_app_uid_stats_map (KeySize=4), the kernel reads/writes only UID;
+// trailing words accommodate legacy/variant 16/20/24-byte stats keys safely.
 type netdStatsKey struct {
-	UID        uint32
-	Tag        uint32
-	CounterSet uint32
-	IfaceIndex uint32
+	UID uint32
+	Ext [5]uint32
 }
 
-// netdStatsValue is the value struct (4*uint64).
+// netdStatsValue holds the heap value buffer (up to 64B to safely absorb
+// 32/40/48/64-byte Mainline stats_value variants without kernel overwrite).
 type netdStatsValue struct {
 	RxPackets uint64
 	RxBytes   uint64
 	TxPackets uint64
 	TxBytes   uint64
+	Extra     [4]uint64
 }
 
-// EBPFSampler implements ByteSampler against the netd BPF map.
+// EBPFSampler implements ByteSampler against map_netd_app_uid_stats_map.
 type EBPFSampler struct {
 	// 严格置于偏移 0 处并附带 atomic.Uint64 对齐标记, 确保 32 位 armeabi-v7a
 	// 下堆分配起始地址与 64 位计数字段均按 8 字节边界对齐, 防止未对齐 panic/SIGBUS。
@@ -77,24 +84,44 @@ type EBPFSampler struct {
 	// 避免栈扩容搬迁导致内核按旧地址越界读写。
 	key, next netdStatsKey
 	fd        int
+	keySize   uint32
+	valueSize uint32
 }
 
-// NewEBPFSampler opens the pinned BPF map. Returns an error if the map
-// doesn't exist (older Android), if the kernel rejects bpf(2) entirely,
-// or if SELinux/DAC blocks us. detect.go interprets all such errors as
-// "fall back to dumpsys".
+func validAppUIDMapKeySize(sz uint32) bool {
+	return sz == 4 || sz == 16 || sz == 20 || sz == 24
+}
+
+func validStatsValueSize(sz uint32) bool {
+	return sz >= 32 && sz <= uint32(unsafe.Sizeof(netdStatsValue{})) && sz%8 == 0
+}
+
+// NewEBPFSampler opens the pinned BPF map (preferring BPF_F_RDONLY) and
+// verifies its key/value sizes via BPF_OBJ_GET_INFO_BY_FD.
 func NewEBPFSampler() (*EBPFSampler, error) {
-	// Quick pre-check: does the file even exist? Saves us from issuing
-	// a bpf() syscall just to get ENOENT.
 	if _, err := os.Stat(bpfMapPath); err != nil {
 		return nil, fmt.Errorf("bpf map not found: %w", err)
 	}
 
-	fd, err := bpfObjGetCall(bpfMapPath)
+	fd, err := bpfObjGetReadonlyCall(bpfMapPath)
 	if err != nil {
 		return nil, fmt.Errorf("bpf(BPF_OBJ_GET, %s): %w", bpfMapPath, err)
 	}
-	return &EBPFSampler{fd: fd}, nil
+	info, err := bpfObjGetInfoCall(fd)
+	if err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("bpf(BPF_OBJ_GET_INFO_BY_FD, %s): %w", bpfMapPath, err)
+	}
+	if !validAppUIDMapKeySize(info.KeySize) || !validStatsValueSize(info.ValueSize) {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("app_uid_stats_map schema mismatch at %s: key=%d (want 4/16/20/24) value=%d (want 32..64)",
+			bpfMapPath, info.KeySize, info.ValueSize)
+	}
+	return &EBPFSampler{
+		fd:        fd,
+		keySize:   info.KeySize,
+		valueSize: info.ValueSize,
+	}, nil
 }
 
 func (s *EBPFSampler) Source() string { return "ebpf" }
@@ -108,10 +135,8 @@ func (s *EBPFSampler) Close() error {
 	return nil
 }
 
-// Sample iterates the entire map and aggregates per uid. Each iteration
-// does one BPF_MAP_GET_NEXT_KEY + one BPF_MAP_LOOKUP_ELEM. Map size is
-// typically <2000 entries (one per active uid×iface×set combination),
-// so the whole pass is sub-millisecond.
+// Sample iterates map_netd_app_uid_stats_map and aggregates per uid.
+// With KeySize=4 (1 entry per uid), a full pass typically completes in <0.2ms.
 func (s *EBPFSampler) Sample() (map[int]ByteCounts, error) {
 	if s.fd <= 0 {
 		return nil, fmt.Errorf("sampler closed")
@@ -142,21 +167,19 @@ func (s *EBPFSampler) Sample() (map[int]ByteCounts, error) {
 		err = bpfMapLookupElemCall(s.fd, unsafe.Pointer(next), unsafe.Pointer(&s.val))
 		val := s.val
 		if err != nil {
-			// Could be that the entry was deleted between get_next_key
-			// and lookup. Skip and continue.
 			*key = *next
 			first = false
 			continue
 		}
 
-		uid := int(next.UID)
-		// uid -5 (-1 cast to uint32 → 4294967291) is "unknown" / special.
-		// Filter out non-real uids: -1, -5 (>4 billion when interpreted unsigned).
-		if uid < 0 || uid > 100000000 {
+		// Filter out special negative sentinel UIDs (-1 / -5 cast to uint32 > 100_000_000)
+		// before casting to int so 32-bit ARM and 64-bit ARM64 behave identically.
+		if next.UID > 100_000_000 {
 			*key = *next
 			first = false
 			continue
 		}
+		uid := int(next.UID)
 
 		bc := out[uid]
 		bc.RxBytes += val.RxBytes
@@ -200,13 +223,14 @@ type bpfAttrObjGet struct {
 	FileFlags uint32
 }
 
-func bpfObjGetCall(path string) (int, error) {
+func bpfObjGetWithFlagsCall(path string, fileFlags uint32) (int, error) {
 	cptr, err := syscall.BytePtrFromString(path)
 	if err != nil {
 		return -1, err
 	}
 	attr := bpfAttrObjGet{
-		Pathname: uint64(uintptr(unsafe.Pointer(cptr))),
+		Pathname:  uint64(uintptr(unsafe.Pointer(cptr))),
+		FileFlags: fileFlags,
 	}
 	var buf bpfAttrBuf
 	binary.NativeEndian.PutUint64(buf.pad[0:8], attr.Pathname)
@@ -225,6 +249,26 @@ func bpfObjGetCall(path string) (int, error) {
 		return -1, errno
 	}
 	return int(r1), nil
+}
+
+// bpfObjGetReadonlyCall opens a pinned BPF map with BPF_F_RDONLY (1<<3) first,
+// falling back to flags=0 if the kernel rejects file_flags.
+func bpfObjGetReadonlyCall(path string) (int, error) {
+	fd, err := bpfObjGetWithFlagsCall(path, bpfFileFlagRdonly)
+	if err == nil {
+		return fd, nil
+	}
+	if err == syscall.ENOENT || err == syscall.ENOTDIR {
+		return -1, err
+	}
+	if fdRw, errRw := bpfObjGetWithFlagsCall(path, 0); errRw == nil {
+		return fdRw, nil
+	}
+	return -1, err
+}
+
+func bpfObjGetCall(path string) (int, error) {
+	return bpfObjGetReadonlyCall(path)
 }
 
 // bpfAttrMapElem matches the map_elem sub-union for LOOKUP/GET_NEXT_KEY.

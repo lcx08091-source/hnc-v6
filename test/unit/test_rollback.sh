@@ -361,6 +361,30 @@ while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_rc4_obs=$?; i=$((
   && grep -q '"from":"6009304","to":"6000001"' "$HNC/data/rollback.json" \
   && test_pass || test_fail "r3=$rc_r3s r4=$rc_r4s prev4=$_prev_after_rc4 obs=$r_rc4_obs bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
 
+test_start "rollback: 6000001 -> 6009304 -> 6009305 (v6.1.0-rc.5) 连刷保护黄金底包并支持异常回退与 6010000 接班"
+rbseed 6009304 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.4\nversionCode=6009304\n' > "$MOD/module.prop"
+echo "GOLDEN-BIN-v601" > "$HNC/bin/hnc_watchdog"
+echo "GOLDEN-HTTPD-v601" > "$HNC/daemon/hnc_httpd/hnc_httpd"
+echo "GOLDEN-WEB-v601" > "$HNC/webroot/index.html"
+rbrun snapshot "$MOD" "$HNC"; rc_r4b=$?
+rm -f "$HNC/data/rollback.observing"
+echo "RC4-BIN" > "$HNC/bin/hnc_watchdog"
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.5\nversionCode=6009305\n' > "$MOD/module.prop"
+rbrun snapshot "$MOD" "$HNC"; rc_r5s=$?
+_prev_after_rc5="$(cat "$HNC/.prev/version" 2>/dev/null | tr -d ' \r\n')"
+echo "RC5-BROKEN-BIN" > "$HNC/bin/hnc_watchdog"
+i=0; r_rc5_obs=0
+while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_rc5_obs=$?; i=$((i+1)); done
+[ "$rc_r4b" -eq 0 ] && [ "$rc_r5s" -eq 0 ] \
+  && [ "$_prev_after_rc5" = "6000001" ] \
+  && [ "$r_rc5_obs" -eq 9 ] \
+  && [ "$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null)" = "GOLDEN-BIN-v601" ] \
+  && [ "$(cat "$HNC/data/runtime_version" 2>/dev/null | tr -d ' \r\n')" = "6000001" ] \
+  && [ "$(cat "$HNC/data/rollback.pinned" 2>/dev/null | tr -d ' \r\n')" = "6009305" ] \
+  && grep -q '"from":"6009305","to":"6000001"' "$HNC/data/rollback.json" \
+  && test_pass || test_fail "r4=$rc_r4b r5=$rc_r5s prev5=$_prev_after_rc5 obs=$r_rc5_obs bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
+
 if [ "$_RB_STANDALONE" = "1" ]; then
     teardown_test_env
     echo "summary: total=$TEST_TOTAL pass=$TEST_PASS fail=$TEST_FAIL"

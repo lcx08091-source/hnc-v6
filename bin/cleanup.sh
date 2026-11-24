@@ -461,6 +461,22 @@ _cleanup_ipt_stack() {
         # shellcheck disable=SC2086
         "$_cmd" $_w -t "$_t" -F "$_h" 2>/dev/null || true
     done
+    # 本机 OUTPUT 子链(HNC_SCALPEL_HOST / HNC_SELF_UID / HNC_SELF_DNS)与 webui_guard 一致:
+    # MODE=rules 仅清空热点转发限速规则, 不误拆本机持久应用防火墙; 全停/重启/卸载(all|restart)时完整拆净。
+    if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
+        for _oc in HNC_SCALPEL_HOST HNC_SELF_UID HNC_SELF_DNS; do
+            _n=0
+            # shellcheck disable=SC2086
+            while "$_cmd" $_w -t filter -D OUTPUT -j "$_oc" 2>/dev/null; do
+                _n=$((_n + 1))
+                [ "$_n" -ge 32 ] && break
+            done
+            # shellcheck disable=SC2086
+            "$_cmd" $_w -t filter -F "$_oc" 2>/dev/null || true
+            # shellcheck disable=SC2086
+            "$_cmd" $_w -t filter -X "$_oc" 2>/dev/null || true
+        done
+    fi
     # 二级 -g 子链在父链清空后引用归零，安全清空并删除
     # shellcheck disable=SC2086
     "$_cmd" $_w -t mangle -F HNC_APP_QOS_IP 2>/dev/null || true
@@ -494,6 +510,7 @@ rm -f "$HNC_DIR/run"/app_limits.*.sig "$HNC_DIR/run/app_limits_ipstats.flat" "$H
 # v5.22: WebUI 访问白名单链(INPUT 上按端口挂的跳转, 上面的 "-D INPUT -j 链" 删不掉,
 # 交给脚本自己拆)。rules 模式不拆: 它是访问控制, 不是用户要清的限速规则。
 if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
+    rm -rf "$HNC_DIR/run/self_firewall.lock" 2>/dev/null || true
     [ -f "$HNC_DIR/bin/webui_guard.sh" ] && sh "$HNC_DIR/bin/webui_guard.sh" remove >/dev/null 2>&1 \
         && log "webui_guard removed"
 fi
@@ -518,7 +535,7 @@ if [ ! -f "$HNC_DIR/bin/portal_manager.sh" ]; then
     rm -f "$RUN/portal_pending.json" "$RUN/portal_sessions.json" 2>/dev/null
 fi
 rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" "$RUN/lock" "$RUN/tc_action.lock" "$RUN"/tc_action.lock.stale.* \
-       "$RUN/v6_sync.lock" "$RUN/stats_v6.lock" "$RUN/app_limits.lock" "$RUN/app_qos.lock" "$RUN/connblock.lock" 2>/dev/null
+       "$RUN/v6_sync.lock" "$RUN/stats_v6.lock" "$RUN/app_limits.lock" "$RUN/app_qos.lock" "$RUN/connblock.lock" "$RUN/self_firewall.lock" 2>/dev/null
 # v3.9.1: stats 临时文件 + 日期标记(stats_raw / stats_daily 是用户数据,不删)
 rm -f "$RUN"/stats_map.* "$RUN"/rollup_names.* "$RUN"/rollup_agg.* "$RUN"/.s4.* "$RUN"/.s6.* "$RUN"/.sm.* \
       "$RUN"/.stats_* "$RUN"/tc_ifindex_* "$RUN/tc_restore_pending" 2>/dev/null

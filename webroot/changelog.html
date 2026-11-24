@@ -19,6 +19,16 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-1-0-rc-5" data-version="v6.1.0-rc.5" data-version-code="6009305">
+  <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v6.1.0-rc.5(准正式版): 热点与本机连接精准拆分 · 护航页克制玻璃风格重编 · 全新「本机守护」中心(实时联网透视/后台耗流耗电排行/四档防火墙) · 本机手术刀秒断与凭据/身份证号防泄露 · 机身与电池双温度精准校准 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-24 · versionCode 6009305</span></div>
+  <ul class="cl-list">
+    <li><b>热点连接与手机本机连接精准拆分</b>：升级 <span class="mono">shm_vector.bin</span> 共享内存至 v3 双域结构，将连热点设备的转发连接与手机自己后台产生的本机连接彻底分开统计；没开热点或没有设备连入时热点连接数干干净净归零，不再把手机自身后台连接混进热点状态栏造成虚高误判。</li>
+    <li><b>护航页全套克制玻璃风格重编与五页联动优化</b>：重塑「护航」页面全套卡片排版与通透微晶玻璃质感，告别繁杂色块与生硬描边，在浅色、深色、液态玻璃及自定义壁纸下均清爽耐看；全面打通设备、应用、护航、统计、设置五页联动跳转与状态秒同步。</li>
+    <li><b>全新「本机守护」中心上线（查流量、揪耗电、管联网一站搞定）</b>：新增按需 8 秒短租约本机实时网速与后台偷跑流量排行（退出页面自动休眠零耗电）、充电后后台息屏掉电与唤醒锁/5G 基带唤醒元凶排行、日常零抓包明文连接与追踪 SDK 实时体检，以及单应用四档本机防火墙（正常放行 / 仅禁明文 HTTP / 禁移动数据 / 全局禁网，同步管住 Android 13+ 广告沙盒进程并配齐六道防自锁保护）。</li>
+    <li><b>本机连接手术刀秒断与账号凭据 / 身份证号明文防泄露</b>：连接手术台支持查看并一键秒断（<span class="mono">SOCK_DESTROY</span>）或临时冻结手机本机异常后台连接；深度明文隐私安检新增账号登录凭据与 18 位身份证号（国标校验位核验）未加密外发实时拦截告警，支持一键封堵泄露域名与直连明文 DNS。</li>
+    <li><b>机身与电池双温度传感器校准及待机实时刷新</b>：温控巡航同时比对机身表皮壳温与电池温度，就算刷了将电池温度改低 <span class="mono">-10°C</span> 的快充伪装模块也能自动识别并按真实机身温度精准控温防烫手，未开热点待机时同样支持实时刷新查看真实温度；全仓 34 个规则分包与指纹库同步升级至 <span class="mono">v6.1.0-rc.5</span>，自动更新通道继续锁定稳定版 <span class="mono">v6.0.1</span>。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v6-1-0-rc-4" data-version="v6.1.0-rc.4" data-version-code="6009304">
   <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v6.1.0-rc.4(准正式版): 原生双卡槽位识别与消灭幽灵未知卡 · 本机自训迁出 32MB 内存盘 · 共享内存 v2 热升级防乱码与 32 位对齐 · 根带宽保底仲裁与三量纲温控熔断 · 门户认证放行与待机零唤醒收口 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-23 · versionCode 6009304</span></div>
   <ul class="cl-list">

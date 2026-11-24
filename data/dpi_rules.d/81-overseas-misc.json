@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "81-overseas-misc",
-  "rules_version": "hnc-curated-v6.1.0-rc.4#81-overseas-misc",
+  "rules_version": "hnc-curated-v6.1.0-rc.5#81-overseas-misc",
   "rules": [
     {
       "id": "github",

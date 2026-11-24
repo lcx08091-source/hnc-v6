@@ -1400,11 +1400,13 @@ var (
 		"vector_express.json",
 		"update_leash.json",
 		"thermo_cruise.json",
+		"self_firewall.json",
 	}
 	// v6BackupLegacyKeyMap 兼容导入旧版备份包中误写的键名, 恢复落盘时自动映射至真实配置文件名。
 	v6BackupLegacyKeyMap = map[string]string{
-		"fp_prototypes.json":   "dpi_fp_prototypes.json",
-		"dpi_self_config.json": "self_policy.json",
+		"fp_prototypes.json":    "dpi_fp_prototypes.json",
+		"dpi_self_config.json":  "self_policy.json",
+		"v6_self_firewall.json": "self_firewall.json",
 	}
 	v6DynamicConfigNameRE = regexp.MustCompile(`^v6_[a-z0-9_.-]{1,48}\.json$`)
 )
@@ -1670,6 +1672,67 @@ func validateBackupFileSemantics(name string, canon []byte) error {
 					if len(arr) > 10 {
 						return fmt.Errorf("leakguard_config.json: undo_stack exceeds 10 limit (got %d)", len(arr))
 					}
+				}
+			}
+		}
+	case "self_firewall.json":
+		var sfDoc struct {
+			Version        int                   `json:"version"`
+			UpdatedAt      int64                 `json:"updated_at"`
+			UIDRules       []SelfFirewallUIDRule `json:"uid_rules"`
+			BlockedDomains json.RawMessage       `json:"blocked_domains"`
+		}
+		if err := json.Unmarshal(canon, &sfDoc); err != nil {
+			return fmt.Errorf("self_firewall.json: %w", err)
+		}
+		if len(sfDoc.UIDRules) > selfFirewallMaxUIDRules {
+			return fmt.Errorf("self_firewall.json: uid_rules exceeds %d max items", selfFirewallMaxUIDRules)
+		}
+		for _, r := range sfDoc.UIDRules {
+			if r.UID < selfFirewallMinAppUID || r.UID > selfFirewallMaxAppUID {
+				return fmt.Errorf("self_firewall.json: forbidden or invalid uid %d (must be >= %d)", r.UID, selfFirewallMinAppUID)
+			}
+			pkg := strings.ToLower(strings.TrimSpace(r.Pkg))
+			if pkg != "" && !isValidAndroidPkgName(pkg) {
+				return fmt.Errorf("self_firewall.json: invalid package name %q", r.Pkg)
+			}
+			if isProtectedSelfFirewallPkg(pkg) {
+				return fmt.Errorf("self_firewall.json: protected package %q cannot be blocked", r.Pkg)
+			}
+			mode := strings.ToLower(strings.TrimSpace(r.Mode))
+			if mode == "" || !isValidSelfFirewallMode(mode) {
+				return fmt.Errorf("self_firewall.json: invalid mode %q for uid %d", r.Mode, r.UID)
+			}
+			if len(r.BlockTargets) > 0 {
+				if _, err := normalizeSelfBlockTargetsList(r.BlockTargets); err != nil {
+					return fmt.Errorf("self_firewall.json: invalid block_targets for uid %d: %w", r.UID, err)
+				}
+			}
+		}
+		if trimmedBD := bytes.TrimSpace(sfDoc.BlockedDomains); len(trimmedBD) > 0 && !bytes.Equal(trimmedBD, []byte("null")) {
+			var domList []string
+			if err := json.Unmarshal(trimmedBD, &domList); err != nil {
+				var objList []struct {
+					Domain string `json:"domain"`
+				}
+				if err2 := json.Unmarshal(trimmedBD, &objList); err2 != nil {
+					return fmt.Errorf("self_firewall.json: invalid blocked_domains: %w", err)
+				}
+				domList = make([]string, 0, len(objList))
+				for _, item := range objList {
+					domList = append(domList, item.Domain)
+				}
+			}
+			if len(domList) > selfFirewallMaxDomains {
+				return fmt.Errorf("self_firewall.json: blocked_domains exceeds %d max items", selfFirewallMaxDomains)
+			}
+			for _, rawDom := range domList {
+				nd, err := normalizeSelfDNSBlockDomain(rawDom)
+				if err != nil {
+					return fmt.Errorf("self_firewall.json: invalid blocked domain %q: %w", rawDom, err)
+				}
+				if dec := evaluateLeakBlockDomainGuard("", nd); dec.Level == leakGuardLevelHardBlock {
+					return fmt.Errorf("self_firewall.json: core public domain %q cannot be blocked (%s)", nd, dec.Vendor)
 				}
 			}
 		}

@@ -6,34 +6,34 @@
    8pt 间距 · 34/22/17/13 字号层级 · iOS 分组圆角列表 · 单一强调色 #007AFF ·
    深色纯黑底 + #1C1C1E 卡片 · 少边框少阴影。 */
 :root[data-style="apple"]{
-  --bg:#F2F2F7; --card:#fff; --card-2:#fff; --card-solid:#fff;
+  --bg:#F2F2F7; --card:#fff; --card-bg:#fff; --card-2:#fff; --card-solid:#fff;
   --text-1:#000; --text-2:rgba(60,60,67,.78); --text-3:rgba(60,60,67,.6); --text-4:rgba(60,60,67,.3);
   --stroke:rgba(60,60,67,.12); --stroke-2:rgba(60,60,67,.18);
   --input:rgba(118,118,128,.12); --divider:rgba(60,60,67,.2);
   --shadow:none; --shadow-2:none; --shadow-3:0 10px 40px rgba(0,0,0,.14);
   --scrim:rgba(0,0,0,.3); --lens-glass:rgba(255,255,255,.3);
   --r-lg:14px; --r-md:12px;
-  --ap-fill-2:rgba(120,120,128,.16); --ap-thumb:#fff; --ap-grouped:#F2F2F7; --ap-inset:#F2F2F7;
+  --ap-fill-2:rgba(120,120,128,.16); --ap-thumb:#fff; --ap-grouped:#F2F2F7; --ap-inset:#F2F2F7; --lg-sub:#F2F2F7;
   --ap-bar-bg:rgba(255,255,255,.72); --ap-hdr-bg:rgba(242,242,247,.76);
 }
 @media (prefers-color-scheme: dark){
   :root[data-style="apple"]:not([data-theme="light"]){
-    --bg:#000; --card:#1C1C1E; --card-2:#1C1C1E; --card-solid:#1C1C1E;
+    --bg:#000; --card:#1C1C1E; --card-bg:#1C1C1E; --card-2:#1C1C1E; --card-solid:#1C1C1E;
     --text-1:#fff; --text-2:rgba(235,235,245,.78); --text-3:rgba(235,235,245,.6); --text-4:rgba(235,235,245,.3);
     --stroke:rgba(84,84,88,.5); --stroke-2:rgba(84,84,88,.65);
     --input:rgba(118,118,128,.24); --divider:rgba(84,84,88,.65);
     --shadow-3:0 10px 40px rgba(0,0,0,.6); --scrim:rgba(0,0,0,.48); --lens-glass:rgba(255,255,255,.12);
-    --ap-fill-2:rgba(120,120,128,.32); --ap-thumb:#636366; --ap-grouped:#000; --ap-inset:#2C2C2E;
+    --ap-fill-2:rgba(120,120,128,.32); --ap-thumb:#636366; --ap-grouped:#000; --ap-inset:#2C2C2E; --lg-sub:#2C2C2E;
     --ap-bar-bg:rgba(28,28,30,.72); --ap-hdr-bg:rgba(0,0,0,.76);
   }
 }
 :root[data-style="apple"][data-theme="dark"]{
-  --bg:#000; --card:#1C1C1E; --card-2:#1C1C1E; --card-solid:#1C1C1E;
+  --bg:#000; --card:#1C1C1E; --card-bg:#1C1C1E; --card-2:#1C1C1E; --card-solid:#1C1C1E;
   --text-1:#fff; --text-2:rgba(235,235,245,.78); --text-3:rgba(235,235,245,.6); --text-4:rgba(235,235,245,.3);
   --stroke:rgba(84,84,88,.5); --stroke-2:rgba(84,84,88,.65);
   --input:rgba(118,118,128,.24); --divider:rgba(84,84,88,.65);
   --shadow-3:0 10px 40px rgba(0,0,0,.6); --scrim:rgba(0,0,0,.48); --lens-glass:rgba(255,255,255,.12);
-  --ap-fill-2:rgba(120,120,128,.32); --ap-thumb:#636366; --ap-grouped:#000; --ap-inset:#2C2C2E;
+  --ap-fill-2:rgba(120,120,128,.32); --ap-thumb:#636366; --ap-grouped:#000; --ap-inset:#2C2C2E; --lg-sub:#2C2C2E;
   --ap-bar-bg:rgba(28,28,30,.72); --ap-hdr-bg:rgba(0,0,0,.76);
 }
 [data-style="apple"] body{font-size:17px;line-height:1.35;letter-spacing:-.01em}
@@ -849,21 +849,22 @@
   }
 }
 /* ==========================================================================
- * HNC v6.0.0 · Vector — Apple / Frosted 与 Cyber 机能主题专属适配样式
+ * HNC v6.1.0 · Vector — Apple / Frosted 与 Cyber 机能主题专属适配样式
  * ========================================================================== */
+[data-style="apple"] .v6-conn-pill,
+[data-style="apple"] .v6-ov-cell,
 [data-style="apple"] .v6-kpi,
 [data-style="apple"] .lgd-summary-line,
 [data-style="apple"] .lgd-ctrl-bar,
 [data-style="apple"] .lgd-item,
 [data-style="apple"] .v6-flow-item,
-[data-style="apple"] .v6-calm-empty,
 [data-style="apple"] .v6-tuple-row,
-[data-style="apple"] .v6-bento:not(.on) {
+[data-style="apple"] .v6-fw-btn:not(.on) {
   border: 0;
   background: var(--ap-inset, var(--input));
 }
 [data-style="apple"] .lgd-ctrl-bar .v6-num-box,
-[data-style="apple"] .v6-card .v6-num-box {
+[data-style="apple"] .scard .v6-num-box {
   border: 0;
   background: var(--card);
 }
@@ -876,18 +877,14 @@
 }
 
 /* 赛博机能主题 (data-style="cyber") 锐利折角与高对比度战术边框 */
-[data-style="cyber"] .v6-card,
-[data-style="cyber"] .v6-hero-card,
-[data-style="cyber"] .lgd-panel,
 [data-style="cyber"] .v6-dev-banner {
   border-radius: var(--r-lg, 8px);
 }
+[data-style="cyber"] .v6-conn-pill,
+[data-style="cyber"] .v6-ov-cell,
 [data-style="cyber"] .v6-kpi,
 [data-style="cyber"] .v6-num-box,
 [data-style="cyber"] .v6-flow-item,
-[data-style="cyber"] .v6-calm-empty,
-[data-style="cyber"] .v6-bento:not(.on),
-[data-style="cyber"] .v6-subtabs,
 [data-style="cyber"] .v6-dev-pill:not(.on):not(.is-auto),
 [data-style="cyber"] .lgd-summary-line,
 [data-style="cyber"] .lgd-ctrl-bar,
@@ -895,28 +892,20 @@
 [data-style="cyber"] .lgd-tchip:not(.on),
 [data-style="cyber"] .lgd-act-btn:not(.dan):not(.warn):not(.ok),
 [data-style="cyber"] .v6-mini-btn:not(.pri):not(.dan):not(.warn):not(.ok),
+[data-style="cyber"] .v6-fw-btn:not(.on),
 [data-style="cyber"] .v6-tuple-row,
 [data-style="cyber"] .v6-scalpel-entry {
   border-radius: 6px;
   background: var(--cy-sub, var(--input));
   border: 1px solid var(--stroke);
 }
-[data-style="cyber"] .v6-bento.on,
 [data-style="cyber"] .v6-dev-pill.on,
-[data-style="cyber"] .v6-subtab,
 [data-style="cyber"] .lgd-tchip,
 [data-style="cyber"] .lgd-act-btn,
-[data-style="cyber"] .v6-mini-btn {
+[data-style="cyber"] .v6-mini-btn,
+[data-style="cyber"] .v6-fw-btn {
   border-radius: 6px;
 }
-[data-style="cyber"] .v6-subtab.on {
-  background: rgba(56, 189, 248, .16);
-  background: color-mix(in srgb, var(--cy-accent, #38bdf8) 16%, transparent);
-  color: var(--cy-accent, #38bdf8);
-  border: 1px solid var(--cy-accent, #38bdf8);
-}
-[data-style="cyber"] .v6-orb,
-[data-style="cyber"] .v6-bento-ic,
 [data-style="cyber"] .sig-wave-card,
 [data-style="cyber"] .sig-intf-card,
 [data-style="cyber"] .sig-intf-row,
@@ -928,8 +917,7 @@
   border: 0;
   background: var(--ap-inset, var(--input));
 }
-[data-style="cyber"] .v6-card-t,
-[data-style="cyber"] .v6-hero-headline b,
+[data-style="cyber"] .v6-hero-title,
 [data-style="cyber"] .lgd-act-btn,
 [data-style="cyber"] .v6-mini-btn {
   font-family: var(--mono);
@@ -950,7 +938,6 @@
 @supports not (background: color-mix(in srgb, #000 50%, transparent)) {
   [data-style="apple"] .tabbar { background: var(--ap-bar-bg, rgba(255, 255, 255, .72)); }
   [data-style="apple"] .header::before { background: var(--ap-hdr-bg, rgba(242, 242, 247, .76)); }
-  [data-style="cyber"] .v6-subtab.on { background: rgba(56, 189, 248, .16); }
 }
 @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
   [data-style="apple"] .tabbar,
@@ -960,4 +947,3 @@
     background: var(--card-solid);
   }
 }
-

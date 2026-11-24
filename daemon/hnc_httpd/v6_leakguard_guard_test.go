@@ -1096,4 +1096,190 @@ func TestBlackboxRTTProbeActiveIdleNoFlushAndWifiStaAttribution(t *testing.T) {
 	}
 }
 
+func TestLeakGuardDualDomainEventsTargetScopeAndSelfFirewallClosedLoop(t *testing.T) {
+	s, mux, dir := newV6TestMux(t)
+	lg := s.v6State().leakGuard
+	sf := s.v6State().selfFirewall
+	lg.notifyExec = func(context.Context, string, ...string) error { return nil }
+
+	// 1. 验证 v6FeaturesSummary 挂载 self_firewall 且初始统计就绪
+	v6Sum0 := s.v6FeaturesSummary()
+	if _, ok := v6Sum0["self_firewall"].(map[string]any); !ok {
+		t.Fatalf("v6FeaturesSummary missing self_firewall: %+v", v6Sum0)
+	}
+
+	// 2. 启动带 ?scope=host 过滤的 SSE 监听客户端, 验证实时流仅推送 host 域事件并完整携带 origin/uid/pkg/app_name/CREDENTIAL/ID_CARD
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	sseCtx, sseCancel := context.WithCancel(context.Background())
+	defer sseCancel()
+	sseReq, _ := http.NewRequestWithContext(sseCtx, http.MethodGet, srv.URL+"/api/leakguard/stream?scope=host", nil)
+	sseResp, err := http.DefaultClient.Do(sseReq)
+	if err != nil {
+		t.Fatalf("connect SSE ?scope=host: %v", err)
+	}
+	defer sseResp.Body.Close()
+
+	var sseFramesMu sync.Mutex
+	var sseLeakEvents []LeakEvent
+	go func() {
+		buf := make([]byte, 4096)
+		var acc string
+		for {
+			n, rerr := sseResp.Body.Read(buf)
+			if n > 0 {
+				acc += string(buf[:n])
+				for {
+					idx := strings.Index(acc, "\n\n")
+					if idx < 0 {
+						break
+					}
+					frame := acc[:idx]
+					acc = acc[idx+2:]
+					if strings.Contains(frame, "event: leak") {
+						for _, ln := range strings.Split(frame, "\n") {
+							if strings.HasPrefix(ln, "data: ") {
+								var ev LeakEvent
+								if json.Unmarshal([]byte(strings.TrimPrefix(ln, "data: ")), &ev) == nil {
+									sseFramesMu.Lock()
+									sseLeakEvents = append(sseLeakEvents, ev)
+									sseFramesMu.Unlock()
+								}
+							}
+						}
+					}
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	waitLeakGuardCond(t, time.Second, "SSE subscriber registered", func() bool {
+		lg.mu.Lock()
+		defer lg.mu.Unlock()
+		return len(lg.subs) == 1
+	})
+
+	// 3. 写入混合热点事件 (Origin 留空默认 "hotspot") 与本机事件 (Origin="host", 含 CREDENTIAL 与 ID_CARD)
+	eventsPayload := `{"events":[
+		{"id":"ev_hs_1","ts":1890000001,"mac":"aa:bb:cc:dd:ee:01","src_ip":"192.168.43.11","dst_host":"hs-leak.ad-net.example","leak_type":"ID_CARD","raw_value":"110101199003071234","hit_count":2},
+		{"id":"ev_host_1","ts":1890000002,"origin":"host","uid":10321,"pkg":"com.leaky.sdkapp","app_name":"某天气日历","src_ip":"10.20.30.40","dst_host":"host-leak.ad-net.example","dst_port":80,"proto":"http","leak_type":"CREDENTIAL","raw_value":"Bearer eyJhbGciOiJIUzI1NiJ9.secret","hit_count":3},
+		{"id":"ev_both_hs","ts":1890000003,"origin":"hotspot","mac":"aa:bb:cc:dd:ee:01","src_ip":"192.168.43.11","dst_host":"dual-leak.ad-net.example","leak_type":"PHONE","raw_value":"13812345678","hit_count":1},
+		{"id":"ev_both_host","ts":1890000004,"origin":"host","uid":10322,"pkg":"com.second.app","app_name":"某清理大师","src_ip":"10.20.30.40","dst_host":"dual-leak.ad-net.example","dst_port":8080,"proto":"http","leak_type":"ID_CARD","raw_value":"31010119920808567X","hit_count":1}
+	]}`
+	if err := os.WriteFile(filepath.Join(dir, "run", "leakguard_events.json"), []byte(eventsPayload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lg.syncFromDisk()
+
+	// 验证 ?scope=host 的 SSE 流只收到 2 条本机事件, 且 CREDENTIAL / ID_CARD 标签精确翻译
+	waitLeakGuardCond(t, time.Second, "2 host SSE events received", func() bool {
+		sseFramesMu.Lock()
+		defer sseFramesMu.Unlock()
+		return len(sseLeakEvents) == 2
+	})
+	sseFramesMu.Lock()
+	gotSSE := append([]LeakEvent(nil), sseLeakEvents...)
+	sseFramesMu.Unlock()
+	if gotSSE[0].Origin != "host" || gotSSE[0].UID != 10321 || gotSSE[0].Pkg != "com.leaky.sdkapp" ||
+		gotSSE[0].AppName != "某天气日历" || gotSSE[0].LeakLabel != "账号凭据/Token" {
+		t.Fatalf("unexpected SSE host event #0: %+v", gotSSE[0])
+	}
+	if gotSSE[1].LeakLabel != "身份证号" {
+		t.Fatalf("expected ID_CARD label '身份证号', got %+v", gotSSE[1])
+	}
+
+	// 4. 验证 GET /api/leakguard/events?scope=all|hotspot|host 过滤与空 origin 默认 "hotspot"
+	for _, tc := range []struct {
+		query   string
+		wantCnt int
+	}{
+		{"", 4},
+		{"?scope=all", 4},
+		{"?scope=hotspot", 2},
+		{"?scope=host", 2},
+	} {
+		rec := doGuardJSONReq(t, mux, http.MethodGet, "/api/leakguard/events"+tc.query, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/leakguard/events%s failed: %d %s", tc.query, rec.Code, rec.Body.String())
+		}
+		var snap struct {
+			Events      []LeakEvent `json:"events"`
+			HostHits    int64       `json:"host_hits"`
+			HotspotHits int64       `json:"hotspot_hits"`
+			AffectedApp int         `json:"affected_apps"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Events) != tc.wantCnt || snap.HostHits != 4 || snap.HotspotHits != 3 || snap.AffectedApp != 2 {
+			t.Fatalf("scope %q mismatch: len=%d(want %d) hostHits=%d hotspotHits=%d affectedApps=%d",
+				tc.query, len(snap.Events), tc.wantCnt, snap.HostHits, snap.HotspotHits, snap.AffectedApp)
+		}
+		for _, ev := range snap.Events {
+			if ev.Origin != "hotspot" && ev.Origin != "host" {
+				t.Fatalf("event missing normalized origin: %+v", ev)
+			}
+		}
+	}
+	badScopeRec := doGuardJSONReq(t, mux, http.MethodGet, "/api/leakguard/events?scope=invalid", "")
+	if badScopeRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid ?scope=invalid, got %d", badScopeRec.Code)
+	}
+
+	// 5. 测试 target_scope="host" 封禁本机域名 (无需传客户端 MAC) + summary() 指标 + 一键撤销
+	blkHost := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain",
+		`{"action":"block","target_scope":"host","dst_host":"host-leak.ad-net.example"}`)
+	if blkHost.Code != http.StatusOK || !strings.Contains(blkHost.Body.String(), `"self_blocked":true`) {
+		t.Fatalf("target_scope=host block failed: %d %s", blkHost.Code, blkHost.Body.String())
+	}
+	if !sf.IsDomainBlocked("sub.host-leak.ad-net.example") {
+		t.Fatal("expected selfFirewall to block host-leak.ad-net.example and subdomains")
+	}
+	sumAfterHostBlk := lg.summary()
+	if sumAfterHostBlk["host_hits"] != int64(4) || sumAfterHostBlk["hotspot_hits"] != int64(3) ||
+		sumAfterHostBlk["affected_apps"] != 2 || sumAfterHostBlk["self_blocked_domains"] != 1 {
+		t.Fatalf("leakGuard.summary() dual-domain stats mismatch: %+v", sumAfterHostBlk)
+	}
+
+	// 验证本机事件 ev_host_1 的 is_blocked 自动变为 true, 而热点事件不受影响
+	hostEvRec := doGuardJSONReq(t, mux, http.MethodGet, "/api/leakguard/events?scope=host", "")
+	if !strings.Contains(hostEvRec.Body.String(), `"is_blocked":true`) {
+		t.Fatalf("expected host event is_blocked:true after target_scope=host block: %s", hostEvRec.Body.String())
+	}
+
+	// Undo 撤销该 host 封禁 -> selfFirewall 自动解封!
+	undoHost := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/undo-block", `{}`)
+	if undoHost.Code != http.StatusOK || sf.IsDomainBlocked("host-leak.ad-net.example") {
+		t.Fatalf("undo target_scope=host failed: code=%d blocked=%v body=%s",
+			undoHost.Code, sf.IsDomainBlocked("host-leak.ad-net.example"), undoHost.Body.String())
+	}
+
+	// 6. 测试 target_scope="both" 同时封禁热点设备与本机域名, 并测试按 target_scope 分步撤销!
+	blkBoth := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain",
+		`{"action":"block","target_scope":"both","dst_host":"dual-leak.ad-net.example","mac":"aa:bb:cc:dd:ee:01"}`)
+	if blkBoth.Code != http.StatusOK || !sf.IsDomainBlocked("dual-leak.ad-net.example") ||
+		!s.dnsTK().blocked("aa:bb:cc:dd:ee:01", "dual-leak.ad-net.example") {
+		t.Fatalf("target_scope=both failed to block both domains: code=%d body=%s", blkBoth.Code, blkBoth.Body.String())
+	}
+
+	// 先仅撤销本机侧 (target_scope:"host") -> 本机解封, 热点侧保持封禁且仍留在撤销栈中!
+	undoPartHost := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/undo-block", `{"target_scope":"host"}`)
+	if undoPartHost.Code != http.StatusOK || sf.IsDomainBlocked("dual-leak.ad-net.example") {
+		t.Fatalf("partial undo target_scope=host failed: %d %s", undoPartHost.Code, undoPartHost.Body.String())
+	}
+	if !s.dnsTK().blocked("aa:bb:cc:dd:ee:01", "dual-leak.ad-net.example") {
+		t.Fatal("partial undo target_scope=host must keep hotspot MAC block intact")
+	}
+
+	// 再撤销剩余的热点侧 -> 双端全部干净清零!
+	undoRestHotspot := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/undo-block", `{}`)
+	if undoRestHotspot.Code != http.StatusOK || s.dnsTK().blocked("aa:bb:cc:dd:ee:01", "dual-leak.ad-net.example") {
+		t.Fatalf("remaining hotspot undo failed: %d %s", undoRestHotspot.Code, undoRestHotspot.Body.String())
+	}
+}
+
+
 

@@ -1,8 +1,8 @@
-/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.4 · 智能护航、隐私明文安检与连接排障中心
+/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.5 · 智能护航、本机守护、隐私安检与连接排障中心
  * 设计准则:
- *   1. 3秒简易认知渐进披露: 顶部一句话人话态势 + 3格控制中心磁贴 + 三大场景切换(网速护航 / 隐私安检 / 连接排障) + 高级参数按需折叠。
- *   2. 100% 真实后端能力闭环: 完整对接 /api/vector_sync、LeakGuard(含白名单/三级守卫/撤销栈)、Express、UpdateLeash、ThermoCruise、FlowScalpel、Blackbox(四维归因)、MultiIface、NativeSubtrees 与 ConfigVault。
- *   3. 状态机零串扰: 全局活跃连接数与单机抽屉完全隔离、写操作 1.5s 乐观飞行锁 + 写代数锁 + 5s 撤销胶囊、morph 就地更新防吞点击、已读水位线消除常亮红点焦虑。
+ *   1. 全站原语彻底收口: 统一复用 .hero.v6-hero、.cc-bento-row/.cc-tile、seg() 弹簧胶囊与 .sgrp.scard.glass.open 标准卡片，零孤岛私有大卡。
+ *   2. 诚实三态与正交双连接: 严格区分热点待机/热点就绪无设备/热点活跃三态；热点连接数与本机连接数正交独立展示与检索。
+ *   3. 本机守护全功能工作台: 完整对接 /api/local_apps/traffic、power、privacy_audit、firewall 与 self_firewall_* / self_dns_* 动作，严守零唤醒租约纪律。
  *   4. 永久红线严守: 零表情字符 · 零拖动滑块（纯直接数字输入） · 全量 SVG 宽高硬锁 · LeakGuard 100% 原始未打码 raw_value 转义展示 · 四大主题自适应。
  */
 'use strict';
@@ -24,7 +24,12 @@ var V6_API = {
   blackbox: '/api/v6/blackbox',
   multiIface: '/api/v6/multi_iface',
   nativeSubtrees: '/api/v6/native_subtrees',
-  backup: '/api/backup'
+  backup: '/api/backup',
+  localTraffic: '/api/local_apps/traffic',
+  localPower: '/api/local_apps/power',
+  localPrivacy: '/api/local_apps/privacy_audit',
+  localFirewall: '/api/local_apps/firewall',
+  selfToggle: '/api/self/toggle'
 };
 
 /* 严格 HTML 转义，防止恶意 HTTP Path / User-Agent / 原始报文切片触发 XSS */
@@ -105,15 +110,21 @@ function v6Svg(name, cls) {
 
 /* 全局 v6 状态仓 */
 var V6 = {
-  subtab: LS.get('hnc6.v6_subtab', 'escort'), // 'escort' | 'privacy' | 'troubleshoot'
+  subtab: LS.get('hnc6.v6_subtab', 'escort'), // 'escort' | 'host' | 'privacy' | 'troubleshoot'
   healthOpen: false,
   advOpen: { exp: false, leash: false, thermo: false, lgCfg: false, lgGuard: false, bbNet: false },
-  mutUntil: { lg: 0, express: 0, leash: 0, thermo: 0 },
+  mutUntil: { lg: 0, express: 0, leash: 0, thermo: 0, hostFw: 0 },
   loaded: false,
   apiSupported: { lg: true, v6: true },
   lg: {
     total_hits: 0,
+    host_hits: 0,
+    hotspot_hits: 0,
+    hotspot_affected_devices: 0,
+    affected_apps: 0,
     affected_devices: 0,
+    hotspot_blocked_domains: 0,
+    self_blocked_domains: 0,
     blocked_domains: 0,
     blocked_set: {},
     hit_ledger: {},
@@ -128,6 +139,7 @@ var V6 = {
     events: [],
     openIds: {},
     visibleLimit: 30,
+    originFilter: 'ALL', // 'ALL' | 'host' | 'hotspot'
     typeFilter: 'ALL',
     q: '',
     sseActive: false,
@@ -163,6 +175,11 @@ var V6 = {
     stage2_temp_c: 45,
     low_bat_pct: 20,
     temp_c: 0,
+    battery_temp_c: 0,
+    shell_temp_c: 0,
+    shell_temp_available: false,
+    shell_zone: '',
+    battery_spoof_suspected: false,
     capacity_pct: 0,
     bat_available: null,
     sensor_checked: false,
@@ -181,6 +198,7 @@ var V6 = {
   },
   scalpel: {
     open: false,
+    scopeDomain: 'all', // 'all' | 'hotspot' | 'host'
     scopeMac: '',
     scopeIp: '',
     devName: '',
@@ -189,6 +207,9 @@ var V6 = {
     paused: false,
     loading: false,
     readable: true,
+    hotspotFlows: 0,
+    hostFlows: 0,
+    hasSplitCounts: false,
     globalFlows: [],
     globalTotalFlows: 0,
     drawerFlows: [],
@@ -198,6 +219,107 @@ var V6 = {
     cutTotal: 0,
     timer: 0,
     err: ''
+  },
+  host: {
+    mode: LS.get('hnc6.v6_host_mode', 'live'), // 'live' | 'traffic' | 'power' | 'firewall'
+    includeSystem: LS.get('hnc6.v6_host_sys', '0') === '1',
+    q: '',
+    period: LS.get('hnc6.v6_host_period', 'today'), // 'boot' | 'today' | '7d' | '30d'
+    net: LS.get('hnc6.v6_host_net', 'all'), // 'all' | 'mobile' | 'wifi'
+    powerSort: LS.get('hnc6.v6_host_psort', 'bg_mah'), // 'bg_mah' | 'screen_off_mah' | 'wakelock_ms' | 'radio_ms' | 'cpu_bg_ms'
+    pollTimer: 0,
+    trafficLoading: false,
+    powerLoading: false,
+    privacyLoading: false,
+    fwLoading: false,
+    trafficLoadedAt: 0,
+    powerLoadedAt: 0,
+    privacyLoadedAt: 0,
+    fwLoadedAt: 0,
+    trafficErr: '',
+    powerErr: '',
+    privacyErr: '',
+    traffic: {
+      available: true,
+      reason: '',
+      rate_warming_up: false,
+      bg_split_available: true,
+      summary: {
+        total_rx_bps: 0,
+        total_tx_bps: 0,
+        total_bps: 0,
+        total_bytes: 0,
+        bg_total_bytes: 0,
+        fg_total_bytes: 0,
+        bg_ratio_pct: 0,
+        app_count: 0,
+        active_conn_apps: 0
+      },
+      apps: []
+    },
+    power: {
+      available: true,
+      reason: '',
+      cached: false,
+      refresh_throttled: false,
+      bg_mah_available: false,
+      bg_mah_reason: '',
+      screen_off_mah_available: false,
+      device_summary: {
+        battery_capacity_mah: 0,
+        computed_drain_mah: 0,
+        actual_discharge_mah: 0,
+        screen_off_discharge_mah: 0,
+        time_on_battery_ms: 0,
+        screen_off_on_battery_ms: 0
+      },
+      apps: []
+    },
+    privacy: {
+      available: true,
+      reason: '',
+      self_capture_enabled: false,
+      self_capture_mode: '',
+      summary: {
+        cleartext_http_conns: 0,
+        direct_dns_conns: 0,
+        tracker_sdk_conns: 0,
+        bg_active_conns: 0,
+        risky_apps_count: 0
+      },
+      findings: []
+    },
+    firewall: {
+      updated_at: 0,
+      uid_rules: [],
+      uid_map: {},
+      blocked_domains: [],
+      blocked_set: {},
+      protected_packages: [
+        'com.agy',
+        'com.android.webview',
+        'com.google.android.webview',
+        'com.rifsxd.ksunext',
+        'com.sukisu.ultra',
+        'com.topjohnwu.magisk',
+        'io.github.vvb2060.magisk',
+        'me.bmax.apatch',
+        'me.weishu.kernelsu'
+      ],
+      uid_rule_count: 0,
+      blocked_domain_count: 0
+    },
+    appSheet: {
+      open: false,
+      uid: -1,
+      pkg: '',
+      appName: '',
+      isSystem: false,
+      flows: [],
+      loading: false,
+      err: '',
+      timer: 0
+    }
   },
   blackbox: {
     granularity_ms: 200,
@@ -247,7 +369,11 @@ var V6 = {
   sse: null,
   sseRetryT: 0
 };
-if (['escort', 'privacy', 'troubleshoot'].indexOf(V6.subtab) < 0) V6.subtab = 'escort';
+if (['escort', 'host', 'privacy', 'troubleshoot'].indexOf(V6.subtab) < 0) V6.subtab = 'escort';
+if (['live', 'traffic', 'power', 'firewall'].indexOf(V6.host.mode) < 0) V6.host.mode = 'live';
+if (['boot', 'today', '7d', '30d'].indexOf(V6.host.period) < 0) V6.host.period = 'today';
+if (['all', 'mobile', 'wifi'].indexOf(V6.host.net) < 0) V6.host.net = 'all';
+if (['bg_mah', 'screen_off_mah', 'wakelock_ms', 'radio_ms', 'cpu_bg_ms'].indexOf(V6.host.powerSort) < 0) V6.host.powerSort = 'bg_mah';
 
 function fmtClockTs(ts) {
   if (!ts) return '--:--:--';
@@ -271,6 +397,7 @@ function leakTypeZh(tp) {
   if (/PHONE/.test(u)) return '手机号';
   if (/EMAIL/.test(u)) return '邮箱地址';
   if (/ID_CARD|IDCARD/.test(u)) return '身份证号';
+  if (/CREDENTIAL/.test(u)) return '账号凭据';
   if (/GPS|LOC|LAT|LON/.test(u)) return '精准定位';
   if (/WIFI_BSSID|BSSID/.test(u)) return '周边Wi-Fi定位';
   if (/MAC/.test(u)) return '网卡地址';
@@ -281,7 +408,7 @@ function leakTypeZh(tp) {
 
 function leakTypeBadgeCls(tp) {
   var u = leakTypeBadgeCode(tp);
-  if (/PHONE|ID_CARD|IDCARD|AUTH|TOKEN|COOKIE|PASS|GPS|LOC|IMEI|IMSI/.test(u)) return 'b-bad';
+  if (/PHONE|ID_CARD|IDCARD|CREDENTIAL|AUTH|TOKEN|COOKIE|PASS|GPS|LOC|IMEI|IMSI/.test(u)) return 'b-bad';
   if (/DEVICE_ID|OAID|ANDROID_ID|IDFA|MAC|BSSID|SERIAL/.test(u)) return 'b-warn';
   return 'b-acc';
 }
@@ -291,13 +418,14 @@ function leakTypeGroup(tp) {
   if (/PHONE|EMAIL|ID_CARD|IDCARD/.test(u)) return 'PHONE';
   if (/GPS|LOC|LAT|LON|WIFI_BSSID|BSSID/.test(u)) return 'GPS';
   if (/MAC/.test(u)) return 'MAC_ADDR';
-  if (/TOKEN|AUTH|COOKIE|KEY|PASS/.test(u)) return 'TOKEN';
+  if (/CREDENTIAL|TOKEN|AUTH|COOKIE|KEY|PASS/.test(u)) return 'TOKEN';
   if (/IMEI|IMSI|OAID|IDFA|ANDROID_ID|DEVICE/.test(u)) return 'DEVICE_ID';
   return 'OTHER';
 }
 
-function leakHitKey(mac, srcIp, dstHost, lType, rawVal) {
-  return (mac || srcIp || '-') + '|' + String(dstHost || '').toLowerCase() + '|' + lType + '|' + rawVal;
+function leakHitKey(origin, uid, mac, srcIp, dstHost, lType, rawVal) {
+  var who = origin === 'host' ? ('uid:' + (uid || 0)) : (mac || srcIp || '-');
+  return who + '|' + String(dstHost || '').toLowerCase() + '|' + lType + '|' + rawVal;
 }
 
 /* ── 三级公共基础设施域名守卫识别与归一化 ── */
@@ -399,11 +527,16 @@ function v6NormUndoBlockItem(it, idx) {
   var host = String(it.dst_host || it.host || it.domain || it.value || '').trim();
   if (!host) return null;
   var alsoIp = String(it.also_ip || it.dst_ip || it.ip || '').trim();
+  var targetScope = String(it.target_scope || it.scope || '').toLowerCase();
   var macs = Array.isArray(it.macs) ? it.macs.map(function (m) { return String(m || '').trim().toLowerCase(); }).filter(Boolean) : [];
   var mac = String(it.mac || (macs.length === 1 ? macs[0] : '') || '').trim().toLowerCase();
   if (!macs.length && mac) macs = [mac];
   var devLabel = String(it.device_name || '');
-  if (!devLabel && macs.length) {
+  if (!devLabel && targetScope === 'host') {
+    devLabel = '本机应用';
+  } else if (!devLabel && targetScope === 'both') {
+    devLabel = '本机与热点双端';
+  } else if (!devLabel && macs.length) {
     var names = macs.map(function (m) {
       var d0 = devBy(m);
       return (d0 && d0.name) ? d0.name : m;
@@ -415,6 +548,7 @@ function v6NormUndoBlockItem(it, idx) {
     id: String(it.id || it.undo_id || (host + '|' + ts + '|' + (idx || 0))),
     hasServerId: !!(it.id || it.undo_id),
     kind: String(it.kind || 'domain'),
+    target_scope: targetScope,
     dst_host: host,
     also_ip: (alsoIp && alsoIp.toLowerCase() !== host.toLowerCase()) ? alsoIp : '',
     mac: mac,
@@ -445,14 +579,26 @@ function v6MarkLeakGuardSeen() {
 }
 
 function v6RecalcLeakWatermark() {
-  var sumHits = 0, devSeen = {};
+  var sumHits = 0, hostHits = 0, hsHits = 0, devSeen = {}, appSeen = {};
   V6.lg.events.forEach(function (e) {
-    sumHits += Math.max(1, num(e.hit_count, 1));
-    var k = e.mac || e.src_ip;
-    if (k) devSeen[k] = 1;
+    var h = Math.max(1, num(e.hit_count, 1));
+    sumHits += h;
+    if (e.origin === 'host') {
+      hostHits += h;
+      var ak = e.pkg ? ('pkg:' + String(e.pkg).toLowerCase()) : (e.uid > 0 ? ('uid:' + e.uid) : (e.app_name ? ('app:' + String(e.app_name).toLowerCase()) : 'host'));
+      appSeen[ak] = 1;
+    } else {
+      hsHits += h;
+      var dk = e.mac || e.src_ip;
+      if (dk) devSeen[dk] = 1;
+    }
   });
   V6.lg.total_hits = sumHits;
-  V6.lg.affected_devices = Object.keys(devSeen).length;
+  V6.lg.host_hits = hostHits;
+  V6.lg.hotspot_hits = hsHits;
+  V6.lg.hotspot_affected_devices = Object.keys(devSeen).length;
+  V6.lg.affected_apps = Object.keys(appSeen).length;
+  V6.lg.affected_devices = V6.lg.hotspot_affected_devices + V6.lg.affected_apps;
   v6SeenLeakHits();
   if (S.page === 'vector' && V6.subtab === 'privacy') {
     v6MarkLeakGuardSeen();
@@ -461,14 +607,20 @@ function v6RecalcLeakWatermark() {
   }
 }
 
-/* ── LeakGuard 数据归一化（对齐 v6_leakguard_api.go LeakEvent） ── */
+/* ── LeakGuard 数据归一化（对齐 v6_leakguard_api.go LeakEvent: 支持本机 host 与热点 hotspot 双来源） ── */
 function v6NormLeakEvent(raw, idx, batchCounts) {
   raw = raw || {};
   var ts = num(raw.ts != null ? raw.ts : (raw.timestamp != null ? raw.timestamp : raw.created_at), 0);
   var mac = String(raw.mac || raw.client_mac || raw.src_mac || '').toLowerCase();
   var srcIp = String(raw.src_ip || raw.client_ip || raw.ip || '');
-  var d = mac ? devBy(mac) : null;
-  if (!d && srcIp && Array.isArray(S.devices)) {
+  var uid = raw.uid != null ? Math.round(num(raw.uid, 0)) : 0;
+  var pkg = String(raw.pkg || raw.package || '').trim();
+  var appName = String(raw.app_name || '').trim();
+  var originRaw = String(raw.origin || '').toLowerCase().trim();
+  var origin = (originRaw === 'host' || (!originRaw && !mac && (uid > 0 || pkg))) ? 'host' : 'hotspot';
+
+  var d = (origin === 'hotspot' && mac) ? devBy(mac) : null;
+  if (origin === 'hotspot' && !d && srcIp && Array.isArray(S.devices)) {
     for (var i = 0; i < S.devices.length; i++) {
       if (S.devices[i].ip === srcIp) { d = S.devices[i]; if (!mac) mac = d.mac; break; }
     }
@@ -483,23 +635,32 @@ function v6NormLeakEvent(raw, idx, batchCounts) {
   var method = String(raw.method || meta.method || 'GET').toUpperCase();
   var urlPath = String(raw.path || raw.url_path || raw.uri || meta.path || '/');
   var ua = String(raw.user_agent || raw.ua || meta.ua || '（未携带客户端标识）');
-  var id = String(raw.id || raw.event_id || (ts + '_' + srcIp + '_' + lType + '_' + dstHost + '_' + (idx || 0)));
-  var isBlocked = raw.is_blocked === true || raw.blocked === true || !!V6.lg.blocked_set[dstHost.toLowerCase()];
+  var id = String(raw.id || raw.event_id || (ts + '_' + origin + '_' + (uid || srcIp) + '_' + lType + '_' + dstHost + '_' + (idx || 0)));
+  var hostLower = dstHost.toLowerCase();
+  var isBlocked = raw.is_blocked === true || raw.blocked === true || (origin !== 'host' && !!V6.lg.blocked_set[hostLower]) || (origin === 'host' && !!(V6.host.firewall && V6.host.firewall.blocked_set && V6.host.firewall.blocked_set[hostLower]));
   var infraGuard = v6NormInfraGuard(raw.infra_guard, raw.guard_level, raw.guard_label || raw.infra_label, dstHost);
-  var hKey = leakHitKey(mac, srcIp, dstHost, lType, rawVal);
+  var hKey = leakHitKey(origin, uid, mac, srcIp, dstHost, lType, rawVal);
   var computedHits = Math.max(
     1,
     Math.round(num(raw.hit_count != null ? raw.hit_count : raw.hits, 0)),
     num(batchCounts && batchCounts[hKey], 0),
     num(V6.lg.hit_ledger[hKey], 0)
   );
+  var devLabel = origin === 'host'
+    ? (appName || pkg || (uid > 0 ? ('本机应用 UID ' + uid) : '本机应用'))
+    : (raw.device_name || (d ? d.name : '') || (srcIp || mac || '未知设备'));
+
   return {
     id: id,
     hKey: hKey,
     ts: ts,
     timeStr: raw.time_str || fmtClockTs(ts),
+    origin: origin,
+    uid: uid,
+    pkg: pkg,
+    app_name: appName,
     mac: mac,
-    devName: raw.device_name || (d ? d.name : '') || (srcIp || mac || '未知设备'),
+    devName: devLabel,
     src_ip: srcIp || (d && d.ip) || '',
     src_port: num(raw.src_port != null ? raw.src_port : raw.sport, 0),
     dst_ip: dstIp,
@@ -572,12 +733,14 @@ function v6ApplyLeakGuardData(d, forceAccept) {
       if (!it) return;
       var mac0 = String(it.mac || '').toLowerCase();
       var ip0 = String(it.src_ip || '');
-      var hk = leakHitKey(mac0, ip0, it.dst_host, leakTypeBadgeCode(it.leak_type), String(it.raw_value != null ? it.raw_value : ''));
+      var uid0 = it.uid != null ? Math.round(num(it.uid, 0)) : 0;
+      var orig0 = (String(it.origin || '').toLowerCase() === 'host' || (!it.origin && !mac0 && (uid0 > 0 || it.pkg))) ? 'host' : 'hotspot';
+      var hk = leakHitKey(orig0, uid0, mac0, ip0, it.dst_host, leakTypeBadgeCode(it.leak_type), String(it.raw_value != null ? it.raw_value : ''));
       batchCounts[hk] = (batchCounts[hk] || 0) + 1;
     });
     var list = rawArr.map(function (it, idx) {
       var ev = v6NormLeakEvent(it, idx, batchCounts);
-      if (ev.is_blocked && ev.dst_host) V6.lg.blocked_set[ev.dst_host.toLowerCase()] = 1;
+      if (ev.is_blocked && ev.dst_host && ev.origin !== 'host') V6.lg.blocked_set[ev.dst_host.toLowerCase()] = 1;
       return ev;
     }).filter(function (ev) {
       return !v6IsEventWhitelisted(ev, V6.lg.whitelist);
@@ -590,17 +753,51 @@ function v6ApplyLeakGuardData(d, forceAccept) {
   if (rawTotalHits != null) {
     V6.lg.total_hits = Math.max(0, Math.round(num(rawTotalHits)));
   }
-  var rawAffected = d.affected_devices != null ? d.affected_devices : stats.affected_devices;
-  if (rawAffected != null) {
-    V6.lg.affected_devices = Math.max(0, Math.round(num(rawAffected)));
-  } else if (V6.lg.events.length) {
-    var devSeen = {};
-    V6.lg.events.forEach(function (e) { var k = e.mac || e.src_ip; if (k) devSeen[k] = 1; });
-    V6.lg.affected_devices = Object.keys(devSeen).length;
+  var rawHostHits = d.host_hits != null ? d.host_hits : stats.host_hits;
+  if (rawHostHits != null) {
+    V6.lg.host_hits = Math.max(0, Math.round(num(rawHostHits)));
   }
+  var rawHotspotHits = d.hotspot_hits != null ? d.hotspot_hits : stats.hotspot_hits;
+  if (rawHotspotHits != null) {
+    V6.lg.hotspot_hits = Math.max(0, Math.round(num(rawHotspotHits)));
+  }
+
+  var rawAffectedDevs = d.affected_devices != null ? d.affected_devices : stats.affected_devices;
+  var rawAffectedApps = d.affected_apps != null ? d.affected_apps : stats.affected_apps;
+  if (rawAffectedDevs != null) {
+    V6.lg.hotspot_affected_devices = Math.max(0, Math.round(num(rawAffectedDevs)));
+  }
+  if (rawAffectedApps != null) {
+    V6.lg.affected_apps = Math.max(0, Math.round(num(rawAffectedApps)));
+  }
+  if (V6.lg.events.length && (rawAffectedDevs == null || rawAffectedApps == null)) {
+    var devSeen = {}, appSeen = {};
+    V6.lg.events.forEach(function (e) {
+      if (e.origin === 'host') {
+        var ak = e.pkg ? ('pkg:' + String(e.pkg).toLowerCase()) : (e.uid > 0 ? ('uid:' + e.uid) : (e.app_name ? ('app:' + String(e.app_name).toLowerCase()) : 'host'));
+        appSeen[ak] = 1;
+      } else {
+        var dk = e.mac || e.src_ip;
+        if (dk) devSeen[dk] = 1;
+      }
+    });
+    if (rawAffectedDevs == null) V6.lg.hotspot_affected_devices = Math.max(V6.lg.hotspot_affected_devices, Object.keys(devSeen).length);
+    if (rawAffectedApps == null) V6.lg.affected_apps = Math.max(V6.lg.affected_apps, Object.keys(appSeen).length);
+  }
+  if (rawAffectedDevs != null || rawAffectedApps != null || V6.lg.events.length) {
+    V6.lg.affected_devices = V6.lg.hotspot_affected_devices + V6.lg.affected_apps;
+  }
+
   var rawBlkDom = typeof d.blocked_domains === 'number' ? d.blocked_domains : stats.blocked_domains;
+  var rawSelfBlkDom = typeof d.self_blocked_domains === 'number' ? d.self_blocked_domains : stats.self_blocked_domains;
   if (typeof rawBlkDom === 'number') {
-    V6.lg.blocked_domains = Math.max(0, Math.round(rawBlkDom));
+    V6.lg.hotspot_blocked_domains = Math.max(0, Math.round(rawBlkDom));
+  }
+  if (typeof rawSelfBlkDom === 'number') {
+    V6.lg.self_blocked_domains = Math.max(0, Math.round(rawSelfBlkDom));
+  }
+  if (typeof rawBlkDom === 'number' || typeof rawSelfBlkDom === 'number') {
+    V6.lg.blocked_domains = V6.lg.hotspot_blocked_domains + V6.lg.self_blocked_domains;
   }
 
   v6SeenLeakHits();
@@ -639,11 +836,24 @@ function v6PushStreamEvent(evObj) {
     V6.lg.events.length = V6.lg.capacity || 300;
   }
   V6.lg.total_hits = num(V6.lg.total_hits) + 1;
-  var devSeen = {};
-  V6.lg.events.forEach(function (x) { var k = x.mac || x.src_ip; if (k) devSeen[k] = 1; });
-  V6.lg.affected_devices = Math.max(V6.lg.affected_devices, Object.keys(devSeen).length);
+  if (tmpEv.origin === 'host') V6.lg.host_hits = num(V6.lg.host_hits) + 1;
+  else V6.lg.hotspot_hits = num(V6.lg.hotspot_hits) + 1;
+  var devSeen = {}, appSeen = {};
+  V6.lg.events.forEach(function (x) {
+    if (x.origin === 'host') {
+      var ak = x.pkg ? ('pkg:' + String(x.pkg).toLowerCase()) : (x.uid > 0 ? ('uid:' + x.uid) : (x.app_name ? ('app:' + String(x.app_name).toLowerCase()) : 'host'));
+      appSeen[ak] = 1;
+    } else {
+      var dk = x.mac || x.src_ip;
+      if (dk) devSeen[dk] = 1;
+    }
+  });
+  V6.lg.hotspot_affected_devices = Math.max(V6.lg.hotspot_affected_devices, Object.keys(devSeen).length);
+  V6.lg.affected_apps = Math.max(V6.lg.affected_apps, Object.keys(appSeen).length);
+  V6.lg.affected_devices = Math.max(V6.lg.affected_devices, V6.lg.hotspot_affected_devices + V6.lg.affected_apps);
   if (S.page === 'vector' && V6.subtab === 'privacy') v6MarkLeakGuardSeen();
   else v6PaintHeaderBadges();
+  if (S.page === 'vector') v6RefreshNavBadges();
   v6RefreshActiveSubviewDom();
 }
 
@@ -744,19 +954,27 @@ function v6ApplyLeashData(r, forceAccept) {
   };
 }
 
-/* ── ThermoCruise 数据归一化 ── */
+/* ── ThermoCruise 数据归一化（支持机身壳温 shell_temp_c + 电池温度双轨及温度锁定提示） ── */
 function v6IsThermoSensorUnreadable(th) {
   th = th || V6.thermo || {};
   var rc = String(th.reason_code || '').toLowerCase();
   if (rc && /unreadable|unavailable|sensor|out_of_range|out_of_bounds|invalid_temp|fuse|trip|missing|nan/.test(rc)) return true;
-  if (th.bat_available === false) return true;
+  if (th.bat_available === false && !th.shell_temp_available) return true;
   return false;
+}
+
+function v6EffectiveTempC(th) {
+  th = th || V6.thermo || {};
+  if (th.shell_temp_available && th.shell_temp_c > 0 && th.shell_temp_c < 95) {
+    return Math.max(th.shell_temp_c, th.temp_c || 0);
+  }
+  return num(th.temp_c, 0);
 }
 
 function v6ThermoStageZh(stage) {
   if (!V6.thermo.enabled) return '已关闭';
   if (v6IsThermoSensorUnreadable(V6.thermo)) return '温度传感器不可读（已安全跳过控温）';
-  if (V6.thermo.bat_available === null && !(V6.thermo.temp_c > 0)) return '待读取';
+  if (V6.thermo.bat_available === null && !(v6EffectiveTempC(V6.thermo) > 0)) return '待读取';
   if (stage >= 2) return '高温降温中';
   if (stage === 1) return '一级省电中';
   return '温度正常';
@@ -802,11 +1020,23 @@ function v6ApplyThermoData(r, forceAccept) {
 
   if (bat) {
     if (bat.temp_c != null) V6.thermo.temp_c = num(bat.temp_c);
+    if (bat.battery_temp_c != null) V6.thermo.battery_temp_c = num(bat.battery_temp_c);
+    if (bat.shell_temp_c != null) V6.thermo.shell_temp_c = num(bat.shell_temp_c);
+    if (typeof bat.shell_temp_available === 'boolean') V6.thermo.shell_temp_available = bat.shell_temp_available;
+    if (bat.shell_zone != null) V6.thermo.shell_zone = String(bat.shell_zone || '');
+    if (typeof bat.battery_spoof_suspected === 'boolean') V6.thermo.battery_spoof_suspected = bat.battery_spoof_suspected;
     if (bat.capacity_pct != null) V6.thermo.capacity_pct = clamp(Math.round(num(bat.capacity_pct)), 0, 100);
     if (bat.status != null) V6.thermo.bat_status = String(bat.status);
     if (typeof bat.is_charging === 'boolean') V6.thermo.is_charging = bat.is_charging;
-  } else {
-    if (r.temp_c != null) V6.thermo.temp_c = num(r.temp_c);
+  }
+  if (r.temp_c != null) V6.thermo.temp_c = num(r.temp_c);
+  if (r.battery_temp_c != null) V6.thermo.battery_temp_c = num(r.battery_temp_c);
+  if (r.shell_temp_c != null) V6.thermo.shell_temp_c = num(r.shell_temp_c);
+  if (typeof r.shell_temp_available === 'boolean') V6.thermo.shell_temp_available = r.shell_temp_available;
+  else if (V6.thermo.shell_temp_c > 0 && V6.thermo.shell_temp_c < 95) V6.thermo.shell_temp_available = true;
+  if (r.shell_zone != null) V6.thermo.shell_zone = String(r.shell_zone || '');
+  if (typeof r.battery_spoof_suspected === 'boolean') V6.thermo.battery_spoof_suspected = r.battery_spoof_suspected;
+  if (!bat) {
     if (r.capacity_pct != null) V6.thermo.capacity_pct = clamp(Math.round(num(r.capacity_pct)), 0, 100);
     if (r.status != null) {
       V6.thermo.bat_status = String(r.status);
@@ -830,7 +1060,7 @@ function v6ApplyThermoData(r, forceAccept) {
     if (effStg != null) {
       V6.thermo.stage = clamp(effStg, 0, 2);
     } else {
-      var tc = V6.thermo.temp_c;
+      var tc = v6EffectiveTempC(V6.thermo);
       V6.thermo.stage = !V6.thermo.enabled || !(tc > 0) ? 0 : (tc >= V6.thermo.stage2_temp_c ? 2 : (tc >= V6.thermo.stage1_temp_c ? 1 : 0));
     }
   }
@@ -844,15 +1074,53 @@ function v6ApplyThermoData(r, forceAccept) {
   };
 }
 
-/* ── FlowScalpel 数据归一化（严格隔离全局计数与单机抽屉筛选，根治 10 -> 1 污染） ── */
+/* ── FlowScalpel 数据归一化（正交隔离热点连接与本机应用连接，严格隔离全局与单机抽屉） ── */
+function v6IsHotspotActive() {
+  return !(typeof S !== 'undefined' && S.hotspot && S.hotspot.active === false);
+}
+
+function v6OnlineClientCount() {
+  if (!v6IsHotspotActive()) return 0;
+  var devs = (typeof S !== 'undefined' && Array.isArray(S.devices)) ? S.devices : [];
+  var byList = devs.filter(function (d) { return d && d.online; }).length;
+  if (typeof S !== 'undefined' && S.devLoaded) return byList;
+  return Math.max(0, Math.round(num(typeof S !== 'undefined' && S.live && S.live.online, byList)));
+}
+
+function v6HotspotFlowCount() {
+  if (!v6IsHotspotActive() || v6OnlineClientCount() <= 0) return 0;
+  if (V6.scalpel.hasSplitCounts) return Math.max(0, V6.scalpel.hotspotFlows);
+  if (typeof S !== 'undefined' && S.live && S.live.hotspot_flows != null) {
+    return Math.max(0, Math.round(num(S.live.hotspot_flows, 0)));
+  }
+  return 0;
+}
+
+function v6HostFlowCount() {
+  if (typeof S !== 'undefined' && S.live && S.live.host_flows != null && !V6.scalpel.hasSplitCounts) {
+    return Math.max(0, Math.round(num(S.live.host_flows, 0)));
+  }
+  if (V6.scalpel.hasSplitCounts) return Math.max(0, V6.scalpel.hostFlows);
+  if (typeof S !== 'undefined' && S.live && S.live.host_flows != null) {
+    return Math.max(0, Math.round(num(S.live.host_flows, 0)));
+  }
+  return Math.max(0, num(V6.scalpel.globalTotalFlows, 0));
+}
+
 function v6NormScalpelFlowList(fl) {
   if (!Array.isArray(fl)) return [];
   var nowSec = Date.now() / 1000;
   return fl.map(function (f, idx) {
     var mac = String(f.mac || '').toLowerCase();
     var srcIp = String(f.src_ip || '');
-    var d = mac ? devBy(mac) : null;
-    if (!d && srcIp && Array.isArray(S.devices)) {
+    var uid = f.uid != null ? Math.round(num(f.uid, -1)) : -1;
+    var pkg = String(f.package || f.pkg || '');
+    var hostAppName = String(f.host_app_name || '');
+    var scopeRaw = String(f.scope || '').toLowerCase();
+    var flowScope = (scopeRaw === 'host' || (!scopeRaw && !mac && (uid >= 0 || pkg || hostAppName))) ? 'host' : 'hotspot';
+
+    var d = (flowScope === 'hotspot' && mac) ? devBy(mac) : null;
+    if (flowScope === 'hotspot' && !d && srcIp && Array.isArray(S.devices)) {
       for (var i = 0; i < S.devices.length; i++) {
         if (S.devices[i].ip === srcIp) { d = S.devices[i]; if (!mac) mac = d.mac; break; }
       }
@@ -862,21 +1130,31 @@ function v6NormScalpelFlowList(fl) {
     var dport = Math.round(num(f.dport != null ? f.dport : f.dst_port, 0));
     var isQuic = rawProto === 'quic' || (rawProto === 'udp' && dport === 443);
     var frozenUntil = num(f.frozen_until, 0);
+    var ownerLabel = flowScope === 'host'
+      ? (hostAppName || pkg || (uid >= 0 ? ('UID ' + uid) : '本机进程'))
+      : (f.device_name || (d ? d.name : '') || srcIp || '未知设备');
+
     return {
-      id: String(f.flow_key || f.id || (rawProto + '|' + srcIp + ':' + sport + '|' + f.dst_ip + ':' + dport + '|' + idx)),
+      id: String(f.flow_key || f.id || (flowScope + '|' + rawProto + '|' + srcIp + ':' + sport + '|' + f.dst_ip + ':' + dport + '|' + idx)),
+      scope: flowScope,
+      uid: uid,
+      pkg: pkg,
+      host_app_name: hostAppName,
+      is_system: f.is_system === true,
+      cleartext_risk: String(f.cleartext_risk || ''),
       proto: rawProto === 'udp' || rawProto === 'quic' ? 'udp' : 'tcp',
       protoBadge: isQuic ? 'QUIC' : (rawProto === 'udp' ? 'UDP' : 'TCP'),
       state: String(f.state || 'ESTABLISHED').toUpperCase(),
       frozen: frozenUntil > nowSec,
       frozen_until: frozenUntil,
       mac: mac,
-      devName: f.device_name || (d ? d.name : '') || srcIp || '未知设备',
+      devName: ownerLabel,
       src_ip: srcIp,
       sport: sport,
       dst_ip: String(f.dst_ip || ''),
       dport: dport,
       dst_host: String(f.domain || f.dst_host || ''),
-      app_name: String(f.app_name || ''),
+      app_name: String(f.app_name || hostAppName || ''),
       traffic_type: String(f.traffic_type || ''),
       rx_bps: num(f.down_bps != null ? f.down_bps : f.rx_bps, 0),
       tx_bps: num(f.up_bps != null ? f.up_bps : f.tx_bps, 0),
@@ -895,6 +1173,11 @@ function v6ApplyScalpelData(r, isDrawerScoped) {
   } else if (typeof r.active_rules === 'number') {
     V6.scalpel.activeRulesCount = Math.max(0, Math.round(r.active_rules));
   }
+  if (!isDrawerScoped && (r.hotspot_flows != null || r.host_flows != null)) {
+    V6.scalpel.hasSplitCounts = true;
+    V6.scalpel.hotspotFlows = (!v6IsHotspotActive() || v6OnlineClientCount() <= 0) ? 0 : Math.max(0, Math.round(num(r.hotspot_flows, 0)));
+    V6.scalpel.hostFlows = Math.max(0, Math.round(num(r.host_flows, 0)));
+  }
 
   var parsed = Array.isArray(r.flows) ? v6NormScalpelFlowList(r.flows) : null;
   if (!parsed) return;
@@ -906,7 +1189,7 @@ function v6ApplyScalpelData(r, isDrawerScoped) {
   } else {
     V6.scalpel.globalFlows = parsed;
     V6.scalpel.globalTotalFlows = tot;
-    if (V6.scalpel.open && !V6.scalpel.scopeMac && !V6.scalpel.scopeIp) {
+    if (V6.scalpel.open && !V6.scalpel.scopeMac && !V6.scalpel.scopeIp && V6.scalpel.scopeDomain === 'all') {
       V6.scalpel.drawerFlows = parsed;
       V6.scalpel.drawerTotal = tot;
     }
@@ -1077,7 +1360,18 @@ function v6ApplyScreenshotPackSummary(pk) {
   }
 }
 
-/* 消费 /api/vector_sync 聚合快照 */
+/* 消费 /api/vector_sync 聚合快照（含零副作用 host_guardian 摘要） */
+function v6ApplyHostSyncSummary(hg) {
+  if (!hg || typeof hg !== 'object') return;
+  if (Date.now() >= V6.mutUntil.hostFw) {
+    if (hg.uid_rule_count != null) V6.host.firewall.uid_rule_count = Math.max(0, Math.round(num(hg.uid_rule_count, 0)));
+    if (hg.blocked_domain_count != null) V6.host.firewall.blocked_domain_count = Math.max(0, Math.round(num(hg.blocked_domain_count, 0)));
+  }
+  if (typeof hg.self_capture_enabled === 'boolean') {
+    V6.host.privacy.self_capture_enabled = hg.self_capture_enabled;
+  }
+}
+
 function v6IngestVectorSync(r) {
   if (!r || typeof r !== 'object') return;
   var ext = (r.extensions && typeof r.extensions === 'object') ? r.extensions : ((r.modules && typeof r.modules === 'object') ? r.modules : {});
@@ -1090,6 +1384,8 @@ function v6IngestVectorSync(r) {
   var scSrc = r.scalpel || ext.scalpel || v.scalpel;
   var bbSrc = r.blackbox || ext.blackbox || v.blackbox;
   var arbSrc = ext.arbiter || r.arbiter || v.arbiter || null;
+  var hgSrc = ext.host_guardian || r.host_guardian || v.host_guardian || null;
+  var sfSrc = r.self_firewall || ext.self_firewall || v.self_firewall || null;
 
   if (lgSrc) v6ApplyLeakGuardData(lgSrc, false);
   if (exSrc) v6ApplyExpressData(exSrc, false);
@@ -1097,6 +1393,17 @@ function v6IngestVectorSync(r) {
   if (thSrc) v6ApplyThermoData(thSrc, false);
   if (scSrc) v6ApplyScalpelData(scSrc, false);
   if (bbSrc) v6ApplyBlackboxData(bbSrc);
+  if (hgSrc) v6ApplyHostSyncSummary(hgSrc);
+  if (sfSrc && typeof sfSrc === 'object' && Date.now() >= V6.mutUntil.hostFw) {
+    var rawSfUid = sfSrc.uid_rule_count != null ? sfSrc.uid_rule_count : sfSrc.enabled_apps;
+    if (rawSfUid != null) {
+      V6.host.firewall.uid_rule_count = Array.isArray(rawSfUid) ? rawSfUid.length : Math.max(0, Math.round(num(rawSfUid, 0)));
+    }
+    var rawSfDom = sfSrc.blocked_domain_count != null ? sfSrc.blocked_domain_count : sfSrc.blocked_domains;
+    if (rawSfDom != null) {
+      V6.host.firewall.blocked_domain_count = Array.isArray(rawSfDom) ? rawSfDom.length : Math.max(0, Math.round(num(rawSfDom, 0)));
+    }
+  }
 
   V6._rawSyncArbiter = arbSrc;
   v6ApplyArbiterData(arbSrc, r.live || S.live);
@@ -1112,6 +1419,7 @@ function v6IngestVectorSync(r) {
   S.v6 = V6;
   v6PaintHeaderBadges();
   v6RefreshDevicesBannerDom();
+  v6RefreshNavBadges();
   if (S.page === 'vector') {
     v6RefreshHeroDom();
     v6RefreshActiveSubviewDom();
@@ -1128,6 +1436,7 @@ function v6LoadLeakGuard(forceAccept) {
     V6.loaded = true;
     if (S.page === 'vector') {
       v6RefreshHeroDom();
+      v6RefreshNavBadges();
       if (V6.subtab === 'privacy') v6RefreshActiveSubviewDom();
     }
     v6RefreshDevicesBannerDom();
@@ -1148,7 +1457,7 @@ function v6LoadCockpitAll() {
     api.get(V6_API.express, null, { timeout: 7000 }).then(function (r) { if (isStale()) return; V6.apiSupported.v6 = true; v6ApplyExpressData(r, false); }).catch(function (e) { if (e && e.status === 404) V6.apiSupported.v6 = false; }),
     api.get(V6_API.updateLeash, null, { timeout: 7000 }).then(function (r) { if (isStale()) return; V6.apiSupported.v6 = true; v6ApplyLeashData(r, false); }).catch(function () {}),
     api.get(V6_API.thermo, null, { timeout: 7000 }).then(function (r) { if (isStale()) return; V6.apiSupported.v6 = true; v6ApplyThermoData(r, false); }).catch(function () {}),
-    api.get(V6_API.scalpelFlows, { limit: 120 }, { timeout: 7000 }).then(function (r) { if (isStale()) return; v6ApplyScalpelData(r, false); }).catch(function () {}),
+    api.get(V6_API.scalpelFlows, { scope: 'all', limit: 120 }, { timeout: 7000 }).then(function (r) { if (isStale()) return; v6ApplyScalpelData(r, false); }).catch(function () {}),
     api.get(V6_API.blackbox, { limit: 12, incidents_only: '1' }, { timeout: 7000 }).then(function (r) { if (isStale()) return; v6ApplyBlackboxData(r); }).catch(function () {}),
     api.get(V6_API.multiIface, null, { timeout: 7000 }).then(function (r) { if (isStale()) return; v6ApplyMultiIfaceData(r); }).catch(function () {})
   ]).then(function () {
@@ -1159,6 +1468,7 @@ function v6LoadCockpitAll() {
     v6RefreshDevicesBannerDom();
     if (S.page === 'vector') {
       v6RefreshHeroDom();
+      v6RefreshNavBadges();
       v6RefreshActiveSubviewDom();
     }
   });
@@ -1281,15 +1591,18 @@ function v6DeviceBadgesHtml(d, skipUsb) {
   return out;
 }
 
-/* 设备页顶部紧凑单行人话状态条（替代旧版两行 5 个英文胶囊墙） */
+/* 设备页顶部紧凑单行人话状态条（诚实反映热点开关与本机守护状态） */
 function v6DevicesStripHtml() {
-  var escortCnt = V6.express.enabled ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
-  var leashCnt = V6.leash.enabled ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
+  var hsActive = v6IsHotspotActive();
+  var onlineCnt = v6OnlineClientCount();
+  var escortCnt = (hsActive && onlineCnt > 0 && V6.express.enabled) ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
+  var leashCnt = (hsActive && onlineCnt > 0 && V6.leash.enabled) ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
   var unreadLg = v6UnreadLeakHits();
   var totalLg = num(V6.lg.total_hits, 0);
   var sensorUnreadable = v6IsThermoSensorUnreadable(V6.thermo);
-  var tempTxt = (!sensorUnreadable && V6.thermo.bat_available !== false && V6.thermo.temp_c > 0) ? (V6.thermo.temp_c.toFixed(1) + '°C') : '';
-  var arbInfo = v6ActiveLimiterInfo();
+  var effTemp = v6EffectiveTempC(V6.thermo);
+  var tempTxt = (!sensorUnreadable && effTemp > 0) ? (effTemp.toFixed(1) + '℃') : '';
+  var arbInfo = hsActive ? v6ActiveLimiterInfo() : null;
 
   var parts = [];
   var dotCls = 'ok';
@@ -1299,6 +1612,11 @@ function v6DevicesStripHtml() {
   } else if (V6.thermo.enabled && !sensorUnreadable && V6.thermo.stage >= 2) {
     parts.push('机身偏热已启动降温保护' + (tempTxt ? '（' + tempTxt + '）' : ''));
     dotCls = 'bad';
+  } else if (!hsActive) {
+    parts.push('热点待机中 · 本机守护运行中');
+    dotCls = 'acc';
+  } else if (onlineCnt <= 0) {
+    parts.push('热点已就绪 · 暂无接入设备');
   } else if (arbInfo && arbInfo.active) {
     parts.push('总带宽压速：' + arbInfo.sourceLabel);
     dotCls = 'warn';
@@ -1309,10 +1627,10 @@ function v6DevicesStripHtml() {
   }
 
   if (leashCnt > 0) {
-    parts.push('已限速 ' + leashCnt + ' 项大更新');
+    parts.push('已限幅 ' + leashCnt + ' 项大更新');
     if (dotCls === 'ok') dotCls = 'acc';
   } else if (tempTxt && V6.thermo.stage < 2) {
-    parts.push('温控 ' + tempTxt);
+    parts.push('机身 ' + tempTxt);
   }
 
   if (unreadLg > 0) {
@@ -1322,13 +1640,14 @@ function v6DevicesStripHtml() {
     parts.push('安检记录 ' + totalLg + ' 条');
   }
 
-  var goTarget = unreadLg > 0 ? 'go-privacy' : 'go-vector';
-  return '<div class="glass v6-dev-banner press" data-v6-act="' + goTarget + '" role="button" tabindex="0" aria-label="打开智能护航与隐私安检">' +
+  var goTarget = unreadLg > 0 ? 'go-privacy' : (!hsActive ? 'go-host' : 'go-vector');
+  var ctaLabel = !hsActive && unreadLg <= 0 ? '本机守护 ' : '护航中心 ';
+  return '<div class="glass v6-dev-banner press" data-v6-act="' + goTarget + '" role="button" tabindex="0" aria-label="打开智能护航与本机守护">' +
     '<div class="v6-dev-banner-l">' +
       '<span class="v6-dot ' + dotCls + '"></span>' +
       '<span class="txt">' + escapeHtml(parts.join(' · ')) + '</span>' +
     '</div>' +
-    '<span class="v6-dev-banner-r">护航中心 ' + ico('right') + '</span>' +
+    '<span class="v6-dev-banner-r">' + ctaLabel + ico('right') + '</span>' +
   '</div>';
 }
 
@@ -1337,23 +1656,24 @@ function v6RefreshDevicesBannerDom() {
   if (m && S.page === 'devices') m.innerHTML = v6DevicesStripHtml();
 }
 
-/* 设置页折叠行内部简洁面板（嵌入标准 scard('scard-v6')，彻底告别突兀大白卡） */
+/* 设置页折叠行内部简洁面板（嵌入标准 scard('scard-v6')） */
 function v6SettingsBodyHtml() {
   var lgHits = num(V6.lg.total_hits, 0);
-  var globalConn = num(V6.scalpel.globalTotalFlows, V6.scalpel.globalFlows.length);
+  var hsConn = v6HotspotFlowCount();
+  var hostConn = v6HostFlowCount();
   return '<div class="row">' +
-      '<span class="tx"><div class="t">智能护航与隐私安检中心</div>' +
-      '<div class="s">集中管理游戏通话优先、后台更新限速与明文隐私记录（共 ' + lgHits + ' 条）</div></span>' +
+      '<span class="tx"><div class="t">智能护航与本机守护中心</div>' +
+      '<div class="s">集中管理网速护航、本机应用联网防火墙与隐私安检记录（共 ' + lgHits + ' 条）</div></span>' +
       '<button type="button" class="v6-mini-btn pri press" data-v6-act="go-vector">打开护航页</button>' +
     '</div>' +
     '<div class="row">' +
-      '<span class="tx"><div class="t">全网活跃连接管理</div>' +
-      '<div class="s">查看当前 ' + globalConn + ' 条活跃连接，支持不断网单独掐断异常连接或封禁 15 分钟</div></span>' +
-      '<button type="button" class="v6-mini-btn press" data-v6-act="open-scalpel" data-mac="" data-ip="" data-name="">管理连接</button>' +
+      '<span class="tx"><div class="t">正交双域活跃连接清理</div>' +
+      '<div class="s">热点连接 ' + hsConn + ' 条 · 本机连接 ' + hostConn + ' 条，支持不断网单独掐断或冻结 15 分钟</div></span>' +
+      '<button type="button" class="v6-mini-btn press" data-v6-act="open-scalpel" data-scope="all" data-mac="" data-ip="" data-name="">管理连接</button>' +
     '</div>' +
     '<div class="row">' +
       '<span class="tx"><div class="t">整机配置一键备份与恢复</div>' +
-      '<div class="s">导出或恢复全部设备备注、限速规则与智能护航参数</div></span>' +
+      '<div class="s">导出或恢复全部设备备注、本机防火墙规则与智能护航参数</div></span>' +
       '<span style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
         '<button type="button" class="v6-mini-btn press" data-v6-act="backup-export">导出备份</button>' +
         '<button type="button" class="v6-mini-btn press" data-v6-act="backup-import-pick">恢复备份</button>' +
@@ -1363,7 +1683,7 @@ function v6SettingsBodyHtml() {
 /* 兼容旧调用点兜底 */
 function v6SettingsSlotHtml() { return ''; }
 
-/* ═════════════════════ Layer 0: 顶部一句话总览 + 3 格控制中心磁贴 + 场景切换 ═════════════════════ */
+/* ═════════════════════ Layer 0: 顶部诚实三态总览 + 正交双连接胶囊 + 3格磁贴 + 4分区弹簧胶囊 ═════════════════════ */
 function v6UniqueEscortCount(ex) {
   ex = ex || V6.express || {};
   var seen = {};
@@ -1382,7 +1702,7 @@ window.v6DeviceEscortStripHtml = function (d) {
   var isAuto = Array.isArray(ex.escorted_macs) && ex.escorted_macs.some(function (m) { return String(m).toLowerCase() === macL; });
   var ul = V6.leash || {};
   var leashHit = Array.isArray(ul.sessions) && ul.sessions.some(function (s) { return String(s.mac || '').toLowerCase() === macL; });
-  var stTxt = isForced ? '已设为常驻优先护航（游戏/会议插队转发）' : (isAuto && ex.enabled ? '智能护航自动加速中' : (leashHit ? '后台大更新正在智能限速，不影响前台浏览' : '未固定常驻优先 · 可一键加入低延迟护航'));
+  var stTxt = isForced ? '已设为常驻优先护航（游戏/会议插队转发）' : (isAuto && ex.enabled ? '智能护航自动加速中' : (leashHit ? '后台大更新正在智能限幅，不影响前台浏览' : '未固定常驻优先 · 可一键加入低延迟护航'));
   return '<div class="dev-v6-strip' + (isForced || (isAuto && ex.enabled) ? ' is-on' : '') + '">' +
     '<span class="dev-v6-l"><i class="dev-v6-dot"></i><span>' + escapeHtml(stTxt) + '</span></span>' +
     '<button type="button" class="dev-v6-btn press' + (isForced ? ' on' : '') + '" data-v6-act="express-dev" data-mac="' + escapeHtml(d.mac) + '">' + (isForced ? '已常驻优先' : '设为常驻优先') + '</button>' +
@@ -1393,14 +1713,22 @@ function v6RenderLatencyCompareHtml() {
   var ar = (typeof S !== 'undefined' && S.autorate) ? S.autorate : {};
   var ex = V6.express || {};
   var bb = V6.blackbox || {};
+  var hsActive = v6IsHotspotActive();
+  var onlineCnt = v6OnlineClientCount();
   var baseRtt = num(ar.base_rtt_ms, 0);
   var curRtt = num(ar.rtt_ms, 0);
-  var hasRealRtt = baseRtt > 0 && curRtt > 0;
+  var hasRealRtt = hsActive && baseRtt > 0 && curRtt > 0;
   var jitterMs = bb.rtt_probe_active === false ? 0 : num(bb.latest_jitter_ms, 0);
   var incCnt = Math.round(num(bb.incident_count, 0));
 
+  if (!hsActive) {
+    return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot idle"></span><span>当前未开启热点，网速护航队列处于零唤醒待机；开启热点后自动接管转发优先级</span></span></div>';
+  }
+  if (onlineCnt <= 0 && !hasRealRtt) {
+    return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (ex.enabled ? 'ok' : 'idle') + '"></span><span>热点已开启，等待设备接入后自动守护游戏通话低延迟</span></span></div>';
+  }
   if (!hasRealRtt && !(jitterMs > 0) && !(incCnt > 0)) {
-    return '<div class="v6-calm-empty"><span class="v6-dot ' + (ex.enabled ? 'ok' : 'idle') + '"></span><span>当前网络通畅，暂无拥塞波动' + (ex.enabled ? '（优先护航持续待命中）' : '（开启优先护航后将在检测到拥塞时自动插队保护）') + '</span></div>';
+    return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (ex.enabled ? 'ok' : 'idle') + '"></span><span>当前网络通畅，暂无排队拥塞波动' + (ex.enabled ? '（优先护航待命中）' : '（开启后遇拥塞自动插队保护）') + '</span></span></div>';
   }
   if (hasRealRtt) {
     var delta = Math.max(0, Math.round(curRtt - baseRtt));
@@ -1414,33 +1742,68 @@ function v6RenderLatencyCompareHtml() {
       '</div>' +
     '</div>';
   }
-  return '<div class="v6-calm-empty"><span class="v6-dot ' + (incCnt > 0 ? 'warn' : 'ok') + '"></span><span>' + (incCnt > 0 ? ('黑匣子已记录 ' + incCnt + ' 次近期延迟波动' + (jitterMs > 0 ? (' · 最新抖动 ' + jitterMs.toFixed(1) + 'ms') : '')) : ('最新采样抖动 ' + jitterMs.toFixed(1) + 'ms · 当前网络整体平稳')) + '</span></div>';
+  return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (incCnt > 0 ? 'warn' : 'ok') + '"></span><span>' + (incCnt > 0 ? ('近期已捕捉 ' + incCnt + ' 次短暂延迟波动' + (jitterMs > 0 ? (' · 最新抖动 ' + jitterMs.toFixed(1) + 'ms') : '')) : ('最新采样抖动 ' + jitterMs.toFixed(1) + 'ms · 当前网络整体平稳')) + '</span></span></div>';
 }
 
 function v6HeroHeadlineInfo() {
-  var escortCnt = V6.express.enabled ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
-  var leashCnt = V6.leash.enabled ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
+  var hsActive = v6IsHotspotActive();
+  var onlineCnt = v6OnlineClientCount();
+  var escortCnt = (hsActive && onlineCnt > 0 && V6.express.enabled) ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
+  var leashCnt = (hsActive && onlineCnt > 0 && V6.leash.enabled) ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
   var unreadLg = v6UnreadLeakHits();
+  var effTemp = v6EffectiveTempC(V6.thermo);
 
   if (S.coreHealthy === false) {
-    return { dot: 'bad', title: '部分底层服务异常，已自动隔离降级', sub: '热点基础联网不受影响，点击右侧状态按钮可查看具体模块' };
+    return { dot: 'bad', title: '部分底层服务异常，已自动隔离降级', sub: '基础联网不受影响，点击右侧状态按钮可查看具体模块' };
   }
   if (V6.thermo.enabled && !v6IsThermoSensorUnreadable(V6.thermo) && V6.thermo.stage >= 2) {
-    return { dot: 'bad', title: '手机温度偏高（' + V6.thermo.temp_c.toFixed(1) + '°C），正在自动降载降温', sub: '已温和收紧后台大流量下载，防止系统过热强关热点' };
+    return {
+      dot: 'bad',
+      title: '机身温度偏高（' + effTemp.toFixed(1) + '℃），正在自动降载降温',
+      sub: hsActive ? '已温和收紧后台大流量下载，防止系统过热强关热点' : '热点待机中 · 本机温控巡航与后台守护持续运行'
+    };
+  }
+  if (!hsActive) {
+    if (unreadLg > 0) {
+      return {
+        dot: 'warn',
+        title: '热点待机中 · 新发现 ' + unreadLg + ' 次明文外发',
+        sub: '热点未开启；本机应用联网监测与隐私安检正在值守，可在下方查看拦截'
+      };
+    }
+    return {
+      dot: 'ok',
+      title: '热点待机中 · 本机守护运行中',
+      sub: '热点关闭时护航队列零额外耗电；本机应用联网、防火墙与明文安检正常值守'
+    };
+  }
+  if (onlineCnt <= 0) {
+    if (unreadLg > 0) {
+      return {
+        dot: 'warn',
+        title: '热点已就绪 · 新发现 ' + unreadLg + ' 次明文外发',
+        sub: '当前暂无设备连入热点；可在下方查看本机守护或隐私安检记录'
+      };
+    }
+    return {
+      dot: 'ok',
+      title: '热点已就绪 · 暂无接入设备',
+      sub: '智能护航静默待命，设备连入后将自动保护游戏通话并限制后台大更新'
+    };
   }
   if (escortCnt > 0 && leashCnt > 0) {
-    return { dot: 'ok', title: '正在为 ' + escortCnt + ' 台设备优先护航，并限速 ' + leashCnt + ' 项后台更新', sub: '游戏与视频通话优先转发，后台下载不抢网速' };
+    return { dot: 'ok', title: '正在为 ' + escortCnt + ' 台设备优先护航，并限幅 ' + leashCnt + ' 项后台更新', sub: '游戏与视频通话优先转发，后台下载不抢网速' };
   }
   if (escortCnt > 0) {
     return { dot: 'ok', title: '正在为 ' + escortCnt + ' 台设备优先护航', sub: '检测到活跃实时流量，已开启低延迟插队转发' };
   }
   if (leashCnt > 0) {
-    return { dot: 'acc', title: '已自动限速 ' + leashCnt + ' 项大体积后台更新', sub: '日常浏览、视频与通话网速保持顺畅' };
+    return { dot: 'acc', title: '已自动限幅 ' + leashCnt + ' 项大体积后台更新', sub: '日常浏览、视频与通话网速保持顺畅' };
   }
   if (unreadLg > 0) {
-    return { dot: 'warn', title: '热点运行通畅 · 新发现 ' + unreadLg + ' 次隐私明文传输', sub: '可在下方「隐私安检」查看具体应用域名并一键拦截' };
+    return { dot: 'warn', title: '热点守护 ' + onlineCnt + ' 台设备 · 新发现 ' + unreadLg + ' 次明文外发', sub: '可在下方「隐私安检」查看具体应用域名并一键拦截' };
   }
-  return { dot: 'ok', title: '热点网络通畅 · 自动护航值守中', sub: '有人打游戏、开视频会议或遇到大更新时将自动介入保护网速' };
+  return { dot: 'ok', title: '热点网络通畅 · 正在守护 ' + onlineCnt + ' 台设备', sub: '有人打游戏、开视频会议或遇到大更新时将自动介入保护网速' };
 }
 
 function v6BulkheadHumanHtml() {
@@ -1463,6 +1826,7 @@ function v6BulkheadHumanHtml() {
 }
 
 function v6RenderArbiterBarHtml() {
+  if (!v6IsHotspotActive()) return '';
   var arb = v6ActiveLimiterInfo();
   if (!arb || !arb.active) return '';
   var ceilParts = [];
@@ -1487,73 +1851,119 @@ function v6RenderHeroCardHtml() {
   var hl = v6HeroHeadlineInfo();
   var allOk = S.coreHealthy !== false;
   var showHealth = V6.healthOpen || !allOk;
+  var hsActive = v6IsHotspotActive();
+  var onlineCnt = v6OnlineClientCount();
+  var hsConns = v6HotspotFlowCount();
+  var hostConns = v6HostFlowCount();
 
-  var expCnt = V6.express.enabled ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
-  var expSub = !V6.express.enabled ? '点击开启' : (expCnt > 0 ? (expCnt + ' 台加速中') : (V6.express.auto_detect ? '自动识别待命' : '仅手动指定'));
+  var expCnt = (hsActive && onlineCnt > 0 && V6.express.enabled) ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
+  var expSub = !V6.express.enabled
+    ? '已关闭 · 点击开启'
+    : (expCnt > 0 ? ('已开启 · ' + expCnt + ' 台加速') : (V6.express.auto_detect ? '已开启 · 自动识别' : '已开启 · 手动指定'));
 
-  var leashActCnt = V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length;
-  var leashSub = !V6.leash.enabled ? '点击开启' : (leashActCnt > 0 ? ('限速中 ' + leashActCnt + ' 项') : ('超 ' + V6.leash.grace_mb + 'MB 限速'));
+  var leashActCnt = (hsActive && onlineCnt > 0) ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
+  var leashGraceStr = V6.leash.grace_mb >= 1024 ? (trim0((V6.leash.grace_mb / 1024).toFixed(1)) + 'G') : (V6.leash.grace_mb + 'M');
+  var leashSub = !V6.leash.enabled
+    ? '已关闭 · 点击开启'
+    : (leashActCnt > 0 ? ('限幅中 ' + leashActCnt + ' 项') : ('已开启 · 超' + leashGraceStr + '限幅'));
 
   var sensorUnreadable = v6IsThermoSensorUnreadable(V6.thermo);
-  var tempStr = sensorUnreadable ? '传感器不可读' : (V6.thermo.temp_c > 0 ? (V6.thermo.temp_c.toFixed(1) + '°C') : '待采样');
+  var effTemp = v6EffectiveTempC(V6.thermo);
+  var tempShort = sensorUnreadable ? '传感器异常' : (effTemp > 0 ? (effTemp.toFixed(1) + '℃') : '待采样');
+  var batShort = V6.thermo.capacity_pct > 0 ? (V6.thermo.capacity_pct + '%') : '';
   var thSub = !V6.thermo.enabled
-    ? (tempStr + ' · 已关')
+    ? ('已关闭 · ' + tempShort)
     : (sensorUnreadable
       ? '已安全跳过控温'
-      : (tempStr + ' · ' + (V6.thermo.stage >= 2 ? '降温中' : (V6.thermo.stage === 1 ? '省电中' : (V6.thermo.temp_c > 0 ? '正常' : '待读取')))));
-  var thTone = (!sensorUnreadable && V6.thermo.stage >= 2) ? ' is-hot' : ((!sensorUnreadable && V6.thermo.stage === 1) ? ' is-warn' : '');
+      : (V6.thermo.stage >= 2
+        ? (tempShort + ' · 降温中')
+        : (tempShort + (batShort ? (' · ' + batShort) : ' · 正常'))));
+  var thStateCls = (!sensorUnreadable && V6.thermo.stage >= 2) ? 'th-hot' : ((!sensorUnreadable && V6.thermo.stage === 1) ? 'th-warn' : 'th-ok');
+  var bSvg = typeof bentoSvg === 'function' ? bentoSvg : function (k) { return v6Svg(k === 'sqm' ? 'express' : k); };
 
-  var lgTotal = num(V6.lg.total_hits, 0);
-  var lgUnread = v6UnreadLeakHits();
-  var globalConns = num(V6.scalpel.globalTotalFlows, V6.scalpel.globalFlows.length);
-
-  return '<section class="glass v6-hero-card" id="v6-hero-card">' +
+  return '<div class="glass hero v6-hero" id="v6-hero-card">' +
     '<div class="v6-hero-top">' +
       '<div class="v6-hero-headline">' +
-        '<b><span class="v6-dot ' + hl.dot + '"></span><span>' + escapeHtml(hl.title) + '</span></b>' +
-        '<small>' + escapeHtml(hl.sub) + '</small>' +
+        '<div class="v6-hero-title"><span class="v6-dot ' + hl.dot + '"></span><span>' + escapeHtml(hl.title) + '</span></div>' +
+        '<div class="v6-hero-sub">' + escapeHtml(hl.sub) + '</div>' +
       '</div>' +
-      '<div class="v6-hero-actions">' +
-        '<button type="button" class="v6-health-pill press" data-v6-act="toggle-health">' +
-          '<span class="v6-dot ' + (allOk ? 'ok' : 'bad') + '"></span>' +
-          '<span>' + (allOk ? '系统正常' : '查看异常') + '</span>' +
-        '</button>' +
-        '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="" data-ip="" data-name="">' +
-          v6Svg('scalpel') + '<span>活跃连接 ' + globalConns + '</span>' +
-        '</button>' +
-      '</div>' +
+      '<button type="button" class="v6-health-pill press" data-v6-act="toggle-health">' +
+        '<span class="v6-dot ' + (allOk ? 'ok' : 'bad') + '"></span>' +
+        '<span>' + (allOk ? '系统正常' : '查看异常') + '</span>' +
+      '</button>' +
     '</div>' +
     '<div class="v6-health-drawer" id="v6-health-drawer"' + (showHealth ? '' : ' hidden') + '>' + v6BulkheadHumanHtml() + '</div>' +
     v6RenderArbiterBarHtml() +
-    '<div class="v6-bento-grid" role="group" aria-label="核心护航快捷控制">' +
-      '<div class="v6-bento is-exp press' + (V6.express.enabled ? ' on' : '') + '" data-v6-bento-nav="express" role="button" tabindex="0" aria-label="查看游戏通话优先详情">' +
-        '<div class="v6-bento-top"><span class="v6-bento-ic">' + v6Svg('express') + '</span><button type="button" class="v6-bento-sw" data-v6-bento="express" aria-pressed="' + V6.express.enabled + '" title="点按快速开关">' + (V6.express.enabled ? '已开启' : '已关闭') + '</button></div>' +
-        '<div class="v6-bento-txt"><b>游戏通话优先</b><small>' + escapeHtml(expSub) + '</small></div>' +
-      '</div>' +
-      '<div class="v6-bento is-leash press' + (V6.leash.enabled ? ' on' : '') + '" data-v6-bento-nav="leash" role="button" tabindex="0" aria-label="查看后台更新限速详情">' +
-        '<div class="v6-bento-top"><span class="v6-bento-ic">' + v6Svg('leash') + '</span><button type="button" class="v6-bento-sw" data-v6-bento="leash" aria-pressed="' + V6.leash.enabled + '" title="点按快速开关">' + (V6.leash.enabled ? '已开启' : '已关闭') + '</button></div>' +
-        '<div class="v6-bento-txt"><b>后台更新限速</b><small>' + escapeHtml(leashSub) + '</small></div>' +
-      '</div>' +
-      '<div class="v6-bento is-thermo press' + (V6.thermo.enabled ? ' on' : '') + thTone + '" data-v6-bento-nav="thermo" role="button" tabindex="0" aria-label="查看发热省电保护详情">' +
-        '<div class="v6-bento-top"><span class="v6-bento-ic">' + v6Svg('thermo') + '</span><button type="button" class="v6-bento-sw" data-v6-bento="thermo" aria-pressed="' + V6.thermo.enabled + '" title="点按快速开关">' + (V6.thermo.enabled ? '已开启' : '已关闭') + '</button></div>' +
-        '<div class="v6-bento-txt"><b>发热省电保护</b><small>' + escapeHtml(thSub) + '</small></div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="v6-subtabs" role="tablist" aria-label="智能护航功能分区">' +
-      '<button type="button" role="tab" class="v6-subtab' + (V6.subtab === 'escort' ? ' on' : '') + '" aria-selected="' + (V6.subtab === 'escort') + '" data-v6-subtab="escort">网速护航</button>' +
-      '<button type="button" role="tab" class="v6-subtab' + (V6.subtab === 'privacy' ? ' on' : '') + '" aria-selected="' + (V6.subtab === 'privacy') + '" data-v6-subtab="privacy">' +
-        '<span>隐私安检</span>' +
-        (lgTotal > 0 ? '<span class="v6-subtab-cnt' + (lgUnread > 0 ? ' unread' : '') + '">' + (lgTotal > 99 ? '99+' : lgTotal) + '</span>' : '') +
+    '<div class="v6-conn-pair" role="group" aria-label="正交双域活跃连接概览">' +
+      '<button type="button" class="v6-conn-pill press" data-v6-act="open-scalpel" data-scope="hotspot" data-mac="" data-ip="" data-name="">' +
+        '<span class="v6-conn-pill-l"><span class="v6-dot ' + (hsActive && onlineCnt > 0 ? 'ok' : 'idle') + '"></span><span>热点连接</span></span>' +
+        '<span class="v6-conn-pill-r"><span>' + hsConns + '</span>' + ico('right') + '</span>' +
       '</button>' +
-      '<button type="button" role="tab" class="v6-subtab' + (V6.subtab === 'troubleshoot' ? ' on' : '') + '" aria-selected="' + (V6.subtab === 'troubleshoot') + '" data-v6-subtab="troubleshoot">' +
-        '<span>连接排障</span>' +
-        (V6.scalpel.activeRulesCount > 0 ? '<span class="v6-subtab-cnt">' + V6.scalpel.activeRulesCount + '</span>' : '') +
+      '<button type="button" class="v6-conn-pill press" data-v6-act="open-scalpel" data-scope="host" data-mac="" data-ip="" data-name="">' +
+        '<span class="v6-conn-pill-l"><span class="v6-dot acc"></span><span>本机连接</span></span>' +
+        '<span class="v6-conn-pill-r"><span>' + hostConns + '</span>' + ico('right') + '</span>' +
       '</button>' +
     '</div>' +
-  '</section>';
+    '<div class="cc-bento-row" role="group" aria-label="核心护航快捷控制">' +
+      '<button type="button" class="cc-tile sqm-tile press' + (V6.express.enabled ? ' on sqm-on' : '') + '" data-v6-tile="express">' +
+        '<span class="cc-orb">' + bSvg('sqm') + '</span>' +
+        '<span class="cc-txt"><b>游戏通话优先</b><small>' + escapeHtml(expSub) + '</small></span>' +
+      '</button>' +
+      '<button type="button" class="cc-tile qos-tile press' + (V6.leash.enabled ? ' on qos-on' : '') + '" data-v6-tile="leash">' +
+        '<span class="cc-orb">' + bSvg('leash') + '</span>' +
+        '<span class="cc-txt"><b>后台更新限幅</b><small>' + escapeHtml(leashSub) + '</small></span>' +
+      '</button>' +
+      '<button type="button" class="cc-tile th-tile press' + (V6.thermo.enabled ? (' on ' + thStateCls) : '') + '" data-v6-tile="thermo">' +
+        '<span class="cc-orb">' + bSvg('thermo') + '</span>' +
+        '<span class="cc-txt"><b>机身温控</b><small>' + escapeHtml(thSub) + '</small></span>' +
+      '</button>' +
+    '</div>' +
+  '</div>';
 }
 
-/* ═════════════════════ Sub-Tab 1: 网速护航 (游戏通话优先 + 后台更新限速 + 发热省电保护) ═════════════════════ */
+function v6BuildMainSegLabel(tabKey) {
+  if (tabKey === 'escort') return '网速护航';
+  if (tabKey === 'host') {
+    var fwCnt = Math.max(0, num(V6.host.firewall.uid_rule_count, 0) + num(V6.host.firewall.blocked_domain_count, 0));
+    return '本机守护' + (fwCnt > 0 ? ('<span class="v6-seg-cnt">' + (fwCnt > 99 ? '99+' : fwCnt) + '</span>') : '');
+  }
+  if (tabKey === 'privacy') {
+    var lgTotal = num(V6.lg.total_hits, 0);
+    var lgUnread = v6UnreadLeakHits();
+    if (lgUnread > 0) return '隐私安检<span class="v6-seg-cnt unread">' + (lgUnread > 99 ? '99+' : lgUnread) + '</span>';
+    if (lgTotal > 0) return '隐私安检<span class="v6-seg-cnt">' + (lgTotal > 99 ? '99+' : lgTotal) + '</span>';
+    return '隐私安检';
+  }
+  var scCnt = Math.max(0, num(V6.scalpel.activeRulesCount, 0));
+  return '连接排障' + (scCnt > 0 ? ('<span class="v6-seg-cnt">' + scCnt + '</span>') : '');
+}
+
+function v6RenderMainSegHtml() {
+  return seg('v6-tab', [
+    ['escort', v6BuildMainSegLabel('escort')],
+    ['host', v6BuildMainSegLabel('host')],
+    ['privacy', v6BuildMainSegLabel('privacy')],
+    ['troubleshoot', v6BuildMainSegLabel('troubleshoot')]
+  ], V6.subtab, 'glass');
+}
+
+/* 就地更新分段器按钮文字角标且不破坏 <i class="thumb"> 弹簧变换状态 */
+function v6RefreshNavBadges() {
+  var nav = document.getElementById('v6-nav-mount');
+  if (!nav || S.page !== 'vector') return;
+  var segEl = nav.querySelector('[data-seg="v6-tab"]');
+  if (!segEl) return;
+  ['escort', 'host', 'privacy', 'troubleshoot'].forEach(function (k) {
+    var btn = segEl.querySelector('button[data-v="' + k + '"]');
+    if (!btn) return;
+    var nextHtml = v6BuildMainSegLabel(k);
+    if (btn.innerHTML !== nextHtml) btn.innerHTML = nextHtml;
+    btn.classList.toggle('on', V6.subtab === k);
+  });
+  if (typeof placeSegs === 'function') placeSegs(nav);
+}
+
+/* ═════════════════════ Sub-Tab 1: 网速护航 (全站标准 .sgrp.scard.glass 卡片) ═════════════════════ */
 function v6FriendlyDevLabel(d, fallbackMac) {
   if (!d) return fallbackMac || '未知设备';
   if (d.name && String(d.name).toLowerCase() !== String(d.mac || '').toLowerCase()) return d.name;
@@ -1561,6 +1971,7 @@ function v6FriendlyDevLabel(d, fallbackMac) {
   var ipTail = d.ip && d.ip.indexOf('.') >= 0 ? (' (.' + d.ip.split('.').pop() + ')') : '';
   return base + ipTail;
 }
+
 function v6BuildExpressDeviceList() {
   var devs = Array.isArray(S.devices) ? S.devices : [];
   var byMac = {};
@@ -1582,26 +1993,28 @@ function v6BuildExpressDeviceList() {
     });
   });
 
-  var rest = devs.filter(function (d) {
-    var ml = String((d && d.mac) || '').toLowerCase();
-    return d && d.online && !d.blocked && ml && !seen[ml];
-  });
-  rest.sort(function (a, b) {
-    var ea = V6.express.escorted_macs.indexOf(String(a.mac).toLowerCase()) >= 0 ? 1 : 0;
-    var eb = V6.express.escorted_macs.indexOf(String(b.mac).toLowerCase()) >= 0 ? 1 : 0;
-    return eb - ea;
-  });
-  rest.slice(0, 10).forEach(function (d) {
-    var ml = String(d.mac).toLowerCase();
-    seen[ml] = 1;
-    out.push({
-      mac: ml,
-      name: v6FriendlyDevLabel(d, ml),
-      online: true,
-      forced: false,
-      autoEscort: V6.express.escorted_macs.indexOf(ml) >= 0
+  if (v6IsHotspotActive()) {
+    var rest = devs.filter(function (d) {
+      var ml = String((d && d.mac) || '').toLowerCase();
+      return d && d.online && !d.blocked && ml && !seen[ml];
     });
-  });
+    rest.sort(function (a, b) {
+      var ea = V6.express.escorted_macs.indexOf(String(a.mac).toLowerCase()) >= 0 ? 1 : 0;
+      var eb = V6.express.escorted_macs.indexOf(String(b.mac).toLowerCase()) >= 0 ? 1 : 0;
+      return eb - ea;
+    });
+    rest.slice(0, 10).forEach(function (d) {
+      var ml = String(d.mac).toLowerCase();
+      seen[ml] = 1;
+      out.push({
+        mac: ml,
+        name: v6FriendlyDevLabel(d, ml),
+        online: true,
+        forced: false,
+        autoEscort: V6.express.escorted_macs.indexOf(ml) >= 0
+      });
+    });
+  }
   return out;
 }
 
@@ -1615,51 +2028,48 @@ function v6RenderExpressCardHtml() {
     return '<button type="button" class="v6-dev-pill press' + cls + '" data-v6-act="express-dev" data-mac="' + escapeHtml(it.mac) + '" title="点按切换该设备的常驻优先状态">' +
       '<span class="v6-dot ' + dotCls + '"></span><span>' + escapeHtml(it.name) + suffix + '</span>' +
     '</button>';
-  }).join('') : '<div class="v6-calm-empty">当前暂无在线设备；设备连入热点后可点选设为常驻优先</div>';
+  }).join('') : '<div class="note" style="margin:0">当前暂无在线设备；设备连入热点后可点选固定为常驻优先</div>';
 
   var qdiscHuman = ex.qdisc === 'fq_codel' ? '智能防卡顿队列 (fq_codel)' : escapeHtml(ex.qdisc || '标准队列');
   var tierHuman = v6DataplaneTierZh(ex.tier);
-  return '<article class="glass v6-card" id="v6-card-express">' +
-    '<div class="v6-card-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb green">' + v6Svg('express') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t"><span>游戏与通话优先</span></div>' +
-          '<div class="v6-card-s">识别到手游对局或视频会议时插队转发，其他设备下载看剧不抢网</div>' +
-        '</div>' +
+  return '<div class="sgrp scard glass open" id="v6-card-express">' +
+    '<div class="sgrp-h scard-h scard-head">' +
+      gi('green', 'bolt') +
+      '<span class="tx"><b>游戏与视频优先</b><small>识别到手游对局或音视频会议时插队转发，其他设备下载不抢网</small></span>' +
+      toggle(ex.enabled, 'data-v6-tog="express" aria-label="游戏与视频优先总开关"') +
+    '</div>' +
+    '<div class="v6-scard-body">' +
+      '<div class="lgd-sw-row' + (ex.enabled ? '' : ' v6-dimmed') + '">' +
+        '<span>自动识别手游与音视频会议<small>无需手动配置，检测到实时互动流量自动介入护航</small></span>' +
+        toggle(ex.auto_detect, 'data-v6-tog="express-auto" aria-label="自动识别手游与音视频会议"' + (ex.enabled ? '' : ' disabled')) +
       '</div>' +
-      toggle(ex.enabled, 'data-v6-tog="express" aria-label="游戏与通话优先总开关"') +
-    '</div>' +
-    '<div class="lgd-sw-row' + (ex.enabled ? '' : ' v6-dimmed') + '" style="padding:2px 0">' +
-      '<span>自动识别手游与音视频通话<small>无需手动配置，检测到实时对局或会议流量自动开启护航</small></span>' +
-      toggle(ex.auto_detect, 'data-v6-tog="express-auto" aria-label="自动识别手游与音视频通话"' + (ex.enabled ? '' : ' disabled')) +
-    '</div>' +
-    '<div class="' + (ex.enabled ? '' : 'v6-dimmed') + '">' +
-      '<div class="note" style="margin:0 0 6px">' + (ex.enabled ? '点按设备可固定为「常驻优先」（再次点按解除）：' : '总开关已关闭 · 点选任意设备将自动重新开启优先护航：') + '</div>' +
-      '<div class="v6-dev-pills">' + devPillsHtml + '</div>' +
-    '</div>' +
-    v6RenderLatencyCompareHtml() +
-    '<details class="v6-adv-fold" data-v6-fold="exp"' + (V6.advOpen.exp ? ' open' : '') + '>' +
-      '<summary><span>底层队列与调度详情</span><span class="v6-adv-r"><span>' + (ex.active ? '护航生效中' : '闲时全速') + (tierHuman ? ' · ' + escapeHtml(tierHuman) : '') + '</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
-      '<div class="v6-adv-body">' +
-        '<div class="v6-kpi-row">' +
-          '<div class="v6-kpi is-ok"><span>优先设备数</span><b>' + v6UniqueEscortCount(ex) + '<small>台</small></b></div>' +
-          '<div class="v6-kpi is-acc"><span>护航时后台上限</span><b>' + (ex.active ? ex.bg_ceil_pct : ex.configured_bg_ceil_pct) + '<small>%</small></b></div>' +
-          '<div class="v6-kpi"><span>累计自动介入</span><b>' + num(ex.transitions) + '<small>次</small></b></div>' +
-        '</div>' +
-        '<div class="note" style="margin:0">' + (tierHuman ? ('数据面档位：' + escapeHtml(tierHuman) + ' · ') : '') + '队列算法：' + qdiscHuman + (ex.cooldown_remaining_sec > 0 ? (' · 对局结束平稳过渡剩余 ' + ex.cooldown_remaining_sec + ' 秒') : ' · P2P 多节点下载自动排除防误判') + '</div>' +
+      '<div class="' + (ex.enabled ? '' : 'v6-dimmed') + '">' +
+        '<div class="note" style="margin:0 0 6px">' + (ex.enabled ? '点按设备可固定为「常驻优先」（再次点按解除）：' : '总开关已关闭 · 点选任意设备将自动重新开启优先护航：') + '</div>' +
+        '<div class="v6-dev-pills">' + devPillsHtml + '</div>' +
       '</div>' +
-    '</details>' +
-  '</article>';
+      v6RenderLatencyCompareHtml() +
+      '<details class="v6-adv-fold" data-v6-fold="exp"' + (V6.advOpen.exp ? ' open' : '') + '>' +
+        '<summary><span>底层队列与调度详情</span><span class="v6-adv-r"><span>' + (ex.active ? '护航生效中' : '闲时全速') + (tierHuman ? ' · ' + escapeHtml(tierHuman) : '') + '</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+        '<div class="v6-adv-body">' +
+          '<div class="v6-kpi-row">' +
+            '<div class="v6-kpi is-ok"><span>优先设备数</span><b>' + v6UniqueEscortCount(ex) + '<small>台</small></b></div>' +
+            '<div class="v6-kpi is-acc"><span>护航时后台上限</span><b>' + (ex.active ? ex.bg_ceil_pct : ex.configured_bg_ceil_pct) + '<small>%</small></b></div>' +
+            '<div class="v6-kpi"><span>累计自动介入</span><b>' + num(ex.transitions) + '<small>次</small></b></div>' +
+          '</div>' +
+          '<div class="note" style="margin:0">' + (tierHuman ? ('数据面档位：' + escapeHtml(tierHuman) + ' · ') : '') + '队列算法：' + qdiscHuman + (ex.cooldown_remaining_sec > 0 ? (' · 对局结束平稳过渡剩余 ' + ex.cooldown_remaining_sec + ' 秒') : ' · P2P 多节点下载自动排除防误判') + '</div>' +
+        '</div>' +
+      '</details>' +
+    '</div>' +
+  '</div>';
 }
 
 function v6RenderLeashCardHtml() {
   var ul = V6.leash;
   var sessHtml = '';
   if (!ul.enabled) {
-    sessHtml = '<div class="v6-calm-empty">后台大更新限速已关闭，所有系统与商店下载均不限制速度</div>';
-  } else if (!ul.sessions.length) {
-    sessHtml = '<div class="v6-calm-empty"><span class="v6-dot ok"></span><span>当前没有大体积后台更新在跑，日常小更新将在 ' + ul.grace_mb + ' MB 高速额度内秒下完成</span></div>';
+    sessHtml = '<div class="lgd-summary-line"><span>后台大下载限幅已关闭，所有系统与商店下载均不限制速度</span></div>';
+  } else if (!v6IsHotspotActive() || !ul.sessions.length) {
+    sessHtml = '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ok"></span><span>当前没有大体积后台更新在跑，日常小补丁将在 ' + ul.grace_mb + ' MB 高速额度内秒下完成</span></span></div>';
   } else {
     sessHtml = '<div class="v6-flow-list">' + ul.sessions.map(function (s) {
       var stBadge = s.paused
@@ -1667,7 +2077,7 @@ function v6RenderLeashCardHtml() {
         : (s.bypass_once
           ? '<span class="v6-mono-badge b-ok">本次不限速</span>'
           : (s.state === 'leashed'
-            ? '<span class="v6-mono-badge b-warn">已限速 ' + trim0((s.applied_kbps / 1000).toFixed(1)) + ' Mbps</span>'
+            ? '<span class="v6-mono-badge b-warn">已限幅 ' + trim0((s.applied_kbps / 1000).toFixed(1)) + ' Mbps</span>'
             : '<span class="v6-mono-badge b-acc">高速额度内（剩 ' + Math.max(0, Math.round(s.rem_mb)) + ' MB）</span>'));
       var srcTitle = s.vendor_label || s.dst_host;
       return '<div class="v6-flow-item">' +
@@ -1689,39 +2099,36 @@ function v6RenderLeashCardHtml() {
     return '<button type="button" class="lgd-tchip' + (on ? ' on' : '') + '" data-v6-act="leash-preset-grace" data-mb="' + mb + '">' + (mb >= 1024 ? '1 GB' : (mb + ' MB')) + '</button>';
   }).join('');
 
-  return '<article class="glass v6-card" id="v6-card-leash">' +
-    '<div class="v6-card-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb orange">' + v6Svg('leash') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t"><span>后台大更新限速</span></div>' +
-          '<div class="v6-card-s">前 ' + ul.grace_mb + ' MB 高速放行小补丁，超出后自动限速至 ' + trim0((ul.leash_kbps / 1000).toFixed(1)) + ' Mbps 防占满带宽</div>' +
-        '</div>' +
-      '</div>' +
-      toggle(ul.enabled, 'data-v6-tog="leash" aria-label="后台大更新限速总开关"') +
+  return '<div class="sgrp scard glass open" id="v6-card-leash">' +
+    '<div class="sgrp-h scard-h scard-head">' +
+      gi('blue', 'leash') +
+      '<span class="tx"><b>后台大下载自动限幅</b><small>前 ' + ul.grace_mb + ' MB 高速放行小补丁，超出后平滑限幅至 ' + trim0((ul.leash_kbps / 1000).toFixed(1)) + ' Mbps</small></span>' +
+      toggle(ul.enabled, 'data-v6-tog="leash" aria-label="后台大下载自动限幅总开关"') +
     '</div>' +
-    sessHtml +
-    '<details class="v6-adv-fold" data-v6-fold="leash"' + (V6.advOpen.leash ? ' open' : '') + '>' +
-      '<summary><span>修改免限速额度与限速值</span><span class="v6-adv-r"><span>' + ul.grace_mb + ' MB / ' + ul.leash_kbps + ' Kbps</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
-      '<div class="v6-adv-body">' +
-        '<div class="v6-quick-chips"><span class="note" style="margin:0">常用额度：</span>' + presetChips + '</div>' +
-        '<div class="v6-num-grid">' +
-          '<label class="v6-num-field"><span>免限速高速额度</span><span class="v6-num-box"><input id="v6-ul-grace" type="number" min="10" max="10240" step="10" inputmode="numeric" value="' + ul.grace_mb + '"><span class="u">MB</span></span></label>' +
-          '<label class="v6-num-field"><span>超额后限速值（1500 ≈ 1.5Mbps）</span><span class="v6-num-box"><input id="v6-ul-kbps" type="number" min="128" max="1000000" step="100" inputmode="numeric" value="' + ul.leash_kbps + '"><span class="u">Kbps</span></span></label>' +
+    '<div class="v6-scard-body">' +
+      sessHtml +
+      '<details class="v6-adv-fold" data-v6-fold="leash"' + (V6.advOpen.leash ? ' open' : '') + '>' +
+        '<summary><span>修改免限速额度与限幅速度</span><span class="v6-adv-r"><span>' + ul.grace_mb + ' MB / ' + ul.leash_kbps + ' Kbps</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+        '<div class="v6-adv-body">' +
+          '<div class="v6-quick-chips"><span class="note" style="margin:0">常用额度：</span>' + presetChips + '</div>' +
+          '<div class="v6-num-grid">' +
+            '<label class="v6-num-field"><span>免限速高速额度</span><span class="v6-num-box"><input id="v6-ul-grace" type="number" min="10" max="10240" step="10" inputmode="numeric" value="' + ul.grace_mb + '"><span class="u">MB</span></span></label>' +
+            '<label class="v6-num-field"><span>超额后限幅值（1500 ≈ 1.5Mbps）</span><span class="v6-num-box"><input id="v6-ul-kbps" type="number" min="128" max="1000000" step="100" inputmode="numeric" value="' + ul.leash_kbps + '"><span class="u">Kbps</span></span></label>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:flex-end">' +
+            '<button type="button" class="btn sm pri press" data-v6-act="leash-save">保存限幅设置</button>' +
+          '</div>' +
         '</div>' +
-        '<div style="display:flex;justify-content:flex-end">' +
-          '<button type="button" class="v6-mini-btn pri press" data-v6-act="leash-save">保存更新限速设置</button>' +
-        '</div>' +
-      '</div>' +
-    '</details>' +
-  '</article>';
+      '</details>' +
+    '</div>' +
+  '</div>';
 }
 
 function v6RenderThermoCardHtml() {
   var th = V6.thermo;
   var sensorUnreadable = v6IsThermoSensorUnreadable(th);
-  var hasTemp = !sensorUnreadable && th.bat_available !== false && th.temp_c > 0;
-  var tempStr = hasTemp ? (th.temp_c.toFixed(1) + ' °C') : '待读取';
+  var effTemp = v6EffectiveTempC(th);
+  var hasTemp = !sensorUnreadable && effTemp > 0;
   var batStr = th.capacity_pct > 0 ? (th.capacity_pct + '%') : '';
   var stBadgeCls = !th.enabled || sensorUnreadable || !hasTemp
     ? ''
@@ -1730,55 +2137,1033 @@ function v6RenderThermoCardHtml() {
     ? 'idle'
     : (th.stage >= 2 ? 'bad' : (th.stage === 1 ? 'warn' : 'ok'));
 
-  var exemptNote = '';
-  if (sensorUnreadable) {
-    var sensorHint = th.reason_zh || (th.reason_code ? ('诊断码：' + th.reason_code) : '内核电池温控节点未暴露或读数越界，已安全跳过温控降速保护');
-    exemptNote = '<div class="note" style="margin:0;color:var(--text-3)">' + escapeHtml(sensorHint) + '</div>';
-  } else if (th.enabled && th.raw_stage >= 2 && th.stage < 2 && th.stage2_exempt) {
-    exemptNote = '<div class="note" style="margin:0;color:var(--badge-warn)">机身温度已达二级降温线，因当前正在' + (th.is_charging ? '充电' : '游戏/通话优先护航') + '，暂不限制网速以保证体验</div>';
-  } else if (th.cool_hold_remaining_sec > 0) {
-    exemptNote = '<div class="note" style="margin:0">温度正在回落，稳态观察剩余 ' + th.cool_hold_remaining_sec + ' 秒（防止临界温度反复跳变）</div>';
+  var tempBadges = '';
+  if (!sensorUnreadable) {
+    if (th.shell_temp_available && th.shell_temp_c > 0) {
+      tempBadges += '<span class="v6-mono-badge b-acc">机身壳温 ' + th.shell_temp_c.toFixed(1) + '℃</span>';
+      if (th.battery_temp_c > 0) {
+        tempBadges += '<span class="v6-mono-badge">电池传感器 ' + th.battery_temp_c.toFixed(1) + '℃</span>';
+      }
+    } else if (hasTemp) {
+      tempBadges += '<span class="v6-mono-badge">当前温度 ' + effTemp.toFixed(1) + '℃</span>';
+    }
   }
 
-  return '<article class="glass v6-card" id="v6-card-thermo">' +
-    '<div class="v6-card-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb ' + (!sensorUnreadable && th.stage >= 2 ? 'red' : (!sensorUnreadable && th.stage === 1 ? 'orange' : 'purple')) + '">' + v6Svg('thermo') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t"><span>发热与省电保护</span></div>' +
-          '<div class="v6-card-s">盛夏开热点发烫时自动降低后台负载降温，插电或游戏中自动豁免不降速</div>' +
-        '</div>' +
-      '</div>' +
-      toggle(th.enabled, 'data-v6-tog="thermo" aria-label="发热与省电保护总开关"') +
+  var extraNotes = '';
+  if (sensorUnreadable) {
+    var sensorHint = th.reason_zh || (th.reason_code ? ('诊断码：' + th.reason_code) : '内核温控节点未暴露或读数越界，已安全跳过温控降速保护');
+    extraNotes += '<div class="note" style="margin:0;color:var(--text-3)">' + escapeHtml(sensorHint) + '</div>';
+  } else {
+    if (th.battery_spoof_suspected) {
+      extraNotes += '<div class="note" style="margin:0;color:var(--text-2)">检测到电池温度读数偏低，已自动采用机身真实温度巡航</div>';
+    }
+    if (th.enabled && th.raw_stage >= 2 && th.stage < 2 && th.stage2_exempt) {
+      extraNotes += '<div class="note" style="margin:0;color:var(--badge-warn)">机身温度已达二级降温线，因当前正在' + (th.is_charging ? '充电' : '游戏/通话优先护航') + '，暂不限制网速以保证体验</div>';
+    } else if (th.cool_hold_remaining_sec > 0) {
+      extraNotes += '<div class="note" style="margin:0">温度正在回落，稳态观察剩余 ' + th.cool_hold_remaining_sec + ' 秒（防止临界温度反复跳变）</div>';
+    }
+  }
+
+  var giColor = (!sensorUnreadable && th.stage >= 2) ? 'red' : 'orange';
+  return '<div class="sgrp scard glass open" id="v6-card-thermo">' +
+    '<div class="sgrp-h scard-h scard-head">' +
+      gi(giColor, 'thermo') +
+      '<span class="tx"><b>高温与低电量自动保护</b><small>开热点机身发烫时自动降低后台负载降温，插电或游戏中自动豁免</small></span>' +
+      toggle(th.enabled, 'data-v6-tog="thermo" aria-label="高温与低电量自动保护总开关"') +
     '</div>' +
-    '<div class="v6-thermo-flags">' +
-      '<span class="v6-mono-badge ' + stBadgeCls + '"><span class="v6-dot ' + stDotCls + '"></span>' + escapeHtml(sensorUnreadable ? '温度传感器不可读（已安全跳过控温）' : v6ThermoStageZh(th.stage)) + '</span>' +
-      (!sensorUnreadable ? '<span class="v6-mono-badge">电池温度 ' + escapeHtml(tempStr) + '</span>' : '') +
-      (batStr ? '<span class="v6-mono-badge">电量 ' + escapeHtml(batStr) + (th.is_charging ? ' · 充电中不限速' : '') + '</span>' : '') +
-      (th.vector_express_active ? '<span class="v6-mono-badge b-ok">游戏通话中 · 不限速</span>' : '') +
-      (th.low_battery_cruise ? '<span class="v6-mono-badge b-warn">低电量省电中</span>' : '') +
-    '</div>' +
-    exemptNote +
-    '<details class="v6-adv-fold" data-v6-fold="thermo"' + (V6.advOpen.thermo ? ' open' : '') + '>' +
-      '<summary><span>修改温控触发温度</span><span class="v6-adv-r"><span>' + th.stage1_temp_c + '°C 省电 / ' + th.stage2_temp_c + '°C 降温</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
-      '<div class="v6-adv-body">' +
-        '<div class="lgd-sw-row">' +
-          '<span>严重过热时自动收紧后台下载网速<small>达到二级降温温度且未充电、未打游戏时自动温和限流降温</small></span>' +
-          toggle(th.stage2_shaper_enabled, 'data-v6-tog="thermo-shaper" aria-label="严重过热自动收紧后台网速"') +
-        '</div>' +
-        '<div class="v6-num-grid">' +
-          '<label class="v6-num-field"><span>一级省电温度（降低采样功耗）</span><span class="v6-num-box"><input id="v6-th-t1" type="number" min="30" max="70" step="1" inputmode="numeric" value="' + th.stage1_temp_c + '"><span class="u">°C</span></span></label>' +
-          '<label class="v6-num-field"><span>二级降温温度（收紧后台大下载）</span><span class="v6-num-box"><input id="v6-th-t2" type="number" min="32" max="75" step="1" inputmode="numeric" value="' + th.stage2_temp_c + '"><span class="u">°C</span></span></label>' +
-        '</div>' +
-        '<div style="display:flex;justify-content:flex-end">' +
-          '<button type="button" class="v6-mini-btn pri press" data-v6-act="thermo-save">保存温度阈值</button>' +
-        '</div>' +
+    '<div class="v6-scard-body">' +
+      '<div class="v6-thermo-flags">' +
+        '<span class="v6-mono-badge ' + stBadgeCls + '"><span class="v6-dot ' + stDotCls + '"></span>' + escapeHtml(sensorUnreadable ? '温度传感器不可读（已安全跳过控温）' : v6ThermoStageZh(th.stage)) + '</span>' +
+        tempBadges +
+        (batStr ? '<span class="v6-mono-badge">电量 ' + escapeHtml(batStr) + (th.is_charging ? ' · 充电中不限速' : '') + '</span>' : '') +
+        (th.vector_express_active ? '<span class="v6-mono-badge b-ok">游戏通话中 · 不限速</span>' : '') +
+        (th.low_battery_cruise ? '<span class="v6-mono-badge b-warn">低电量省电中</span>' : '') +
       '</div>' +
-    '</details>' +
-  '</article>';
+      extraNotes +
+      '<details class="v6-adv-fold" data-v6-fold="thermo"' + (V6.advOpen.thermo ? ' open' : '') + '>' +
+        '<summary><span>修改温控触发阈值</span><span class="v6-adv-r"><span>' + th.stage1_temp_c + '℃ 省电 / ' + th.stage2_temp_c + '℃ 降温</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+        '<div class="v6-adv-body">' +
+          '<div class="lgd-sw-row">' +
+            '<span>严重过热时自动收紧后台下载网速<small>达到二级降温温度且未充电、未打游戏时自动温和限流降温</small></span>' +
+            toggle(th.stage2_shaper_enabled, 'data-v6-tog="thermo-shaper" aria-label="严重过热自动收紧后台网速"') +
+          '</div>' +
+          '<div class="v6-num-grid">' +
+            '<label class="v6-num-field"><span>一级省电温度（降低采样功耗）</span><span class="v6-num-box"><input id="v6-th-t1" type="number" min="30" max="70" step="1" inputmode="numeric" value="' + th.stage1_temp_c + '"><span class="u">℃</span></span></label>' +
+            '<label class="v6-num-field"><span>二级降温温度（收紧后台大下载）</span><span class="v6-num-box"><input id="v6-th-t2" type="number" min="32" max="75" step="1" inputmode="numeric" value="' + th.stage2_temp_c + '"><span class="u">℃</span></span></label>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:flex-end">' +
+            '<button type="button" class="btn sm pri press" data-v6-act="thermo-save">保存温度阈值</button>' +
+          '</div>' +
+        '</div>' +
+      '</details>' +
+    '</div>' +
+  '</div>';
 }
 
-/* ═════════════════════ Sub-Tab 2: 隐私安检 (LeakGuard 零解密明文外泄取证) ═════════════════════ */
+/* ═════════════════════ Sub-Tab 2: 本机守护 (Host Guardian 全功能工作台 · 严守零唤醒租约纪律) ═════════════════════ */
+var V6_APP_AV_GRADS = [
+  'linear-gradient(145deg,#0a84ff,#0066cc)',
+  'linear-gradient(145deg,#34c759,#1f9d55)',
+  'linear-gradient(145deg,#ff9f0a,#e07a00)',
+  'linear-gradient(145deg,#af52de,#8938b8)',
+  'linear-gradient(145deg,#00c7be,#00968f)',
+  'linear-gradient(145deg,#ff453a,#d72b2b)'
+];
+
+function v6AppAvatarHtml(name, pkg, uid) {
+  var raw = String(name || pkg || 'A').trim();
+  var ch = raw.charAt(0).toUpperCase();
+  if (/^com\.|^org\.|^net\.|^io\./i.test(raw)) {
+    var segs = raw.split('.');
+    var tail = segs[segs.length - 1] || raw;
+    ch = tail.charAt(0).toUpperCase();
+  }
+  var seed = Math.abs(Math.round(num(uid, 0)) || raw.charCodeAt(0) || 0);
+  var bg = V6_APP_AV_GRADS[seed % V6_APP_AV_GRADS.length];
+  return '<span class="v6-app-ic" style="background:' + bg + '" aria-hidden="true">' + escapeHtml(ch || 'A') + '</span>';
+}
+
+function v6NormFwMode(mode) {
+  var m = String(mode || 'allow').toLowerCase().trim();
+  if (m === 'block_http' || m === 'cleartext' || m === 'block_cleartext') return 'block_cleartext';
+  if (m === 'block_mobile' || m === 'cellular' || m === 'block_cellular') return 'block_cellular';
+  if (m === 'block_all' || m === 'deny' || m === 'all') return 'block_all';
+  return 'allow';
+}
+
+function v6FwModeBadgeHtml(mode) {
+  var m = v6NormFwMode(mode);
+  if (m === 'block_cleartext') return '<span class="v6-mono-badge b-acc">仅禁明文</span>';
+  if (m === 'block_cellular') return '<span class="v6-mono-badge b-warn">禁移动网</span>';
+  if (m === 'block_all') return '<span class="v6-mono-badge b-bad">全局禁网</span>';
+  return '';
+}
+
+function v6FwModeZh(mode) {
+  var m = v6NormFwMode(mode);
+  if (m === 'block_cleartext') return '仅禁明文HTTP';
+  if (m === 'block_cellular') return '禁移动数据';
+  if (m === 'block_all') return '全局禁网';
+  return '正常放行';
+}
+
+function v6HostUidMode(uid) {
+  var r = V6.host.firewall.uid_map[String(Math.round(num(uid, -1)))];
+  return r ? v6NormFwMode(r.mode) : 'allow';
+}
+
+function v6IsHostAppProtected(uid, pkg) {
+  var u = Math.round(num(uid, 0));
+  if (u >= 0 && u < 10000) return true;
+  var p = String(pkg || '').toLowerCase().trim();
+  if (!p) return false;
+  var list = V6.host.firewall.protected_packages || [];
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i] || '').toLowerCase() === p) return true;
+  }
+  return false;
+}
+
+function v6FmtDurMs(ms) {
+  var sec = Math.max(0, Math.round(num(ms, 0) / 1000));
+  if (sec <= 0) return '0 秒';
+  if (sec < 60) return sec + ' 秒';
+  var m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return m + ' 分' + (s > 0 && m < 10 ? (' ' + s + ' 秒') : '');
+  var h = Math.floor(m / 60), rm = m % 60;
+  return h + ' 小时' + (rm > 0 ? (' ' + rm + ' 分') : '');
+}
+
+/* 零唤醒租约定时器：仅当停留在「护航 -> 本机守护」且页面可见时续租 2.5s 采样，离开即刻归零 */
+function v6SyncHostPollTimer() {
+  var shouldPoll = (typeof S !== 'undefined' && S.page === 'vector' && V6.subtab === 'host' && !document.hidden);
+  if (!shouldPoll) {
+    if (V6.host.pollTimer) {
+      clearInterval(V6.host.pollTimer);
+      V6.host.pollTimer = 0;
+    }
+    return;
+  }
+  if (!V6.host.pollTimer) {
+    V6.host.pollTimer = setInterval(function () {
+      if (typeof S === 'undefined' || S.page !== 'vector' || V6.subtab !== 'host' || document.hidden) {
+        clearInterval(V6.host.pollTimer);
+        V6.host.pollTimer = 0;
+        return;
+      }
+      if (!V6.host.trafficLoading && (V6.host.mode === 'live' || V6.host.mode === 'traffic')) {
+        v6LoadHostTraffic(false);
+      }
+    }, 2500);
+  }
+}
+
+function v6LoadHostTraffic(manual) {
+  if (V6.host.trafficLoading && !manual) return Promise.resolve();
+  V6.host.trafficLoading = true;
+  if (manual) V6.host.trafficErr = '';
+  var sortKey = V6.host.mode === 'traffic' ? 'bg_bytes' : 'rate';
+  var qParams = {
+    period: V6.host.period || 'today',
+    net: V6.host.net || 'all',
+    sort: sortKey,
+    include_system: V6.host.includeSystem ? '1' : '0',
+    limit: 100
+  };
+  return api.get(V6_API.localTraffic, qParams, { timeout: 8000 }).then(function (r) {
+    V6.host.trafficLoading = false;
+    V6.host.trafficLoadedAt = Date.now();
+    V6.host.trafficErr = '';
+    if (r && typeof r === 'object') {
+      V6.host.traffic.available = r.available !== false;
+      V6.host.traffic.reason = String(r.reason || '');
+      V6.host.traffic.rate_warming_up = r.rate_warming_up === true;
+      V6.host.traffic.bg_split_available = r.bg_split_available !== false;
+      if (r.summary && typeof r.summary === 'object') {
+        V6.host.traffic.summary = Object.assign({}, V6.host.traffic.summary, r.summary);
+      }
+      if (Array.isArray(r.apps)) {
+        V6.host.traffic.apps = r.apps;
+      }
+    }
+    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    return r;
+  }).catch(function (e) {
+    V6.host.trafficLoading = false;
+    V6.host.trafficErr = errText(e);
+    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    return null;
+  });
+}
+
+function v6LoadHostPower(forceRefresh) {
+  if (V6.host.powerLoading && !forceRefresh) return Promise.resolve();
+  V6.host.powerLoading = true;
+  V6.host.powerErr = '';
+  var qParams = {
+    sort: V6.host.powerSort || 'bg_mah',
+    include_system: V6.host.includeSystem ? '1' : '0'
+  };
+  if (forceRefresh) qParams.refresh = '1';
+  return api.get(V6_API.localPower, qParams, { timeout: 12000 }).then(function (r) {
+    V6.host.powerLoading = false;
+    V6.host.powerLoadedAt = Date.now();
+    if (r && typeof r === 'object') {
+      V6.host.power.available = r.available !== false;
+      V6.host.power.reason = String(r.reason || '');
+      V6.host.power.cached = r.cached === true;
+      V6.host.power.refresh_throttled = r.refresh_throttled === true;
+      V6.host.power.bg_mah_available = r.bg_mah_available === true;
+      V6.host.power.bg_mah_reason = String(r.bg_mah_reason || '');
+      V6.host.power.screen_off_mah_available = r.screen_off_mah_available === true;
+      if (r.device_summary && typeof r.device_summary === 'object') {
+        V6.host.power.device_summary = Object.assign({}, V6.host.power.device_summary, r.device_summary);
+      }
+      if (Array.isArray(r.apps)) {
+        V6.host.power.apps = r.apps;
+      }
+    }
+    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    return r;
+  }).catch(function (e) {
+    V6.host.powerLoading = false;
+    V6.host.powerErr = errText(e);
+    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    return null;
+  });
+}
+
+function v6LoadHostPrivacy() {
+  if (V6.host.privacyLoading) return Promise.resolve();
+  V6.host.privacyLoading = true;
+  V6.host.privacyErr = '';
+  return api.get(V6_API.localPrivacy, { include_system: V6.host.includeSystem ? '1' : '0' }, { timeout: 8000 }).then(function (r) {
+    V6.host.privacyLoading = false;
+    V6.host.privacyLoadedAt = Date.now();
+    if (r && typeof r === 'object') {
+      V6.host.privacy.available = r.available !== false;
+      V6.host.privacy.reason = String(r.reason || '');
+      if (typeof r.self_capture_enabled === 'boolean') V6.host.privacy.self_capture_enabled = r.self_capture_enabled;
+      if (r.self_capture_mode != null) V6.host.privacy.self_capture_mode = String(r.self_capture_mode || '');
+      if (r.summary && typeof r.summary === 'object') {
+        V6.host.privacy.summary = Object.assign({}, V6.host.privacy.summary, r.summary);
+      }
+      if (Array.isArray(r.findings)) {
+        V6.host.privacy.findings = r.findings;
+      }
+    }
+    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    return r;
+  }).catch(function (e) {
+    V6.host.privacyLoading = false;
+    V6.host.privacyErr = errText(e);
+    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    return null;
+  });
+}
+
+function v6ApplyHostFirewallData(r) {
+  if (!r || typeof r !== 'object') return;
+  if (r.updated_at != null) V6.host.firewall.updated_at = num(r.updated_at, 0);
+  if (Array.isArray(r.protected_packages) && r.protected_packages.length) {
+    V6.host.firewall.protected_packages = r.protected_packages.map(String);
+  }
+  if (Array.isArray(r.uid_rules)) {
+    var uMap = {};
+    V6.host.firewall.uid_rules = r.uid_rules.map(function (it) {
+      var u = Math.round(num(it.uid, 0));
+      var norm = {
+        uid: u,
+        sdk_sandbox_uid: Math.round(num(it.sdk_sandbox_uid, 0)),
+        pkg: String(it.pkg || it.package || ''),
+        app_name: String(it.app_name || ''),
+        mode: v6NormFwMode(it.mode),
+        updated_at: num(it.updated_at, 0)
+      };
+      if (norm.mode !== 'allow') uMap[String(u)] = norm;
+      return norm;
+    }).filter(function (x) { return x.mode !== 'allow'; });
+    V6.host.firewall.uid_map = uMap;
+    V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
+  } else if (r.uid_rule_count != null) {
+    V6.host.firewall.uid_rule_count = Math.max(0, Math.round(num(r.uid_rule_count, 0)));
+  }
+  if (Array.isArray(r.blocked_domains)) {
+    var bSet = {};
+    V6.host.firewall.blocked_domains = r.blocked_domains.map(function (d) {
+      var dom = typeof d === 'string' ? d.trim().toLowerCase() : String((d && (d.domain || d.host || d.value)) || '').trim().toLowerCase();
+      if (dom) bSet[dom] = 1;
+      return dom;
+    }).filter(Boolean);
+    V6.host.firewall.blocked_set = bSet;
+    V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
+  } else if (r.blocked_domain_count != null) {
+    V6.host.firewall.blocked_domain_count = Math.max(0, Math.round(num(r.blocked_domain_count, 0)));
+  }
+}
+
+function v6LoadHostFirewall(forceAccept) {
+  if (V6.host.fwLoading && !forceAccept) return Promise.resolve();
+  V6.host.fwLoading = true;
+  return api.get(V6_API.localFirewall, null, { timeout: 7000 }).then(function (r) {
+    V6.host.fwLoading = false;
+    V6.host.fwLoadedAt = Date.now();
+    if (forceAccept || Date.now() >= V6.mutUntil.hostFw) {
+      v6ApplyHostFirewallData(r);
+    }
+    if (S.page === 'vector') {
+      v6RefreshNavBadges();
+      if (V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    }
+    if (V6.host.appSheet.open) v6PaintHostAppSheetFwButtons();
+    return r;
+  }).catch(function () {
+    V6.host.fwLoading = false;
+    return null;
+  });
+}
+
+function v6EnsureHostModeLoaded(forceAll) {
+  v6SyncHostPollTimer();
+  v6LoadHostTraffic(!!forceAll);
+  v6LoadHostFirewall(!!forceAll);
+  if (forceAll || V6.host.mode === 'power' || !V6.host.powerLoadedAt) {
+    v6LoadHostPower(!!forceAll);
+  }
+  if (forceAll || V6.host.mode === 'firewall' || !V6.host.privacyLoadedAt) {
+    v6LoadHostPrivacy();
+  }
+}
+
+/* ── UID 实时连接与四档防火墙抽屉 (Bottom Sheet) ── */
+function v6StopHostAppSheetTimer() {
+  if (V6.host.appSheet.timer) {
+    clearInterval(V6.host.appSheet.timer);
+    V6.host.appSheet.timer = 0;
+  }
+  V6.host.appSheet.open = false;
+}
+
+function v6HostAppFlowsInnerHtml() {
+  var st = V6.host.appSheet;
+  if (st.loading && !st.flows.length) {
+    return '<div class="note">正在读取该应用的内核实时连接…</div>';
+  }
+  if (st.err) {
+    return '<div class="note err">' + escapeHtml(st.err) + '</div>';
+  }
+  if (!st.flows.length) {
+    return '<div class="lgd-summary-line"><span>当前该应用没有活跃网络套接字连接</span></div>';
+  }
+  return '<div class="v6-tuple-list" style="max-height:300px">' + st.flows.map(function (f) {
+    var rxB = bps(f.rx_bps), txB = bps(f.tx_bps);
+    var pCls = f.frozen ? 'b-bad' : (f.protoBadge === 'QUIC' ? 'b-pur' : (f.proto === 'udp' ? 'b-acc' : ''));
+    var remMin = f.frozen ? Math.max(1, Math.ceil((f.frozen_until - Date.now() / 1000) / 60)) : 0;
+    var riskBadge = f.cleartext_risk === 'http_cleartext'
+      ? '<span class="v6-mono-badge b-bad">HTTP明文</span>'
+      : (f.cleartext_risk === 'dns_direct' ? '<span class="v6-mono-badge b-warn">直连DNS</span>' : '');
+    var titleMain = f.dst_host || (f.dst_ip + ':' + f.dport);
+    return '<div class="v6-tuple-row" data-mkey="huid-' + escapeHtml(f.id) + '">' +
+      '<div class="v6-tuple-5">' +
+        '<div class="v6-tuple-primary">' +
+          '<span class="v6-mono-badge mono ' + pCls + '">' + escapeHtml(f.frozen ? ('封禁剩' + remMin + '分') : f.protoBadge) + '</span>' +
+          riskBadge +
+          '<span>' + escapeHtml(titleMain) + '</span>' +
+        '</div>' +
+        '<div class="ep">' + escapeHtml(f.src_ip + ':' + f.sport + ' -> ' + f.dst_ip + ':' + f.dport) + '</div>' +
+      '</div>' +
+      '<div class="v6-tuple-rate">↓ ' + rxB.v + ' ' + rxB.u + '<br>↑ ' + txB.v + ' ' + txB.u + '</div>' +
+      '<div class="v6-tuple-acts">' +
+        '<button type="button" class="lgd-act-btn warn press" data-v6-act="host-sheet-cut" data-freeze="0" data-fid="' + escapeHtml(f.id) + '">' + v6Svg('cut') + '<span>秒断</span></button>' +
+        '<button type="button" class="lgd-act-btn dan press" data-v6-act="host-sheet-cut" data-freeze="1" data-fid="' + escapeHtml(f.id) + '">' + v6Svg('freeze') + '<span>冻结15分</span></button>' +
+      '</div>' +
+    '</div>';
+  }).join('') + '</div>';
+}
+
+function v6FetchHostAppFlows() {
+  var st = V6.host.appSheet;
+  if (!st.open || st.uid < 0 || document.hidden) return Promise.resolve();
+  st.loading = true;
+  return api.get(V6_API.scalpelFlows, { scope: 'host', uid: st.uid, limit: 100 }, { timeout: 6000 }).then(function (r) {
+    st.loading = false;
+    st.err = '';
+    st.flows = Array.isArray(r && r.flows) ? v6NormScalpelFlowList(r.flows) : [];
+    var box = document.getElementById('v6-host-sheet-flows');
+    if (box) morph(box, v6HostAppFlowsInnerHtml());
+    var cnt = document.getElementById('v6-host-sheet-cnt');
+    if (cnt) cnt.textContent = st.flows.length + ' 条连接';
+  }).catch(function (e) {
+    st.loading = false;
+    st.err = errText(e);
+    var box = document.getElementById('v6-host-sheet-flows');
+    if (box) box.innerHTML = v6HostAppFlowsInnerHtml();
+  });
+}
+
+function v6PaintHostAppSheetFwButtons() {
+  var st = V6.host.appSheet;
+  if (!st.open) return;
+  var curMode = v6HostUidMode(st.uid);
+  $$('#v6-host-fw-picker [data-fw-mode]').forEach(function (b) {
+    var m = b.getAttribute('data-fw-mode');
+    b.classList.toggle('on', m === curMode);
+  });
+}
+
+function v6OpenHostAppSheet(uid, pkg, appName, isSystem) {
+  uid = Math.round(num(uid, -1));
+  if (uid < 0 || typeof sheet !== 'function') return;
+  pkg = String(pkg || '').trim();
+  appName = String(appName || pkg || ('UID ' + uid)).trim();
+  v6StopHostAppSheetTimer();
+
+  V6.host.appSheet.open = true;
+  V6.host.appSheet.uid = uid;
+  V6.host.appSheet.pkg = pkg;
+  V6.host.appSheet.appName = appName;
+  V6.host.appSheet.isSystem = !!isSystem;
+  V6.host.appSheet.flows = [];
+  V6.host.appSheet.err = '';
+
+  var curMode = v6HostUidMode(uid);
+  var isProt = v6IsHostAppProtected(uid, pkg);
+  var disAttr = isProt ? ' disabled' : '';
+
+  var html = '<h3>' + escapeHtml(appName) + '</h3>' +
+    '<div class="sub mono">' + escapeHtml((pkg ? pkg + ' · ' : '') + 'UID ' + uid + (isSystem ? ' · 系统组件' : '')) + '</div>' +
+    '<div style="margin:10px 0 6px;font-size:12.5px;font-weight:700;color:var(--text-2)">本机联网四档管控（内核 UID 级即时生效）</div>' +
+    (isProt ? '<div class="note warn" style="margin:0 0 8px">该组件属于 Android 核心系统或 Root / WebView 保护白名单，已锁定防断网自锁，仅支持查看连接</div>' : '') +
+    '<div class="v6-fw-grid' + (isProt ? ' v6-dimmed' : '') + '" id="v6-host-fw-picker">' +
+      '<button type="button" class="v6-fw-btn m-allow press' + (curMode === 'allow' ? ' on' : '') + '" data-v6-act="host-fw-set" data-fw-mode="allow" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appName) + '"><b><span>正常放行</span></b><small>允许全部网络通信</small></button>' +
+      '<button type="button" class="v6-fw-btn m-http press' + (curMode === 'block_cleartext' ? ' on' : '') + '" data-v6-act="host-fw-set" data-fw-mode="block_cleartext" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appName) + '"' + disAttr + '><b><span>仅禁明文HTTP</span></b><small>阻断80端口防裸奔，HTTPS正常</small></button>' +
+      '<button type="button" class="v6-fw-btn m-mob press' + (curMode === 'block_cellular' ? ' on' : '') + '" data-v6-act="host-fw-set" data-fw-mode="block_cellular" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appName) + '"' + disAttr + '><b><span>禁移动数据</span></b><small>仅允许Wi-Fi联网，省流量</small></button>' +
+      '<button type="button" class="v6-fw-btn m-all press' + (curMode === 'block_all' ? ' on' : '') + '" data-v6-act="host-fw-set" data-fw-mode="block_all" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appName) + '"' + disAttr + '><b><span>全局禁网</span></b><small>阻断前后台一切联网</small></button>' +
+    '</div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 8px">' +
+      '<b style="font-size:13px;color:var(--text-1)">当前活跃连接</b>' +
+      '<span class="v6-mono-badge" id="v6-host-sheet-cnt">读取中…</span>' +
+    '</div>' +
+    '<div id="v6-host-sheet-flows">' + v6HostAppFlowsInnerHtml() + '</div>' +
+    '<button type="button" class="btn sec wide press" data-close style="margin-top:12px">关闭</button>';
+
+  sheet(html, { tall: true, kind: 'v6-host-app', onClose: v6StopHostAppSheetTimer });
+  v6FetchHostAppFlows();
+  if (!document.hidden) {
+    V6.host.appSheet.timer = setInterval(function () {
+      if (!V6.host.appSheet.open || document.hidden) return;
+      v6FetchHostAppFlows();
+    }, 2500);
+  }
+}
+
+/* ── 本机防火墙与自抓包写操作封装 ── */
+function v6SetHostUidFirewall(uid, rawMode, pkg, appName, triggerEl, fromUndo) {
+  uid = Math.round(num(uid, -1));
+  if (uid < 0) return Promise.resolve();
+  var wireMode = v6NormFwMode(rawMode);
+  if (wireMode !== 'allow' && v6IsHostAppProtected(uid, pkg)) {
+    toast('核心系统或管理器组件受安全保护，禁止拦截', 'warn');
+    return Promise.resolve();
+  }
+  var prevMode = v6HostUidMode(uid);
+  if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
+  V6.mutUntil.hostFw = Date.now() + 1500;
+
+  if (wireMode === 'allow') {
+    delete V6.host.firewall.uid_map[String(uid)];
+    V6.host.firewall.uid_rules = V6.host.firewall.uid_rules.filter(function (x) { return x.uid !== uid; });
+  } else {
+    var nextRule = { uid: uid, sdk_sandbox_uid: 0, pkg: pkg || '', app_name: appName || '', mode: wireMode, updated_at: Math.round(Date.now() / 1000) };
+    V6.host.firewall.uid_map[String(uid)] = nextRule;
+    var rest = V6.host.firewall.uid_rules.filter(function (x) { return x.uid !== uid; });
+    rest.unshift(nextRule);
+    V6.host.firewall.uid_rules = rest;
+  }
+  V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
+  v6PaintHostAppSheetFwButtons();
+  v6RefreshNavBadges();
+  if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+
+  var actName = wireMode === 'allow' ? 'self_firewall_remove' : 'self_firewall_set';
+  var actParams = wireMode === 'allow'
+    ? { uid: String(uid) }
+    : { uid: String(uid), mode: wireMode, pkg: pkg || '', app_name: appName || '' };
+  var dispApp = appName || pkg || ('UID ' + uid);
+
+  return busyWhile(triggerEl, api.action(actName, actParams)).then(function () {
+    v6LoadHostFirewall(true);
+    if (V6.host.mode === 'firewall') v6LoadHostPrivacy();
+    var okMsg = wireMode === 'allow'
+      ? ('已恢复放行：' + dispApp)
+      : ('已对「' + dispApp + '」设为' + v6FwModeZh(wireMode));
+    if (!fromUndo && prevMode !== wireMode && typeof undoToast === 'function') {
+      undoToast(okMsg, function () {
+        return v6SetHostUidFirewall(uid, prevMode, pkg, appName, null, true);
+      });
+    } else {
+      toast(okMsg);
+    }
+  }).catch(function (e) {
+    V6.mutUntil.hostFw = 0;
+    v6LoadHostFirewall(true);
+    toast(errText(e), 'err');
+  });
+}
+
+function v6BlockHostDomain(domainRaw, triggerEl, opts) {
+  opts = opts || {};
+  var dom = String(domainRaw || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (!dom || dom.indexOf('.') < 0) {
+    toast('请输入有效的目标域名', 'warn');
+    return Promise.resolve();
+  }
+  var params = { domain: dom };
+  if (opts.force) params.force = 'true';
+  if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
+  V6.mutUntil.hostFw = Date.now() + 1500;
+
+  return busyWhile(triggerEl, api.action('self_dns_block', params)).then(function () {
+    if (!V6.host.firewall.blocked_set[dom]) {
+      V6.host.firewall.blocked_set[dom] = 1;
+      V6.host.firewall.blocked_domains.unshift(dom);
+      V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
+    }
+    var inp = document.getElementById('v6-host-dom-inp');
+    if (inp) inp.value = '';
+    v6RefreshNavBadges();
+    v6LoadHostFirewall(true);
+    if (V6.host.mode === 'firewall') v6LoadHostPrivacy();
+    var msg = '已在本机拦截域名：' + dom;
+    if (!opts.fromUndo && typeof undoToast === 'function') {
+      undoToast(msg, function () { return v6UnblockHostDomain(dom, null, true); });
+    } else {
+      toast(msg);
+    }
+  }).catch(function (e) {
+    V6.mutUntil.hostFw = 0;
+    var errMsg = errText(e);
+    if ((e && e.status === 409) || /guard_warn_confirm|共享|公共/i.test(errMsg)) {
+      if (/hard_block|核心公共|禁止封禁/i.test(errMsg)) {
+        toast('该域名属于系统联网检测核心域，禁止拦截以免断网', 'warn');
+        return;
+      }
+      confirmSheet(
+        '确认强制拦截共享底座域名？',
+        '<b class="mono">' + escapeHtml(dom) + '</b> 涉及多款应用共用的公共 CDN 或云底座，拦截后可能影响同节点正常服务，确定继续吗？',
+        '强制拦截'
+      ).then(function (ok) {
+        if (ok) v6BlockHostDomain(dom, triggerEl, { force: true, fromUndo: opts.fromUndo });
+      });
+      return;
+    }
+    toast(errMsg, 'err');
+  });
+}
+
+function v6UnblockHostDomain(domainRaw, triggerEl, fromUndo) {
+  var dom = String(domainRaw || '').trim().toLowerCase();
+  if (!dom) return Promise.resolve();
+  if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
+  V6.mutUntil.hostFw = Date.now() + 1500;
+  delete V6.host.firewall.blocked_set[dom];
+  V6.host.firewall.blocked_domains = V6.host.firewall.blocked_domains.filter(function (x) { return x !== dom; });
+  V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
+  v6RefreshNavBadges();
+  if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+
+  return busyWhile(triggerEl, api.action('self_dns_unblock', { domain: dom })).then(function () {
+    v6LoadHostFirewall(true);
+    var msg = '已解除本机域名拦截：' + dom;
+    if (!fromUndo && typeof undoToast === 'function') {
+      undoToast(msg, function () { return v6BlockHostDomain(dom, null, { force: true, fromUndo: true }); });
+    } else {
+      toast(msg);
+    }
+  }).catch(function (e) {
+    V6.mutUntil.hostFw = 0;
+    v6LoadHostFirewall(true);
+    toast(errText(e), 'err');
+  });
+}
+
+function v6ClearHostFirewall(btn) {
+  var tot = num(V6.host.firewall.uid_rule_count, 0) + num(V6.host.firewall.blocked_domain_count, 0);
+  if (tot <= 0) { toast('当前没有生效中的本机管控规则'); return; }
+  confirmSheet('清空全部本机管控规则？', '将立即解除全部 ' + tot + ' 条本机应用禁网规则与本机域名黑名单，恢复所有应用正常联网。', '全部清空').then(function (ok) {
+    if (!ok) return;
+    if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
+    V6.mutUntil.hostFw = Date.now() + 1500;
+    busyWhile(btn, api.action('self_firewall_clear', {})).then(function () {
+      V6.host.firewall.uid_rules = [];
+      V6.host.firewall.uid_map = {};
+      V6.host.firewall.blocked_domains = [];
+      V6.host.firewall.blocked_set = {};
+      V6.host.firewall.uid_rule_count = 0;
+      V6.host.firewall.blocked_domain_count = 0;
+      v6RefreshNavBadges();
+      v6RefreshActiveSubviewDom();
+      toast('已清空全部本机防火墙与域名规则');
+    }).catch(function (e) {
+      V6.mutUntil.hostFw = 0;
+      v6LoadHostFirewall(true);
+      toast(errText(e), 'err');
+    });
+  });
+}
+
+function v6ToggleSelfCapture(nextOn, togEl) {
+  if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
+  V6.host.privacy.self_capture_enabled = nextOn;
+  return busyWhile(togEl, api.post(V6_API.selfToggle, { enabled: !!nextOn }, { timeout: 7000 })).then(function () {
+    v6LoadHostPrivacy();
+    toast(nextOn ? '已开启本机深度明文抓包审计（5秒内生效）' : '已关闭本机深度抓包，恢复零开销巡检');
+  }).catch(function (e) {
+    V6.host.privacy.self_capture_enabled = !nextOn;
+    if (togEl) togEl.setAttribute('aria-checked', String(!nextOn));
+    toast(errText(e), 'err');
+  });
+}
+
+/* ── 本机守护 4 子模式渲染器 ── */
+function v6FilterHostApps(list) {
+  var q = String(V6.host.q || '').trim().toLowerCase();
+  if (!q) return list;
+  return list.filter(function (a) {
+    var doms = Array.isArray(a.top_domains) ? a.top_domains.join(' ') : '';
+    var hay = ((a.app_name || '') + ' ' + (a.package || '') + ' ' + a.uid + ' ' + doms).toLowerCase();
+    return hay.indexOf(q) >= 0;
+  });
+}
+
+function v6RenderHostLiveListHtml() {
+  var tf = V6.host.traffic;
+  if (V6.host.trafficLoading && !V6.host.trafficLoadedAt) {
+    return '<div class="empty">正在采样本机应用实时联网速率…</div>';
+  }
+  if (V6.host.trafficErr && !tf.apps.length) {
+    return '<div class="v6-scard-body"><div class="note err">' + escapeHtml(V6.host.trafficErr) + '</div></div>';
+  }
+  if (!tf.available) {
+    return '<div class="v6-scard-body"><div class="note">' + escapeHtml(tf.reason || '当前内核未暴露按 UID 流量统计接口') + '</div></div>';
+  }
+  var apps = v6FilterHostApps((tf.apps || []).slice());
+  apps.sort(function (a, b) {
+    return (num(b.total_bps, 0) - num(a.total_bps, 0)) || (num(b.active_conns, 0) - num(a.active_conns, 0)) || (num(b.bg_total_bytes, 0) - num(a.bg_total_bytes, 0));
+  });
+  if (!apps.length) {
+    return '<div class="empty">' + (V6.host.q ? '没有匹配搜索词的本机应用' : '当前暂无产生流量的本机应用') + '</div>';
+  }
+  return '<div class="scard-rows">' + apps.slice(0, 60).map(function (a) {
+    var uid = Math.round(num(a.uid, 0));
+    var pkg = String(a.package || '');
+    var nm = String(a.app_name || pkg || ('UID ' + uid));
+    var isFg = a.current_state === 'fg' || a.current_state === 'foreground';
+    var stateBadge = isFg
+      ? '<span class="v6-mono-badge b-ok">前台</span>'
+      : '<span class="v6-mono-badge b-warn">后台</span>';
+    var fwBadge = v6FwModeBadgeHtml(v6HostUidMode(uid));
+    var flags = Array.isArray(a.cleartext_flags) ? a.cleartext_flags : [];
+    var riskHtml = '';
+    if (flags.indexOf('http_cleartext') >= 0) riskHtml += '<span class="v6-mono-badge b-bad">HTTP明文</span>';
+    if (flags.indexOf('dns_direct') >= 0) riskHtml += '<span class="v6-mono-badge b-warn">直连DNS</span>';
+    var sysBadge = a.is_system ? '<span class="v6-mono-badge">系统</span>' : '';
+
+    var rx = bps(a.rx_bps), tx = bps(a.tx_bps);
+    var connsCnt = Math.round(num(a.active_conns, 0));
+    var doms = Array.isArray(a.top_domains) && a.top_domains.length ? ('近期访问：' + a.top_domains.slice(0, 3).join('、')) : '';
+
+    return '<div class="v6-app-row press" role="button" tabindex="0" data-mkey="hlive-' + uid + '" data-v6-act="host-app-open" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(nm) + '" data-sys="' + (a.is_system ? '1' : '0') + '">' +
+      v6AppAvatarHtml(nm, pkg, uid) +
+      '<div class="v6-app-main">' +
+        '<div class="v6-app-t"><span class="nm">' + escapeHtml(nm) + '</span>' + stateBadge + fwBadge + riskHtml + sysBadge + '</div>' +
+        '<div class="v6-app-s">' + escapeHtml((pkg ? pkg + ' · ' : '') + 'UID ' + uid + (connsCnt > 0 ? (' · ' + connsCnt + ' 条活跃连接') : '')) + '</div>' +
+        (doms ? '<div class="v6-app-doms">' + escapeHtml(doms) + '</div>' : '') +
+      '</div>' +
+      '<div class="v6-app-metrics">' +
+        '<span class="rx">↓ ' + rx.v + ' ' + rx.u + '</span>' +
+        '<span class="tx">↑ ' + tx.v + ' ' + tx.u + '</span>' +
+        '<small>累计 ' + bytes(a.total_bytes) + '</small>' +
+      '</div>' +
+    '</div>';
+  }).join('') + '</div>';
+}
+
+function v6RenderHostTrafficRankHtml() {
+  var tf = V6.host.traffic;
+  if (V6.host.trafficLoading && !V6.host.trafficLoadedAt) {
+    return '<div class="empty">正在统计前后台累计流量排行…</div>';
+  }
+  var apps = v6FilterHostApps((tf.apps || []).slice());
+  var splitOk = tf.bg_split_available !== false;
+  apps.sort(function (a, b) {
+    return splitOk
+      ? ((num(b.bg_total_bytes, 0) - num(a.bg_total_bytes, 0)) || (num(b.total_bytes, 0) - num(a.total_bytes, 0)))
+      : (num(b.total_bytes, 0) - num(a.total_bytes, 0));
+  });
+  apps = apps.filter(function (a) { return num(a.total_bytes, 0) > 0; });
+  if (!apps.length) {
+    return '<div class="empty">该统计周期内暂无本机应用流量记录</div>';
+  }
+  var maxTot = Math.max.apply(null, apps.map(function (a) { return num(a.total_bytes, 0); }).concat([1]));
+  return '<div style="display:grid;gap:4px">' + apps.slice(0, 50).map(function (a) {
+    var uid = Math.round(num(a.uid, 0));
+    var pkg = String(a.package || '');
+    var nm = String(a.app_name || pkg || ('UID ' + uid));
+    var bgB = Math.max(0, num(a.bg_total_bytes, 0));
+    var fgB = Math.max(0, num(a.fg_total_bytes, Math.max(0, num(a.total_bytes, 0) - bgB)));
+    var totB = Math.max(1, bgB + fgB, num(a.total_bytes, 0));
+    var bgW = splitOk ? Math.min(100, (bgB / maxTot) * 100) : 0;
+    var fgW = splitOk ? Math.min(100 - bgW, (fgB / maxTot) * 100) : Math.min(100, (totB / maxTot) * 100);
+    var bgPct = splitOk ? Math.round(clamp(num(a.bg_ratio_pct, (bgB / totB) * 100), 0, 100)) : 0;
+    var fwBadge = v6FwModeBadgeHtml(v6HostUidMode(uid));
+
+    return '<div class="hbar is-dual press" role="button" tabindex="0" data-mkey="htrf-' + uid + '" data-v6-act="host-app-open" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(nm) + '" data-sys="' + (a.is_system ? '1' : '0') + '">' +
+      '<span class="n" style="min-width:0">' +
+        '<span style="display:flex;align-items:center;gap:5px;flex-wrap:wrap"><b style="font-weight:700;color:var(--text-1)">' + escapeHtml(nm) + '</b>' + fwBadge + '</span>' +
+        '<small style="display:block;font-size:10.5px;color:var(--text-3)">' + (splitOk ? ('后台占比 ' + bgPct + '%') : escapeHtml(pkg || ('UID ' + uid))) + '</small>' +
+      '</span>' +
+      '<div class="hbar-track" title="橙色：后台流量 · 蓝色：前台流量">' +
+        (bgW > 0 ? '<i class="hbar-seg-bg" style="width:' + Math.max(1.8, bgW).toFixed(1) + '%"></i>' : '') +
+        (fgW > 0 ? '<i class="hbar-seg-fg" style="width:' + Math.max(1.8, fgW).toFixed(1) + '%"></i>' : '') +
+      '</div>' +
+      '<span class="v" style="text-align:right">' +
+        (splitOk
+          ? ('<span style="color:var(--badge-warn)">后台 ' + bytes(bgB) + '</span><small style="display:block;color:var(--text-3)">前台 ' + bytes(fgB) + '</small>')
+          : ('<span>总计 ' + bytes(totB) + '</span>')) +
+      '</span>' +
+    '</div>';
+  }).join('') + '</div>';
+}
+
+function v6RenderHostPowerListHtml() {
+  var pw = V6.host.power;
+  if (V6.host.powerLoading && !V6.host.powerLoadedAt) {
+    return '<div class="empty">正在解析系统电池耗电与内核持锁归因…</div>';
+  }
+  if (V6.host.powerErr && !pw.apps.length) {
+    return '<div class="v6-scard-body"><div class="note err">' + escapeHtml(V6.host.powerErr) + '</div></div>';
+  }
+  if (!pw.available) {
+    return '<div class="v6-scard-body"><div class="note">' + escapeHtml(pw.reason || '当前系统未开放 batterystats 耗电统计') + '</div></div>';
+  }
+  var apps = v6FilterHostApps((pw.apps || []).slice());
+  if (!apps.length) {
+    return '<div class="empty">暂无可归因的后台耗电或持锁唤醒记录（拔掉充电器使用一段时间后数据更完整）</div>';
+  }
+  return '<div class="scard-rows">' + apps.slice(0, 50).map(function (a) {
+    var uid = Math.round(num(a.uid, 0));
+    var pkg = String(a.package || '');
+    var nm = String(a.app_name || pkg || ('UID ' + uid));
+    var fwBadge = v6FwModeBadgeHtml(v6HostUidMode(uid));
+    var wlMs = Math.max(num(a.wakelock_bg_ms, 0), num(a.wakelock_partial_ms, 0));
+    var radioMs = num(a.mobile_radio_active_ms, 0);
+    var cpuBgMs = num(a.cpu_bg_ms, 0);
+    var alarms = Math.round(num(a.wakeup_alarms_count, 0));
+    var topWl = (Array.isArray(a.top_wakelocks) && a.top_wakelocks[0] && a.top_wakelocks[0].name) ? a.top_wakelocks[0].name : '';
+    var topAl = (!topWl && Array.isArray(a.top_wakeup_alarms) && a.top_wakeup_alarms[0] && a.top_wakeup_alarms[0].name) ? a.top_wakeup_alarms[0].name : '';
+
+    var detailParts = [];
+    if (wlMs > 0) detailParts.push('持锁 ' + v6FmtDurMs(wlMs));
+    if (radioMs > 0) detailParts.push('射频 ' + v6FmtDurMs(radioMs));
+    if (cpuBgMs > 0) detailParts.push('后台CPU ' + v6FmtDurMs(cpuBgMs));
+    if (alarms > 0) detailParts.push('唤醒 ' + alarms + ' 次');
+    if (!detailParts.length && num(a.total_mah, 0) > 0) detailParts.push('总耗电 ' + num(a.total_mah, 0).toFixed(1) + ' mAh');
+
+    var rightMain = '';
+    var rightSub = '';
+    if (a.bg_mah_available && num(a.bg_mah, 0) > 0) {
+      rightMain = '<span style="color:var(--badge-warn)">后台 ' + num(a.bg_mah, 0).toFixed(1) + ' mAh</span>';
+      rightSub = num(a.screen_off_mah, 0) > 0
+        ? ('息屏 ' + num(a.screen_off_mah, 0).toFixed(1) + ' mAh')
+        : ('总计 ' + num(a.total_mah, 0).toFixed(1) + ' mAh');
+    } else if (num(a.total_mah, 0) > 0) {
+      rightMain = '<span>总计 ' + num(a.total_mah, 0).toFixed(1) + ' mAh</span>';
+      rightSub = wlMs > 0 ? ('持锁 ' + v6FmtDurMs(wlMs)) : (alarms > 0 ? ('唤醒 ' + alarms + ' 次') : '点击管控联网');
+    } else {
+      rightMain = '<span style="color:var(--badge-warn)">' + (wlMs > 0 ? ('持锁 ' + v6FmtDurMs(wlMs)) : (radioMs > 0 ? ('射频 ' + v6FmtDurMs(radioMs)) : ('唤醒 ' + alarms + ' 次'))) + '</span>';
+      rightSub = cpuBgMs > 0 ? ('后台CPU ' + v6FmtDurMs(cpuBgMs)) : '点击管控联网';
+    }
+
+    return '<div class="v6-app-row press" role="button" tabindex="0" data-mkey="hpwr-' + uid + '" data-v6-act="host-app-open" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(nm) + '" data-sys="' + (a.is_system ? '1' : '0') + '">' +
+      v6AppAvatarHtml(nm, pkg, uid) +
+      '<div class="v6-app-main">' +
+        '<div class="v6-app-t"><span class="nm">' + escapeHtml(nm) + '</span>' + fwBadge + (a.is_system ? '<span class="v6-mono-badge">系统</span>' : '') + '</div>' +
+        '<div class="v6-app-s">' + escapeHtml(detailParts.join(' · ') || (pkg || ('UID ' + uid))) + '</div>' +
+        ((topWl || topAl) ? '<div class="v6-app-doms">主要唤醒源：' + escapeHtml(topWl || topAl) + '</div>' : '') +
+      '</div>' +
+      '<div class="v6-app-metrics">' + rightMain + '<small>' + escapeHtml(rightSub) + '</small></div>' +
+    '</div>';
+  }).join('') + '</div>';
+}
+
+function v6RenderHostFirewallModeHtml() {
+  var pv = V6.host.privacy;
+  var fw = V6.host.firewall;
+  var pvSum = pv.summary || {};
+  var findings = Array.isArray(pv.findings) ? pv.findings : [];
+
+  var findingsHtml = '';
+  if (V6.host.privacyLoading && !V6.host.privacyLoadedAt) {
+    findingsHtml = '<div class="note">正在扫描本机明文连接与直连 DNS 风险…</div>';
+  } else if (!findings.length) {
+    findingsHtml = '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ok"></span><span>当前未发现本机应用使用 80 明文端口、绕过代理直连 DNS 或已知追踪连接</span></span></div>';
+  } else {
+    findingsHtml = '<div class="v6-flow-list">' + findings.slice(0, 30).map(function (f, idx) {
+      var uid = Math.round(num(f.uid, 0));
+      var pkg = String(f.package || '');
+      var appNm = String(f.app_name || f.name || pkg || ('UID ' + uid));
+      var rType = String(f.risk_type || '');
+      var isHttpClear = (rType === 'http_cleartext' || rType === 'cleartext_http');
+      var isDnsDirect = (rType === 'dns_direct' || rType === 'direct_dns');
+      var rBadge = isHttpClear
+        ? '<span class="v6-mono-badge b-bad">HTTP明文</span>'
+        : (isDnsDirect
+          ? '<span class="v6-mono-badge b-warn">直连DNS</span>'
+          : (rType === 'bg_silent_uplink'
+            ? '<span class="v6-mono-badge b-acc">后台外发</span>'
+            : '<span class="v6-mono-badge b-pur">' + escapeHtml(f.sdk_name || '追踪SDK') + '</span>'));
+      var rIp = f.remote_ip || f.dst_ip || '';
+      var rPort = f.remote_port != null ? f.remote_port : (f.dport != null ? f.dport : '');
+      var targetStr = f.domain ? (f.domain + (rPort ? ':' + rPort : '')) : (rIp + (rPort ? ':' + rPort : ''));
+      var isProt = v6IsHostAppProtected(uid, pkg);
+      var curMode = v6HostUidMode(uid);
+      var domBlocked = !!(f.domain && fw.blocked_set[String(f.domain).toLowerCase()]);
+      var isBgState = (f.app_state === 'background' || f.app_state === 'bg' || f.current_state === 'background');
+
+      return '<div class="v6-flow-item" data-mkey="hpvf-' + uid + '-' + idx + '">' +
+        '<div class="v6-flow-main">' +
+          '<div class="v6-flow-t">' + rBadge + '<span>' + escapeHtml(appNm) + '</span>' + (isBgState ? '<span class="v6-mono-badge">后台</span>' : '') + '</div>' +
+          '<div class="v6-flow-s">' + escapeHtml(targetStr + (f.detail ? (' · ' + f.detail) : '')) + '</div>' +
+        '</div>' +
+        '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
+          (!isProt && isHttpClear && curMode !== 'block_cleartext' && curMode !== 'block_all'
+            ? '<button type="button" class="v6-mini-btn pri press" data-v6-act="host-fw-set" data-fw-mode="block_cleartext" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appNm) + '">仅禁明文</button>'
+            : '') +
+          (f.domain
+            ? (domBlocked
+              ? '<span class="v6-mono-badge b-ok">域名已拦截</span>'
+              : '<button type="button" class="v6-mini-btn warn press" data-v6-act="host-dns-block" data-domain="' + escapeHtml(f.domain) + '">拦截域名</button>')
+            : '') +
+          '<button type="button" class="v6-mini-btn press" data-v6-act="host-app-open" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appNm) + '" data-sys="' + (f.is_system ? '1' : '0') + '">管控</button>' +
+        '</div>' +
+      '</div>';
+    }).join('') + '</div>';
+  }
+
+  var uidRulesHtml = fw.uid_rules.length ? ('<div class="v6-flow-list">' + fw.uid_rules.map(function (r) {
+    var disp = r.app_name || r.pkg || ('UID ' + r.uid);
+    return '<div class="v6-flow-item" data-mkey="hfwu-' + r.uid + '">' +
+      '<div class="v6-flow-main">' +
+        '<div class="v6-flow-t">' + v6FwModeBadgeHtml(r.mode) + '<span>' + escapeHtml(disp) + '</span></div>' +
+        '<div class="v6-flow-s">' + escapeHtml((r.pkg ? r.pkg + ' · ' : '') + 'UID ' + r.uid + (r.sdk_sandbox_uid > 0 ? (' · 同步沙箱 ' + r.sdk_sandbox_uid) : '')) + '</div>' +
+      '</div>' +
+      '<div style="display:inline-flex;gap:6px">' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="host-app-open" data-uid="' + r.uid + '" data-pkg="' + escapeHtml(r.pkg) + '" data-name="' + escapeHtml(disp) + '" data-sys="0">改档位</button>' +
+        '<button type="button" class="v6-mini-btn ok press" data-v6-act="host-fw-set" data-fw-mode="allow" data-uid="' + r.uid + '" data-pkg="' + escapeHtml(r.pkg) + '" data-name="' + escapeHtml(disp) + '">恢复放行</button>' +
+      '</div>' +
+    '</div>';
+  }).join('') + '</div>') : '<div class="note" style="margin:0">暂无受限应用（在「实时联网 / 后台耗流 / 后台耗电」点任意应用即可一键设为仅禁明文、禁移动网或全局禁网）</div>';
+
+  var domRulesHtml = fw.blocked_domains.length ? ('<div class="v6-flow-list">' + fw.blocked_domains.map(function (dom) {
+    return '<div class="v6-flow-item" data-mkey="hfwd-' + escapeHtml(dom) + '">' +
+      '<div class="v6-flow-main">' +
+        '<div class="v6-flow-t"><span class="v6-mono-badge b-bad">本机拦截</span><span class="mono">' + escapeHtml(dom) + '</span></div>' +
+      '</div>' +
+      '<button type="button" class="v6-mini-btn ok press" data-v6-act="host-dns-unblock" data-domain="' + escapeHtml(dom) + '">解除拦截</button>' +
+    '</div>';
+  }).join('') + '</div>') : '<div class="note" style="margin:0">暂无本机域名黑名单</div>';
+
+  var totRules = num(fw.uid_rule_count, 0) + num(fw.blocked_domain_count, 0);
+
+  return '<div class="v6-shell">' +
+    '<div class="sgrp scard glass open" id="v6-host-privacy-card">' +
+      '<div class="sgrp-h scard-h scard-head">' +
+        gi('orange', 'eye') +
+        '<span class="tx"><b>本机明文与追踪风险巡检</b><small>零抓包开销扫描本机 80 明文 HTTP、直连 DNS 与追踪连接</small></span>' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="host-privacy-refresh">立即扫描</button>' +
+      '</div>' +
+      '<div class="v6-scard-body">' +
+        '<div class="v6-ov-grid">' +
+          '<div class="v6-ov-cell' + (num(pvSum.cleartext_http_conns) > 0 ? ' is-bad' : '') + '"><span>80端口明文连接</span><b>' + num(pvSum.cleartext_http_conns, 0) + '</b><small>未加密裸奔请求</small></div>' +
+          '<div class="v6-ov-cell' + (num(pvSum.direct_dns_conns) > 0 ? ' is-warn' : '') + '"><span>直连 DNS (:53)</span><b>' + num(pvSum.direct_dns_conns, 0) + '</b><small>绕过本机DNS守卫</small></div>' +
+          '<div class="v6-ov-cell' + (num(pvSum.tracker_sdk_conns) > 0 ? ' is-warn' : '') + '"><span>追踪/广告连接</span><b>' + num(pvSum.tracker_sdk_conns, 0) + '</b><small>已知统计与广告域</small></div>' +
+          '<div class="v6-ov-cell"><span>涉及风险应用</span><b>' + num(pvSum.risky_apps_count, 0) + '</b><small>支持一键禁明文</small></div>' +
+        '</div>' +
+        '<div class="lgd-sw-row">' +
+          '<span>开启本机深度明文载荷审计<small>平时关闭零额外耗电；开启后实时提取本机 HTTP 明文原文并汇入「隐私安检」</small></span>' +
+          toggle(pv.self_capture_enabled, 'data-v6-tog="host-self-capture" aria-label="开启本机深度明文载荷审计"') +
+        '</div>' +
+        findingsHtml +
+      '</div>' +
+    '</div>' +
+    '<div class="sgrp scard glass open" id="v6-host-fw-card">' +
+      '<div class="sgrp-h scard-h scard-head">' +
+        gi('red', 'lock') +
+        '<span class="tx"><b>已生效本机防火墙与域名黑名单</b><small>内核 OUTPUT 链 UID 精确阻断与 DNS 拦截，重启自动恢复</small></span>' +
+        (totRules > 0 ? '<button type="button" class="v6-mini-btn dan press" data-v6-act="host-fw-clear">清空全部</button>' : '') +
+      '</div>' +
+      '<div class="v6-scard-body">' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+          '<label class="lgd-search-mini" style="max-width:none;flex:1 1 200px">' + ico('globe') + '<input id="v6-host-dom-inp" type="text" placeholder="输入要在本机屏蔽的域名，如 ad.example.com" autocomplete="off"></label>' +
+          '<button type="button" class="btn sm pri press" data-v6-act="host-dns-add">添加本机拦截</button>' +
+        '</div>' +
+        '<div><div class="note" style="margin:0 0 6px;font-weight:700;color:var(--text-2)">应用联网限制（' + fw.uid_rules.length + ' 款）</div>' + uidRulesHtml + '</div>' +
+        '<div><div class="note" style="margin:0 0 6px;font-weight:700;color:var(--text-2)">本机屏蔽域名（' + fw.blocked_domains.length + ' 个）</div>' + domRulesHtml + '</div>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+function v6RenderHostSubviewHtml() {
+  var tf = V6.host.traffic;
+  var ts = tf.summary || {};
+  var pw = V6.host.power;
+  var ds = pw.device_summary || {};
+  var fw = V6.host.firewall;
+  var rxB = bps(ts.total_rx_bps), txB = bps(ts.total_tx_bps);
+  var bgSneakCnt = (tf.apps || []).filter(function (a) {
+    return a.current_state !== 'fg' && a.current_state !== 'foreground' && (num(a.total_bps, 0) > 0 || num(a.active_conns, 0) > 0);
+  }).length;
+  var fwTotal = num(fw.uid_rule_count, 0) + num(fw.blocked_domain_count, 0);
+
+  var drainMain = (pw.screen_off_mah_available && num(ds.screen_off_discharge_mah, 0) > 0)
+    ? (Math.round(num(ds.screen_off_discharge_mah, 0)) + ' mAh')
+    : (num(ds.actual_discharge_mah, 0) > 0 ? ('总放 ' + Math.round(num(ds.actual_discharge_mah, 0)) + ' mAh') : (V6.host.powerLoadedAt ? '0 mAh' : '按需读取'));
+  var drainSub = num(ds.screen_off_on_battery_ms, 0) > 0
+    ? ('息屏时长 ' + v6FmtDurMs(ds.screen_off_on_battery_ms))
+    : '点后台耗电查看归因';
+
+  var modeBodyHtml = '';
+  if (V6.host.mode === 'firewall') {
+    modeBodyHtml = v6RenderHostFirewallModeHtml();
+  } else if (V6.host.mode === 'traffic') {
+    modeBodyHtml = '<div class="sgrp scard glass open" id="v6-host-list-card">' +
+      '<div class="sgrp-h scard-h scard-head">' +
+        gi('orange', 'stats') +
+        '<span class="tx"><b>本机应用前后台流量排行</b><small>橙色为后台静默消耗，点按任意应用可一键限制移动网或禁网</small></span>' +
+      '</div>' +
+      '<div class="v6-scard-body">' +
+        '<div class="v6-toolbar-row">' +
+          seg('v6-host-period', [['boot', '自开机'], ['today', '今日'], ['7d', '近7天'], ['30d', '近30天']], V6.host.period, 'small') +
+          seg('v6-host-net', [['all', '全部'], ['mobile', '移动网'], ['wifi', 'Wi-Fi']], V6.host.net, 'small') +
+        '</div>' +
+        (tf.bg_split_available === false ? '<div class="lgd-summary-line"><span>当前内核未单独拆分 UID 前后台历史字节，已按总流量真实排序</span></div>' : '') +
+        '<label class="lgd-search-mini" style="max-width:none;width:100%">' + ico('search') + '<input id="v6-host-q" type="search" placeholder="搜索本机应用名或包名" value="' + escapeHtml(V6.host.q) + '" autocomplete="off"></label>' +
+        '<div id="v6-host-dynamic-list">' + v6RenderHostTrafficRankHtml() + '</div>' +
+      '</div>' +
+    '</div>';
+  } else if (V6.host.mode === 'power') {
+    var pDims = [
+      ['bg_mah', '后台耗电'],
+      ['screen_off_mah', '息屏掉电'],
+      ['wakelock_ms', '后台持锁'],
+      ['radio_ms', '射频唤醒'],
+      ['cpu_bg_ms', '后台CPU']
+    ];
+    modeBodyHtml = '<div class="sgrp scard glass open" id="v6-host-list-card">' +
+      '<div class="sgrp-h scard-h scard-head">' +
+        gi('purple', 'power') +
+        '<span class="tx"><b>后台耗电与持锁唤醒归因</b><small>直读系统 batterystats 真实持锁、射频激活与闹钟唤醒源</small></span>' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="host-power-refresh">刷新统计</button>' +
+      '</div>' +
+      '<div class="v6-scard-body">' +
+        '<div class="lgd-type-chips">' +
+          pDims.map(function (pd) {
+            return '<button type="button" class="lgd-tchip' + (V6.host.powerSort === pd[0] ? ' on' : '') + '" data-v6-act="host-psort" data-sort="' + pd[0] + '">' + pd[1] + '</button>';
+          }).join('') +
+        '</div>' +
+        (V6.host.powerLoadedAt && !pw.bg_mah_available
+          ? '<div class="lgd-summary-line"><span>' + escapeHtml(pw.bg_mah_reason || '当前系统未单独拆分前后台毫安时，已自动按真实内核持锁与射频唤醒时长排序（零估算伪造）') + '</span></div>'
+          : '') +
+        '<label class="lgd-search-mini" style="max-width:none;width:100%">' + ico('search') + '<input id="v6-host-q" type="search" placeholder="搜索应用名、包名或唤醒锁名称" value="' + escapeHtml(V6.host.q) + '" autocomplete="off"></label>' +
+      '</div>' +
+      '<div id="v6-host-dynamic-list">' + v6RenderHostPowerListHtml() + '</div>' +
+    '</div>';
+  } else {
+    modeBodyHtml = '<div class="sgrp scard glass open" id="v6-host-list-card">' +
+      '<div class="sgrp-h scard-h scard-head">' +
+        gi('green', 'globe') +
+        '<span class="tx"><b>本机应用实时联网监控</b><small>实时显示前后台网速、活跃连接与访问域名，点按应用开启四档管控</small></span>' +
+      '</div>' +
+      '<div class="v6-scard-body" style="padding-bottom:10px">' +
+        '<label class="lgd-search-mini" style="max-width:none;width:100%">' + ico('search') + '<input id="v6-host-q" type="search" placeholder="搜索应用名、包名或正在访问的域名" value="' + escapeHtml(V6.host.q) + '" autocomplete="off"></label>' +
+      '</div>' +
+      '<div id="v6-host-dynamic-list">' + v6RenderHostLiveListHtml() + '</div>' +
+    '</div>';
+  }
+
+  return '<div class="v6-shell">' +
+    '<div class="sgrp scard glass open" id="v6-host-ov-card">' +
+      '<div class="sgrp-h scard-h scard-head">' +
+        gi('blue', 'screen') +
+        '<span class="tx"><b>本机守护总览</b><small>仅在停留本页时按需采样，切走或息屏立即零唤醒静默</small></span>' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="host-refresh-all">刷新</button>' +
+      '</div>' +
+      '<div class="v6-scard-body">' +
+        '<div class="v6-ov-grid">' +
+          '<div class="v6-ov-cell is-ok"><span>本机实时网速</span><b>↓' + rxB.v + rxB.u + '</b><small>' + (tf.rate_warming_up ? '采样预热中 · ↑' : ('↑' + txB.v + txB.u + ' · 活跃 ' + num(ts.active_conn_apps, 0) + ' 款')) + '</small></div>' +
+          '<div class="v6-ov-cell' + (bgSneakCnt > 0 ? ' is-warn' : '') + '"><span>后台活跃联网</span><b>' + bgSneakCnt + ' 款</b><small>后台流量占比 ' + Math.round(clamp(num(ts.bg_ratio_pct, 0), 0, 100)) + '%</small></div>' +
+          '<div class="v6-ov-cell"><span>息屏待机掉电</span><b>' + escapeHtml(drainMain) + '</b><small>' + escapeHtml(drainSub) + '</small></div>' +
+          '<div class="v6-ov-cell' + (fwTotal > 0 ? ' is-warn' : '') + '"><span>生效管控规则</span><b>' + fwTotal + ' 条</b><small>' + num(fw.uid_rule_count, 0) + ' 款应用 · ' + num(fw.blocked_domain_count, 0) + ' 个域名</small></div>' +
+        '</div>' +
+        '<div class="lgd-sw-row">' +
+          '<span>包含系统底层组件<small>默认仅展示日常安装应用，开启后包含 Android 核心系统服务</small></span>' +
+          toggle(V6.host.includeSystem, 'data-v6-tog="host-sys" aria-label="包含系统底层组件"') +
+        '</div>' +
+        seg('v6-host-mode', [
+          ['live', '实时联网'],
+          ['traffic', '后台耗流'],
+          ['power', '后台耗电'],
+          ['firewall', '明文与防火墙']
+        ], V6.host.mode, 'small') +
+      '</div>' +
+    '</div>' +
+    modeBodyHtml +
+  '</div>';
+}
+
+/* ═════════════════════ Sub-Tab 3: 隐私安检 (LeakGuard 零解密明文外泄取证 · 支持本机+热点双来源) ═════════════════════ */
 function v6StreamModeBadgeHtml() {
   if (KSU) return '<span class="v6-mono-badge b-acc"><span class="v6-dot acc"></span>自动巡检中</span>';
   if (V6.lg.sseActive) return '<span class="v6-mono-badge b-ok"><span class="v6-dot ok"></span>实时监测中</span>';
@@ -1791,19 +3176,25 @@ function v6UpdateStreamBadgeDom() {
 }
 
 function v6FilteredLeakEvents() {
+  var of = V6.lg.originFilter || 'ALL';
   var tf = V6.lg.typeFilter || 'ALL';
   var q = String(V6.lg.q || '').trim().toLowerCase();
   return V6.lg.events.filter(function (ev) {
+    if (of !== 'ALL' && (ev.origin || 'hotspot') !== of) return false;
     if (tf !== 'ALL' && leakTypeGroup(ev.leak_type) !== tf) return false;
     if (!q) return true;
-    var hay = (ev.devName + ' ' + ev.src_ip + ' ' + ev.mac + ' ' + ev.leak_label + ' ' + ev.leak_type + ' ' + ev.raw_value + ' ' + ev.dst_host + ' ' + ev.dst_ip + ' ' + ev.url_path).toLowerCase();
+    var hay = (ev.devName + ' ' + (ev.pkg || '') + ' ' + ev.src_ip + ' ' + ev.mac + ' ' + ev.leak_label + ' ' + ev.leak_type + ' ' + ev.raw_value + ' ' + ev.dst_host + ' ' + ev.dst_ip + ' ' + ev.url_path).toLowerCase();
     return hay.indexOf(q) >= 0;
   });
 }
 
 function v6RenderLeakForensicInnerHtml(ev) {
   var tupleStr = (ev.src_ip || '—') + (ev.src_port ? ':' + ev.src_port : '') + ' -> ' + (ev.dst_ip || ev.dst_host) + ':' + (ev.dst_port || 80) + ' (' + ev.proto.toUpperCase() + ')';
+  var srcOwner = ev.origin === 'host'
+    ? ('本机应用 · ' + (ev.app_name || ev.pkg || ('UID ' + ev.uid)) + (ev.pkg ? ' (' + ev.pkg + ')' : ''))
+    : ('热点设备 · ' + ev.devName + (ev.mac ? ' (' + ev.mac + ')' : ''));
   return '<dl class="lgd-forensic-meta">' +
+      '<dt>事件来源</dt><dd>' + escapeHtml(srcOwner) + '</dd>' +
       '<dt>通信地址</dt><dd>' + escapeHtml(tupleStr) + '</dd>' +
       '<dt>请求路径</dt><dd>' + escapeHtml(ev.method + ' http://' + ev.dst_host + ev.url_path) + '</dd>' +
       '<dt>客户端标识</dt><dd>' + escapeHtml(ev.user_agent) + '</dd>' +
@@ -1827,9 +3218,9 @@ function v6LeakStreamHtml() {
   var list = v6FilteredLeakEvents();
   if (!list.length) {
     if (V6.lg.events.length > 0) {
-      return '<div class="v6-calm-empty">没有匹配当前筛选条件的记录，可切回「全部」查看</div>';
+      return '<div class="lgd-summary-line"><span>没有匹配当前筛选条件的记录，可切回「全部」查看</span></div>';
     }
-    return '<div class="v6-calm-empty"><span class="v6-dot ok"></span><span>暂未发现未加密的 HTTP 隐私明文外发，网络隐私安全</span></div>';
+    return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ok"></span><span>暂未发现未加密的 HTTP 隐私明文外发，网络隐私安全</span></span></div>';
   }
   var capLim = Math.max(20, num(V6.lg.visibleLimit, 30));
   var shown = list.slice(0, capLim);
@@ -1837,13 +3228,22 @@ function v6LeakStreamHtml() {
 
   var cardsHtml = shown.map(function (ev) {
     var isOpen = !!V6.lg.openIds[ev.id];
-    var dObj = ev.mac ? devBy(ev.mac) : null;
-    var dispDev = (dObj && dObj.name && dObj.name !== dObj.mac) ? dObj.name : (ev.devName && !v6ValidMac(ev.devName) && !v6ValidIp(ev.devName) ? ev.devName : (dObj ? v6FriendlyDevLabel(dObj, ev.devName) : ev.devName));
+    var isHostEv = ev.origin === 'host';
+    var dObj = (!isHostEv && ev.mac) ? devBy(ev.mac) : null;
+    var dispDev = isHostEv
+      ? (ev.app_name || ev.pkg || ('UID ' + ev.uid))
+      : ((dObj && dObj.name && dObj.name !== dObj.mac) ? dObj.name : (ev.devName && !v6ValidMac(ev.devName) && !v6ValidIp(ev.devName) ? ev.devName : (dObj ? v6FriendlyDevLabel(dObj, ev.devName) : ev.devName)));
+    var originTag = isHostEv
+      ? '<span class="v6-mono-badge b-acc">本机应用</span>'
+      : '<span class="v6-mono-badge">热点设备</span>';
+    var blkBtnTxt = ev.is_blocked ? '解除封禁' : (isHostEv ? '拦截本机域名' : '封禁热点域名');
+
     return '<div class="lgd-item' + (isOpen ? ' is-open' : '') + (ev.is_blocked ? ' is-blocked' : '') + '" data-mkey="lgd-' + escapeHtml(ev.id) + '" data-lgd-id="' + escapeHtml(ev.id) + '">' +
       '<div class="lgd-card-body">' +
         '<div class="lgd-r1">' +
           '<div class="lgd-r1-l">' +
-            '<span class="lgd-dev" title="' + escapeHtml(ev.src_ip + ' ' + ev.mac) + '">' + escapeHtml(dispDev) + '</span>' +
+            originTag +
+            '<span class="lgd-dev" title="' + escapeHtml(isHostEv ? (ev.pkg + ' UID ' + ev.uid) : (ev.src_ip + ' ' + ev.mac)) + '">' + escapeHtml(dispDev) + '</span>' +
             '<span class="v6-mono-badge ' + leakTypeBadgeCls(ev.leak_type) + '">' + escapeHtml(leakTypeZh(ev.leak_type)) + '</span>' +
             v6InfraGuardBadgeHtml(ev.infra_guard) +
             (ev.is_blocked ? '<span class="v6-mono-badge b-ok">已封禁目标</span>' : '') +
@@ -1858,10 +3258,10 @@ function v6LeakStreamHtml() {
           '<span class="lgd-copy-hint">复制</span>' +
         '</div>' +
         '<div class="lgd-r3">' +
-          '<span class="lgd-host" title="' + escapeHtml(ev.dst_host + ev.url_path) + '">发往 → ' + escapeHtml(ev.dst_host) + (ev.url_path && ev.url_path !== '/' ? (' ' + escapeHtml(ev.url_path)) : '') + '</span>' +
+          '<span class="lgd-host" title="' + escapeHtml(ev.dst_host + ev.url_path) + '">发往 -> ' + escapeHtml(ev.dst_host) + (ev.url_path && ev.url_path !== '/' ? (' ' + escapeHtml(ev.url_path)) : '') + '</span>' +
         '</div>' +
         '<div class="lgd-acts">' +
-          '<button type="button" class="lgd-act-btn ' + (ev.is_blocked ? 'ok' : 'warn') + ' press" data-v6-act="lgd-block-domain" data-id="' + escapeHtml(ev.id) + '">' + (ev.is_blocked ? '解除封禁' : '封禁域名与IP') + '</button>' +
+          '<button type="button" class="lgd-act-btn ' + (ev.is_blocked ? 'ok' : 'warn') + ' press" data-v6-act="lgd-block-domain" data-id="' + escapeHtml(ev.id) + '">' + blkBtnTxt + '</button>' +
           '<button type="button" class="lgd-act-btn press" data-v6-act="lgd-ignore-sheet" data-id="' + escapeHtml(ev.id) + '">忽略误报</button>' +
           '<button type="button" class="lgd-act-btn dan press" data-v6-act="lgd-cut-conn" data-id="' + escapeHtml(ev.id) + '">断开连接</button>' +
           '<button type="button" class="lgd-act-btn press" data-v6-act="lgd-toggle-btn" data-id="' + escapeHtml(ev.id) + '">' + (isOpen ? '收起原文' : '查看原文') + '</button>' +
@@ -1900,14 +3300,14 @@ function v6RenderLeakGuardManagerBodyHtml() {
   var undoHtml = undoList.length ? ('<div class="v6-flow-list">' + undoList.map(function (u) {
     var subParts = [];
     if (u.also_ip) subParts.push('连带 IP ' + u.also_ip);
-    if (u.device_name) subParts.push('来源 ' + u.device_name);
+    if (u.device_name) subParts.push('范围 ' + u.device_name);
     if (u.timeStr) subParts.push(u.timeStr);
     return '<div class="v6-flow-item">' +
       '<div class="v6-flow-main">' +
         '<div class="v6-flow-t"><span class="v6-mono-badge b-warn">已封禁</span><span class="mono">' + escapeHtml(u.dst_host) + '</span></div>' +
         (subParts.length ? '<div class="v6-flow-s">' + escapeHtml(subParts.join(' · ')) + '</div>' : '') +
       '</div>' +
-      '<button type="button" class="v6-mini-btn ok press" data-v6-act="lgd-undo-block" data-uid="' + escapeHtml(u.hasServerId ? u.id : '') + '" data-host="' + escapeHtml(u.dst_host) + '">撤销封禁</button>' +
+      '<button type="button" class="v6-mini-btn ok press" data-v6-act="lgd-undo-block" data-uid="' + escapeHtml(u.hasServerId ? u.id : '') + '" data-host="' + escapeHtml(u.dst_host) + '" data-tscope="' + escapeHtml(u.target_scope || '') + '">撤销封禁</button>' +
     '</div>';
   }).join('') + '</div>') : '<div class="note" style="margin:0">暂无最近封禁操作记录（封禁追踪域名后最多保留最近 10 条供一键反悔恢复）</div>';
 
@@ -1933,98 +3333,108 @@ function v6RenderPrivacySubviewHtml() {
   var lg = V6.lg;
   var undoCnt = Math.max(0, Math.round(num(lg.undo_count, lg.undo_stack ? lg.undo_stack.length : 0)));
   var wlCnt = Math.max(lg.whitelist ? lg.whitelist.length : 0, Math.round(num(lg.whitelist_count, 0)));
+  var originTypes = [
+    ['ALL', '全部来源'],
+    ['host', '本机应用'],
+    ['hotspot', '热点设备']
+  ];
   var filterTypes = [
-    ['ALL', '全部'],
-    ['PHONE', '手机号'],
+    ['ALL', '全部类别'],
+    ['PHONE', '手机/证件'],
     ['DEVICE_ID', '设备指纹'],
     ['GPS', '精准定位'],
     ['MAC_ADDR', '网卡地址'],
-    ['TOKEN', '登录凭证']
+    ['TOKEN', '账号/凭证']
   ];
+  var originChipsHtml = originTypes.map(function (ot) {
+    var on = (lg.originFilter || 'ALL') === ot[0];
+    return '<button type="button" class="lgd-tchip' + (on ? ' on' : '') + '" data-v6-act="lgd-origin-filter" data-origin="' + ot[0] + '">' + ot[1] + '</button>';
+  }).join('');
   var chipsHtml = filterTypes.map(function (ft) {
     var on = (lg.typeFilter || 'ALL') === ft[0];
     return '<button type="button" class="lgd-tchip' + (on ? ' on' : '') + '" data-v6-act="lgd-filter" data-type="' + ft[0] + '">' + ft[1] + '</button>';
   }).join('');
 
-  return '<section class="glass lgd-panel" id="v6-leakguard-card">' +
-    '<div class="lgd-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb red">' + v6Svg('shieldAlert') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t"><span>隐私明文安检</span><span id="lgd-stream-mode">' + v6StreamModeBadgeHtml() + '</span></div>' +
-          '<div class="v6-card-s">不安装证书、不解密 HTTPS，仅揪出仍在裸奔发送手机号、定位或凭证的明文请求</div>' +
-        '</div>' +
-      '</div>' +
+  return '<div class="sgrp scard glass open" id="v6-leakguard-card">' +
+    '<div class="sgrp-h scard-h scard-head">' +
+      gi('red', 'eye') +
+      '<span class="tx"><b>隐私明文安检 <span id="lgd-stream-mode">' + v6StreamModeBadgeHtml() + '</span></b><small>不安装证书、不解密 HTTPS，实时抓出本机与热点裸奔发送敏感信息的明文请求</small></span>' +
       '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
-        (undoCnt > 0 ? '<button type="button" class="v6-mini-btn warn press" data-v6-act="lgd-undo-block">撤销封禁 (' + undoCnt + ')</button>' : '') +
+        (undoCnt > 0 ? '<button type="button" class="v6-mini-btn warn press" data-v6-act="lgd-undo-block">撤销 (' + undoCnt + ')</button>' : '') +
         '<button type="button" class="v6-mini-btn press" data-v6-act="lgd-refresh">刷新</button>' +
-        '<button type="button" class="v6-mini-btn dan press" data-v6-act="lgd-clear">清空记录</button>' +
+        '<button type="button" class="v6-mini-btn dan press" data-v6-act="lgd-clear">清空</button>' +
       '</div>' +
     '</div>' +
-    '<div class="lgd-summary-line" id="lgd-summary-line">' +
-      '<span>累计发现 <b class="' + (num(lg.total_hits) > 0 ? 'bad' : '') + '">' + num(lg.total_hits) + '</b> 次明文传输 · 涉及 <b>' + num(lg.affected_devices) + '</b> 台设备 · 已封禁 <b>' + num(lg.blocked_domains) + '</b> 个追踪域名' + (wlCnt > 0 ? (' · 已忽略 <b>' + wlCnt + '</b> 项白名单') : '') + '</span>' +
-    '</div>' +
-    '<details class="v6-adv-fold" data-v6-fold="lgCfg"' + (V6.advOpen.lgCfg ? ' open' : '') + '>' +
-      '<summary><span>手机通知提醒与保留条数设置</span><span class="v6-adv-r"><span>' + (lg.notify_enabled ? '通知已开' : '通知已关') + ' · 保留 ' + lg.capacity + ' 条</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
-      '<div class="v6-adv-body">' +
-        '<div class="lgd-ctrl-bar">' +
-          '<div class="lgd-switches">' +
-            '<div class="lgd-sw-row"><span>发现明文泄露时发系统通知<small>在热点手机状态栏实时弹出安全提醒</small></span>' + toggle(lg.notify_enabled, 'data-v6-tog="lgd-notify" aria-label="发现明文泄露时发系统通知"') + '</div>' +
-            '<div class="lgd-sw-row"><span>锁屏通知隐藏中间敏感数字<small>仅影响手机系统弹窗，下方列表始终展示完整原文</small></span>' + toggle(lg.lockscreen_mask, 'data-v6-tog="lgd-mask" aria-label="锁屏通知隐藏中间敏感数字"') + '</div>' +
-          '</div>' +
-          '<div class="lgd-cfg-box">' +
-            '<div class="v6-num-grid">' +
-              '<label class="v6-num-field"><span>最多保留记录数</span><span class="v6-num-box"><input id="lgd-cap-inp" type="number" min="10" max="2000" step="10" inputmode="numeric" value="' + lg.capacity + '"><span class="u">条</span></span></label>' +
-              '<label class="v6-num-field"><span>同类重复提醒间隔</span><span class="v6-num-box"><input id="lgd-cd-inp" type="number" min="0" max="86400" step="30" inputmode="numeric" value="' + lg.cooldown_sec + '"><span class="u">秒</span></span></label>' +
+    '<div class="v6-scard-body">' +
+      '<div class="lgd-summary-line" id="lgd-summary-line">' +
+        '<span>累计发现 <b class="' + (num(lg.total_hits) > 0 ? 'bad' : '') + '">' + num(lg.total_hits) + '</b> 次明文传输 · 涉及 <b>' + num(lg.affected_devices) + '</b> 个来源 · 已封禁 <b>' + num(lg.blocked_domains) + '</b> 个追踪域名' + (wlCnt > 0 ? (' · 已忽略 <b>' + wlCnt + '</b> 项白名单') : '') + '</span>' +
+      '</div>' +
+      '<details class="v6-adv-fold" data-v6-fold="lgCfg"' + (V6.advOpen.lgCfg ? ' open' : '') + '>' +
+        '<summary><span>手机通知提醒与保留条数设置</span><span class="v6-adv-r"><span>' + (lg.notify_enabled ? '通知已开' : '通知已关') + ' · 保留 ' + lg.capacity + ' 条</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+        '<div class="v6-adv-body">' +
+          '<div class="lgd-ctrl-bar">' +
+            '<div class="lgd-switches">' +
+              '<div class="lgd-sw-row"><span>发现明文泄露时发系统通知<small>在手机状态栏实时弹出安全提醒</small></span>' + toggle(lg.notify_enabled, 'data-v6-tog="lgd-notify" aria-label="发现明文泄露时发系统通知"') + '</div>' +
+              '<div class="lgd-sw-row"><span>锁屏通知隐藏中间敏感数字<small>仅影响手机系统弹窗，下方列表始终展示完整原文</small></span>' + toggle(lg.lockscreen_mask, 'data-v6-tog="lgd-mask" aria-label="锁屏通知隐藏中间敏感数字"') + '</div>' +
             '</div>' +
-            '<div class="lgd-cfg-acts"><button type="button" class="v6-mini-btn pri press" data-v6-act="lgd-save-cfg">保存通知设置</button></div>' +
+            '<div class="lgd-cfg-box">' +
+              '<div class="v6-num-grid">' +
+                '<label class="v6-num-field"><span>最多保留记录数</span><span class="v6-num-box"><input id="lgd-cap-inp" type="number" min="10" max="2000" step="10" inputmode="numeric" value="' + lg.capacity + '"><span class="u">条</span></span></label>' +
+                '<label class="v6-num-field"><span>同类重复提醒间隔</span><span class="v6-num-box"><input id="lgd-cd-inp" type="number" min="0" max="86400" step="30" inputmode="numeric" value="' + lg.cooldown_sec + '"><span class="u">秒</span></span></label>' +
+              '</div>' +
+              '<div class="lgd-cfg-acts"><button type="button" class="btn sm pri press" data-v6-act="lgd-save-cfg">保存通知设置</button></div>' +
+            '</div>' +
           '</div>' +
         '</div>' +
+      '</details>' +
+      '<details class="v6-adv-fold" data-v6-fold="lgGuard"' + (V6.advOpen.lgGuard ? ' open' : '') + '>' +
+        '<summary><span>误封恢复与忽略白名单管理</span><span class="v6-adv-r"><span>可撤销 ' + undoCnt + ' 条 · 白名单 ' + wlCnt + ' 项</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+        '<div class="v6-adv-body">' + v6RenderLeakGuardManagerBodyHtml() + '</div>' +
+      '</details>' +
+      '<div class="lgd-type-chips">' + originChipsHtml + '</div>' +
+      '<div class="lgd-filter-bar">' +
+        '<div class="lgd-type-chips">' + chipsHtml + '</div>' +
+        '<label class="lgd-search-mini">' + ico('search') + '<input id="lgd-q" type="search" placeholder="搜索应用名、设备名、域名或明文内容" value="' + escapeHtml(lg.q) + '" autocomplete="off"></label>' +
       '</div>' +
-    '</details>' +
-    '<details class="v6-adv-fold" data-v6-fold="lgGuard"' + (V6.advOpen.lgGuard ? ' open' : '') + '>' +
-      '<summary><span>误封恢复与忽略白名单管理</span><span class="v6-adv-r"><span>可撤销 ' + undoCnt + ' 条 · 白名单 ' + wlCnt + ' 项</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
-      '<div class="v6-adv-body">' + v6RenderLeakGuardManagerBodyHtml() + '</div>' +
-    '</details>' +
-    '<div class="lgd-filter-bar">' +
-      '<div class="lgd-type-chips">' + chipsHtml + '</div>' +
-      '<label class="lgd-search-mini">' + ico('search') + '<input id="lgd-q" type="search" placeholder="搜索设备名、域名或明文内容" value="' + escapeHtml(lg.q) + '" autocomplete="off"></label>' +
+      '<div class="lgd-stream" id="lgd-stream-list">' + v6LeakStreamHtml() + '</div>' +
     '</div>' +
-    '<div class="lgd-stream" id="lgd-stream-list">' + v6LeakStreamHtml() + '</div>' +
-  '</section>';
+  '</div>';
 }
 
-/* ═════════════════════ Sub-Tab 3: 连接排障 (异常连接清理 + 卡顿抓拍 + 配置备份) ═════════════════════ */
+/* ═════════════════════ Sub-Tab 4: 连接排障 (异常连接清理 + 卡顿抓拍归因 · 配置备份收口至设置页) ═════════════════════ */
 function v6RenderScalpelCardHtml() {
   var sc = V6.scalpel;
-  var onlineDevs = (S.devices || []).filter(function (d) { return d && d.online; }).slice(0, 10);
+  var hsActive = v6IsHotspotActive();
+  var hsConns = v6HotspotFlowCount();
+  var hostConns = v6HostFlowCount();
+  var onlineDevs = hsActive ? (S.devices || []).filter(function (d) { return d && d.online; }).slice(0, 10) : [];
   var devJumpHtml = onlineDevs.length ? onlineDevs.map(function (d) {
-    return '<button type="button" class="v6-dev-pill press" data-v6-act="open-scalpel" data-mac="' + escapeHtml(d.mac) + '" data-ip="' + escapeHtml(d.ip || '') + '" data-name="' + escapeHtml(d.name) + '">' +
+    return '<button type="button" class="v6-dev-pill press" data-v6-act="open-scalpel" data-scope="hotspot" data-mac="' + escapeHtml(d.mac) + '" data-ip="' + escapeHtml(d.ip || '') + '" data-name="' + escapeHtml(d.name) + '">' +
       v6Svg('scalpel') + '<span>' + escapeHtml(d.name) + '</span>' +
     '</button>';
-  }).join('') : '<span class="note">当前暂无在线设备</span>';
+  }).join('') : '<span class="note">' + (hsActive ? '当前暂无在线热点设备' : '当前热点未开启（仍可清理本机应用活跃连接）') + '</span>';
 
-  return '<article class="glass v6-card" id="v6-card-scalpel">' +
-    '<div class="v6-card-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb">' + v6Svg('scalpel') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t"><span>异常连接清理</span></div>' +
-          '<div class="v6-card-s">不断开整机 Wi-Fi，单独掐断卡死或偷跑流量的连接，支持封禁 15 分钟防重连</div>' +
-        '</div>' +
+  return '<div class="sgrp scard glass open" id="v6-card-scalpel">' +
+    '<div class="sgrp-h scard-h scard-head">' +
+      gi('blue', 'scalpel') +
+      '<span class="tx"><b>异常连接手术刀</b><small>不断开整机网络，正交管理热点设备与本机应用连接，支持冻结 15 分钟</small></span>' +
+    '</div>' +
+    '<div class="v6-scard-body">' +
+      '<div class="v6-kpi-row">' +
+        '<div class="v6-kpi is-ok"><span>热点设备连接</span><b>' + hsConns + '<small>条</small></b></div>' +
+        '<div class="v6-kpi is-acc"><span>本机应用连接</span><b>' + hostConns + '<small>条</small></b></div>' +
+        '<div class="v6-kpi ' + (sc.activeRulesCount > 0 ? 'is-warn' : '') + '"><span>15分钟冻结中</span><b>' + num(sc.activeRulesCount) + '<small>条</small></b></div>' +
+      '</div>' +
+      '<div>' +
+        '<div class="note" style="margin:0 0 6px">点选在线热点设备单独查看连接：</div>' +
+        '<div class="v6-dev-pills">' + devJumpHtml + '</div>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px">' +
+        '<button type="button" class="btn sec press" data-v6-act="open-scalpel" data-scope="host" data-mac="" data-ip="" data-name="">管理本机连接 (' + hostConns + ')</button>' +
+        '<button type="button" class="btn pri press" data-v6-act="open-scalpel" data-scope="all" data-mac="" data-ip="" data-name="">管理全网连接</button>' +
       '</div>' +
     '</div>' +
-    '<div class="v6-kpi-row">' +
-      '<div class="v6-kpi is-acc"><span>全网活跃连接</span><b>' + num(sc.globalTotalFlows, sc.globalFlows.length) + '<small>条</small></b></div>' +
-      '<div class="v6-kpi ' + (sc.activeRulesCount > 0 ? 'is-warn' : '') + '"><span>15分钟封禁中</span><b>' + num(sc.activeRulesCount) + '<small>条</small></b></div>' +
-      '<div class="v6-kpi"><span>累计已清理</span><b>' + num(sc.cutTotal) + '<small>次</small></b></div>' +
-    '</div>' +
-    '<div>' +
-      '<div class="note" style="margin:0 0 6px">点选设备直接管理它的活跃连接：</div>' +
-      '<div class="v6-dev-pills">' + devJumpHtml + '</div>' +
-    '</div>' +
-    '<button type="button" class="btn pri wide press" data-v6-act="open-scalpel" data-mac="" data-ip="" data-name="">' + v6Svg('scalpel') + '<span>查看并管理全网活跃连接</span></button>' +
-  '</article>';
+  '</div>';
 }
 
 /* ── 黑匣子四维人话归因字典与证据格式器 ── */
@@ -2098,7 +3508,7 @@ function v6BlackboxEvidenceLine(inc, dim) {
       var upPct = inc.uplink_util_pct != null ? num(inc.uplink_util_pct, -1) : num(inc.up_util_pct, -1);
       if (upPct > 0) evParts.push('上行占用 ' + Math.round(upPct) + '%');
       var tc = num(inc.temp_c != null ? inc.temp_c : (inc.thermal_temp_c != null ? inc.thermal_temp_c : 0), 0);
-      if (tc > 0) evParts.push('机身 ' + tc.toFixed(1) + '°C');
+      if (tc > 0) evParts.push('机身 ' + tc.toFixed(1) + '℃');
       var rcZh = String(inc.root_cause_zh || '').trim();
       if (!evParts.length && rcZh && rcZh !== String(inc.verdict_zh || '').trim()) evParts.push(rcZh);
       if (!evParts.length && inc.culprit_device && !v6ValidMac(inc.culprit_device)) evParts.push(String(inc.culprit_device));
@@ -2172,7 +3582,7 @@ function v6RenderBlackboxCardHtml() {
       '</div>' +
       (canLocate ? '<button type="button" class="v6-mini-btn press" data-jump-mac="' + escapeHtml(inc.culprit_mac) + '">定位设备</button>' : '') +
     '</div>';
-  }).join('') + '</div>') : '<div class="v6-calm-empty"><span class="v6-dot ok"></span><span>近期网络平稳，未捕捉到明显跳 Ping 卡顿事件</span></div>';
+  }).join('') + '</div>') : '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ok"></span><span>近期网络平稳，未捕捉到明显跳 Ping 卡顿事件</span></span></div>';
 
   var ifacesTxt = mi.shape_targets && mi.shape_targets.length ? mi.shape_targets.join(' + ') : (mi.primary_downstream || '自动跟随热点接口');
   var rttProbeOff = bb.rtt_probe_active === false ||
@@ -2180,67 +3590,47 @@ function v6RenderBlackboxCardHtml() {
   var rttKpiHtml = rttProbeOff
     ? '<div class="v6-kpi"><span>上游 RTT</span><b style="font-size:13px;color:var(--text-3);font-weight:650">未开启延迟探测</b></div>'
     : '<div class="v6-kpi ' + (bb.latest_jitter_ms > 25 ? 'is-warn' : 'is-ok') + '"><span>当前延迟波动</span><b>' + num(bb.latest_jitter_ms).toFixed(1) + '<small>ms</small></b></div>';
-  return '<article class="glass v6-card" id="v6-card-blackbox">' +
-    '<div class="v6-card-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb purple">' + v6Svg('blackbox') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t"><span>卡顿抓拍与多网状态</span></div>' +
-          '<div class="v6-card-s">后台每 0.2 秒自动监测延迟抖动，精准区分设备抢网、手机上行占满、基站抖动与高温降速</div>' +
-        '</div>' +
-      '</div>' +
-      '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
-        '<button type="button" class="v6-mini-btn press" data-v6-act="bb-sample">立即检测</button>' +
-        (hasInc ? '<button type="button" class="v6-mini-btn dan press" data-v6-act="bb-clear">清空记录</button>' : '') +
-      '</div>' +
-    '</div>' +
-    '<div class="v6-kpi-row">' +
-      rttKpiHtml +
-      '<div class="v6-kpi ' + (bb.incident_count > 0 ? 'is-warn' : '') + '"><span>抓拍卡顿事件</span><b>' + num(bb.incident_count) + '<small>次</small></b></div>' +
-      '<div class="v6-kpi is-acc"><span>三档网速配比</span><b>' + sb.tier1_pct + '/' + sb.tier2_pct + '/' + sb.tier3_pct + '</b></div>' +
-    '</div>' +
-    latestVerdictBoxHtml +
-    incHtml +
-    '<details class="v6-adv-fold" data-v6-fold="bbNet"' + (V6.advOpen.bbNet ? ' open' : '') + '>' +
-      '<summary><span>多网接口与代理防环详情</span><span class="v6-adv-r"><span>' + (mi.tun0_loop_risk ? '存在环路风险' : '接口正常') + '</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
-      '<div class="v6-adv-body">' +
-        '<div class="v6-thermo-flags">' +
-          '<span class="v6-mono-badge b-ok"><span class="v6-dot ok"></span>接管接口：' + escapeHtml(ifacesTxt) + '</span>' +
-          '<span class="v6-mono-badge b-acc">局域网互传直通 ' + num(mi.lan_fastlane_gbps, 2.5) + ' Gbps</span>' +
-          '<span class="v6-mono-badge ' + (mi.tun0_loop_risk ? 'b-bad' : 'b-ok') + '">本机 VPN 防环：' + (mi.tun0_loop_risk ? '检测到冲突' : '安全隔离') + '</span>' +
-          (mi.dual_band_or_mlo ? '<span class="v6-mono-badge b-ok">双频 / Wi-Fi 7 协同</span>' : '') +
-          (mi.usb_tether_active ? '<span class="v6-mono-badge b-acc">USB 共享已并入</span>' : '') +
-        '</div>' +
-        '<div style="display:flex;justify-content:flex-end">' +
-          '<button type="button" class="v6-mini-btn press" data-v6-act="subtrees-sync">重新同步底层分流规则</button>' +
-        '</div>' +
-      '</div>' +
-    '</details>' +
-  '</article>';
-}
 
-function v6RenderVaultCardHtml() {
-  var vt = V6.vault;
-  return '<article class="glass v6-card" id="v6-card-vault">' +
-    '<div class="v6-card-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb">' + v6Svg('vault') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t"><span>配置备份与恢复</span></div>' +
-          '<div class="v6-card-s">一键备份设备备注、限速规则与全部智能护航设置，刷机或换机后秒恢复（不影响当前登录状态）</div>' +
-        '</div>' +
+  return '<div class="sgrp scard glass open" id="v6-card-blackbox">' +
+    '<div class="sgrp-h scard-h scard-head">' +
+      gi('purple', 'heart') +
+      '<span class="tx"><b>卡顿抓拍与多网状态</b><small>每 0.2 秒监测延迟抖动，精准区分设备抢网、上行占满、基站抖动与高温降速</small></span>' +
+      '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="bb-sample">检测</button>' +
+        (hasInc ? '<button type="button" class="v6-mini-btn dan press" data-v6-act="bb-clear">清空</button>' : '') +
       '</div>' +
     '</div>' +
-    (vt.last_sha256 ? '<div class="note mono" style="margin:0">最近校验摘要：' + escapeHtml(vt.last_sha256.slice(0, 20)) + '…' + (vt.last_file_count ? (' · 共 ' + vt.last_file_count + ' 项配置') : '') + (vt.last_restored ? (' · 已恢复 ' + vt.last_restored + ' 项') : '') + '</div>' : '') +
-    '<div class="btns">' +
-      '<button type="button" class="btn pri press" data-v6-act="backup-export">导出配置备份文件</button>' +
-      '<button type="button" class="btn sec press" data-v6-act="backup-import-pick">选择备份文件恢复</button>' +
-      '<input id="v6-backup-file" type="file" accept=".json,application/json" hidden>' +
+    '<div class="v6-scard-body">' +
+      '<div class="v6-kpi-row">' +
+        rttKpiHtml +
+        '<div class="v6-kpi ' + (bb.incident_count > 0 ? 'is-warn' : '') + '"><span>抓拍卡顿事件</span><b>' + num(bb.incident_count) + '<small>次</small></b></div>' +
+        '<div class="v6-kpi is-acc"><span>三档网速配比</span><b>' + sb.tier1_pct + '/' + sb.tier2_pct + '/' + sb.tier3_pct + '</b></div>' +
+      '</div>' +
+      latestVerdictBoxHtml +
+      incHtml +
+      '<details class="v6-adv-fold" data-v6-fold="bbNet"' + (V6.advOpen.bbNet ? ' open' : '') + '>' +
+        '<summary><span>多网接口与代理防环详情</span><span class="v6-adv-r"><span>' + (mi.tun0_loop_risk ? '存在环路风险' : '接口正常') + '</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+        '<div class="v6-adv-body">' +
+          '<div class="v6-thermo-flags">' +
+            '<span class="v6-mono-badge b-ok"><span class="v6-dot ok"></span>接管接口：' + escapeHtml(ifacesTxt) + '</span>' +
+            '<span class="v6-mono-badge b-acc">局域网互传直通 ' + num(mi.lan_fastlane_gbps, 2.5) + ' Gbps</span>' +
+            '<span class="v6-mono-badge ' + (mi.tun0_loop_risk ? 'b-bad' : 'b-ok') + '">本机 VPN 防环：' + (mi.tun0_loop_risk ? '检测到冲突' : '安全隔离') + '</span>' +
+            (mi.dual_band_or_mlo ? '<span class="v6-mono-badge b-ok">双频 / Wi-Fi 7 协同</span>' : '') +
+            (mi.usb_tether_active ? '<span class="v6-mono-badge b-acc">USB 共享已并入</span>' : '') +
+          '</div>' +
+          '<div style="display:flex;justify-content:flex-end">' +
+            '<button type="button" class="v6-mini-btn press" data-v6-act="subtrees-sync">重新同步底层分流规则</button>' +
+          '</div>' +
+        '</div>' +
+      '</details>' +
     '</div>' +
-  '</article>';
+  '</div>';
 }
 
 function v6RenderSubviewHtml() {
+  if (V6.subtab === 'host') {
+    return v6RenderHostSubviewHtml();
+  }
   if (V6.subtab === 'privacy') {
     return v6RenderPrivacySubviewHtml();
   }
@@ -2248,8 +3638,7 @@ function v6RenderSubviewHtml() {
     return '<div class="v6-grid cols-2">' +
       v6RenderScalpelCardHtml() +
       v6RenderBlackboxCardHtml() +
-      '</div>' +
-      v6RenderVaultCardHtml();
+    '</div>';
   }
   return '<div class="v6-grid cols-2">' +
     v6RenderExpressCardHtml() +
@@ -2258,17 +3647,20 @@ function v6RenderSubviewHtml() {
     v6RenderThermoCardHtml();
 }
 
-/* ═════════════════════ 页面主渲染与无闪烁局部刷新 ═════════════════════ */
+/* ═════════════════════ 页面主渲染、弹簧分段器切换与跨页面跳转契约 ═════════════════════ */
 function renderVectorPage(anim1) {
   var p = document.getElementById('p-vector');
   if (!p) return;
   if (V6.subtab === 'privacy') v6MarkLeakGuardSeen();
   var html = '<div class="wrap v6-shell">' +
     '<div id="v6-hero-mount">' + v6RenderHeroCardHtml() + '</div>' +
+    '<div id="v6-nav-mount">' + v6RenderMainSegHtml() + '</div>' +
     '<div id="v6-subview-mount" class="v6-shell">' + v6RenderSubviewHtml() + '</div>' +
   '</div>';
   if (!anim1 && p.firstElementChild) morph(p, html);
   else p.innerHTML = html;
+  if (typeof placeSegs === 'function') placeSegs(p);
+  v6SyncHostPollTimer();
   if (anim1 && typeof stagger === 'function') stagger($('.v6-shell', p));
 }
 
@@ -2281,37 +3673,103 @@ function v6RefreshHeroDom() {
 function v6RefreshActiveSubviewDom() {
   if (S.page !== 'vector') return;
   var ae = document.activeElement;
-  /* 若用户正在输入框内打字，仅刷新流列表内部节点，绝不重复包裹外层容器或打断光标 */
+  /* 若用户正在输入框内打字，仅刷新流列表内部节点，绝不重绘外层容器或打断输入法光标 */
   if (ae && ae.tagName === 'INPUT' && ae.closest('#p-vector')) {
     if (V6.subtab === 'privacy') {
       var st = document.getElementById('lgd-stream-list');
       if (st) morph(st, v6LeakStreamHtml());
+    } else if (V6.subtab === 'host' && ae.id === 'v6-host-q') {
+      var hl = document.getElementById('v6-host-dynamic-list');
+      if (hl) {
+        var nextInner = V6.host.mode === 'traffic'
+          ? v6RenderHostTrafficRankHtml()
+          : (V6.host.mode === 'power' ? v6RenderHostPowerListHtml() : v6RenderHostLiveListHtml());
+        morph(hl, nextInner);
+      }
     }
     return;
   }
   var sub = document.getElementById('v6-subview-mount');
   if (sub) {
+    /* 备份内部 .seg 滑块坐标以防 morph 清空内联 transform 后丢失过渡基线 */
+    var segSnaps = [];
+    $$('.seg', sub).forEach(function (sg) {
+      var th = $('.thumb', sg);
+      if (th && th.style.transform) {
+        segSnaps.push({ id: sg.getAttribute('data-seg'), w: th.style.width, tf: th.style.transform, lx: th._lx });
+      }
+    });
     morph(sub, v6RenderSubviewHtml());
+    segSnaps.forEach(function (sn) {
+      var sg2 = sub.querySelector('.seg[data-seg="' + sn.id + '"]');
+      var th2 = sg2 && $('.thumb', sg2);
+      if (th2) {
+        th2.style.transition = 'none';
+        th2.style.width = sn.w;
+        th2.style.transform = sn.tf;
+        th2._lx = sn.lx;
+        void th2.offsetWidth;
+        th2.style.transition = '';
+      }
+    });
+    if (typeof placeSegs === 'function') placeSegs(sub);
   }
 }
 
 function onEnterVectorPage() {
+  if (typeof window !== 'undefined' && window.__pendingV6Subtab) {
+    var pend = window.__pendingV6Subtab;
+    window.__pendingV6Subtab = null;
+    openV6Subtab(pend.tab, pend.opts);
+    return;
+  }
   if (V6.subtab === 'privacy') v6MarkLeakGuardSeen();
   if (V6.apiSupported.lg) v6LoadLeakGuard();
   if (V6.apiSupported.v6) v6LoadCockpitAll();
   if (!KSU) v6StartLeakGuardSSE();
+  if (V6.subtab === 'host') {
+    v6EnsureHostModeLoaded(false);
+  } else {
+    v6SyncHostPollTimer();
+  }
 }
 
-function v6FocusPrivacyPanel() {
-  V6.subtab = 'privacy';
-  LS.set('hnc6.v6_subtab', 'privacy');
-  v6MarkLeakGuardSeen();
-  if (S.page !== 'vector') {
+/* 跨页面统一跳转契约：供设备页、应用页、统计页一键跳入「本机守护」或任意子分区 */
+function openV6Subtab(tab, opts) {
+  var nextTab = ['escort', 'host', 'privacy', 'troubleshoot'].indexOf(tab) >= 0 ? tab : 'escort';
+  var hm = typeof opts === 'string' ? opts : (opts && (opts.hostMode || opts.mode || opts.submode));
+  if (hm && ['live', 'traffic', 'power', 'firewall'].indexOf(hm) >= 0) {
+    V6.host.mode = hm;
+    LS.set('hnc6.v6_host_mode', hm);
+    if (!tab || tab === 'host') nextTab = 'host';
+  }
+  V6.subtab = nextTab;
+  LS.set('hnc6.v6_subtab', nextTab);
+  if (nextTab === 'privacy') v6MarkLeakGuardSeen();
+
+  if (typeof S !== 'undefined' && S.page !== 'vector' && typeof go === 'function') {
     go('vector');
+    v6RefreshHeroDom();
+    v6RefreshNavBadges();
+    v6RefreshActiveSubviewDom();
+    if (nextTab === 'host') v6EnsureHostModeLoaded(false);
+    else v6SyncHostPollTimer();
   } else {
     v6RefreshHeroDom();
+    v6RefreshNavBadges();
     v6RefreshActiveSubviewDom();
+    if (nextTab === 'host') v6EnsureHostModeLoaded(false);
+    else v6SyncHostPollTimer();
   }
+  if (opts && opts.openScalpel) {
+    var scDom = ['all', 'hotspot', 'host'].indexOf(opts.openScalpel) >= 0 ? opts.openScalpel : 'all';
+    setTimeout(function () { openScalpelDrawer('', '', '', scDom); }, 40);
+  }
+}
+if (typeof window !== 'undefined') window.openV6Subtab = openV6Subtab;
+
+function v6FocusPrivacyPanel() {
+  openV6Subtab('privacy');
   setTimeout(function () {
     var el = document.getElementById('v6-leakguard-card');
     if (el && el.scrollIntoView) el.scrollIntoView({ behavior: motionOn() ? 'smooth' : 'auto', block: 'start' });
@@ -2319,50 +3777,64 @@ function v6FocusPrivacyPanel() {
 }
 var v6ScrollToLeakGuard = v6FocusPrivacyPanel;
 
-/* ═════════════════════ FlowScalpel 活跃连接管理抽屉（全局与单机状态完全隔离） ═════════════════════ */
+/* ═════════════════════ FlowScalpel 正交双域连接清理抽屉（支持全部 / 热点设备 / 本机应用切换） ═════════════════════ */
 function v6FilteredScalpelDrawerFlows() {
-  var src = (V6.scalpel.scopeMac || V6.scalpel.scopeIp) ? V6.scalpel.drawerFlows : (V6.scalpel.drawerFlows.length ? V6.scalpel.drawerFlows : V6.scalpel.globalFlows);
+  var isDevScoped = !!(V6.scalpel.scopeMac || V6.scalpel.scopeIp);
+  var src = (isDevScoped || V6.scalpel.scopeDomain !== 'all' || V6.scalpel.drawerFlows.length)
+    ? V6.scalpel.drawerFlows
+    : V6.scalpel.globalFlows;
+  var domScope = isDevScoped ? 'hotspot' : (V6.scalpel.scopeDomain || 'all');
   var pf = V6.scalpel.protoFilter || 'ALL';
   var q = String(V6.scalpel.q || '').trim().toLowerCase();
   return src.filter(function (f) {
+    if (!isDevScoped && domScope !== 'all' && f.scope !== domScope) return false;
     if (pf === 'TCP' && f.proto !== 'tcp') return false;
     if (pf === 'UDP' && f.proto !== 'udp') return false;
     if (pf === 'FROZEN' && !f.frozen) return false;
     if (!q) return true;
-    var hay = (f.devName + ' ' + f.app_name + ' ' + f.dst_host + ' ' + f.src_ip + ':' + f.sport + ' ' + f.dst_ip + ':' + f.dport + ' ' + f.protoBadge).toLowerCase();
+    var hay = (f.devName + ' ' + (f.pkg || '') + ' ' + f.app_name + ' ' + f.dst_host + ' ' + f.src_ip + ':' + f.sport + ' ' + f.dst_ip + ':' + f.dport + ' ' + f.protoBadge).toLowerCase();
     return hay.indexOf(q) >= 0;
   });
 }
 
 function v6ScalpelListHtml() {
   if (V6.scalpel.loading && !V6.scalpel.drawerFlows.length && !V6.scalpel.globalFlows.length) {
-    return '<div class="v6-calm-empty">正在读取实时活跃连接…</div>';
+    return '<div class="empty">正在读取实时活跃连接…</div>';
   }
   if (V6.scalpel.err) {
     return '<div class="note err">' + escapeHtml(V6.scalpel.err) + '</div>';
   }
   var list = v6FilteredScalpelDrawerFlows();
   if (!list.length) {
-    return '<div class="v6-calm-empty">当前筛选范围内没有活跃连接</div>';
+    return '<div class="empty">' + (V6.scalpel.scopeDomain === 'hotspot' && !v6IsHotspotActive() ? '当前热点未开启，热点连接为 0' : '当前筛选范围内没有活跃连接') + '</div>';
   }
   return list.map(function (f) {
     var rxB = bps(f.rx_bps), txB = bps(f.tx_bps);
     var pCls = f.frozen ? 'b-bad' : (f.protoBadge === 'QUIC' ? 'b-pur' : (f.proto === 'udp' ? 'b-acc' : ''));
     var titleMain = f.app_name ? (f.app_name + (f.dst_host ? ' · ' + f.dst_host : '')) : (f.dst_host || (f.dst_ip + ':' + f.dport));
     var remMin = f.frozen ? Math.max(1, Math.ceil((f.frozen_until - Date.now() / 1000) / 60)) : 0;
+    var isHost = f.scope === 'host';
+    var ownerBadge = !V6.scalpel.scopeMac
+      ? ('<span class="v6-mono-badge ' + (isHost ? 'b-acc' : '') + '">' + escapeHtml((isHost ? '本机 · ' : '') + f.devName) + '</span>')
+      : '';
+    var riskBadge = f.cleartext_risk === 'http_cleartext'
+      ? '<span class="v6-mono-badge b-bad">HTTP明文</span>'
+      : (f.cleartext_risk === 'dns_direct' ? '<span class="v6-mono-badge b-warn">直连DNS</span>' : '');
+
     return '<div class="v6-tuple-row" data-mkey="sc-' + escapeHtml(f.id) + '">' +
       '<div class="v6-tuple-5">' +
         '<div class="v6-tuple-primary">' +
-          '<span class="v6-mono-badge mono ' + pCls + '">' + escapeHtml(f.frozen ? ('封禁剩' + remMin + '分') : f.protoBadge) + '</span>' +
+          '<span class="v6-mono-badge mono ' + pCls + '">' + escapeHtml(f.frozen ? ('冻结剩' + remMin + '分') : f.protoBadge) + '</span>' +
+          riskBadge +
           '<span>' + escapeHtml(titleMain) + '</span>' +
-          (!V6.scalpel.scopeMac ? '<span class="v6-mono-badge">' + escapeHtml(f.devName) + '</span>' : '') +
+          ownerBadge +
         '</div>' +
         '<div class="ep">' + escapeHtml(f.src_ip + ':' + f.sport + ' -> ' + f.dst_ip + ':' + f.dport) + (f.state && f.state !== 'ESTABLISHED' && f.state !== 'ASSURED' ? (' · ' + escapeHtml(f.state)) : '') + '</div>' +
       '</div>' +
       '<div class="v6-tuple-rate">↓ ' + rxB.v + ' ' + rxB.u + '<br>↑ ' + txB.v + ' ' + txB.u + '</div>' +
       '<div class="v6-tuple-acts">' +
         '<button type="button" class="lgd-act-btn warn press" data-v6-act="scalpel-cut-once" data-fid="' + escapeHtml(f.id) + '">' + v6Svg('cut') + '<span>断开一次</span></button>' +
-        '<button type="button" class="lgd-act-btn dan press" data-v6-act="scalpel-cut-freeze" data-fid="' + escapeHtml(f.id) + '">' + v6Svg('freeze') + '<span>断开并封15分钟</span></button>' +
+        '<button type="button" class="lgd-act-btn dan press" data-v6-act="scalpel-cut-freeze" data-fid="' + escapeHtml(f.id) + '">' + v6Svg('freeze') + '<span>冻结15分</span></button>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -2371,17 +3843,28 @@ function v6ScalpelListHtml() {
 function v6ScalpelDrawerBodyHtml() {
   var sc = V6.scalpel;
   var isScoped = !!(sc.scopeMac || sc.scopeIp);
-  var scopeTitle = isScoped ? ('活跃连接 · ' + (sc.devName || sc.scopeIp || sc.scopeMac)) : '全网活跃连接管理';
+  var hsCnt = v6HotspotFlowCount();
+  var hostCnt = v6HostFlowCount();
+  var scopeTitle = isScoped
+    ? ('活跃连接 · ' + (sc.devName || sc.scopeIp || sc.scopeMac))
+    : (sc.scopeDomain === 'hotspot' ? '热点设备活跃连接' : (sc.scopeDomain === 'host' ? '本机应用活跃连接' : '全网活跃连接手术刀'));
   var shownCount = v6FilteredScalpelDrawerFlows().length;
-  var pTabs = [['ALL', '全部'], ['TCP', 'TCP'], ['UDP', 'UDP / QUIC'], ['FROZEN', '封禁中']];
+  var pTabs = [['ALL', '全部'], ['TCP', 'TCP'], ['UDP', 'UDP / QUIC'], ['FROZEN', '冻结中']];
 
   return '<div class="v6-drawer-head">' +
-      '<div>' +
-        '<div class="v6-card-t">' + v6Svg('scalpel') + '<span>' + escapeHtml(scopeTitle) + '</span></div>' +
-        '<div class="v6-card-s">「断开一次」立即清理卡死连接；「封15分钟」阻止流氓后台反复重连</div>' +
+      '<div style="min-width:0">' +
+        '<div style="display:flex;align-items:center;gap:6px;font-size:15px;font-weight:750;color:var(--text-1)" id="v6-sc-title">' + v6Svg('scalpel') + '<span>' + escapeHtml(scopeTitle) + '</span></div>' +
+        '<div style="font-size:11.5px;color:var(--text-3);margin-top:2px">「断开一次」秒清卡死套接字；「冻结15分」阻止后台顽固重连</div>' +
       '</div>' +
       '<button type="button" class="v6-mini-btn press" data-v6-act="scalpel-close">关闭</button>' +
     '</div>' +
+    (!isScoped
+      ? ('<div style="margin-bottom:8px" id="v6-sc-scope-mount">' + seg('v6-sc-scope', [
+          ['all', '全部 (' + (hsCnt + hostCnt) + ')'],
+          ['hotspot', '热点设备 (' + hsCnt + ')'],
+          ['host', '本机应用 (' + hostCnt + ')']
+        ], sc.scopeDomain || 'all', 'small') + '</div>')
+      : '') +
     '<div class="v6-drawer-subbar">' +
       '<div class="lgd-type-chips">' +
         pTabs.map(function (pt) {
@@ -2395,7 +3878,7 @@ function v6ScalpelDrawerBodyHtml() {
       '</div>' +
     '</div>' +
     '<div class="v6-drawer-tools">' +
-      '<label class="lgd-search-mini" style="max-width:none;width:100%">' + ico('search') + '<input id="v6-sc-q" type="search" placeholder="搜索应用名、域名、IP 或端口" value="' + escapeHtml(sc.q) + '" autocomplete="off"></label>' +
+      '<label class="lgd-search-mini" style="max-width:none;width:100%">' + ico('search') + '<input id="v6-sc-q" type="search" placeholder="搜索本机应用、设备名、域名、IP 或端口" value="' + escapeHtml(sc.q) + '" autocomplete="off"></label>' +
     '</div>' +
     '<div class="v6-tuple-list" id="v6-scalpel-list">' + v6ScalpelListHtml() + '</div>';
 }
@@ -2405,12 +3888,25 @@ function v6RefreshScalpelDrawerList() {
   if (listEl) morph(listEl, v6ScalpelListHtml());
   var cntEl = document.getElementById('v6-sc-cnt-pill');
   if (cntEl) cntEl.textContent = '共 ' + v6FilteredScalpelDrawerFlows().length + ' 条';
+  var scopeMount = document.getElementById('v6-sc-scope-mount');
+  if (scopeMount) {
+    var hsCnt = v6HotspotFlowCount(), hostCnt = v6HostFlowCount();
+    var bAll = scopeMount.querySelector('button[data-v="all"]');
+    var bHs = scopeMount.querySelector('button[data-v="hotspot"]');
+    var bHo = scopeMount.querySelector('button[data-v="host"]');
+    if (bAll) bAll.textContent = '全部 (' + (hsCnt + hostCnt) + ')';
+    if (bHs) bHs.textContent = '热点设备 (' + hsCnt + ')';
+    if (bHo) bHo.textContent = '本机应用 (' + hostCnt + ')';
+    if (typeof placeSegs === 'function') placeSegs(scopeMount);
+  }
 }
 
 function v6FetchScalpelFlows() {
   if (!V6.scalpel.open) return Promise.resolve();
-  var isScoped = !!(v6ValidMac(V6.scalpel.scopeMac) || v6ValidIp(V6.scalpel.scopeIp));
-  var params = { limit: 200 };
+  var isDevScoped = !!(v6ValidMac(V6.scalpel.scopeMac) || v6ValidIp(V6.scalpel.scopeIp));
+  var domScope = isDevScoped ? 'hotspot' : (V6.scalpel.scopeDomain || 'all');
+  var isScopedReq = isDevScoped || domScope !== 'all';
+  var params = { scope: domScope, limit: 200 };
   if (v6ValidMac(V6.scalpel.scopeMac)) params.mac = V6.scalpel.scopeMac;
   if (v6ValidIp(V6.scalpel.scopeIp)) params.ip = V6.scalpel.scopeIp;
 
@@ -2418,20 +3914,31 @@ function v6FetchScalpelFlows() {
   V6.scalpel.err = '';
   return api.get(V6_API.scalpelFlows, params, { timeout: 7000 }).then(function (r) {
     V6.scalpel.loading = false;
-    v6ApplyScalpelData(r, isScoped);
+    if (r && (r.hotspot_flows != null || r.host_flows != null)) {
+      V6.scalpel.hasSplitCounts = true;
+      V6.scalpel.hotspotFlows = (!v6IsHotspotActive() || v6OnlineClientCount() <= 0) ? 0 : Math.max(0, Math.round(num(r.hotspot_flows, 0)));
+      V6.scalpel.hostFlows = Math.max(0, Math.round(num(r.host_flows, 0)));
+    }
+    v6ApplyScalpelData(r, isScopedReq);
     v6RefreshScalpelDrawerList();
-    if (!isScoped && S.page === 'vector') {
+    if (S.page === 'vector') {
       v6RefreshHeroDom();
+      v6RefreshNavBadges();
       if (V6.subtab === 'troubleshoot') v6RefreshActiveSubviewDom();
     }
   }).catch(function (e) {
     V6.scalpel.loading = false;
-    /* 兼容回退：单机连接表兜底同样仅写入 drawerFlows，绝不覆写 globalTotalFlows */
-    if (isScoped && V6.scalpel.scopeMac && S.conn && S.conn[V6.scalpel.scopeMac] && S.conn[V6.scalpel.scopeMac].r) {
+    if (isDevScoped && V6.scalpel.scopeMac && S.conn && S.conn[V6.scalpel.scopeMac] && S.conn[V6.scalpel.scopeMac].r) {
       var cr = S.conn[V6.scalpel.scopeMac].r;
       V6.scalpel.drawerFlows = (cr.conns || []).map(function (c, idx) {
         return {
           id: 'fb_' + idx,
+          scope: 'hotspot',
+          uid: -1,
+          pkg: '',
+          host_app_name: '',
+          is_system: false,
+          cleartext_risk: '',
           proto: c.proto === 'udp' ? 'udp' : 'tcp',
           protoBadge: c.proto === 'udp' && c.dport === 443 ? 'QUIC' : String(c.proto || 'tcp').toUpperCase(),
           state: String(c.state || 'ESTABLISHED'),
@@ -2459,7 +3966,7 @@ function v6FetchScalpelFlows() {
   });
 }
 
-function openScalpelDrawer(mac, ip, devName) {
+function openScalpelDrawer(mac, ip, devName, initialScope) {
   if (typeof closeSheet === 'function' && $('#sheet') && $('#sheet').classList.contains('show')) closeSheet(0);
   V6.scalpel.scopeMac = v6ValidMac(mac) ? String(mac).toLowerCase() : '';
   V6.scalpel.scopeIp = v6ValidIp(ip) ? String(ip).trim() : '';
@@ -2469,6 +3976,13 @@ function openScalpelDrawer(mac, ip, devName) {
     if (!devName && d0) devName = d0.name;
   }
   V6.scalpel.devName = devName || '';
+  if (V6.scalpel.scopeMac || V6.scalpel.scopeIp) {
+    V6.scalpel.scopeDomain = 'hotspot';
+  } else if (initialScope && ['all', 'hotspot', 'host'].indexOf(initialScope) >= 0) {
+    V6.scalpel.scopeDomain = initialScope;
+  } else {
+    V6.scalpel.scopeDomain = 'all';
+  }
   V6.scalpel.protoFilter = 'ALL';
   V6.scalpel.q = '';
   V6.scalpel.paused = false;
@@ -2482,9 +3996,11 @@ function openScalpelDrawer(mac, ip, devName) {
   if (!dr || !bd) return;
   dr.hidden = false;
   bd.innerHTML = v6ScalpelDrawerBodyHtml();
+  if (typeof placeSegs === 'function') placeSegs(bd);
   requestAnimationFrame(function () {
     if (sc) sc.classList.add('show');
     dr.classList.add('show');
+    if (typeof placeSegs === 'function') placeSegs(bd);
   });
   try {
     if (window.history && typeof window.history.pushState === 'function' && !(window.history.state && window.history.state.hncScalpel)) {
@@ -2522,6 +4038,7 @@ function closeScalpelDrawer(fromPop) {
   } else {
     V6.scalpel._pushedHist = false;
   }
+  V6.scalpel.scopeDomain = 'all';
   V6.scalpel.scopeMac = '';
   V6.scalpel.scopeIp = '';
   V6.scalpel.devName = '';
@@ -2585,10 +4102,15 @@ function v6ClearLeakGuard(btn) {
       V6.lg.events = [];
       V6.lg.hit_ledger = {};
       V6.lg.total_hits = 0;
+      V6.lg.host_hits = 0;
+      V6.lg.hotspot_hits = 0;
+      V6.lg.hotspot_affected_devices = 0;
+      V6.lg.affected_apps = 0;
       V6.lg.affected_devices = 0;
       V6.lg.openIds = {};
       v6MarkLeakGuardSeen();
       v6RefreshHeroDom();
+      v6RefreshNavBadges();
       v6RefreshActiveSubviewDom();
       v6RefreshDevicesBannerDom();
       toast('已清空隐私安检历史记录');
@@ -2727,8 +4249,10 @@ function v6RemoveLeakWhitelist(wIdx, triggerEl) {
   });
 }
 
-function v6UndoLeakBlock(undoId, fallbackHost, triggerEl) {
-  var reqBody = undoId ? { id: undoId } : {};
+function v6UndoLeakBlock(undoId, fallbackHost, targetScope, triggerEl) {
+  var reqBody = {};
+  if (undoId) reqBody.id = undoId;
+  if (targetScope) reqBody.target_scope = targetScope;
   if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
   V6.mutUntil.lg = Date.now() + 1500;
 
@@ -2737,12 +4261,20 @@ function v6UndoLeakBlock(undoId, fallbackHost, triggerEl) {
     var undoneId = String((undoneObj && undoneObj.id) || undoId || '').trim();
     var restoredHost = String((undoneObj && (undoneObj.dst_host || undoneObj.host || undoneObj.domain)) || fallbackHost || '').trim();
     var restoredIp = String((undoneObj && (undoneObj.also_ip || undoneObj.dst_ip)) || '').trim();
+    var effScope = String((undoneObj && undoneObj.target_scope) || targetScope || '').toLowerCase();
     if (restoredHost) {
       var rk = restoredHost.toLowerCase();
-      delete V6.lg.blocked_set[rk];
+      if (effScope !== 'host') delete V6.lg.blocked_set[rk];
+      if (effScope === 'host' || effScope === 'both') {
+        delete V6.host.firewall.blocked_set[rk];
+        V6.host.firewall.blocked_domains = V6.host.firewall.blocked_domains.filter(function (x) { return x !== rk; });
+        V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
+      }
       V6.lg.events.forEach(function (x) {
         if (String(x.dst_host || '').toLowerCase() === rk || (restoredIp && x.dst_ip === restoredIp)) {
-          x.is_blocked = false;
+          if (!effScope || effScope === 'both' || (x.origin || 'hotspot') === effScope) {
+            x.is_blocked = false;
+          }
         }
       });
     }
@@ -2765,6 +4297,7 @@ function v6UndoLeakBlock(undoId, fallbackHost, triggerEl) {
     }
     if (r) v6ApplyLeakGuardData(r, true);
     v6RefreshHeroDom();
+    v6RefreshNavBadges();
     v6RefreshActiveSubviewDom();
     v6LoadLeakGuard(true);
     toast('已撤销封禁' + (restoredHost ? ('：' + restoredHost) : ''));
@@ -2783,9 +4316,20 @@ function v6BlockLeakDomain(evId, btn, opts) {
   var act = wantBlock ? 'block' : 'unblock';
   var primaryHost = String(ev.dst_host && ev.dst_host !== '—' ? ev.dst_host : ev.dst_ip).trim();
   if (!primaryHost) { toast('该记录缺少可封禁的目标域名或公网 IP', 'warn'); return; }
-  var macArg = v6ValidMac(ev.mac) ? ev.mac : '';
-  var alsoIp = (!opts.skipAlsoIp && v6ValidIp(ev.dst_ip) && ev.dst_ip.toLowerCase() !== primaryHost.toLowerCase()) ? ev.dst_ip : '';
-  var reqPayload = { action: act, dst_host: primaryHost, mac: macArg };
+  var targetScope = String(opts.targetScope || (ev.origin === 'host' ? 'host' : 'hotspot')).toLowerCase();
+  if (targetScope === 'host' && v6ValidIp(primaryHost)) {
+    if (num(ev.uid, 0) >= 10000) {
+      v6OpenHostAppSheet(ev.uid, ev.pkg, ev.app_name || ev.devName, false);
+      toast('纯 IP 明文连接无法通过域名拦截，请在此对该应用开启「仅禁明文HTTP」或「全局禁网」', 'warn');
+    } else {
+      toast('纯 IP 明文连接无法通过域名拦截，请前往「连接排障」断开该连接', 'warn');
+    }
+    return Promise.resolve();
+  }
+  var macArg = (targetScope !== 'host' && v6ValidMac(ev.mac)) ? ev.mac : '';
+  var alsoIp = (targetScope !== 'host' && !opts.skipAlsoIp && v6ValidIp(ev.dst_ip) && ev.dst_ip.toLowerCase() !== primaryHost.toLowerCase()) ? ev.dst_ip : '';
+  var reqPayload = { action: act, dst_host: primaryHost, mac: macArg, target_scope: targetScope };
+  if (targetScope !== 'host' && !macArg) reqPayload.scope = 'global';
   if (alsoIp) reqPayload.also_ip = alsoIp;
   if (opts.force) reqPayload.force = true;
 
@@ -2798,21 +4342,40 @@ function v6BlockLeakDomain(evId, btn, opts) {
     var effAlsoIp = skippedSharedIp ? '' : alsoIp;
     ev.is_blocked = wantBlock;
     var dk = primaryHost.toLowerCase();
-    if (wantBlock) V6.lg.blocked_set[dk] = 1;
-    else delete V6.lg.blocked_set[dk];
+    if (wantBlock) {
+      if (targetScope !== 'host') V6.lg.blocked_set[dk] = 1;
+      if (targetScope === 'host' || targetScope === 'both') {
+        if (!V6.host.firewall.blocked_set[dk]) {
+          V6.host.firewall.blocked_set[dk] = 1;
+          V6.host.firewall.blocked_domains.unshift(dk);
+          V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
+        }
+      }
+    } else {
+      if (targetScope !== 'host') delete V6.lg.blocked_set[dk];
+      if (targetScope === 'host' || targetScope === 'both') {
+        delete V6.host.firewall.blocked_set[dk];
+        V6.host.firewall.blocked_domains = V6.host.firewall.blocked_domains.filter(function (x) { return x !== dk; });
+        V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
+      }
+    }
     V6.lg.events.forEach(function (x) {
       if (String(x.dst_host || '').toLowerCase() === dk || (effAlsoIp && x.dst_ip === effAlsoIp)) {
-        x.is_blocked = wantBlock;
+        if (targetScope === 'both' || (x.origin || 'hotspot') === targetScope) {
+          x.is_blocked = wantBlock;
+        }
       }
     });
     if (r) v6ApplyLeakGuardData(r, true);
+    v6RefreshNavBadges();
     v6RefreshActiveSubviewDom();
     v6LoadLeakGuard(true);
+    var scopeZh = targetScope === 'host' ? '本机域名' : (targetScope === 'both' ? '双端域名' : '热点域名');
     var msgTxt;
     if (wantBlock && skippedSharedIp) {
-      msgTxt = '已封禁域名：' + primaryHost + '（共享 CDN IP 已自动跳过防误伤）';
+      msgTxt = '已封禁' + scopeZh + '：' + primaryHost + '（共享 CDN IP 已自动跳过防误伤）';
     } else if (wantBlock) {
-      msgTxt = '已封禁追踪域名' + (effAlsoIp ? '与 IP' : '') + '：' + primaryHost;
+      msgTxt = '已封禁' + scopeZh + (effAlsoIp ? '与 IP' : '') + '：' + primaryHost;
     } else {
       msgTxt = '已解除封禁：' + primaryHost;
     }
@@ -2821,6 +4384,7 @@ function v6BlockLeakDomain(evId, btn, opts) {
         return v6BlockLeakDomain(evId, null, {
           fromUndo: true,
           targetAction: wantBlock ? 'unblock' : 'block',
+          targetScope: targetScope,
           force: true,
           skipAlsoIp: skippedSharedIp,
           evSnapshot: evSnap
@@ -2845,6 +4409,7 @@ function v6BlockLeakDomain(evId, btn, opts) {
               force: true,
               fromUndo: opts.fromUndo,
               targetAction: 'block',
+              targetScope: targetScope,
               evSnapshot: evSnap
             });
           }
@@ -2854,7 +4419,7 @@ function v6BlockLeakDomain(evId, btn, opts) {
       if (gLevel === 'hard_block') {
         confirmSheet(
           '核心公共域名受保护',
-          '<b>' + escapeHtml(primaryHost) + '</b> 属于系统联网检测或核心基础公共服务（' + escapeHtml(gReason) + '），一旦封禁会导致连接设备误判无网络而断流，系统已阻止封禁。<br><br>如果确认该明文请求为正常公开参数，可将其转入忽略误报白名单。',
+          '<b>' + escapeHtml(primaryHost) + '</b> 属于系统联网检测或核心基础公共服务（' + escapeHtml(gReason) + '），一旦封禁会导致设备误判无网络而断流，系统已阻止封禁。<br><br>如果确认该明文请求为正常公开参数，可将其转入忽略误报白名单。',
           '转入忽略误报',
           { safe: true }
         ).then(function (ok) {
@@ -2870,14 +4435,22 @@ function v6BlockLeakDomain(evId, btn, opts) {
 function v6BuildScalpelCutPayload(flowObj, modeStr) {
   var p = String(flowObj.proto || 'tcp').toLowerCase();
   var normProto = (p === 'udp' || p === 'quic') ? 'udp' : 'tcp';
-  return {
+  var fScope = (flowObj.scope === 'host' || flowObj.origin === 'host') ? 'host' : 'hotspot';
+  var out = {
     mode: modeStr === 'cut_freeze_15m' ? 'cut_freeze_15m' : 'cut_once',
+    scope: fScope,
     proto: normProto,
     src_ip: String(flowObj.src_ip || '').trim(),
     sport: clamp(Math.round(num(flowObj.sport != null ? flowObj.sport : flowObj.src_port, 0)), 1, 65535),
     dst_ip: String(flowObj.dst_ip || '').trim(),
     dport: clamp(Math.round(num(flowObj.dport != null ? flowObj.dport : flowObj.dst_port, 80)), 1, 65535)
   };
+  if (fScope === 'host' && flowObj.uid != null && num(flowObj.uid, -1) >= 0) {
+    out.uid = Math.round(num(flowObj.uid, 0));
+  } else if (v6ValidMac(flowObj.mac)) {
+    out.mac = String(flowObj.mac).toLowerCase();
+  }
+  return out;
 }
 
 function v6CutFlow(flowObj, freeze15m, btn) {
@@ -2891,9 +4464,10 @@ function v6CutFlow(flowObj, freeze15m, btn) {
   if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
   busyWhile(btn, api.post(V6_API.scalpelCut, payload, { timeout: 8000 })).then(function () {
     toast(freeze15m
-      ? ('已断开并封禁 15 分钟：' + (flowObj.dst_host || flowObj.dst_ip))
-      : ('已断开连接：' + (flowObj.dst_host || payload.dst_ip) + ':' + payload.dport));
+      ? ('已断开并冻结 15 分钟：' + (flowObj.dst_host || flowObj.dst_ip))
+      : ('已秒断连接：' + (flowObj.dst_host || payload.dst_ip) + ':' + payload.dport));
     if (V6.scalpel.open) v6FetchScalpelFlows();
+    if (V6.host.appSheet.open) v6FetchHostAppFlows();
     if (S.page === 'vector') v6LoadCockpitAll();
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
@@ -2904,9 +4478,11 @@ function v6CutLeakEventConn(ev, btn) {
     v6CutFlow(ev, false, btn);
     return;
   }
-  var qParams = { limit: 250 };
-  if (v6ValidMac(ev.mac)) qParams.mac = ev.mac;
-  if (v6ValidIp(ev.src_ip)) qParams.ip = ev.src_ip;
+  var isHostEv = ev.origin === 'host';
+  var qParams = { scope: isHostEv ? 'host' : 'hotspot', limit: 250 };
+  if (isHostEv && ev.uid > 0) qParams.uid = ev.uid;
+  if (!isHostEv && v6ValidMac(ev.mac)) qParams.mac = ev.mac;
+  if (!isHostEv && v6ValidIp(ev.src_ip)) qParams.ip = ev.src_ip;
 
   busyWhile(btn, api.get(V6_API.scalpelFlows, qParams, { timeout: 7000 }).then(function (r) {
     var flows = Array.isArray(r && r.flows) ? r.flows : [];
@@ -2931,9 +4507,12 @@ function v6CutLeakEventConn(ev, btn) {
   })).then(function (res) {
     if (res && res.cutN > 0) {
       toast('已断开 ' + res.cutN + ' 条相关连接：' + (ev.dst_host || ev.dst_ip));
+    } else if (isHostEv && ev.uid >= 10000) {
+      v6OpenHostAppSheet(ev.uid, ev.pkg, ev.app_name || ev.devName, false);
+      toast('该短连接已自然结束，已打开此应用的联网管控面板', 'warn');
     } else {
-      openScalpelDrawer(ev.mac, ev.src_ip, ev.devName);
-      toast('该短连接已自然结束，已打开此设备的活跃连接列表', 'warn');
+      openScalpelDrawer(isHostEv ? '' : ev.mac, isHostEv ? '' : ev.src_ip, isHostEv ? '' : ev.devName, isHostEv ? 'host' : 'hotspot');
+      toast('该短连接已自然结束，已打开实时活跃连接列表', 'warn');
     }
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
@@ -3056,7 +4635,7 @@ function v6PostLeash(payload, el, msg, fromUndo) {
           });
           v6RefreshHeroDom();
         }
-        return v6PostLeash(undoPayload, null, '已撤销后台更新限速变更', true);
+        return v6PostLeash(undoPayload, null, '已撤销后台更新限幅变更', true);
       });
     } else if (msg) {
       toast(msg);
@@ -3116,7 +4695,7 @@ function v6ExportBackupBundle(actEl) {
   if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function' && typeof loadSecret === 'function') {
     var ksuVer = v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.4';
+      'v6.1.0-rc.5';
     var ksuFname = 'hnc-backup-' + ksuVer + '-' + Date.now() + '.json';
     var outPath = '/sdcard/Download/' + ksuFname;
     var runCurlSave = function (forceSec) {
@@ -3162,7 +4741,7 @@ function v6ExportBackupBundle(actEl) {
     var verTag = v6CleanBackupVer(bundle.module_version) ||
       v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.4';
+      'v6.1.0-rc.5';
     var fname = 'hnc-backup-' + verTag + '-' + Date.now() + '.json';
     try {
       var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
@@ -3195,7 +4774,18 @@ function v6BindEvents() {
   if (scScrim) scScrim.addEventListener('click', function () { closeScalpelDrawer(false); });
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && V6.scalpel.open) closeScalpelDrawer(false);
+    if (e.key === 'Escape' && V6.scalpel.open) {
+      closeScalpelDrawer(false);
+      return;
+    }
+    if (e.key === 'Enter' && e.target && e.target.id === 'v6-host-dom-inp') {
+      e.preventDefault();
+      var inp = e.target;
+      var val = inp.value;
+      v6BlockHostDomain(val, inp).then(function (ok) {
+        if (ok !== false) inp.value = '';
+      });
+    }
   });
 
   /* 记录 <details class="v6-adv-fold"> 展开态，保证后台轮询 morph 时不会自动合上用户展开的高级设置 */
@@ -3246,6 +4836,15 @@ function v6BindEvents() {
     } else if (t.id === 'v6-sc-q') {
       V6.scalpel.q = t.value;
       v6RefreshScalpelDrawerList();
+    } else if (t.id === 'v6-host-q') {
+      V6.host.q = t.value;
+      var hl = document.getElementById('v6-host-dynamic-list');
+      if (hl) {
+        var nextInner = V6.host.mode === 'traffic'
+          ? v6RenderHostTrafficRankHtml()
+          : (V6.host.mode === 'power' ? v6RenderHostPowerListHtml() : v6RenderHostLiveListHtml());
+        morph(hl, nextInner);
+      }
     }
   });
 
@@ -3253,65 +4852,86 @@ function v6BindEvents() {
     var t = typeof evEl === 'function' ? evEl(e) : (e && e.target && e.target.nodeType === 3 ? e.target.parentNode : e && e.target);
     if (!t || typeof t.closest !== 'function') return;
 
-    /* 1. 顶部三大场景切换胶囊 */
+    /* 0. 全站原生 .seg 弹簧分段器（v6-tab / v6-host-mode / v6-host-period / v6-host-net / v6-sc-scope） */
+    var segBtn = t.closest('.seg button');
+    if (segBtn && segBtn.parentNode) {
+      var sg = segBtn.parentNode;
+      var sk = sg.getAttribute('data-seg');
+      var sv = segBtn.getAttribute('data-v');
+      if (sk === 'v6-tab' || sk === 'v6-host-mode' || sk === 'v6-host-period' || sk === 'v6-host-net' || sk === 'v6-sc-scope') {
+        e.stopPropagation();
+        if (segBtn.classList.contains('on') || sg.classList.contains('pending')) return;
+        if (typeof haptic === 'function') haptic(8);
+        $$('button', sg).forEach(function (b) { b.classList.toggle('on', b === segBtn); });
+        sg.classList.remove('jelly');
+        if (typeof placeSegs === 'function') placeSegs(sg.parentNode);
+
+        if (sk === 'v6-tab') {
+          V6.subtab = sv || 'escort';
+          LS.set('hnc6.v6_subtab', V6.subtab);
+          if (V6.subtab === 'privacy') v6MarkLeakGuardSeen();
+          v6RefreshHeroDom();
+          v6RefreshNavBadges();
+          v6RefreshActiveSubviewDom();
+          if (V6.subtab === 'host') v6EnsureHostModeLoaded(false);
+          else v6SyncHostPollTimer();
+        } else if (sk === 'v6-host-mode') {
+          V6.host.mode = sv || 'live';
+          LS.set('hnc6.v6_host_mode', V6.host.mode);
+          v6RefreshActiveSubviewDom();
+          v6EnsureHostModeLoaded(false);
+        } else if (sk === 'v6-host-period') {
+          V6.host.period = sv || 'today';
+          LS.set('hnc6.v6_host_period', V6.host.period);
+          v6LoadHostTraffic(true);
+        } else if (sk === 'v6-host-net') {
+          V6.host.net = sv || 'all';
+          LS.set('hnc6.v6_host_net', V6.host.net);
+          v6LoadHostTraffic(true);
+        } else if (sk === 'v6-sc-scope') {
+          V6.scalpel.scopeDomain = sv || 'all';
+          v6FetchScalpelFlows();
+        }
+        return;
+      }
+    }
+
+    /* 1. 兼容旧式 data-v6-subtab 切换触发器 */
     var subBtn = t.closest('[data-v6-subtab]');
     if (subBtn) {
       e.stopPropagation();
       var nextSub = subBtn.getAttribute('data-v6-subtab') || 'escort';
       if (typeof haptic === 'function') haptic(8);
-      V6.subtab = nextSub;
-      LS.set('hnc6.v6_subtab', nextSub);
-      if (nextSub === 'privacy') v6MarkLeakGuardSeen();
-      v6RefreshHeroDom();
-      v6RefreshActiveSubviewDom();
+      openV6Subtab(nextSub);
       return;
     }
 
-    /* 2A. 顶部 3 格磁贴右上角胶囊：独立一键开关（防误触） */
-    var bentoBtn = t.closest('[data-v6-bento]');
-    if (bentoBtn) {
+    /* 2. Hero 控制中心三联磁贴 (.cc-tile[data-v6-tile] 与兼容 [data-v6-bento]) */
+    var tileBtn = t.closest('[data-v6-tile], [data-v6-bento]');
+    if (tileBtn) {
       e.stopPropagation();
-      if (bentoBtn.classList.contains('busy')) return;
+      if (tileBtn.classList.contains('busy')) return;
       if (typeof haptic === 'function') haptic(10);
-      var bKind = bentoBtn.getAttribute('data-v6-bento');
+      var bKind = tileBtn.getAttribute('data-v6-tile') || tileBtn.getAttribute('data-v6-bento');
       if (bKind === 'express') {
         var nextExp = !V6.express.enabled;
         V6.express.enabled = nextExp;
         v6RefreshHeroDom();
-        v6PostExpress({ enabled: nextExp }, bentoBtn, nextExp ? '已开启游戏与通话优先' : '已关闭游戏与通话优先');
+        if (V6.subtab === 'escort') v6RefreshActiveSubviewDom();
+        v6PostExpress({ enabled: nextExp }, tileBtn, nextExp ? '已开启游戏与通话优先' : '已关闭游戏与通话优先');
       } else if (bKind === 'leash') {
         var nextUl = !V6.leash.enabled;
         V6.leash.enabled = nextUl;
         v6RefreshHeroDom();
-        v6PostLeash({ action: 'config', enabled: nextUl }, bentoBtn, nextUl ? '已开启后台大更新限速' : '已关闭后台大更新限速');
+        if (V6.subtab === 'escort') v6RefreshActiveSubviewDom();
+        v6PostLeash({ action: 'config', enabled: nextUl }, tileBtn, nextUl ? '已开启后台大更新限幅' : '已关闭后台大更新限幅');
       } else if (bKind === 'thermo') {
         var nextTh = !V6.thermo.enabled;
         V6.thermo.enabled = nextTh;
         v6RefreshHeroDom();
-        v6PostThermo({ enabled: nextTh }, bentoBtn, nextTh ? '已开启发热与省电保护' : '已关闭发热与省电保护');
+        if (V6.subtab === 'escort') v6RefreshActiveSubviewDom();
+        v6PostThermo({ enabled: nextTh }, tileBtn, nextTh ? '已开启机身温控保护' : '已关闭机身温控保护');
       }
-      return;
-    }
-
-    /* 2B. 顶部 3 格磁贴主体点按：平滑定位至对应设置卡片（不误关保护开关） */
-    var bentoNav = t.closest('[data-v6-bento-nav]');
-    if (bentoNav) {
-      e.stopPropagation();
-      if (typeof haptic === 'function') haptic(6);
-      var navKind = bentoNav.getAttribute('data-v6-bento-nav');
-      if (V6.subtab !== 'escort') {
-        V6.subtab = 'escort';
-        LS.set('hnc6.v6_subtab', 'escort');
-        v6RefreshHeroDom();
-        v6RefreshActiveSubviewDom();
-      }
-      var cardId = navKind === 'leash' ? 'v6-card-leash' : (navKind === 'thermo' ? 'v6-card-thermo' : 'v6-card-express');
-      setTimeout(function () {
-        var targetCard = document.getElementById(cardId);
-        if (targetCard && targetCard.scrollIntoView) {
-          targetCard.scrollIntoView({ behavior: motionOn() ? 'smooth' : 'auto', block: 'center' });
-        }
-      }, 40);
       return;
     }
 
@@ -3332,21 +4952,27 @@ function v6BindEvents() {
       } else if (kind === 'express') {
         V6.express.enabled = nextOn;
         v6RefreshHeroDom();
-        v6PostExpress({ enabled: nextOn }, vTog, nextOn ? '游戏与通话优先已开启' : '游戏与通话优先已关闭');
+        v6PostExpress({ enabled: nextOn }, vTog, nextOn ? '游戏与视频优先已开启' : '游戏与视频优先已关闭');
       } else if (kind === 'express-auto') {
         V6.express.auto_detect = nextOn;
         v6PostExpress({ auto_detect: nextOn }, vTog, nextOn ? '已开启自动识别游戏与通话' : '已切换为仅手动指定设备优先');
       } else if (kind === 'leash') {
         V6.leash.enabled = nextOn;
         v6RefreshHeroDom();
-        v6PostLeash({ action: 'config', enabled: nextOn }, vTog, nextOn ? '后台大更新限速已开启' : '后台大更新限速已关闭');
+        v6PostLeash({ action: 'config', enabled: nextOn }, vTog, nextOn ? '后台大下载限幅已开启' : '后台大下载限幅已关闭');
       } else if (kind === 'thermo') {
         V6.thermo.enabled = nextOn;
         v6RefreshHeroDom();
-        v6PostThermo({ enabled: nextOn }, vTog, nextOn ? '发热与省电保护已开启' : '发热与省电保护已关闭');
+        v6PostThermo({ enabled: nextOn }, vTog, nextOn ? '高温与低电量保护已开启' : '高温与低电量保护已关闭');
       } else if (kind === 'thermo-shaper') {
         V6.thermo.stage2_shaper_enabled = nextOn;
         v6PostThermo({ stage2_shaper_enabled: nextOn }, vTog, nextOn ? '已开启严重过热自动收紧后台网速' : '已关闭过热限速降温');
+      } else if (kind === 'host-sys') {
+        V6.host.includeSystem = nextOn;
+        LS.set('hnc6.v6_host_sys', nextOn ? '1' : '0');
+        v6EnsureHostModeLoaded(true);
+      } else if (kind === 'host-self-capture') {
+        v6ToggleSelfCapture(nextOn, vTog);
       }
       return;
     }
@@ -3364,13 +4990,21 @@ function v6BindEvents() {
       case 'go-privacy':
         v6FocusPrivacyPanel();
         break;
+      case 'go-host':
+        openV6Subtab('host', { mode: actEl.getAttribute('data-mode') || 'live' });
+        break;
       case 'toggle-health':
         V6.healthOpen = !V6.healthOpen;
         var hd = document.getElementById('v6-health-drawer');
         if (hd) hd.hidden = !V6.healthOpen;
         break;
       case 'open-scalpel':
-        openScalpelDrawer(actEl.getAttribute('data-mac') || '', actEl.getAttribute('data-ip') || '', actEl.getAttribute('data-name') || '');
+        openScalpelDrawer(
+          actEl.getAttribute('data-mac') || '',
+          actEl.getAttribute('data-ip') || '',
+          actEl.getAttribute('data-name') || '',
+          actEl.getAttribute('data-scope') || ''
+        );
         break;
       case 'scalpel-close':
         closeScalpelDrawer();
@@ -3379,8 +5013,12 @@ function v6BindEvents() {
         V6.scalpel.scopeMac = '';
         V6.scalpel.scopeIp = '';
         V6.scalpel.devName = '';
+        V6.scalpel.scopeDomain = 'all';
         var bd0 = document.getElementById('v6-scalpel-body');
-        if (bd0) bd0.innerHTML = v6ScalpelDrawerBodyHtml();
+        if (bd0) {
+          bd0.innerHTML = v6ScalpelDrawerBodyHtml();
+          if (typeof placeSegs === 'function') placeSegs(bd0);
+        }
         v6FetchScalpelFlows();
         break;
       case 'scalpel-pause':
@@ -3397,9 +5035,72 @@ function v6BindEvents() {
       case 'scalpel-cut-once':
       case 'scalpel-cut-freeze':
         var fid = actEl.getAttribute('data-fid');
-        var pool = (V6.scalpel.scopeMac || V6.scalpel.scopeIp) ? V6.scalpel.drawerFlows : (V6.scalpel.drawerFlows.length ? V6.scalpel.drawerFlows : V6.scalpel.globalFlows);
+        var pool = (V6.scalpel.scopeMac || V6.scalpel.scopeIp || V6.scalpel.drawerFlows.length)
+          ? V6.scalpel.drawerFlows
+          : V6.scalpel.globalFlows;
         var fl = pool.filter(function (x) { return x.id === fid; })[0];
         v6CutFlow(fl, act === 'scalpel-cut-freeze', actEl);
+        break;
+      case 'host-refresh-all':
+        busyWhile(actEl, Promise.all([
+          v6LoadHostTraffic(true),
+          v6LoadHostFirewall(true),
+          v6LoadHostPower(true),
+          v6LoadHostPrivacy()
+        ])).then(function () { toast('本机守护数据已刷新'); });
+        break;
+      case 'host-power-refresh':
+        busyWhile(actEl, v6LoadHostPower(true)).then(function () {
+          toast(V6.host.power.refresh_throttled ? '距上次刷新不足15秒，已展示最新缓存' : '后台耗电统计已刷新');
+        });
+        break;
+      case 'host-psort':
+        V6.host.powerSort = actEl.getAttribute('data-sort') || 'bg_mah';
+        LS.set('hnc6.v6_host_psort', V6.host.powerSort);
+        $$('#v6-host-list-card [data-v6-act="host-psort"]').forEach(function (b) { b.classList.toggle('on', b === actEl); });
+        v6LoadHostPower(false);
+        break;
+      case 'host-privacy-refresh':
+        busyWhile(actEl, v6LoadHostPrivacy()).then(function () { toast('本机明文与追踪风险已重新扫描'); });
+        break;
+      case 'host-app-open':
+        v6OpenHostAppSheet(
+          num(actEl.getAttribute('data-uid'), -1),
+          actEl.getAttribute('data-pkg') || '',
+          actEl.getAttribute('data-name') || '',
+          actEl.getAttribute('data-sys') === '1'
+        );
+        break;
+      case 'host-fw-set':
+        v6SetHostUidFirewall(
+          num(actEl.getAttribute('data-uid'), -1),
+          actEl.getAttribute('data-fw-mode') || 'allow',
+          actEl.getAttribute('data-pkg') || '',
+          actEl.getAttribute('data-name') || '',
+          actEl,
+          false
+        );
+        break;
+      case 'host-fw-clear':
+        v6ClearHostFirewall(actEl);
+        break;
+      case 'host-dns-block':
+        v6BlockHostDomain(actEl.getAttribute('data-domain') || '', actEl);
+        break;
+      case 'host-dns-add':
+        var dinp = document.getElementById('v6-host-dom-inp');
+        var dval = dinp ? dinp.value : '';
+        v6BlockHostDomain(dval, actEl).then(function (ok) {
+          if (ok !== false && dinp) dinp.value = '';
+        });
+        break;
+      case 'host-dns-unblock':
+        v6UnblockHostDomain(actEl.getAttribute('data-domain') || '', actEl, false);
+        break;
+      case 'host-sheet-cut':
+        var hfid = actEl.getAttribute('data-fid');
+        var hfl = (V6.host.appSheet.flows || []).filter(function (x) { return x.id === hfid; })[0];
+        if (hfl) v6CutFlow(hfl, actEl.getAttribute('data-freeze') === '1', actEl);
         break;
       case 'lgd-refresh':
         busyWhile(actEl, v6LoadLeakGuard(true)).then(function () { toast('隐私安检列表已刷新'); });
@@ -3409,6 +5110,13 @@ function v6BindEvents() {
         break;
       case 'lgd-save-cfg':
         v6SaveLeakGuardConfig(null, actEl, '通知提醒与保留设置已保存');
+        break;
+      case 'lgd-origin-filter':
+        V6.lg.originFilter = actEl.getAttribute('data-origin') || 'ALL';
+        V6.lg.visibleLimit = 30;
+        $$('#v6-leakguard-card [data-v6-act="lgd-origin-filter"]').forEach(function (b) { b.classList.toggle('on', b === actEl); });
+        var stOrig = document.getElementById('lgd-stream-list');
+        if (stOrig) morph(stOrig, v6LeakStreamHtml());
         break;
       case 'lgd-filter':
         V6.lg.typeFilter = actEl.getAttribute('data-type') || 'ALL';
@@ -3470,7 +5178,12 @@ function v6BindEvents() {
         if (wIdx >= 0) v6RemoveLeakWhitelist(wIdx, actEl);
         break;
       case 'lgd-undo-block':
-        v6UndoLeakBlock(actEl.getAttribute('data-uid') || '', actEl.getAttribute('data-host') || '', actEl);
+        v6UndoLeakBlock(
+          actEl.getAttribute('data-uid') || '',
+          actEl.getAttribute('data-host') || '',
+          actEl.getAttribute('data-tscope') || '',
+          actEl
+        );
         break;
       case 'lgd-cut-conn':
         var ceid = actEl.getAttribute('data-id');
@@ -3620,6 +5333,7 @@ function v6BootInit() {
 }
 
 function v6OnPollTick(tickN) {
+  v6SyncHostPollTimer();
   if (S.page === 'vector') {
     if ((KSU || !V6.lg.sseActive) && tickN % 2 === 0 && V6.apiSupported.lg) v6LoadLeakGuard();
     if (tickN % 3 === 0 && V6.apiSupported.v6) v6LoadCockpitAll();
@@ -3629,25 +5343,35 @@ function v6OnPollTick(tickN) {
 }
 
 function v6OnVisibility(hidden) {
+  v6SyncHostPollTimer();
   if (hidden) {
     v6StopLeakGuardSSE();
     v6StopScalpelTimer();
   } else {
     v6EnsureLeakStream();
-    if (S.page === 'vector') { v6LoadLeakGuard(); v6LoadCockpitAll(); }
+    if (S.page === 'vector') {
+      v6LoadLeakGuard();
+      v6LoadCockpitAll();
+      if (V6.subtab === 'host') v6EnsureHostModeLoaded(false);
+    }
     if (V6.scalpel.open) {
       if (!V6.scalpel.paused) v6FetchScalpelFlows();
       v6StartScalpelTimer();
+    }
+    if (V6.host.appSheet.open) {
+      v6FetchHostAppFlows();
     }
   }
 }
 
 v6BindEvents();
 if (typeof window !== 'undefined') {
+  window.openV6Subtab = openV6Subtab;
   window.HNCVectorV6 = {
     V6: V6,
     escapeHtml: escapeHtml,
     highlightRawSnippet: highlightRawSnippet,
+    openSubtab: openV6Subtab,
     openScalpelDrawer: openScalpelDrawer,
     closeScalpelDrawer: closeScalpelDrawer,
     focusPrivacy: v6FocusPrivacyPanel,

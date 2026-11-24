@@ -3,7 +3,7 @@
 //
 // Design invariants:
 //   - Fixed 16384-byte binary layout (matches Android 16 16KB page alignment):
-//     [0..64)       Top-level latch header (Magic "HNCVSHM1", Version=2, layout tags, active seq)
+//     [0..64)       Top-level latch header (Magic "HNCVSHM1", Version=3, layout tags, active seq)
 //     [64..8224)    Latch Slot 0 (64B slot header + 126*64B devices + 24B pad + 8B EndSeq)
 //     [8224..16384) Latch Slot 1 (64B slot header + 126*64B devices + 24B pad + 8B EndSeq)
 //   - Linux/Android uses syscall.Mmap(MAP_SHARED); non-Linux or mmap-unsupported
@@ -34,7 +34,7 @@ const (
 	Magic         = "HNCVSHM1"
 	legacyMagicV1 = "HNCV6SHM"
 
-	SchemaVersion uint32 = 2
+	SchemaVersion uint32 = 3
 	Version       uint32 = SchemaVersion
 	EndianTag     uint32 = 0x01020304
 
@@ -172,10 +172,12 @@ type Header struct {
 	EndianTag      uint32
 	ActiveSlot     uint32
 	ActiveFlows    uint32
+	HostFlows      uint32
 	DeviceCount    uint32
 	Flags          uint32
 	HeaderSize     uint16
 	DeviceSlotSize uint16
+	_pad           uint32
 }
 
 // DeviceSlot is one fixed-layout downstream client record in the snapshot body.
@@ -369,7 +371,7 @@ func OpenWriterPath(path string, forceFallback bool) (*Writer, error) {
 	}
 
 	// Preserve monotonic continuity only if existing file already had exact size
-	// and a valid SchemaVersion=2 header; otherwise zero-fill all physical blocks first.
+	// and a valid SchemaVersion=3 header; otherwise zero-fill all physical blocks first.
 	if !reinit {
 		var existingHdr [HeaderSize]byte
 		if _, err := f.ReadAt(existingHdr[:], 0); err == nil && validateFileHeader(existingHdr[:], false) == nil {
@@ -394,7 +396,7 @@ func OpenWriterPath(path string, forceFallback bool) (*Writer, error) {
 		}
 	}
 
-	// Ensure schema v2 header is immediately valid even before first traffic tick.
+	// Ensure schema v3 header is immediately valid even before first traffic tick.
 	if w.seq == 0 {
 		if err := w.Write(MonotonicNs(), 0, 0, nil); err != nil {
 			_ = w.Close()
@@ -424,7 +426,7 @@ func (w *Writer) Seq() uint64 {
 // Write publishes device slots + summary counters into the inactive latch slot
 // and atomically flips the active slot index.
 func (w *Writer) Write(updatedMonoNs int64, activeFlows uint32, totalLeaks uint64, devices []DeviceSlot) error {
-	return w.WriteWithFlags(updatedMonoNs, activeFlows, totalLeaks, 0, devices)
+	return w.WriteWithHostFlows(updatedMonoNs, activeFlows, 0, totalLeaks, 0, devices)
 }
 
 func (w *Writer) writeToMmapLocked(slotOff int, oddLatch, evenLatch, nextSeq uint64) (err error) {
@@ -469,6 +471,12 @@ func (w *Writer) writeToMmapLocked(slotOff int, oddLatch, evenLatch, nextSeq uin
 
 // WriteWithFlags publishes a snapshot with optional header-level flags.
 func (w *Writer) WriteWithFlags(updatedMonoNs int64, activeFlows uint32, totalLeaks uint64, flags uint32, devices []DeviceSlot) error {
+	return w.WriteWithHostFlows(updatedMonoNs, activeFlows, 0, totalLeaks, flags, devices)
+}
+
+// WriteWithHostFlows publishes orthogonal downstream hotspotFlows (ActiveFlows)
+// and local phone hostFlows (HostFlows) into the inactive 16KB latch slot.
+func (w *Writer) WriteWithHostFlows(updatedMonoNs int64, hotspotFlows uint32, hostFlows uint32, totalLeaks uint64, flags uint32, devices []DeviceSlot) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed || w.file == nil {
@@ -496,7 +504,7 @@ func (w *Writer) WriteWithFlags(updatedMonoNs int64, activeFlows uint32, totalLe
 	binary.LittleEndian.PutUint64(w.slotBuf[0:8], evenLatch)
 	binary.LittleEndian.PutUint64(w.slotBuf[8:16], uint64(updatedMonoNs))
 	binary.LittleEndian.PutUint64(w.slotBuf[16:24], uint64(nowUnixNs))
-	binary.LittleEndian.PutUint32(w.slotBuf[24:28], activeFlows)
+	binary.LittleEndian.PutUint32(w.slotBuf[24:28], hotspotFlows)
 	binary.LittleEndian.PutUint32(w.slotBuf[28:32], uint32(devCount))
 	binary.LittleEndian.PutUint64(w.slotBuf[32:40], totalLeaks)
 	binary.LittleEndian.PutUint32(w.slotBuf[40:44], flags)
@@ -505,6 +513,7 @@ func (w *Writer) WriteWithFlags(updatedMonoNs int64, activeFlows uint32, totalLe
 	binary.LittleEndian.PutUint16(w.slotBuf[50:52], DeviceSlotSize)
 	binary.LittleEndian.PutUint32(w.slotBuf[52:56], SlotSize)
 	binary.LittleEndian.PutUint32(w.slotBuf[56:60], EndianTag)
+	binary.LittleEndian.PutUint32(w.slotBuf[60:64], hostFlows)
 
 	for i := 0; i < devCount; i++ {
 		d := devices[i]
@@ -526,7 +535,7 @@ func (w *Writer) WriteWithFlags(updatedMonoNs int64, activeFlows uint32, totalLe
 	binary.LittleEndian.PutUint64(w.hdrBuf[16:24], nextSeq)
 	binary.LittleEndian.PutUint64(w.hdrBuf[24:32], uint64(updatedMonoNs))
 	binary.LittleEndian.PutUint64(w.hdrBuf[32:40], uint64(nowUnixNs))
-	binary.LittleEndian.PutUint32(w.hdrBuf[40:44], activeFlows)
+	binary.LittleEndian.PutUint32(w.hdrBuf[40:44], hotspotFlows)
 	binary.LittleEndian.PutUint32(w.hdrBuf[44:48], uint32(devCount))
 	binary.LittleEndian.PutUint32(w.hdrBuf[48:52], flags)
 	binary.LittleEndian.PutUint16(w.hdrBuf[52:54], HeaderSize)
@@ -840,6 +849,7 @@ func (r *Reader) tryDecodeSlot(buf []byte, slotIdx int, dst *Snapshot, useAtomic
 	tmp.Header.UpdatedMonoNs = int64(binary.LittleEndian.Uint64(slot[8:16]))
 	tmp.Header.UpdatedUnixNs = int64(binary.LittleEndian.Uint64(slot[16:24]))
 	tmp.Header.ActiveFlows = binary.LittleEndian.Uint32(slot[24:28])
+	tmp.Header.HostFlows = loadU32(slot, 60, useAtomic)
 	tmp.Header.DeviceCount = devCount
 	tmp.Header.TotalLeaks = binary.LittleEndian.Uint64(slot[32:40])
 	tmp.Header.Flags = binary.LittleEndian.Uint32(slot[40:44])

@@ -3,7 +3,7 @@
 # Read-only summary for WebUI/KSU. Does not modify live JSON.
 
 set +e
-HNC="${HNC:-/data/local/hnc}"
+HNC="${HNC:-${HNC_DIR:-/data/local/hnc}}"
 BIN="$HNC/bin"
 RUN="$HNC/run"
 DATA="$HNC/data"

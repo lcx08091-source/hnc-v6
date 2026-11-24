@@ -561,6 +561,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionClsactModeSet(hncDir, p)
 	case "json_doctor_repair":
 		return actionJSONDoctorRepair(s)
+	case "self_firewall_set", "self_firewall_remove", "self_firewall_clear", "self_dns_block", "self_dns_unblock":
+		return dispatchSelfFirewallAction(s, action, p)
 	default:
 		return actionResp{OK: false, Error: "unknown action"}
 	}
@@ -1116,7 +1118,8 @@ func writeActionResp(w http.ResponseWriter, status int, r actionResp) {
 }
 
 func isBadParamErr(msg string) bool {
-	return msg == "bad params" || msg == "invalid mac" || msg == "invalid rate" || msg == "not merged"
+	return msg == "bad params" || msg == "invalid mac" || msg == "invalid rate" || msg == "not merged" ||
+		msg == "protected_uid" || msg == "protected_package"
 }
 
 // rc3 N-5: 敏感字段白名单. 记 audit log 前对 key 匹配的 value 替换成 <redacted>.
