@@ -292,6 +292,15 @@ func rpLoadLocal(hncDir string) *rpLocal {
 			}
 		}
 	}
+	for k := range loadMergedAutoExpandBlockSet(hncDir) {
+		l.blocked[k] = true
+	}
+	return l
+}
+
+// loadMergedAutoExpandBlockSet 累加合并 etc/auto_expand_blocklist.json 与 data/auto_expand_blocklist.json 全部黑名单域名。
+func loadMergedAutoExpandBlockSet(hncDir string) map[string]bool {
+	out := map[string]bool{}
 	for _, p := range dataCandidates(hncDir, "auto_expand_blocklist.json") {
 		b, err := os.ReadFile(p)
 		if err != nil || len(b) > 1<<20 {
@@ -302,12 +311,13 @@ func rpLoadLocal(hncDir string) *rpLocal {
 		}
 		if json.Unmarshal(b, &f) == nil {
 			for _, x := range f.Blocked {
-				l.blocked[rpNormHost(x)] = true
+				if nh := rpNormHost(x); nh != "" {
+					out[nh] = true
+				}
 			}
-			break
 		}
 	}
-	return l
+	return out
 }
 
 // longestOwner h 自身或父域在本机规则里的最长匹配 → 根应用 id

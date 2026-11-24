@@ -204,6 +204,30 @@ get_iface() {
     sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null
 }
 
+# C084: 统一核验 run/cleanup_rules.marker (600s 抑制窗口, 过期或脏时间戳自动回收)
+_CLEANUP_MARKER_AGE=0
+cleanup_rules_marker_active() {
+    local marker="$HNC_DIR/run/cleanup_rules.marker" mts now _age
+    [ -f "$marker" ] || return 1
+    mts=$(tr -d ' \t\r\n' < "$marker" 2>/dev/null)
+    now=$(date +%s 2>/dev/null) || now=0
+    case "$mts:$now" in
+        *[!0-9:]*|:*)
+            rm -f "$marker" 2>/dev/null
+            return 1
+            ;;
+    esac
+    if [ "$mts" -gt 0 ] && [ "$now" -gt 0 ]; then
+        _age=$((now - mts))
+        if [ "$_age" -ge -5 ] && [ "$_age" -lt 600 ]; then
+            _CLEANUP_MARKER_AGE="$_age"
+            return 0
+        fi
+    fi
+    rm -f "$marker" 2>/dev/null
+    return 1
+}
+
 # ── 完整恢复 ─────────────────────────────────────────────────
 full_restore() {
     local reason=$1
@@ -211,15 +235,9 @@ full_restore() {
     local _frc="$HNC_DIR/run/watchdog_full_restore.count" _frn
     _frn=$(cat "$_frc" 2>/dev/null); case "$_frn" in *[!0-9]*|'') _frn=0 ;; esac
     echo $((_frn + 1)) > "$_frc" 2>/dev/null || true
-    local marker="$HNC_DIR/run/cleanup_rules.marker"
-    if [ -f "$marker" ]; then
-        local mts; mts=$(cat "$marker" 2>/dev/null)
-        local now; now=$(date +%s 2>/dev/null) || now=0
-        if [ -n "$mts" ] && [ -n "$now" ] && [ $((now - mts)) -lt 600 ]; then
-            log "RESTORE skipped: cleanup_rules marker active ($((now - mts))s ago, suppress 600s)"
-            return 0
-        fi
-        rm -f "$marker" 2>/dev/null
+    if cleanup_rules_marker_active; then
+        log "RESTORE skipped: cleanup_rules marker active (${_CLEANUP_MARKER_AGE}s ago, suppress 600s)"
+        return 0
     fi
     local iface=$(get_iface)
     if [ -z "$iface" ]; then
@@ -277,6 +295,10 @@ full_restore() {
 # do_full_init: PENDING -> ACTIVE:<iface>
 do_full_init() {
     local iface=$1 ip=$2
+    if cleanup_rules_marker_active; then
+        log "INIT skipped: cleanup_rules marker active (${_CLEANUP_MARKER_AGE}s ago, suppress 600s)"
+        return 0
+    fi
     log "STATE PENDING -> ACTIVE:$iface (ip=$ip), running first-time init"
     sh "$HNC_DIR/bin/iptables_manager.sh" init >> "$LOG" 2>&1
     HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
@@ -321,6 +343,10 @@ do_full_init() {
 
     (
         sleep 15
+        if cleanup_rules_marker_active; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WDG] delayed re-restore skipped: cleanup_rules marker active" >> "$LOG"
+            exit 0
+        fi
         cur_state=$(cat "$STATE_FILE" 2>/dev/null)
         case "$cur_state" in
             ACTIVE:*)

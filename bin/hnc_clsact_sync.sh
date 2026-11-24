@@ -38,13 +38,24 @@ command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
 [ -s "$DEVICES_FLAT" ] || [ -f "$DEVICES" ] || exit 0
 [ -f "$RULES" ] || exit 0
 
-IFACE=$(cat "$HNC_DIR/run/hnc_state" 2>/dev/null | sed -n 's/^ACTIVE://p' | head -n1 | tr -d ' \r\n')
-"$CTL" check "$IFACE" 2>/dev/null | grep -q '"map":true' || exit 0
+IFACE="${1:-$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -n1 | tr -d ' \r\n')}"
+case "$IFACE" in
+    ''|*[!a-zA-Z0-9_.:-]*) exit 0 ;;
+esac
 
-V6_NEIGH=""
-if [ -n "$IFACE" ] && command -v ip >/dev/null 2>&1; then
-    V6_NEIGH=$(ip -6 neigh show dev "$IFACE" 2>/dev/null)
-    [ -z "$V6_NEIGH" ] && V6_NEIGH=$(ip neigh show dev "$IFACE" 2>/dev/null)
+_CHK=$("$CTL" check "$IFACE" 2>/dev/null)
+printf '%s\n' "$_CHK" | grep -q '"map":true' || exit 0
+
+if ! grep -q '"mark_id"' "$RULES" 2>/dev/null; then
+    if printf '%s\n' "$_CHK" | grep -q '"ip_entries":0' && {
+        ! printf '%s\n' "$_CHK" | grep -q '"mac_map":true' || printf '%s\n' "$_CHK" | grep -q '"mac_entries":0'
+    }; then
+        exit 0
+    fi
+    printf '' | "$CTL" sync
+    rc=$?
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [clsact-sync] rc=$rc" >> "$HNC_DIR/logs/offload_guard.log" 2>/dev/null
+    exit 0
 fi
 
 # 优先读取 run/devices.flat, 回退直接解析扁平 data/devices.json(绝不再对扁平 devices.json 调恒返空的 get-device)
@@ -114,11 +125,13 @@ emit_entries() {
     _devs=$(extract_dev_mac_ip)
     [ -n "$_devs" ] || return 0
     _mids=$(extract_rule_mids)
+    _v6_loaded=0
+    V6_NEIGH=""
 
     printf '%s\n' "$_devs" | while read -r mac ip; do
         [ -n "$mac" ] || continue
         mid=$(printf '%s\n' "$_mids" | awk -v m="$mac" '$1 == m { print $2; exit }')
-        if [ -z "$mid" ] && [ -f "$HNC_DIR/bin/hnc_json" ]; then
+        if [ -z "$mid" ] && [ -f "$HNC_DIR/bin/hnc_json" ] && grep -qiF "\"$mac\"" "$RULES" 2>/dev/null; then
             mid=$(sh "$HNC_DIR/bin/hnc_json" get-device "$RULES" "$mac" mark_id 2>/dev/null) || mid=""
         fi
 
@@ -140,11 +153,27 @@ emit_entries() {
                 ;;
         esac
 
+        if [ "$_v6_loaded" = 0 ]; then
+            _v6_loaded=1
+            if command -v ip >/dev/null 2>&1; then
+                V6_NEIGH=$(ip -6 neigh show dev "$IFACE" 2>/dev/null)
+                [ -z "$V6_NEIGH" ] && V6_NEIGH=$(ip neigh show dev "$IFACE" 2>/dev/null)
+            fi
+        fi
         if [ -n "$V6_NEIGH" ]; then
             printf '%s\n' "$V6_NEIGH" | awk -v m="$mac" -v mk="$mark_hex" '
-                tolower($0) ~ m && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $NF != "FAILED" && $NF != "INCOMPLETE" {
-                    print tolower($1), mk
-                }' | sort -u
+                {
+                    ip6 = tolower($1)
+                    st = toupper($NF)
+                    if (ip6 ~ /:/ && ip6 !~ /^(fe80:|ff)/ && st != "FAILED" && st != "INCOMPLETE") {
+                        for (i = 2; i < NF; i++) {
+                            if (tolower($i) == "lladdr" && tolower($(i+1)) == m) {
+                                if (!(ip6 in seen6)) { seen6[ip6] = 1; print ip6, mk }
+                                break
+                            }
+                        }
+                    }
+                }'
         fi
     done
 }

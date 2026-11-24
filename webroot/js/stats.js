@@ -91,7 +91,7 @@ function puBodyHtml() {
           '<label class="field">卡' + slotN + ' 套餐上限<span class="box"><input type="number" min="0" step="1" inputmode="decimal" id="pu-in-plan-' + slotN + '" value="' + (planGB || '') + '" placeholder="填 0 为不限"><span class="u">GB</span></span></label>' +
           '<label class="field">每月计费日<span class="box"><input type="number" min="1" max="28" inputmode="numeric" id="pu-in-bd-' + slotN + '" value="' + num(cfg.billing_day, 1) + '"><span class="u">号</span></span></label>' +
         '</div>' +
-        '<label class="field">运营商掌厅当前已用校准（可选，解决免流包或半途装机误差）<span class="box"><input type="number" min="0" step="0.01" inputmode="decimal" id="pu-in-anc-' + slotN + '" value="' + (ancVal != null && num(ancVal) > 0 ? trim0(num(ancVal).toFixed(2)) : '') + '" placeholder="留空则按网卡/系统自动统计"><span class="u">GB</span></span></label>' +
+        '<label class="field">运营商掌厅当前已用校准（可选，解决免流包或半途装机误差）<span class="box"><input type="number" min="0" step="0.01" inputmode="decimal" id="pu-in-anc-' + slotN + '" value="' + (ancVal != null && isFinite(Number(ancVal)) && Number(ancVal) >= 0 ? trim0(num(ancVal).toFixed(2)) : '') + '" placeholder="留空则按网卡/系统自动统计"><span class="u">GB</span></span></label>' +
         '<div class="btns"><button type="button" class="btn sec press" data-act="pu-sim-edit" data-slot="0">取消</button><button type="button" class="btn pri press" data-act="pu-inline-save" data-slot="' + slotN + '">保存卡' + slotN + ' 设置</button></div>' +
       '</div>'
     ) : '';
@@ -156,7 +156,7 @@ function paintPU() {
   var b = $('#pu-body');
   if (b) { var waiting = !S.pu[S.puPeriod] && b.querySelector('.pu-tiles'); b.style.opacity = waiting ? '.55' : ''; if (!waiting) morph(b, puBodyHtml()); }
   var ss = $('#pu-set-s'); if (ss) ss.textContent = puSetSummary();
-  var st = $('#pu-set'); if (st && !st.contains(document.activeElement) && !st._filled && S.puCfg) { st.innerHTML = puSetHtml(); st._filled = true; }
+  var st = $('#pu-set'); if (st && !st.contains(document.activeElement) && !st._filled && S.puCfg) { st.innerHTML = puSetHtml(); st._filled = true; placeSegs(st); }
 }
 function refreshPU(force) { var seq = ++puRefreshSeq; paintPU(); return loadPhoneUsage(S.puPeriod, force).then(function () { if (seq === puRefreshSeq && S.page === 'stats' && S.aseg === 'stats') paintPU(); }); }
 function puSave() {
@@ -164,13 +164,22 @@ function puSave() {
   if (!(bd >= 1 && bd <= 28)) { toast('计费日填 1~28', 'err'); return; }
   if (!(w >= 1 && w <= 100)) { toast('提醒比例填 1~100', 'err'); return; }
   var p = { billing_day: bd, warn_percent: w };
-  if (p1 !== '') { if (!(num(p1, -1) >= 0)) { toast('卡1 套餐填 0 或正数', 'err'); return; } p.plan_sim1_gb = trim0(num(p1).toFixed(2)); }
-  if (p2 !== '') { if (!(num(p2, -1) >= 0)) { toast('卡2 套餐填 0 或正数', 'err'); return; } p.plan_sim2_gb = trim0(num(p2).toFixed(2)); }
+  if (p1 === '') p.plan_sim1_gb = '0';
+  else { if (!(num(p1, -1) >= 0)) { toast('卡1 套餐填 0 或正数', 'err'); return; } p.plan_sim1_gb = trim0(num(p1).toFixed(2)); }
+  if (p2 === '') p.plan_sim2_gb = '0';
+  else { if (!(num(p2, -1) >= 0)) { toast('卡2 套餐填 0 或正数', 'err'); return; } p.plan_sim2_gb = trim0(num(p2).toFixed(2)); }
   api.action('phone_usage_set', p).then(function () { toast('已保存 · 计费日 ' + bd + ' 号'); S.pu = {}; var st = $('#pu-set'); if (st) st._filled = false; return refreshPU(true); }).catch(function (e) { toast(errText(e), 'err'); });
 }
 function afterAseg() {
   if (S.aseg === 'stats') { updateStatsCounters(); refreshStats(); refreshPU(); }
-  else { paintDpi(); loadDpi(true); }
+  else {
+    paintDpi(); loadDpi(true);
+    if (S.open.deval) {
+      if (S.eval && !S.eval.err && typeof paintEval === 'function') paintEval();
+      else if (typeof loadEval === 'function') loadEval();
+    }
+    if (S.open.dpiexp && typeof loadExports === 'function') loadExports();
+  }
 }
 function statsBody() {
   return '<div class="counters">' + counts().map(function (c) { return '<div class="glass counter"><div class="n num" data-cnt>0</div><div class="l">' + c[1] + '</div></div>'; }).join('') + '</div>' +
@@ -441,6 +450,16 @@ function paintDpi() {
       : stRow('L4 · /proc/net UID 本机真值对齐', selfOn ? '亮屏常驻' : '已手动关闭', selfOn ? 'ok' : '', '本机双网卡 Socket inode → Android 应用 UID 零误差蒸馏至热点') +
         stRow('L5 · 被动终端栈与密文几何画像', st && st.dfp_enabled !== false ? '已启用' : '基础模式', 'ok', 'DHCP Option 55/60 + mDNS + JA4 + 8 包 SPLT 序列应对 ECH/无域名流'));
   paintDpiHist(); paintClients(); paintUnknown(); paintUnkTraffic(); paintIdent(); paintDiscEntry();
+  if (S.open.deval) {
+    var evEl0 = $('#eval-body');
+    if (evEl0 && !evEl0.hasAttribute('data-keep')) {
+      if (S.eval && !S.eval.err && typeof paintEval === 'function') paintEval();
+      else if (typeof loadEval === 'function' && !S._evalAutoLoading) {
+        S._evalAutoLoading = true;
+        Promise.resolve(loadEval()).then(function () { S._evalAutoLoading = false; }, function () { S._evalAutoLoading = false; });
+      }
+    }
+  }
 }
 /* 未识别流量(按字节) —— 连接表里没被规则库认出来的域名 / IP */
 S.dpiUnk = {};
@@ -711,38 +730,107 @@ function paintUnknown() {
       (isSh ? '<span class="badge b-gray">已豁免</span>' : '<button class="btn sec press" data-rule-tpl="' + esc(u.n) + '">生成规则</button>') + '</div>';
   }).join('') : '<div class="empty">过滤公共 CDN/SDK 后暂无剩余未知专属域名</div>');
 }
+function mergeCustomDpiRules(existingRaw, incomingObj) {
+  var exObj = existingRaw;
+  if (typeof exObj === 'string') {
+    try { exObj = exObj.trim() ? JSON.parse(exObj) : null; } catch (_) { exObj = null; }
+  }
+  var exRules = Array.isArray(exObj) ? exObj : (exObj && Array.isArray(exObj.rules) ? exObj.rules : []);
+  var inRules = incomingObj && Array.isArray(incomingObj.rules) ? incomingObj.rules : [];
+  if (!exRules.length) return incomingObj;
+  var byId = {}, merged = [];
+  exRules.forEach(function (r) {
+    if (!r || typeof r !== 'object') return;
+    var rid = String(r.id || '');
+    if (rid) byId[rid] = merged.length;
+    merged.push(r);
+  });
+  inRules.forEach(function (r) {
+    if (!r || typeof r !== 'object') return;
+    var rid = String(r.id || '');
+    if (rid && Object.prototype.hasOwnProperty.call(byId, rid)) merged[byId[rid]] = r;
+    else { if (rid) byId[rid] = merged.length; merged.push(r); }
+  });
+  return {
+    schema_version: (incomingObj && incomingObj.schema_version) || (exObj && exObj.schema_version) || '1.0',
+    rules_version: (incomingObj && incomingObj.rules_version && incomingObj.rules_version !== 'empty') ? incomingObj.rules_version : ('user-' + today()),
+    rules: merged
+  };
+}
 function ruleTemplate(host) {
   var suf = guessSuffix(host), ta = $('#rules-text'); if (!ta || !suf) return;
   var rule = { id: ('user_' + suf.replace(/[^a-z0-9]+/g, '_')).replace(/_+$/, '').slice(0, 48), app: '待确认应用', category: 'unknown', confidence: 'user', suffixes: [suf] };
-  var obj = null; try { obj = ta.value.trim() ? JSON.parse(ta.value) : null; } catch (_) { obj = null; }
+  var wasEmpty = !ta.value.trim();
+  var obj = null; try { obj = !wasEmpty ? JSON.parse(ta.value) : null; } catch (_) { obj = null; }
   if (obj && Array.isArray(obj.rules)) {
-    if (!obj.rules.some(function (r) { return (r.suffixes || []).indexOf(suf) >= 0; })) obj.rules.push(rule);
-  } else obj = { schema_version: '1.0', rules_version: 'user-' + today(), rules: [rule] };
+    if (!obj.rules.some(function (r) { return r && (r.id === rule.id || (r.suffixes || []).indexOf(suf) >= 0); })) obj.rules.push(rule);
+  } else {
+    obj = { schema_version: '1.0', rules_version: 'user-' + today(), rules: [rule] };
+    ta.dataset.needsMerge = '1';
+  }
   ta.value = JSON.stringify(obj, null, 2);
   S.open.rules = true; var rb = $('#rules'); if (rb) rb.classList.add('open');
-  toast('已加入规则模板（' + suf + '），改好 app / category 后点「导入」');
+  if (wasEmpty) {
+    api.getSafe('/api/dpi_rules', null, null).then(function (r) {
+      if (!r || !r.rules || !ta.isConnected) return;
+      if (document.activeElement === ta) return;
+      var cur = null; try { cur = ta.value.trim() ? JSON.parse(ta.value) : null; } catch (_) { cur = null; }
+      if (!cur || !Array.isArray(cur.rules)) return;
+      var merged = mergeCustomDpiRules(r.rules, cur);
+      ta.value = JSON.stringify(merged, null, 2);
+      ta.dataset.exported = '1';
+      delete ta.dataset.needsMerge;
+    });
+  }
+  toast('已加入规则模板（' + suf + '），改好 app / category 后点「保存并重载」');
 }
 function rulesOut(t, cls) { var o = $('#rules-out'); if (!o) return; o.hidden = false; o.textContent = t; o.style.color = cls === 'err' ? 'var(--badge-red)' : ''; }
 function rulesAct(act) {
   var ta = $('#rules-text');
   if (act === 'rules-export') {
     rulesOut('读取中…');
-    return api.get('/api/dpi_rules', null, { timeout: 15000, maxTime: 13 }).then(function (r) { ta.value = typeof r.rules === 'string' ? r.rules : JSON.stringify(r.rules || r, null, 2); rulesOut('已读取 · 来源 ' + (r.source || '—') + ' · ' + (ta.value.length / 1024).toFixed(1) + ' KB'); }).catch(function (e) { rulesOut(errText(e), 'err'); });
+    return api.get('/api/dpi_rules', null, { timeout: 15000, maxTime: 13 }).then(function (r) {
+      ta.value = typeof r.rules === 'string' ? r.rules : JSON.stringify(r.rules || r, null, 2);
+      ta.dataset.exported = '1';
+      delete ta.dataset.needsMerge;
+      rulesOut('已读取 · 来源 ' + (r.source || '—') + ' · ' + (ta.value.length / 1024).toFixed(1) + ' KB');
+    }).catch(function (e) { rulesOut(errText(e), 'err'); });
   }
   if (act === 'rules-import') {
     var txt = ta.value.trim(); if (!txt) { toast('先粘贴规则 JSON', 'warn'); return; }
-    try { JSON.parse(txt); } catch (e) { rulesOut('JSON 格式错误：' + e.message, 'err'); return; }
+    var parsed;
+    try { parsed = JSON.parse(txt); } catch (e) { rulesOut('JSON 格式错误：' + e.message, 'err'); return; }
+    if (!parsed || !Array.isArray(parsed.rules)) { rulesOut('JSON 缺少顶层 rules 数组', 'err'); return; }
     if (txt.length > 512 * 1024) { rulesOut('超过 512 KB', 'err'); return; }
-    return confirmSheet('导入规则库？', '会覆盖当前的自定义规则库（内置规则不受影响），dpid 随后自动重载。', '导入', { safe: true }).then(function (ok) {
+    var shouldMerge = ta.dataset.exported !== '1' || ta.dataset.needsMerge === '1';
+    var desc = shouldMerge
+      ? '将与当前已有自定义规则按 id 合并保存（保留既有自定义规则，内置规则不受影响），dpid 随后自动重载。'
+      : '将保存当前编辑的自定义规则库（内置规则不受影响），dpid 随后自动重载。';
+    return confirmSheet('保存自定义规则库？', desc, '保存', { safe: true }).then(function (ok) {
       if (!ok) return;
-      rulesOut('导入中…');
-      api.post('/api/dpi_rules', { rules: txt }, { timeout: 30000, maxTime: 28 }).then(function (r) { if (r.ok === false) throw new Error(r.error || '导入失败'); rulesOut(r.detail || '已导入'); toast('规则库已导入'); }).catch(function (e) { rulesOut(errText(e), 'err'); });
+      rulesOut('保存中…');
+      var prep = shouldMerge
+        ? api.getSafe('/api/dpi_rules', null, null).then(function (r0) {
+            var finObj = (r0 && r0.rules) ? mergeCustomDpiRules(r0.rules, parsed) : parsed;
+            var finTxt = JSON.stringify(finObj, null, 2);
+            if (finTxt.length > 512 * 1024) throw new Error('合并后超过 512 KB');
+            if (ta && ta.isConnected) { ta.value = finTxt; ta.dataset.exported = '1'; delete ta.dataset.needsMerge; }
+            return finTxt;
+          })
+        : Promise.resolve(txt);
+      return prep.then(function (sendTxt) {
+        return api.post('/api/dpi_rules', { rules: sendTxt }, { timeout: 30000, maxTime: 28 });
+      }).then(function (r) {
+        if (r.ok === false) throw new Error(r.error || '导入失败');
+        rulesOut(r.detail || '已保存');
+        toast('规则库已保存并重载');
+      }).catch(function (e) { rulesOut(errText(e), 'err'); });
     });
   }
   if (act === 'rules-reset') {
     return confirmSheet('恢复内置规则库？', '删除自定义规则，回到模块自带的规则库。', '恢复').then(function (ok) {
       if (!ok) return;
-      api.action('dpi_rules_reset', {}, { timeout: 30000, maxTime: 28 }).then(function (r) { rulesOut(r.detail || '已恢复内置'); ta.value = ''; toast('已恢复内置规则库'); }).catch(function (e) { rulesOut(errText(e), 'err'); });
+      api.action('dpi_rules_reset', {}, { timeout: 30000, maxTime: 28 }).then(function (r) { rulesOut(r.detail || '已恢复内置'); ta.value = ''; delete ta.dataset.exported; delete ta.dataset.needsMerge; toast('已恢复内置规则库'); }).catch(function (e) { rulesOut(errText(e), 'err'); });
     });
   }
   if (act === 'rules-update') {

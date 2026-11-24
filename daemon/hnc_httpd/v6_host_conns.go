@@ -257,13 +257,35 @@ func hostConnParseProcNetLine(line, proto string, isV6File bool) (hostConnSockEn
 	}, true
 }
 
+func hostConnExtractProcLocalAddr(line string, isV6File bool) (string, bool) {
+	fp := ctFieldsPool.Get().(*[]string)
+	f := splitASCIIFieldsInto(*fp, line)
+	defer func() {
+		*fp = f[:0]
+		ctFieldsPool.Put(fp)
+	}()
+	if len(f) < 4 || f[0] == "sl" {
+		return "", false
+	}
+	srcAddr, _, ok := hostConnParseAddrPort(f[1], isV6File)
+	if !ok {
+		return "", false
+	}
+	srcAddr = srcAddr.Unmap()
+	if !srcAddr.IsValid() || srcAddr.IsUnspecified() || srcAddr.IsLoopback() || srcAddr.IsMulticast() {
+		return "", false
+	}
+	return srcAddr.String(), true
+}
+
 type hostConnProcSnapshot struct {
-	at       time.Time
-	procRoot string
-	list     []hostConnSockEntry
-	byKey    map[string]hostConnSockEntry
-	byRevKey map[string]hostConnSockEntry
-	readable bool
+	at         time.Time
+	procRoot   string
+	list       []hostConnSockEntry
+	byKey      map[string]hostConnSockEntry
+	byRevKey   map[string]hostConnSockEntry
+	localAddrs map[string]bool
+	readable   bool
 }
 
 var hostConnProcCache struct {
@@ -317,6 +339,7 @@ func hostConnReadProcSnapshot() *hostConnProcSnapshot {
 
 	byKey := make(map[string]hostConnSockEntry, 64)
 	byRev := make(map[string]hostConnSockEntry, 64)
+	localAddrs := make(map[string]bool, 16)
 	anyReadable := false
 
 	bufPtr := ctScanBufPool.Get().(*[]byte)
@@ -340,7 +363,11 @@ func hostConnReadProcSnapshot() *hostConnProcSnapshot {
 			if lineCnt > hostConnMaxProcLines {
 				break
 			}
-			ent, ok := hostConnParseProcNetLine(sc.Text(), sp.proto, sp.isV6)
+			ln := sc.Text()
+			if la, ok := hostConnExtractProcLocalAddr(ln, sp.isV6); ok {
+				localAddrs[la] = true
+			}
+			ent, ok := hostConnParseProcNetLine(ln, sp.proto, sp.isV6)
 			if !ok {
 				continue
 			}
@@ -362,12 +389,13 @@ func hostConnReadProcSnapshot() *hostConnProcSnapshot {
 	})
 
 	snap := &hostConnProcSnapshot{
-		at:       now,
-		procRoot: procRoot,
-		list:     list,
-		byKey:    byKey,
-		byRevKey: byRev,
-		readable: anyReadable,
+		at:         now,
+		procRoot:   procRoot,
+		list:       list,
+		byKey:      byKey,
+		byRevKey:   byRev,
+		localAddrs: localAddrs,
+		readable:   anyReadable,
 	}
 
 	hostConnProcCache.mu.Lock()
@@ -633,7 +661,86 @@ func hostConnLookupPkgLabel(hncDir, pkg string) string {
 	return res.Display(pkg)
 }
 
-// scalpelResolveHostUID 解析 Android UID（含多用户/分身 userId = uid/100000, appId = uid%100000）至包名与中文应用名。
+const (
+	scalpelHostPerUserRange  = 100000
+	scalpelHostAppMinID      = 10000
+	scalpelHostAppMaxID      = 19999
+	scalpelHostSandboxMinID  = 20000
+	scalpelHostSandboxMaxID  = 29999
+	scalpelHostSandboxOffset = 10000
+	scalpelHostIsolatedMinID = 90000
+)
+
+func scalpelSplitAndroidUID(uid int) (userID, appID int) {
+	if uid < 0 {
+		return -1, -1
+	}
+	return uid / scalpelHostPerUserRange, uid % scalpelHostPerUserRange
+}
+
+func scalpelIsForbiddenHostUID(uid int) (sysUID bool, isolatedUID bool) {
+	if uid < 0 {
+		return false, false
+	}
+	_, appID := scalpelSplitAndroidUID(uid)
+	if appID < scalpelHostAppMinID {
+		return true, false
+	}
+	if appID >= scalpelHostIsolatedMinID {
+		return false, true
+	}
+	return false, false
+}
+
+// scalpelPairHostSandboxUID 按 uid % 100000 双向配对主应用 (10000..19999) 与 SDK 沙盒 (20000..29999),
+// 严禁触碰 < 10000、30000..89999 与 90000+ 隔离进程区间。
+func scalpelPairHostSandboxUID(uid int) (peerUID int, hasPeer bool) {
+	if uid < scalpelHostAppMinID {
+		return 0, false
+	}
+	userID, appID := scalpelSplitAndroidUID(uid)
+	switch {
+	case appID >= scalpelHostAppMinID && appID <= scalpelHostAppMaxID:
+		return userID*scalpelHostPerUserRange + appID + scalpelHostSandboxOffset, true
+	case appID >= scalpelHostSandboxMinID && appID <= scalpelHostSandboxMaxID:
+		return userID*scalpelHostPerUserRange + appID - scalpelHostSandboxOffset, true
+	default:
+		return 0, false
+	}
+}
+
+func scalpelOrderedHostFreezeUIDs(uid int) []int {
+	sysUID, isolatedUID := scalpelIsForbiddenHostUID(uid)
+	if uid < scalpelHostAppMinID || sysUID || isolatedUID {
+		return nil
+	}
+	peer, ok := scalpelPairHostSandboxUID(uid)
+	if !ok {
+		return []int{uid}
+	}
+	if uid < peer {
+		return []int{uid, peer}
+	}
+	return []int{peer, uid}
+}
+
+func scalpelSameOrPairedHostUID(u1, u2 int) bool {
+	if u1 < scalpelHostAppMinID || u2 < scalpelHostAppMinID {
+		return false
+	}
+	s1, iso1 := scalpelIsForbiddenHostUID(u1)
+	s2, iso2 := scalpelIsForbiddenHostUID(u2)
+	if s1 || iso1 || s2 || iso2 {
+		return false
+	}
+	if u1 == u2 {
+		return true
+	}
+	peer, ok := scalpelPairHostSandboxUID(u1)
+	return ok && peer == u2
+}
+
+// scalpelResolveHostUID 解析 Android UID（含多用户/分身 userId = uid/100000, appId = uid%100000 及 SDK 沙盒反查）至包名与中文应用名。
 func scalpelResolveHostUID(hncDir string, uid int) hostConnIdentity {
 	if uid < 0 {
 		return hostConnIdentity{
@@ -642,8 +749,7 @@ func scalpelResolveHostUID(hncDir string, uid int) hostConnIdentity {
 			AppName: "本机连接",
 		}
 	}
-	userID := uid / 100000
-	appID := uid % 100000
+	userID, appID := scalpelSplitAndroidUID(uid)
 	isClone := userID > 0
 
 	withCloneSuffix := func(label string) string {
@@ -655,7 +761,7 @@ func scalpelResolveHostUID(hncDir string, uid int) hostConnIdentity {
 
 	pkgsMap := hostConnLoadPackagesMap()
 
-	if appID < 10000 {
+	if appID < scalpelHostAppMinID {
 		id := hostConnIdentity{
 			UID:      uid,
 			UserID:   userID,
@@ -686,6 +792,18 @@ func scalpelResolveHostUID(hncDir string, uid int) hostConnIdentity {
 		return id
 	}
 
+	if appID >= scalpelHostIsolatedMinID {
+		return hostConnIdentity{
+			UID:      uid,
+			UserID:   userID,
+			AppID:    appID,
+			Package:  fmt.Sprintf("isolated:%d", appID),
+			AppName:  withCloneSuffix(fmt.Sprintf("隔离沙盒进程 (%d)", appID)),
+			IsSystem: true,
+			IsClone:  isClone,
+		}
+	}
+
 	var (
 		rec   hostConnPkgRecord
 		found bool
@@ -694,6 +812,16 @@ func scalpelResolveHostUID(hncDir string, uid int) hostConnIdentity {
 		rec, found = pkgsMap[uid]
 		if !found && userID > 0 {
 			rec, found = pkgsMap[appID]
+		}
+		// Android 13+ SDK 沙盒 (20000..29999) 回退反查同用户或主用户宿主应用包名
+		if !found && appID >= scalpelHostSandboxMinID && appID <= scalpelHostSandboxMaxID {
+			hostAppID := appID - scalpelHostSandboxOffset
+			if userID > 0 {
+				rec, found = pkgsMap[userID*scalpelHostPerUserRange+hostAppID]
+			}
+			if !found {
+				rec, found = pkgsMap[hostAppID]
+			}
 		}
 	}
 	if found && rec.PrimaryPkg != "" {
@@ -739,10 +867,10 @@ func scalpelIsProtectedHostIdentity(id hostConnIdentity) (bool, string) {
 }
 
 // scalpelDetectCleartextRisk 标记 L1 明文/绕过风险:
-//   - uid >= 10000 直连 :53 -> "dns_direct"
-//   - TCP :80/:8080/:8000  -> "http_cleartext"
+//   - appId >= 10000 直连 :53 -> "dns_direct"
+//   - TCP :80/:8080/:8000     -> "http_cleartext"
 func scalpelDetectCleartextRisk(proto string, dport int, uid int) string {
-	if dport == 53 && uid >= 10000 {
+	if dport == 53 && uid >= scalpelHostAppMinID && (uid%scalpelHostPerUserRange) >= scalpelHostAppMinID {
 		return "dns_direct"
 	}
 	if proto == "tcp" && (dport == 80 || dport == 8080 || dport == 8000) {
@@ -1013,9 +1141,10 @@ func evaluateScalpelHostGuard(s *server, norm ScalpelTuple, mode string, reqUID 
 	}
 	id = scalpelResolveHostUID(hncDir, effectiveUID)
 
-	// 门禁 3: 严禁斩断核心系统守护进程
-	//   - cut_freeze_15m 强制要求 uid >= 10000
-	//   - cut_once 拒绝 uid >= 0 && uid < 10000 的系统 UID；反查不到 UID (<0) 时仅允许非 53/853/67/68 的精确五元组 cut_once
+	// 门禁 3: 严禁斩断核心系统守护进程与隔离沙盒进程 (按 uid % 100000 覆盖多用户/应用分身)
+	//   - cut_freeze_15m 强制要求有效应用 UID (appId 在 10000..89999)
+	//   - cut_once 拒绝 appId < 10000 系统 UID 与 appId >= 90000 隔离进程；反查不到 UID (<0) 时仅允许非 53/853/67/68 的精确五元组 cut_once
+	sysUID, isolatedUID := scalpelIsForbiddenHostUID(effectiveUID)
 	if mode == scalpelModeFreeze15m {
 		if effectiveUID < 0 {
 			return effectiveUID, id, &scalpelFreezeGuardError{
@@ -1024,19 +1153,33 @@ func evaluateScalpelHostGuard(s *server, norm ScalpelTuple, mode string, reqUID 
 				Detail:     "目标本机连接已释放无法确认所属应用 UID，已拒绝 15 分钟冻结以免误伤系统组件；仅允许使用 cut_once 执行一次性精确五元组秒斩",
 			}
 		}
-		if effectiveUID < 10000 {
+		if sysUID {
 			return effectiveUID, id, &scalpelFreezeGuardError{
 				ReasonCode: "host_system_uid_blocked",
 				Vendor:     "Host System Guard",
-				Detail:     fmt.Sprintf("目标连接归属核心系统进程 %s (UID=%d < 10000)，严禁执行本机冻结以防手机断网或系统故障", id.AppName, effectiveUID),
+				Detail:     fmt.Sprintf("目标连接归属核心系统进程 %s (UID=%d, appId < 10000)，严禁执行本机冻结以防手机断网或系统故障", id.AppName, effectiveUID),
+			}
+		}
+		if isolatedUID {
+			return effectiveUID, id, &scalpelFreezeGuardError{
+				ReasonCode: "host_isolated_uid_blocked",
+				Vendor:     "Host System Guard",
+				Detail:     fmt.Sprintf("目标连接归属动态隔离沙盒进程 %s (UID=%d, appId >= 90000)，严禁下发持久化冻结规则以防 UID 回收复用误伤系统 WebView 或其他应用", id.AppName, effectiveUID),
 			}
 		}
 	} else {
-		if effectiveUID >= 0 && effectiveUID < 10000 {
+		if effectiveUID >= 0 && sysUID {
 			return effectiveUID, id, &scalpelFreezeGuardError{
 				ReasonCode: "host_system_uid_blocked",
 				Vendor:     "Host System Guard",
-				Detail:     fmt.Sprintf("目标连接归属关键系统守护进程 %s (UID=%d < 10000)，严禁斩流以防网络栈或电话基带异常", id.AppName, effectiveUID),
+				Detail:     fmt.Sprintf("目标连接归属关键系统守护进程 %s (UID=%d, appId < 10000)，严禁斩流以防网络栈或电话基带异常", id.AppName, effectiveUID),
+			}
+		}
+		if effectiveUID >= 0 && isolatedUID {
+			return effectiveUID, id, &scalpelFreezeGuardError{
+				ReasonCode: "host_isolated_uid_blocked",
+				Vendor:     "Host System Guard",
+				Detail:     fmt.Sprintf("目标连接归属系统隔离沙盒进程 %s (UID=%d, appId >= 90000)，已拒绝斩流以防误伤系统 WebView 渲染沙盒", id.AppName, effectiveUID),
 			}
 		}
 		if effectiveUID < 0 && (scalpelIsUnknownUIDBlockedPort(norm.Sport) || scalpelIsUnknownUIDBlockedPort(norm.Dport)) {
@@ -1052,12 +1195,28 @@ func evaluateScalpelHostGuard(s *server, norm ScalpelTuple, mode string, reqUID 
 		}
 	}
 
-	// 门禁 4: 严禁保护包名被冻结或斩断 (Root 管理器与宿主容器)
+	// 门禁 4: 严禁保护包名被冻结或斩断 (含按 uid % 100000 双向配对主应用 10000..19999 与 SDK 沙盒 20000..29999)
 	if protected, hitPkg := scalpelIsProtectedHostIdentity(id); protected {
 		return effectiveUID, id, &scalpelFreezeGuardError{
 			ReasonCode: "host_protected_package_blocked",
 			Vendor:     hitPkg,
 			Detail:     fmt.Sprintf("应用 %s (%s) 属于受保护的核心管理器或运行宿主，严禁对其下发本机阻断规则", id.AppName, hitPkg),
+		}
+	}
+	if peerUID, hasPeer := scalpelPairHostSandboxUID(effectiveUID); hasPeer {
+		peerID := scalpelResolveHostUID(hncDir, peerUID)
+		if protected, hitPkg := scalpelIsProtectedHostIdentity(peerID); protected {
+			if id.Package == "" {
+				id.Package = peerID.Package
+			}
+			if (id.AppName == "" || strings.HasPrefix(id.AppName, "UID ")) && peerID.AppName != "" {
+				id.AppName = peerID.AppName
+			}
+			return effectiveUID, id, &scalpelFreezeGuardError{
+				ReasonCode: "host_protected_package_blocked",
+				Vendor:     hitPkg,
+				Detail:     fmt.Sprintf("应用 %s (%s) 属于受保护的核心管理器或运行宿主（配对宿主/沙盒 UID=%d），严禁对其下发本机阻断规则", id.AppName, hitPkg, peerUID),
+			}
 		}
 	}
 
@@ -1073,7 +1232,8 @@ func evaluateScalpelHostGuard(s *server, norm ScalpelTuple, mode string, reqUID 
 
 // buildScalpelHostRestorePayload 纯函数生成 *filter 表 HNC_SCALPEL_HOST 子链的 --noflush 内存载荷:
 //   - 当无该协议栈活跃规则时生成纯空链，保持零报文匹配开销；
-//   - 当存在活跃规则时，前 3 条固定写入 -o lo 与 8443,8444,8080 双向免死 RETURN 规则。
+//   - 当存在活跃规则时，前 3 条固定写入 -o lo 与 8443,8444,8080 双向免死 RETURN 规则；
+//   - 15m 端点冻结按 uid % 100000 双向配对主应用 (10000..19999) 与 SDK 沙盒 (20000..29999) 同步生成规则。
 func buildScalpelHostRestorePayload(isIPv6 bool, rules []ScalpelActiveRule) string {
 	var b strings.Builder
 	b.WriteString("*filter\n")
@@ -1094,6 +1254,7 @@ func buildScalpelHostRestorePayload(isIPv6 bool, rules []ScalpelActiveRule) stri
 	b.WriteString("-A " + scalpelHostChainName + " -p tcp -m multiport --sports 8443,8444,8080 -j RETURN\n")
 	b.WriteString("-A " + scalpelHostChainName + " -p tcp -m multiport --dports 8443,8444,8080 -j RETURN\n")
 
+	emittedFreeze := make(map[string]bool, activeForFamily*2)
 	for _, r := range rules {
 		if r.IsIPv6 != isIPv6 {
 			continue
@@ -1116,8 +1277,21 @@ func buildScalpelHostRestorePayload(isIPv6 bool, rules []ScalpelActiveRule) stri
 					scalpelHostChainName, t.Proto, t.SrcIP, t.DstIP, t.Sport, t.Dport, rejectWith)
 			}
 		} else {
-			fmt.Fprintf(&b, "-A %s -m owner --uid-owner %d -d %s -p %s --dport %d -j REJECT --reject-with %s\n",
-				scalpelHostChainName, r.UID, t.DstIP, t.Proto, t.Dport, rejectWith)
+			freezeUIDs := scalpelOrderedHostFreezeUIDs(r.UID)
+			if len(freezeUIDs) == 0 && r.HasUID && r.UID >= scalpelHostAppMinID {
+				if sysU, isoU := scalpelIsForbiddenHostUID(r.UID); !sysU && !isoU {
+					freezeUIDs = []int{r.UID}
+				}
+			}
+			for _, fUID := range freezeUIDs {
+				dedupKey := fmt.Sprintf("%d|%s|%s|%d", fUID, t.Proto, t.DstIP, t.Dport)
+				if emittedFreeze[dedupKey] {
+					continue
+				}
+				emittedFreeze[dedupKey] = true
+				fmt.Fprintf(&b, "-A %s -m owner --uid-owner %d -d %s -p %s --dport %d -j REJECT --reject-with %s\n",
+					scalpelHostChainName, fUID, t.DstIP, t.Proto, t.Dport, rejectWith)
+			}
 		}
 	}
 	b.WriteString("COMMIT\n")
@@ -1131,6 +1305,7 @@ type hostConnIfaceSnap struct {
 	localIPs     map[string]bool
 	tetherSubV4  netip.Prefix
 	hasTetherSub bool
+	tetherSubsV6 []netip.Prefix
 }
 
 var hostConnIfaceCache struct {
@@ -1142,6 +1317,12 @@ var hostConnDefaultTetherPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("192.168.43.0/24"),
 	netip.MustParsePrefix("192.168.42.0/24"),
 	netip.MustParsePrefix("192.168.49.0/24"),
+}
+
+func hostConnInvalidateIfaceCache() {
+	hostConnIfaceCache.mu.Lock()
+	hostConnIfaceCache.byHotspotIf = nil
+	hostConnIfaceCache.mu.Unlock()
 }
 
 func hostConnLocalIfaceSnapshot(hotspotIface string) *hostConnIfaceSnap {
@@ -1159,6 +1340,7 @@ func hostConnLocalIfaceSnapshot(hotspotIface string) *hostConnIfaceSnap {
 	localIPs := make(map[string]bool, 8)
 	var tetherSub netip.Prefix
 	hasTether := false
+	var tetherSubsV6 []netip.Prefix
 
 	ifaces, err := net.Interfaces()
 	if err == nil {
@@ -1184,11 +1366,28 @@ func hostConnLocalIfaceSnapshot(hotspotIface string) *hostConnIfaceSnap {
 					continue
 				}
 				localIPs[addr.String()] = true
-				if hotspotIface != "" && ifc.Name == hotspotIface && addr.Is4() && !hasTether {
-					ones, bits := ipn.Mask.Size()
-					if bits == 32 && ones > 0 {
-						tetherSub = netip.PrefixFrom(addr, ones).Masked()
-						hasTether = true
+				if hotspotIface != "" && ifc.Name == hotspotIface {
+					if addr.Is4() && !hasTether {
+						ones, bits := ipn.Mask.Size()
+						if bits == 32 && ones > 0 {
+							tetherSub = netip.PrefixFrom(addr, ones).Masked()
+							hasTether = true
+						}
+					} else if addr.Is6() && !addr.IsLinkLocalUnicast() && !addr.IsLinkLocalMulticast() && !addr.IsMulticast() {
+						ones, bits := ipn.Mask.Size()
+						if bits == 128 && ones > 0 && ones < 128 {
+							pfx6 := netip.PrefixFrom(addr, ones).Masked()
+							dup := false
+							for _, ex := range tetherSubsV6 {
+								if ex == pfx6 {
+									dup = true
+									break
+								}
+							}
+							if !dup {
+								tetherSubsV6 = append(tetherSubsV6, pfx6)
+							}
+						}
 					}
 				}
 			}
@@ -1200,11 +1399,173 @@ func hostConnLocalIfaceSnapshot(hotspotIface string) *hostConnIfaceSnap {
 		localIPs:     localIPs,
 		tetherSubV4:  tetherSub,
 		hasTetherSub: hasTether,
+		tetherSubsV6: tetherSubsV6,
 	}
 	hostConnIfaceCache.mu.Lock()
 	hostConnIfaceCache.byHotspotIf[hotspotIface] = snap
 	hostConnIfaceCache.mu.Unlock()
 	return snap
+}
+
+type scalpelTetherV6PrefixOwner struct {
+	prefix    netip.Prefix
+	uniqueMAC string
+	ambiguous bool
+}
+
+func scalpelIsRoutableUnicastV6(addr netip.Addr) bool {
+	return addr.IsValid() && addr.Is6() &&
+		!addr.IsLoopback() && !addr.IsLinkLocalUnicast() &&
+		!addr.IsLinkLocalMulticast() && !addr.IsMulticast() && !addr.IsUnspecified()
+}
+
+func scalpelIsSelfLocalAddr(ipStr, hotspotGatewayIP string, ifSnap *hostConnIfaceSnap, procSnap *hostConnProcSnapshot) bool {
+	if ipStr == "" {
+		return false
+	}
+	if hotspotGatewayIP != "" && ipStr == hotspotGatewayIP {
+		return true
+	}
+	if ifSnap != nil && ifSnap.localIPs[ipStr] {
+		return true
+	}
+	if procSnap != nil && procSnap.localAddrs[ipStr] {
+		return true
+	}
+	return false
+}
+
+// scalpelBuildTetherV6PrefixOwners 从已知热点客户端 IPv6 地址构建 /64 前缀归属表，
+// 用于关联同一热点客户端尚未入 macByIP 的 RFC 4941 临时隐私 IPv6 地址。
+func scalpelBuildTetherV6PrefixOwners(macByIP map[string]string, hotspotGatewayIP string, ifSnap *hostConnIfaceSnap, procSnap *hostConnProcSnapshot) []scalpelTetherV6PrefixOwner {
+	if len(macByIP) == 0 {
+		return nil
+	}
+	var out []scalpelTetherV6PrefixOwner
+	for ipStr, rawMAC := range macByIP {
+		cMac := canonMAC(rawMAC)
+		if cMac == "" || scalpelIsSelfLocalAddr(ipStr, hotspotGatewayIP, ifSnap, procSnap) {
+			continue
+		}
+		addr, err := netip.ParseAddr(ipStr)
+		if err != nil {
+			continue
+		}
+		addr = addr.Unmap()
+		if !scalpelIsRoutableUnicastV6(addr) {
+			continue
+		}
+		pfx64 := netip.PrefixFrom(addr, 64).Masked()
+		found := false
+		for i := range out {
+			if out[i].prefix == pfx64 {
+				found = true
+				if !out[i].ambiguous && out[i].uniqueMAC != cMac {
+					out[i].ambiguous = true
+					out[i].uniqueMAC = ""
+				}
+				break
+			}
+		}
+		if !found {
+			out = append(out, scalpelTetherV6PrefixOwner{
+				prefix:    pfx64,
+				uniqueMAC: cMac,
+			})
+		}
+	}
+	return out
+}
+
+// scalpelBuildDeviceDirectory 在 s.buildDeviceDirectory() 基础上补齐 data/devices.json 中的 ipv6/ip6/ips 多地址映射。
+func scalpelBuildDeviceDirectory(s *server) (nameByMAC map[string]string, macByIP map[string]string) {
+	if s == nil || s.hncDir == "" {
+		return map[string]string{}, map[string]string{}
+	}
+	nameByMAC, macByIP = s.buildDeviceDirectory()
+	addIP := func(m, rawIP string) {
+		trimmed := strings.TrimSpace(rawIP)
+		if m == "" || trimmed == "" || trimmed == "-" {
+			return
+		}
+		if addr, err := netip.ParseAddr(trimmed); err == nil {
+			canon := addr.Unmap().String()
+			if macByIP[canon] == "" {
+				macByIP[canon] = m
+			}
+		}
+	}
+	var raw any
+	var rerr error
+	if s.jsonCache != nil {
+		raw, rerr = s.jsonCache.read(filepath.Join(s.hncDir, "data", "devices.json"))
+	} else {
+		raw, rerr = readJSON(filepath.Join(s.hncDir, "data", "devices.json"))
+	}
+	if rerr == nil {
+		if dm, ok := raw.(map[string]any); ok {
+			for mac, v := range dm {
+				cMac := canonMAC(mac)
+				d, _ := v.(map[string]any)
+				if cMac == "" || d == nil {
+					continue
+				}
+				for _, k := range []string{"ipv6", "ip6", "ips", "client_ips"} {
+					val := d[k]
+					switch tv := val.(type) {
+					case string:
+						addIP(cMac, tv)
+					case []any:
+						for _, elem := range tv {
+							addIP(cMac, asString(elem))
+						}
+					case []string:
+						for _, elem := range tv {
+							addIP(cMac, elem)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nameByMAC, macByIP
+}
+
+func scalpelInferUniqueV6PrefixMAC(ipStr string, macByIP map[string]string) string {
+	addr, err := netip.ParseAddr(ipStr)
+	if err != nil {
+		return ""
+	}
+	addr = addr.Unmap()
+	if !scalpelIsRoutableUnicastV6(addr) {
+		return ""
+	}
+	owners := scalpelBuildTetherV6PrefixOwners(macByIP, "", nil, nil)
+	for _, ow := range owners {
+		if ow.prefix.Contains(addr) {
+			return ow.uniqueMAC
+		}
+	}
+	return ""
+}
+
+func scalpelMatchExplicitTetherV6Prefix(addr netip.Addr, ifSnap *hostConnIfaceSnap, v6Owners []scalpelTetherV6PrefixOwner) (matched bool, uniqueMAC string) {
+	if !scalpelIsRoutableUnicastV6(addr) {
+		return false, ""
+	}
+	for _, ow := range v6Owners {
+		if ow.prefix.Contains(addr) {
+			return true, ow.uniqueMAC
+		}
+	}
+	if ifSnap != nil {
+		for _, pfx := range ifSnap.tetherSubsV6 {
+			if pfx.Contains(addr) {
+				return true, ""
+			}
+		}
+	}
+	return false, ""
 }
 
 func scalpelIsLikelyUnregisteredTetherClient(ipStr, hotspotGatewayIP string, ifSnap *hostConnIfaceSnap) bool {
@@ -1213,9 +1574,6 @@ func scalpelIsLikelyUnregisteredTetherClient(ipStr, hotspotGatewayIP string, ifS
 		return false
 	}
 	addr = addr.Unmap()
-	if !addr.Is4() {
-		return false
-	}
 	canon := addr.String()
 	if hotspotGatewayIP != "" && canon == hotspotGatewayIP {
 		return false
@@ -1223,12 +1581,22 @@ func scalpelIsLikelyUnregisteredTetherClient(ipStr, hotspotGatewayIP string, ifS
 	if ifSnap != nil && ifSnap.localIPs[canon] {
 		return false
 	}
-	if ifSnap != nil && ifSnap.hasTetherSub && ifSnap.tetherSubV4.Contains(addr) {
-		return true
-	}
-	for _, pfx := range hostConnDefaultTetherPrefixes {
-		if pfx.Contains(addr) && !strings.HasSuffix(canon, ".1") {
+	if addr.Is4() {
+		if ifSnap != nil && ifSnap.hasTetherSub && ifSnap.tetherSubV4.Contains(addr) {
 			return true
+		}
+		for _, pfx := range hostConnDefaultTetherPrefixes {
+			if pfx.Contains(addr) && !strings.HasSuffix(canon, ".1") {
+				return true
+			}
+		}
+		return false
+	}
+	if scalpelIsRoutableUnicastV6(addr) && ifSnap != nil {
+		for _, pfx := range ifSnap.tetherSubsV6 {
+			if pfx.Contains(addr) {
+				return true
+			}
 		}
 	}
 	return false
@@ -1279,12 +1647,65 @@ func scalpelHotspotOnlineState(s *server) (hotspotActive bool, onlineCount int, 
 	return hotspotActive, onlineCount, hotspotIface, hotspotIP
 }
 
-// scalpelInferTargetScope 当 POST /api/v6/scalpel/cut 未显式指定 scope 时正交推断目标属于 "hotspot" 或 "host"。
+// scalpelInferTargetScope 当 POST /api/v6/scalpel/cut 未显式指定 scope（或陈旧标记未知 UID 热点临时 IPv6 流）时，
+// 正交推断目标属于 "hotspot" (FORWARD -> HNC_SCALPEL) 或 "host" (OUTPUT -> HNC_SCALPEL_HOST)。
 func scalpelInferTargetScope(s *server, norm ScalpelTuple, rawScope, rawMAC string, hasReqUID bool) (string, error) {
 	sc := strings.ToLower(strings.TrimSpace(rawScope))
 	switch sc {
-	case scalpelHostScopeHotspot, scalpelHostScopeHost:
-		return sc, nil
+	case scalpelHostScopeHotspot:
+		return scalpelHostScopeHotspot, nil
+	case scalpelHostScopeHost:
+		if hasReqUID || canonMAC(rawMAC) != "" || s == nil || s.hncDir == "" {
+			return scalpelHostScopeHost, nil
+		}
+		if scalpelIsWebUISelfPort(norm.Sport) || scalpelIsWebUISelfPort(norm.Dport) {
+			return scalpelHostScopeHost, nil
+		}
+		if srcA, err := netip.ParseAddr(norm.SrcIP); err == nil {
+			u := srcA.Unmap()
+			if u.IsLoopback() || u.IsLinkLocalUnicast() || u.IsLinkLocalMulticast() {
+				return scalpelHostScopeHost, nil
+			}
+		}
+		if dstA, err := netip.ParseAddr(norm.DstIP); err == nil {
+			u := dstA.Unmap()
+			if u.IsLoopback() || u.IsLinkLocalUnicast() || u.IsLinkLocalMulticast() {
+				return scalpelHostScopeHost, nil
+			}
+		}
+		if _, ok := scalpelLookupSocketUID(norm); ok {
+			return scalpelHostScopeHost, nil
+		}
+		hotspotActive, _, hsIface, hsIP := scalpelHotspotOnlineState(s)
+		if !hotspotActive {
+			return scalpelHostScopeHost, nil
+		}
+		_, macByIP := scalpelBuildDeviceDirectory(s)
+		if macByIP[norm.SrcIP] != "" || macByIP[norm.DstIP] != "" {
+			return scalpelHostScopeHotspot, nil
+		}
+		ifSnap := hostConnLocalIfaceSnapshot(hsIface)
+		procSnap := hostConnReadProcSnapshot()
+		if scalpelIsSelfLocalAddr(norm.SrcIP, hsIP, ifSnap, procSnap) {
+			return scalpelHostScopeHost, nil
+		}
+		if scalpelIsLikelyUnregisteredTetherClient(norm.SrcIP, hsIP, ifSnap) {
+			return scalpelHostScopeHotspot, nil
+		}
+		if srcA, err := netip.ParseAddr(norm.SrcIP); err == nil {
+			srcU := srcA.Unmap()
+			v6Owners := scalpelBuildTetherV6PrefixOwners(macByIP, hsIP, ifSnap, procSnap)
+			if matched, _ := scalpelMatchExplicitTetherV6Prefix(srcU, ifSnap, v6Owners); matched {
+				return scalpelHostScopeHotspot, nil
+			}
+			if procSnap != nil && procSnap.readable &&
+				scalpelIsRoutableUnicastV6(srcU) &&
+				!scalpelIsSelfLocalAddr(norm.DstIP, hsIP, ifSnap, procSnap) &&
+				!isPrivateIP(norm.DstIP) {
+				return scalpelHostScopeHotspot, nil
+			}
+		}
+		return scalpelHostScopeHost, nil
 	case "":
 	default:
 		return "", errors.New("scope must be hotspot or host")
@@ -1315,7 +1736,7 @@ func scalpelInferTargetScope(s *server, norm ScalpelTuple, rawScope, rawMAC stri
 		return scalpelHostScopeHotspot, nil
 	}
 
-	_, macByIP := s.buildDeviceDirectory()
+	_, macByIP := scalpelBuildDeviceDirectory(s)
 	if macByIP[norm.SrcIP] != "" || macByIP[norm.DstIP] != "" {
 		return scalpelHostScopeHotspot, nil
 	}
@@ -1326,11 +1747,18 @@ func scalpelInferTargetScope(s *server, norm ScalpelTuple, rawScope, rawMAC stri
 
 	hotspotActive, _, hsIface, hsIP := scalpelHotspotOnlineState(s)
 	ifSnap := hostConnLocalIfaceSnapshot(hsIface)
-	if (hsIP != "" && norm.SrcIP == hsIP) || (ifSnap != nil && ifSnap.localIPs[norm.SrcIP]) {
+	procSnap := hostConnReadProcSnapshot()
+	if scalpelIsSelfLocalAddr(norm.SrcIP, hsIP, ifSnap, procSnap) {
 		return scalpelHostScopeHost, nil
 	}
 	if scalpelIsLikelyUnregisteredTetherClient(norm.SrcIP, hsIP, ifSnap) {
 		return scalpelHostScopeHotspot, nil
+	}
+	if srcAddr, err := netip.ParseAddr(norm.SrcIP); err == nil {
+		v6Owners := scalpelBuildTetherV6PrefixOwners(macByIP, hsIP, ifSnap, procSnap)
+		if matched, _ := scalpelMatchExplicitTetherV6Prefix(srcAddr.Unmap(), ifSnap, v6Owners); matched {
+			return scalpelHostScopeHotspot, nil
+		}
 	}
 	if !hotspotActive {
 		return scalpelHostScopeHost, nil
@@ -1401,19 +1829,14 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 
 	hotspotActive, onlineCount, hsIface, hsIP := scalpelHotspotOnlineState(s)
 	ifSnap := hostConnLocalIfaceSnapshot(hsIface)
-	nameByMAC, macByIP := s.buildDeviceDirectory()
+	nameByMAC, macByIP := scalpelBuildDeviceDirectory(s)
+	v6PfxOwners := scalpelBuildTetherV6PrefixOwners(macByIP, hsIP, ifSnap, procSnap)
 	names := s.loadIPNames()
 	apps := s.loadIPApps()
 	fpSt, now := fpFor(s.hncDir), time.Now()
 
 	isGatewayAddr := func(ip string) bool {
-		if ip == "" {
-			return false
-		}
-		if hsIP != "" && ip == hsIP {
-			return true
-		}
-		return ifSnap != nil && ifSnap.localIPs[ip]
+		return scalpelIsSelfLocalAddr(ip, hsIP, ifSnap, procSnap)
 	}
 
 	frozenHotspot := func(mac, src, dst string, dport int, proto string) int64 {
@@ -1435,7 +1858,7 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 			if r.Mode != "freeze_15m" || r.Tuple.DstIP != dst || r.Tuple.Dport != dport || r.Tuple.Proto != proto {
 				continue
 			}
-			if uid >= 0 && r.UID == uid {
+			if uid >= 0 && (r.UID == uid || scalpelSameOrPairedHostUID(r.UID, uid)) {
 				return r.ExpiresUnix
 			}
 		}
@@ -1484,6 +1907,64 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 			appName = wellKnownSvc(proto, dport)
 		}
 		return
+	}
+
+	appendHotspotEntry := func(ent ctEntry, clientMAC, clientIP, remoteIP string, sport, dport int, reversed bool) {
+		upB, dnB := ent.UpB, ent.DnB
+		k := ent.key()
+		var upBps, dnBps float64
+		if ctSnap != nil {
+			upBps, dnBps = ctSnap.upBps[k], ctSnap.dnBps[k]
+		}
+		if reversed {
+			upB, dnB = ent.DnB, ent.UpB
+			upBps, dnBps = dnBps, upBps
+		}
+		devName := ""
+		if clientMAC != "" {
+			devName = nameByMAC[clientMAC]
+			if devName == "" {
+				devName = clientMAC
+			}
+		} else {
+			devName = clientIP
+		}
+		domain, domainSrc, appID, appName, appSrc, appConf, ja4, company, ownerJSON, isSDK := enrichTarget(k, ent.Proto, remoteIP, dport)
+		tt, tconf, _ := flowTrafficType(k)
+
+		out.HotspotList = append(out.HotspotList, scalpelClassifiedFlow{
+			Scope:       scalpelHostScopeHotspot,
+			FlowKey:     k,
+			Proto:       ent.Proto,
+			SrcIP:       clientIP,
+			Sport:       sport,
+			DstIP:       remoteIP,
+			Dport:       dport,
+			IsV6:        ent.Family == "ipv6",
+			State:       ent.State,
+			TTL:         ent.TTL,
+			MAC:         clientMAC,
+			DeviceName:  devName,
+			UID:         -1,
+			Company:     company,
+			OwnerJSON:   ownerJSON,
+			Domain:      domain,
+			DomainSrc:   domainSrc,
+			AppID:       appID,
+			AppName:     appName,
+			AppSrc:      appSrc,
+			AppConf:     appConf,
+			JA4:         ja4,
+			IsSDK:       isSDK,
+			UpBytes:     upB,
+			DownBytes:   dnB,
+			UpBps:       upBps,
+			DownBps:     dnBps,
+			Unreplied:   ent.Unrepl,
+			TrafficType: tt,
+			TrafficConf: tconf,
+			FrozenUntil: frozenHotspot(clientMAC, clientIP, remoteIP, dport, ent.Proto),
+		})
 	}
 
 	// 为 conntrack 建立五元组索引供 /proc/net 本机 socket 双向 JOIN 字节与速率
@@ -1541,67 +2022,11 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 			continue
 		}
 
-		clientMAC := macSrc
-		clientIP := ent.Src
-		remoteIP := ent.Dst
-		sport := ent.Sport
-		dport := ent.Dport
-		upB, dnB := ent.UpB, ent.DnB
-		k := ent.key()
-		var upBps, dnBps float64
-		if ctSnap != nil {
-			upBps, dnBps = ctSnap.upBps[k], ctSnap.dnBps[k]
+		if macSrc != "" {
+			appendHotspotEntry(ent, macSrc, ent.Src, ent.Dst, ent.Sport, ent.Dport, false)
+		} else {
+			appendHotspotEntry(ent, macDst, ent.Dst, ent.Src, ent.Dport, ent.Sport, true)
 		}
-		if clientMAC == "" && macDst != "" {
-			clientMAC = macDst
-			clientIP = ent.Dst
-			remoteIP = ent.Src
-			sport = ent.Dport
-			dport = ent.Sport
-			upB, dnB = ent.DnB, ent.UpB
-			upBps, dnBps = dnBps, upBps
-		}
-
-		devName := nameByMAC[clientMAC]
-		if devName == "" {
-			devName = clientMAC
-		}
-		domain, domainSrc, appID, appName, appSrc, appConf, ja4, company, ownerJSON, isSDK := enrichTarget(k, ent.Proto, remoteIP, dport)
-		tt, tconf, _ := flowTrafficType(k)
-
-		out.HotspotList = append(out.HotspotList, scalpelClassifiedFlow{
-			Scope:       scalpelHostScopeHotspot,
-			FlowKey:     k,
-			Proto:       ent.Proto,
-			SrcIP:       clientIP,
-			Sport:       sport,
-			DstIP:       remoteIP,
-			Dport:       dport,
-			IsV6:        ent.Family == "ipv6",
-			State:       ent.State,
-			TTL:         ent.TTL,
-			MAC:         clientMAC,
-			DeviceName:  devName,
-			UID:         -1,
-			Company:     company,
-			OwnerJSON:   ownerJSON,
-			Domain:      domain,
-			DomainSrc:   domainSrc,
-			AppID:       appID,
-			AppName:     appName,
-			AppSrc:      appSrc,
-			AppConf:     appConf,
-			JA4:         ja4,
-			IsSDK:       isSDK,
-			UpBytes:     upB,
-			DownBytes:   dnB,
-			UpBps:       upBps,
-			DownBps:     dnBps,
-			Unreplied:   ent.Unrepl,
-			TrafficType: tt,
-			TrafficConf: tconf,
-			FrozenUntil: frozenHotspot(clientMAC, clientIP, remoteIP, dport, ent.Proto),
-		})
 	}
 
 	// Step B: 四路内存 JOIN 构建手机本机连接 (scope == "host")
@@ -1617,6 +2042,11 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 			}
 			if scalpelIsLikelyUnregisteredTetherClient(sk.DstIP, hsIP, ifSnap) {
 				continue
+			}
+			if dstA, err := netip.ParseAddr(sk.DstIP); err == nil {
+				if matched, _ := scalpelMatchExplicitTetherV6Prefix(dstA.Unmap(), ifSnap, v6PfxOwners); matched {
+					continue
+				}
 			}
 
 			k := sk.key()
@@ -1703,15 +2133,69 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 		}
 	}
 
-	// B2) 合并 conntrack 中存在但已退出 /proc/net（如短命 UDP 流 / TIME_WAIT）的本机自身外联流
+	// B2) 对剩余未命中 /proc/net 活跃 socket 的 conntrack 条目做双域精准分流:
+	//   - 若命中下游热点子网、已知客户端 /64 前缀或热点激活态下的非本机临时隐私 IPv6 转发流 -> 归入 HotspotList (C058)；
+	//   - 仅本机自身短命/TIME_WAIT 外联流归入 HostList。
 	for i, ent := range ctEntries {
 		if usedCT[i] {
 			continue
 		}
-		if isPrivateIP(ent.Dst) {
+		srcAddr, errS := netip.ParseAddr(ent.Src)
+		dstAddr, errD := netip.ParseAddr(ent.Dst)
+		if errS != nil || errD != nil {
 			continue
 		}
-		if scalpelIsLikelyUnregisteredTetherClient(ent.Src, hsIP, ifSnap) {
+		srcU := srcAddr.Unmap()
+		dstU := dstAddr.Unmap()
+		if srcU.IsLoopback() || dstU.IsLoopback() || srcU.IsMulticast() || dstU.IsMulticast() {
+			continue
+		}
+
+		srcIsSelf := isGatewayAddr(ent.Src)
+		dstIsSelf := isGatewayAddr(ent.Dst)
+
+		// 1) 正向检查未入 macByIP 的热点客户端 (IPv4 热点网段 / IPv6 已知 /64 前缀 / 热点激活态非本机临时隐私 IPv6)
+		if !srcIsSelf {
+			srcExplicitTether := scalpelIsLikelyUnregisteredTetherClient(ent.Src, hsIP, ifSnap)
+			inferredMAC := ""
+			if !srcExplicitTether && srcU.Is6() {
+				srcExplicitTether, inferredMAC = scalpelMatchExplicitTetherV6Prefix(srcU, ifSnap, v6PfxOwners)
+			}
+			srcUnregHotspotV6 := !srcExplicitTether && hotspotActive &&
+				procSnap != nil && procSnap.readable &&
+				scalpelIsRoutableUnicastV6(srcU) && !dstIsSelf && !isPrivateIP(ent.Dst) &&
+				ent.State != "TIME_WAIT"
+
+			if srcExplicitTether || srcUnregHotspotV6 {
+				if (dstIsSelf || isPrivateIP(ent.Dst)) && scalpelIsGatewayLocalServicePort(ent.Dport) {
+					continue
+				}
+				if hotspotActive && !dstIsSelf {
+					appendHotspotEntry(ent, inferredMAC, ent.Src, ent.Dst, ent.Sport, ent.Dport, false)
+				}
+				continue
+			}
+		}
+
+		// 2) 反向检查确定性热点子网/前缀 (远端主动包先入 conntrack 的场景)
+		if !dstIsSelf && !srcIsSelf && !isPrivateIP(ent.Src) {
+			dstExplicitTether := scalpelIsLikelyUnregisteredTetherClient(ent.Dst, hsIP, ifSnap)
+			inferredMAC := ""
+			if !dstExplicitTether && dstU.Is6() {
+				dstExplicitTether, inferredMAC = scalpelMatchExplicitTetherV6Prefix(dstU, ifSnap, v6PfxOwners)
+			}
+			if dstExplicitTether {
+				if scalpelIsGatewayLocalServicePort(ent.Sport) {
+					continue
+				}
+				if hotspotActive {
+					appendHotspotEntry(ent, inferredMAC, ent.Dst, ent.Src, ent.Dport, ent.Sport, true)
+				}
+				continue
+			}
+		}
+
+		if isPrivateIP(ent.Dst) {
 			continue
 		}
 

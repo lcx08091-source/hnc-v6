@@ -20,10 +20,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -584,6 +587,14 @@ func readUplinkCapability(hncDir string) (bool, bool) {
 	return sup, known
 }
 
+func isZeroRateStr(r string) bool {
+	switch strings.ToLower(strings.TrimSpace(r)) {
+	case "0", "0kbit", "0mbit", "0gbit":
+		return true
+	}
+	return false
+}
+
 func numberStringPositive(s string) bool {
 	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	return err == nil && v > 0
@@ -591,16 +602,168 @@ func numberStringPositive(s string) bool {
 
 func rateStringPositive(r string) bool {
 	r = strings.TrimSpace(strings.ToLower(r))
-	if r == "" || r == "0" {
+	if r == "" || isZeroRateStr(r) {
 		return false
 	}
-	for _, suf := range []string{"kbit", "mbit"} {
+	for _, suf := range []string{"kbit", "mbit", "gbit"} {
 		if strings.HasSuffix(r, suf) {
 			n, err := strconv.Atoi(strings.TrimSuffix(r, suf))
 			return err == nil && n > 0
 		}
 	}
 	return numberStringPositive(r)
+}
+
+// blProcNetRoutePath 默认路由表路径(单测可替换为临时路由表 fixture)。
+var blProcNetRoutePath = "/proc/net/route"
+
+func parseDefaultGatewayIPsFromProcRoute(routePath string) map[string]bool {
+	out := map[string]bool{}
+	f, err := os.Open(routePath)
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	first := true
+	for sc.Scan() {
+		if first {
+			first = false
+			continue
+		}
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 8 {
+			continue
+		}
+		dst, err1 := strconv.ParseUint(fields[1], 16, 32)
+		gw, err2 := strconv.ParseUint(fields[2], 16, 32)
+		flags, err3 := strconv.ParseUint(fields[3], 16, 32)
+		mask, err4 := strconv.ParseUint(fields[7], 16, 32)
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+			continue
+		}
+		// RTF_UP=0x1, Destination=0, Mask=0, Gateway!=0
+		if dst != 0 || mask != 0 || (flags&0x1) == 0 || gw == 0 {
+			continue
+		}
+		var b [4]byte
+		binary.NativeEndian.PutUint32(b[:], uint32(gw))
+		ip := net.IPv4(b[0], b[1], b[2], b[3]).To4()
+		if ip != nil && !ip.IsUnspecified() {
+			out[ip.String()] = true
+		}
+	}
+	return out
+}
+
+func readPersistedDeviceIPFromRules(hncDir, mac string) string {
+	b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	var root map[string]interface{}
+	if json.Unmarshal(b, &root) != nil {
+		return ""
+	}
+	devs, _ := root["devices"].(map[string]interface{})
+	for k, v := range devs {
+		if strings.EqualFold(k, mac) {
+			if dm, ok := v.(map[string]interface{}); ok {
+				if ip, ok := dm["ip"].(string); ok {
+					ip = strings.TrimSpace(ip)
+					if ipv4RE.MatchString(ip) {
+						return ip
+					}
+				}
+			}
+			break
+		}
+	}
+	return ""
+}
+
+// isProtectedTargetForBlacklist 拦截拉黑受保护特殊/热点接口 MAC、本机自身 IP 及当前默认路由网关 IP/MAC。
+func isProtectedTargetForBlacklist(hncDir, mac string) (bool, string) {
+	if isProtectedMAC(hncDir, mac) {
+		return true, "cannot blacklist host/broadcast/null mac"
+	}
+	if ifs, err := net.Interfaces(); err == nil {
+		for _, ifi := range ifs {
+			if len(ifi.HardwareAddr) == 6 && strings.EqualFold(ifi.HardwareAddr.String(), mac) {
+				return true, "cannot blacklist host interface mac"
+			}
+		}
+	}
+	ownIPs := map[string]bool{}
+	for _, ifi := range webuiListIfaces() {
+		for _, ipn := range ifi.Addrs {
+			if ipn == nil || ipn.IP == nil || ipn.IP.IsUnspecified() || ipn.IP.IsMulticast() {
+				continue
+			}
+			if v4 := ipn.IP.To4(); v4 != nil {
+				ownIPs[v4.String()] = true
+			} else {
+				ownIPs[ipn.IP.String()] = true
+			}
+		}
+	}
+	gwIPs := parseDefaultGatewayIPsFromProcRoute(blProcNetRoutePath)
+
+	candIPs := map[string]bool{}
+	addCandIP := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		if ip := net.ParseIP(raw); ip != nil && !ip.IsUnspecified() {
+			if v4 := ip.To4(); v4 != nil {
+				candIPs[v4.String()] = true
+			} else {
+				candIPs[ip.String()] = true
+			}
+		}
+	}
+	addCandIP(lookupCurrentDeviceIP(hncDir, mac))
+	addCandIP(readPersistedDeviceIPFromRules(hncDir, mac))
+
+	if af, err := os.Open(neighArpPath); err == nil {
+		sc := bufio.NewScanner(af)
+		first := true
+		for sc.Scan() {
+			if first {
+				first = false
+				continue
+			}
+			f := strings.Fields(sc.Text())
+			if len(f) < 4 || f[2] == "0x0" {
+				continue
+			}
+			arpMAC := strings.ToLower(f[3])
+			arpIP := net.ParseIP(f[0])
+			if arpIP == nil || arpIP.To4() == nil || arpMAC == "00:00:00:00:00:00" {
+				continue
+			}
+			ipStr := arpIP.To4().String()
+			if gwIPs[ipStr] && arpMAC == mac {
+				_ = af.Close()
+				return true, "cannot blacklist default gateway (" + ipStr + ")"
+			}
+			if arpMAC == mac {
+				candIPs[ipStr] = true
+			}
+		}
+		_ = af.Close()
+	}
+
+	for ipStr := range candIPs {
+		if ownIPs[ipStr] {
+			return true, "cannot blacklist host own ip (" + ipStr + ")"
+		}
+		if gwIPs[ipStr] {
+			return true, "cannot blacklist default gateway ip (" + ipStr + ")"
+		}
+	}
+	return false, ""
 }
 
 // actionRuleSet · 设置限速
@@ -647,6 +810,11 @@ func actionRuleSet(hncDir string, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "bad params", Detail: "rate_up: " + err.Error()}
 	}
 
+	// 上下行均为零速率时直接转调 actionRuleClear, 严禁将双 0 落入 apply_device_rule.sh limit 触发离线报错
+	if !numberStringPositive(dnMbps) && !numberStringPositive(upMbps) {
+		return actionRuleClear(hncDir, p)
+	}
+
 	// hotfix16.9: capabilities.json is authoritative for unsupported HTB too.
 	// Do not call shell/tc paths that would block/timeout on ROMs where HTB probing failed.
 	if supported, known := tcHTBSupported(hncDir); known && !supported && (numberStringPositive(dnMbps) || numberStringPositive(upMbps)) {
@@ -679,6 +847,7 @@ func actionRuleSet(hncDir string, p map[string]string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "apply failed", Detail: detail}
 	}
+	rulesStore.Invalidate(hncDir)
 	if strings.Contains(detail, "partial_tc_fail=uplink") || strings.Contains(detail, "limit_apply_mode=down_only") {
 		return actionResp{OK: true, Detail: "download limit applied; uplink unsupported/disabled on this ROM, kept up=0"}
 	}
@@ -702,6 +871,7 @@ func actionRuleClear(hncDir string, p map[string]string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "apply failed", Detail: strings.TrimSpace(out)}
 	}
+	rulesStore.Invalidate(hncDir)
 	return actionResp{OK: true, Detail: "limit cleared"}
 }
 
@@ -710,12 +880,12 @@ func actionRuleClear(hncDir string, p map[string]string) actionResp {
 //	"500kbit"  → "0.5"
 //	"5120kbit" → "5.12"
 //	"10mbit"   → "10"
-//	"" 或 "0"  → "0"
+//	"" 或 "0" / "0kbit" / "0mbit" / "0gbit" → "0"
 //
 // shell 侧 mbps_to_rate 用 awk 浮点能接 "0.5" → 500kbit, 精度无损.
 // 前端 rules.json.down_mbps 也保持小数 (0.5 mbps), 读取时 Number() 直接用.
 func rateToMbpsStr(r string) (string, error) {
-	if r == "" || r == "0" {
+	if r == "" || isZeroRateStr(r) {
 		return "0", nil
 	}
 	for i, c := range r {
@@ -764,9 +934,8 @@ func actionBLAdd(hncDir string, p map[string]string) actionResp {
 	if !macRE.MatchString(mac) {
 		return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
 	}
-	if isProtectedMAC(hncDir, mac) {
-		return actionResp{OK: false, Error: "protected mac",
-			Detail: "cannot blacklist host/broadcast/null mac"}
+	if blocked, why := isProtectedTargetForBlacklist(hncDir, mac); blocked {
+		return actionResp{OK: false, Error: "protected mac", Detail: why}
 	}
 	if useNativeDataplane(hncDir) && tryNativeBlacklistSet(hncDir, mac, true) {
 		return actionResp{OK: true, Detail: "blacklisted"}
@@ -775,6 +944,7 @@ func actionBLAdd(hncDir string, p map[string]string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "apply failed", Detail: strings.TrimSpace(out)}
 	}
+	rulesStore.Invalidate(hncDir)
 	return actionResp{OK: true, Detail: "blacklisted"}
 }
 
@@ -792,15 +962,16 @@ func actionBLDel(hncDir string, p map[string]string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "apply failed", Detail: strings.TrimSpace(out)}
 	}
+	rulesStore.Invalidate(hncDir)
 	return actionResp{OK: true, Detail: "removed from blacklist"}
 }
 
 // ── helper ─────────────────────────────────────────────────────
 
 // validateRate 校验速率格式 + 最小值
-// "0" 视为不限速(允许), 其它必须 >= 64kbit
+// "0" / "0kbit" / "0mbit" / "0gbit" 视为不限速(允许), 其它必须 >= 64kbit
 func validateRate(r string) error {
-	if r == "0" {
+	if isZeroRateStr(r) {
 		return nil
 	}
 	if !rateRE.MatchString(r) {

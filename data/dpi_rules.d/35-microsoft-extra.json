@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "35-microsoft-extra",
-  "rules_version": "hnc-curated-v6.1.0-rc.5#35-microsoft-extra",
+  "rules_version": "hnc-curated-v6.1.0-rc.6#35-microsoft-extra",
   "rules": [
     {
       "id": "microsoft_extras",

@@ -174,11 +174,25 @@ func powerNoteAPIHit(now time.Time) {
 	}
 }
 
-// activityTouchMiddleware 包在 authMiddleware 里面: 只有鉴权通过的请求才算「有人在看」
-// (热点上的陌生客户端扫端口不会让后台一直保持高频)。
+// shouldTouchWebUIActivity 判定请求路径是否计入「真人在看 WebUI」活跃窗口:
+// 排除 SSE 长连接(/api/events 由 sseConns 独立计量, 断开即刻归零)及所有免鉴权公开路径
+// (如 hnc_watchdog 周期探活的 /api/health、陌生设备扫描的 /pair 与静态资源), 根治待机锁死 WebUIActive=true。
+func shouldTouchWebUIActivity(path string) bool {
+	if path == "" || path == "/api/events" || isPublicPath(path) {
+		return false
+	}
+	return true
+}
+
+// activityTouchMiddleware 包在 authMiddleware 里面: 只有鉴权通过的非公开业务请求才算「有人在看」
+// (看门狗探活 /api/health 与热点上的未配对请求不会让后台一直保持高频)。
 func activityTouchMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		powerNoteAPIHit(time.Now())
+		if r != nil && r.URL != nil && shouldTouchWebUIActivity(r.URL.Path) {
+			if skip, _ := r.Context().Value(ctxKeySkipActivityTouch).(bool); !skip {
+				powerNoteAPIHit(time.Now())
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -197,6 +211,8 @@ func webuiState(now time.Time) (active bool, agoS int64, sse int) {
 }
 
 // ─── 屏幕探测 ─────────────────────────────────────────────────────
+
+const screenAODSuspectMax = int64(64)
 
 // parseWakefulness `dumpsys power` → (亮屏, 是否解析到)。
 // Awake/Dreaming(屏保, 屏幕亮着)= 亮; Asleep/Dozing(含 AOD)= 灭。
@@ -249,10 +265,18 @@ func parseDisplayState(text string) (on bool, ok bool) {
 	return false, false
 }
 
-// parseBacklight 背光亮度文本 → (亮, 是否有效)
-func parseBacklight(s string) (bool, bool) {
+func parseBacklightLevel(s string) (int64, bool) {
 	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// parseBacklight 背光亮度文本 → (亮, 是否有效)
+func parseBacklight(s string) (bool, bool) {
+	n, ok := parseBacklightLevel(s)
+	if !ok {
 		return false, false
 	}
 	return n > 0, true
@@ -265,12 +289,13 @@ type screenProber struct {
 	dumpsys func(service string, keys []string) (string, error)
 	now     func() time.Time
 
-	mode       string // "" | backlight | power | display | none
-	verifiedAt time.Time
-	lastCmdAt  time.Time
-	lastOn     bool
-	lastOK     bool
-	mismatch   int
+	mode           string // "" | backlight | power | display | none
+	verifiedAt     time.Time
+	lastCmdAt      time.Time
+	lastOn         bool
+	lastOK         bool
+	mismatch       int
+	lastBrightness int64
 }
 
 var screenBacklightGlobs = []string{
@@ -287,8 +312,8 @@ func newScreenProber() *screenProber {
 	}
 }
 
-func (p *screenProber) backlight() (bool, bool) {
-	any, okAny := false, false
+func (p *screenProber) backlightLevel() (bool, int64, bool) {
+	any, maxLv, okAny := false, int64(0), false
 	for _, g := range screenBacklightGlobs {
 		paths, _ := p.glob(g)
 		for _, path := range paths {
@@ -296,13 +321,23 @@ func (p *screenProber) backlight() (bool, bool) {
 			if err != nil {
 				continue
 			}
-			if on, ok := parseBacklight(string(b)); ok {
+			if lv, ok := parseBacklightLevel(string(b)); ok {
 				okAny = true
-				any = any || on
+				if lv > 0 {
+					any = true
+				}
+				if lv > maxLv {
+					maxLv = lv
+				}
 			}
 		}
 	}
-	return any, okAny
+	return any, maxLv, okAny
+}
+
+func (p *screenProber) backlight() (bool, bool) {
+	on, _, ok := p.backlightLevel()
+	return on, ok
 }
 
 // fromDumpsys power → display(权威判定, 有进程开销)
@@ -323,8 +358,9 @@ func (p *screenProber) fromDumpsys() (on bool, ok bool, src string) {
 // probe 返回 (亮屏, 是否已知, 来源)
 func (p *screenProber) probe() (bool, bool, string) {
 	now := p.now()
-	bl, blOK := p.backlight()
-	if p.mode == "" || now.Sub(p.verifiedAt) >= screenVerifyEvery {
+	bl, blLv, blOK := p.backlightLevel()
+	noneReady := p.mode == "none" && (blOK || now.Sub(p.lastCmdAt) >= screenDumpsysEvery)
+	if p.mode == "" || noneReady || now.Sub(p.verifiedAt) >= screenVerifyEvery {
 		on, ok, src := p.fromDumpsys()
 		p.verifiedAt, p.lastCmdAt = now, now
 		switch {
@@ -341,6 +377,9 @@ func (p *screenProber) probe() (bool, bool, string) {
 			p.mode = "none"
 		}
 		p.lastOn, p.lastOK = on, ok
+		if blOK {
+			p.lastBrightness = blLv
+		}
 		if p.mode == "backlight" {
 			return bl, true, "backlight"
 		}
@@ -349,6 +388,26 @@ func (p *screenProber) probe() (bool, bool, string) {
 	switch p.mode {
 	case "backlight":
 		if blOK {
+			// 非零低值骤降疑似切入息屏 AOD(DOZE/DOZE_SUSPEND 但背光维持低值 >0): 允许低频复核 dumpsys 显示状态
+			sharpDropToLow := bl && blLv > 0 && blLv <= screenAODSuspectMax &&
+				p.lastBrightness > blLv &&
+				(p.lastBrightness > screenAODSuspectMax || blLv*2 <= p.lastBrightness) &&
+				now.Sub(p.lastCmdAt) >= activityProbeEvery
+			lowSteadyRecheck := bl && blLv > 0 && blLv <= screenAODSuspectMax &&
+				now.Sub(p.lastCmdAt) >= screenDumpsysEvery
+			p.lastBrightness = blLv
+			if sharpDropToLow || lowSteadyRecheck {
+				p.lastCmdAt = now
+				if on, ok, src := p.fromDumpsys(); ok {
+					p.lastOn, p.lastOK = on, true
+					if on != bl {
+						p.mismatch++
+						p.mode = src
+						return on, true, src
+					}
+					p.verifiedAt = now
+				}
+			}
 			return bl, true, "backlight"
 		}
 		p.mode = "" // 节点没了: 下轮重新选

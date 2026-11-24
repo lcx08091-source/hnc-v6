@@ -30,8 +30,50 @@ type jsonFileCache struct {
 	entries map[string]jsonCacheEntry
 }
 
+var (
+	jsonCacheRingMu  sync.Mutex
+	jsonCacheRing    [64]*jsonFileCache
+	jsonCacheRingPos int
+)
+
 func newJSONFileCache() *jsonFileCache {
-	return &jsonFileCache{entries: map[string]jsonCacheEntry{}}
+	c := &jsonFileCache{entries: map[string]jsonCacheEntry{}}
+	jsonCacheRingMu.Lock()
+	jsonCacheRing[jsonCacheRingPos%len(jsonCacheRing)] = c
+	jsonCacheRingPos++
+	jsonCacheRingMu.Unlock()
+	return c
+}
+
+// Invalidate 驱逐指定路径的缓存条目(同毫秒原子写盘后主动调用, 消除 mtime+size 碰撞盲区)。
+func (c *jsonFileCache) Invalidate(path string) {
+	if c == nil || path == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.entries, path)
+	c.mu.Unlock()
+}
+
+// invalidateJSONCaches 通知已创建的 jsonFileCache 实例立即失效指定文件路径。
+// 锁序安全: 先拷贝非 nil 指针释放 jsonCacheRingMu, 再逐个获取叶子锁 c.mu。
+func invalidateJSONCaches(path string) {
+	if path == "" {
+		return
+	}
+	var targets [64]*jsonFileCache
+	n := 0
+	jsonCacheRingMu.Lock()
+	for _, c := range jsonCacheRing {
+		if c != nil {
+			targets[n] = c
+			n++
+		}
+	}
+	jsonCacheRingMu.Unlock()
+	for i := 0; i < n; i++ {
+		targets[i].Invalidate(path)
+	}
 }
 
 // read 返回 path 解析后的 JSON, mtime+size 未变时直接命中缓存。

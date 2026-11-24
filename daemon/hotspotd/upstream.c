@@ -503,9 +503,27 @@ int upstream_detect_via_proc_route(int *ifindex_out,
 
 #define BPF_UPSTREAM4_MAP  "/sys/fs/bpf/tethering/map_offload_tether_upstream4_map"
 
+#ifndef BPF_F_RDONLY
+#define BPF_F_RDONLY (1U << 3)
+#endif
+
 static long _sys_bpf(enum bpf_cmd cmd, union bpf_attr *attr, unsigned int size)
 {
     return syscall(__NR_bpf, cmd, attr, size);
+}
+
+static long open_bpf_map_rdonly_prefer(const char *pathname)
+{
+    union bpf_attr oattr;
+    memset(&oattr, 0, sizeof(oattr));
+    oattr.pathname   = (uint64_t)(uintptr_t)pathname;
+    oattr.file_flags = BPF_F_RDONLY;
+    long fd = _sys_bpf(BPF_OBJ_GET, &oattr, sizeof(oattr));
+    if (fd >= 0)
+        return fd;
+    memset(&oattr, 0, sizeof(oattr));
+    oattr.pathname = (uint64_t)(uintptr_t)pathname;
+    return _sys_bpf(BPF_OBJ_GET, &oattr, sizeof(oattr));
 }
 
 int upstream_detect_via_bpf(int *ifindex_out,
@@ -514,11 +532,8 @@ int upstream_detect_via_bpf(int *ifindex_out,
 {
     if (!ifindex_out || !ifname_out || ifname_size < 2) return -1;
 
-    /* 打开 upstream4_map */
-    union bpf_attr oattr;
-    memset(&oattr, 0, sizeof(oattr));
-    oattr.pathname = (uint64_t)(uintptr_t)BPF_UPSTREAM4_MAP;
-    long fd = _sys_bpf(BPF_OBJ_GET, &oattr, sizeof(oattr));
+    /* 打开 upstream4_map (纯只读采样: 优先 BPF_F_RDONLY, 失败回退 0) */
+    long fd = open_bpf_map_rdonly_prefer(BPF_UPSTREAM4_MAP);
     if (fd < 0) {
         /* map 不存在 (ROM 没 tethering BPF) 或无权限 */
         fprintf(stderr, "[upstream] Tier3: open %s failed: %s\n",
@@ -672,10 +687,7 @@ int upstream_detect_via_limit_map(int *ifindex_out,
 {
     if (!ifindex_out || !ifname_out || ifname_size < 2) return -1;
 
-    union bpf_attr oattr;
-    memset(&oattr, 0, sizeof(oattr));
-    oattr.pathname = (uint64_t)(uintptr_t)BPF_LIMIT_MAP_PATH;
-    long fd = _sys_bpf(BPF_OBJ_GET, &oattr, sizeof(oattr));
+    long fd = open_bpf_map_rdonly_prefer(BPF_LIMIT_MAP_PATH);
     if (fd < 0) {
         fprintf(stderr, "[upstream] Tier4: open %s failed: %s\n",
                 BPF_LIMIT_MAP_PATH, strerror(errno));

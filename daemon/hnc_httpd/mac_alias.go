@@ -33,21 +33,28 @@ const (
 
 func macAliasesPath(hncDir string) string { return filepath.Join(hncDir, macAliasesRelPath) }
 
+// macAliasMu 叶子互斥锁, 统一串行化 mac_aliases.json 的读改写(RMW)与内存缓存。
+// 严格锁序: rmacReconcileMu -> s.actionMu -> 子模块锁 -> macArchiveMu -> rmacMu -> macMergeMu -> macAliasMu(叶子锁, 持锁期间严禁再拿任何其他锁)。
+var macAliasMu sync.Mutex
+
 var macAliasCache struct {
-	mu    sync.Mutex
 	path  string
 	mtime time.Time
 	size  int64
 	m     map[string]string
 }
 
-// loadMACAliases 读别名表(按 mtime+size 缓存)。返回的 map 只读, 调用方不得修改。
-// 文件缺失/损坏 = 空表。
-func loadMACAliases(hncDir string) map[string]string {
+func cloneAliasMap(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func loadMACAliasesLocked(hncDir string) map[string]string {
 	path := macAliasesPath(hncDir)
 	st, err := os.Stat(path)
-	macAliasCache.mu.Lock()
-	defer macAliasCache.mu.Unlock()
 	if err != nil {
 		macAliasCache.path, macAliasCache.m = path, map[string]string{}
 		macAliasCache.mtime, macAliasCache.size = time.Time{}, -1
@@ -61,6 +68,27 @@ func loadMACAliases(hncDir string) map[string]string {
 	macAliasCache.path, macAliasCache.m = path, m
 	macAliasCache.mtime, macAliasCache.size = st.ModTime(), st.Size()
 	return m
+}
+
+func invalidateMACAliasCacheLocked() {
+	macAliasCache.m = nil
+}
+
+// loadMACAliases 读别名表(按 mtime+size 缓存)。返回独立副本, 并发安全。
+// 文件缺失/损坏 = 空表。
+func loadMACAliases(hncDir string) map[string]string {
+	macAliasMu.Lock()
+	defer macAliasMu.Unlock()
+	return cloneAliasMap(loadMACAliasesLocked(hncDir))
+}
+
+// loadMACAliasesWithTsSnapshot 在 macAliasMu 保护下一次性返回裁剪后的别名映射与时间戳表。
+func loadMACAliasesWithTsSnapshot(hncDir string) (map[string]string, map[string]int64) {
+	macAliasMu.Lock()
+	defer macAliasMu.Unlock()
+	out, tsMap := readMACAliasesWithTs(macAliasesPath(hncDir))
+	pruneMACAliasesMap(out, tsMap, time.Now().Unix())
+	return out, tsMap
 }
 
 func readMACAliasesWithTs(path string) (map[string]string, map[string]int64) {
@@ -150,6 +178,12 @@ func saveMACAliases(hncDir string, m map[string]string) error {
 
 // saveMACAliasesAt 支持指定当前时间与自定义时间戳映射(供归档/后台裁剪与单测精确控制 TTL)。
 func saveMACAliasesAt(hncDir string, m map[string]string, now int64, customTs map[string]int64) error {
+	macAliasMu.Lock()
+	defer macAliasMu.Unlock()
+	return saveMACAliasesAtLocked(hncDir, m, now, customTs)
+}
+
+func saveMACAliasesAtLocked(hncDir string, m map[string]string, now int64, customTs map[string]int64) error {
 	path := macAliasesPath(hncDir)
 	prevM, prevTs := readMACAliasesWithTs(path)
 	clean := map[string]string{}
@@ -181,14 +215,47 @@ func saveMACAliasesAt(hncDir string, m map[string]string, now int64, customTs ma
 		return err
 	}
 	err = discoverWriteAtomic(path, b)
-	macAliasCache.mu.Lock()
-	macAliasCache.m = nil
-	macAliasCache.mu.Unlock()
+	invalidateMACAliasCacheLocked()
 	return err
+}
+
+// commitMACAliasStep 在叶子锁 macAliasMu 内原子完成快照采集、别名链压平登记与写盘提交。
+func commitMACAliasStep(hncDir, from, to string, now int64) (fileSnap, error) {
+	macAliasMu.Lock()
+	defer macAliasMu.Unlock()
+	path := macAliasesPath(hncDir)
+	snap := snapFile(path)
+	m := cloneAliasMap(loadMACAliasesLocked(hncDir))
+	addMACAlias(m, from, to)
+	if err := saveMACAliasesAtLocked(hncDir, m, now, nil); err != nil {
+		return snap, err
+	}
+	return snap, nil
+}
+
+// undoMACAliasStep 在叶子锁 macAliasMu 内原子恢复快照并使缓存失效。
+func undoMACAliasStep(snap fileSnap) {
+	macAliasMu.Lock()
+	defer macAliasMu.Unlock()
+	if snap.path != "" {
+		_ = snap.restore()
+		invalidateMACAliasCacheLocked()
+	}
+}
+
+// removeMACAliasFrom 在叶子锁 macAliasMu 内原子删除指定旧 MAC 别名绑定并写盘。
+func removeMACAliasFrom(hncDir, from string, now int64) error {
+	macAliasMu.Lock()
+	defer macAliasMu.Unlock()
+	m := cloneAliasMap(loadMACAliasesLocked(hncDir))
+	delete(m, from)
+	return saveMACAliasesAtLocked(hncDir, m, now, nil)
 }
 
 // pruneMACAliases 周期性裁剪过期(>90 天)或超上限(>1024 条)的别名记录; 无变动时零写盘。
 func pruneMACAliases(hncDir string, now int64) {
+	macAliasMu.Lock()
+	defer macAliasMu.Unlock()
 	path := macAliasesPath(hncDir)
 	if _, err := os.Stat(path); err != nil {
 		return
@@ -210,7 +277,7 @@ func pruneMACAliases(hncDir string, now int64) {
 		changed = true
 	}
 	if changed {
-		_ = saveMACAliasesAt(hncDir, m, now, tsMap)
+		_ = saveMACAliasesAtLocked(hncDir, m, now, tsMap)
 	}
 }
 

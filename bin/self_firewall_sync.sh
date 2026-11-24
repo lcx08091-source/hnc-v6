@@ -6,9 +6,9 @@
 #   sh bin/self_firewall_sync.sh flush [--dry-run]   # 干净摘除并销毁 HNC_SELF_UID / HNC_SELF_DNS 双栈子链
 #
 # 安全铁律:
-#   1. 硬性拒绝 uid < 10000 及受保护的 Root 管理器 / WebView / 宿主包名;
-#   2. HNC_SELF_UID 第 1~3 条恒为 -o lo -j RETURN 与 8443,8444,8080 双向 RETURN;
-#   3. 10000 <= uid <= 19999 自动协同封禁 SDK Sandbox (uid + 10000);
+#   1. 硬性拒绝 appId = uid % 100000 < 10000 及受保护的 Root 管理器 / WebView / 宿主包名(含多用户与 SDK 沙盒反查);
+#   2. HNC_SELF_UID 首条仅放行 -o lo -j RETURN (严禁无目的地址豁免 8443,8444,8080 导致公网端口穿透);
+#   3. appId 在 10000..19999 (含多用户/双开) 自动协同封禁 SDK Sandbox (uid + 10000);
 #   4. HNC_SELF_DNS 仅在 filter/OUTPUT 对 UDP/TCP :53 执行标签长度前缀 hex -j DROP (严禁 REJECT / :853 / mangle);
 #   5. 通过内存管道调用 iptables-restore / ip6tables-restore -w 2 --noflush, 零 run/ tmpfs 常驻文件。
 
@@ -46,6 +46,44 @@ sf_log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) [self_firewall] $*" >> "$LOG" 2>/dev/null || true
 }
 
+sf_is_wait_flag_err() {
+    case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+        *unknown\ option*|*unrecognized\ option*|*invalid\ option*|*option\ \"-w\"*|*option\ \'-w\'*|*wait*interval*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+sf_is_xt_string_unsupported() {
+    case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+        *xt_string*|*ipt_string*|*ip6t_string*|*string*|*couldn\'t\ load\ match*|*no\ chain/target/match\ by\ that\ name*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+sf_is_ipv6_unsupported() {
+    _sf6_m=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    case "$_sf6_m" in
+        *ip6tables*not\ found*|*address\ family\ not\ supported*|*eafnosupport*|*can\'t\ initialize\ ip6tables\ table*|*table\ \'filter\'\ does\ not\ exist*|*table\ \`filter\'\ does\ not\ exist*|*ip6table_filter*)
+            unset _sf6_m
+            return 0
+            ;;
+        *ip6_tables*)
+            case "$_sf6_m" in
+                *does\ not\ exist*|*no\ such\ file*|*not\ found*)
+                    unset _sf6_m
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    unset _sf6_m
+    return 1
+}
+
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
 IPT_RESTORE=${HNC_IPT_RESTORE:-"iptables-restore"}
@@ -53,20 +91,37 @@ IP6T_RESTORE=${HNC_IP6T_RESTORE:-"ip6tables-restore"}
 
 if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$SF_DRY" != "1" ]; then
     if command -v iptables >/dev/null 2>&1; then
-        iptables -w 2 -t filter -L -n >/dev/null 2>&1 || IPT="iptables"
+        iptables -w 2 -t filter -L -n >/dev/null 2>&1
+        if [ $? -eq 2 ]; then
+            iptables -w -t filter -L -n >/dev/null 2>&1
+            [ $? -eq 2 ] && IPT="iptables" || IPT="iptables -w"
+        fi
     fi
 fi
 if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$SF_DRY" != "1" ]; then
     if command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || IP6T="ip6tables"
+        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1
+        if [ $? -eq 2 ]; then
+            ip6tables -w -t filter -L -n >/dev/null 2>&1
+            [ $? -eq 2 ] && IP6T="ip6tables" || IP6T="ip6tables -w"
+        fi
     fi
 fi
 
 SF_V6_OK=0
 if [ "$SF_DRY" = "1" ]; then
     SF_V6_OK=1
-elif command -v "${IP6T%% *}" >/dev/null 2>&1 && $IP6T -t filter -L -n >/dev/null 2>&1; then
+elif [ -n "${HNC_IP6T:-}" ] || [ -n "${HNC_IP6T_RESTORE:-}" ]; then
     SF_V6_OK=1
+elif command -v "${IP6T%% *}" >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    _sf_v6_probe=$($IP6T -t filter -L -n 2>&1 >/dev/null)
+    if [ $? -eq 0 ]; then
+        SF_V6_OK=1
+    elif ! sf_is_ipv6_unsupported "$_sf_v6_probe"; then
+        SF_V6_OK=1
+    fi
+    unset _sf_v6_probe
 fi
 
 sf_lock() {
@@ -116,12 +171,50 @@ trap 'sf_unlock' EXIT
 trap 'sf_unlock; trap - EXIT; exit 130' INT
 trap 'sf_unlock; trap - EXIT; exit 143' TERM
 
+SF_LAST_ERR=""
+
 sf_run_ipt() {
     if [ "$SF_DRY" = "1" ]; then
         echo "DRY: $*"
         return 0
     fi
     "$@" 2>/dev/null
+}
+
+_sf_restore_with_wait_fallback() {
+    _sfw_bin="$1"
+    _sfw_data="$2"
+    # shellcheck disable=SC2086
+    _sfw_err=$(printf '%s' "$_sfw_data" | $_sfw_bin -w 2 --noflush 2>&1 >/dev/null)
+    _sfw_rc=$?
+    if [ "$_sfw_rc" -eq 0 ]; then
+        SF_LAST_ERR=""
+        return 0
+    fi
+    if [ "$_sfw_rc" -eq 2 ] || sf_is_wait_flag_err "$_sfw_err"; then
+        # shellcheck disable=SC2086
+        _sfw_err2=$(printf '%s' "$_sfw_data" | $_sfw_bin -w --noflush 2>&1 >/dev/null)
+        _sfw_rc2=$?
+        if [ "$_sfw_rc2" -eq 0 ]; then
+            SF_LAST_ERR=""
+            return 0
+        fi
+        if [ "$_sfw_rc2" -eq 2 ] || sf_is_wait_flag_err "$_sfw_err2"; then
+            # shellcheck disable=SC2086
+            _sfw_err3=$(printf '%s' "$_sfw_data" | $_sfw_bin --noflush 2>&1 >/dev/null)
+            _sfw_rc3=$?
+            if [ "$_sfw_rc3" -eq 0 ]; then
+                SF_LAST_ERR=""
+                return 0
+            fi
+            SF_LAST_ERR="${_sfw_err3:-$_sfw_err}"
+            return "$_sfw_rc3"
+        fi
+        SF_LAST_ERR="${_sfw_err2:-$_sfw_err}"
+        return "$_sfw_rc2"
+    fi
+    SF_LAST_ERR="$_sfw_err"
+    return "$_sfw_rc"
 }
 
 sf_pipe_restore() {
@@ -131,17 +224,22 @@ sf_pipe_restore() {
         printf 'DRY_RESTORE(%s):\n%s' "$_sfr_bin" "$_sfr_payload"
         return 0
     fi
-    command -v "$_sfr_bin" >/dev/null 2>&1 || return 1
-    printf '%s' "$_sfr_payload" | "$_sfr_bin" -w 2 --noflush 2>/dev/null && return 0
-    printf '%s' "$_sfr_payload" | "$_sfr_bin" -w --noflush 2>/dev/null && return 0
-    printf '%s' "$_sfr_payload" | "$_sfr_bin" --noflush 2>/dev/null && return 0
+    _sfr_cmd0="${_sfr_bin%% *}"
+    if ! command -v "$_sfr_cmd0" >/dev/null 2>&1 && [ ! -x "$_sfr_cmd0" ]; then
+        SF_LAST_ERR="$_sfr_cmd0 not found"
+        return 127
+    fi
+    _sf_restore_with_wait_fallback "$_sfr_bin" "$_sfr_payload" && return 0
+    _sfr_orig_err="$SF_LAST_ERR"
     case "$_sfr_payload" in
         *REJECT*)
             _sfr_drop=$(printf '%s' "$_sfr_payload" | sed -e 's/-j REJECT --reject-with [^ ]*/-j DROP/g' -e 's/-j REJECT$/-j DROP/g')
-            printf '%s' "$_sfr_drop" | "$_sfr_bin" -w 2 --noflush 2>/dev/null && return 0
-            printf '%s' "$_sfr_drop" | "$_sfr_bin" --noflush 2>/dev/null && return 0
+            if [ "$_sfr_drop" != "$_sfr_payload" ]; then
+                _sf_restore_with_wait_fallback "$_sfr_bin" "$_sfr_drop" && return 0
+            fi
             ;;
     esac
+    [ -n "$SF_LAST_ERR" ] || SF_LAST_ERR="$_sfr_orig_err"
     return 1
 }
 
@@ -165,14 +263,31 @@ sf_detach_chain_one() {
 sf_ensure_link_one() {
     _sfl_ipt="$1"
     _sfl_ch="$2"
-    [ -n "$_sfl_ipt" ] || return 0
+    [ -n "$_sfl_ipt" ] || { SF_LAST_ERR="empty iptables cmd"; return 1; }
     if [ "$SF_DRY" = "1" ]; then
         echo "DRY: $_sfl_ipt -t filter -I OUTPUT 1 -j $_sfl_ch"
         return 0
     fi
+    _sfl_cmd0="${_sfl_ipt%% *}"
+    if ! command -v "$_sfl_cmd0" >/dev/null 2>&1 && [ ! -x "$_sfl_cmd0" ]; then
+        SF_LAST_ERR="$_sfl_cmd0 not found"
+        return 127
+    fi
+    SF_LAST_ERR=""
     # shellcheck disable=SC2086
-    $_sfl_ipt -t filter -C OUTPUT -j "$_sfl_ch" 2>/dev/null \
-        || $_sfl_ipt -t filter -I OUTPUT 1 -j "$_sfl_ch" 2>/dev/null
+    if $_sfl_ipt -t filter -C OUTPUT -j "$_sfl_ch" >/dev/null 2>&1; then
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    $_sfl_ipt -t filter -N "$_sfl_ch" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    _sfl_err=$($_sfl_ipt -t filter -I OUTPUT 1 -j "$_sfl_ch" 2>&1 >/dev/null)
+    _sfl_rc=$?
+    if [ "$_sfl_rc" -ne 0 ]; then
+        SF_LAST_ERR="$_sfl_err"
+        return "$_sfl_rc"
+    fi
+    return 0
 }
 
 sf_flush_all() {
@@ -235,9 +350,13 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
     FILENAME == pkgs_file {
         if (NF >= 2 && $2 ~ /^[0-9]+$/) {
             u = $2 + 0
+            pa = u % 100000
             if (is_protected_pkg($1)) {
                 prot_uid[u] = 1
-                if (u >= 10000 && u <= 19999) prot_uid[u + 10000] = 1
+                if (pa >= 10000) {
+                    prot_appid[pa] = 1
+                    if (pa <= 19999) prot_appid[pa + 10000] = 1
+                }
             }
         }
         next
@@ -323,7 +442,10 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
                     if (tt == "}") {
                         in_rule = 0
                         m = tolower(cur_mode)
-                        if (cur_uid >= 10000 && cur_uid <= 99999999 && !(cur_uid in prot_uid) && !is_protected_pkg(cur_pkg) && \
+                        app_id = cur_uid % 100000
+                        # C064: 按 appId = uid % 100000 严格拒绝 < 10000 的主用户与多用户系统进程及受保护包
+                        if (cur_uid >= 10000 && cur_uid <= 99999999 && app_id >= 10000 && \
+                            !(cur_uid in prot_uid) && !(app_id in prot_appid) && !is_protected_pkg(cur_pkg) && \
                             (m == "block_cleartext" || m == "block_cellular" || m == "block_all")) {
                             rcnt++
                             r_uid[rcnt] = cur_uid
@@ -377,13 +499,16 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
                 tag = (fam == 4 ? "UID4" : "UID6")
                 print tag " *filter"
                 print tag " :HNC_SELF_UID - [0:0]"
+                # C063: 链首仅保留 -o lo -j RETURN, 移除 8443,8444,8080 无目的地址 RETURN 绕过规则
                 print tag " -A HNC_SELF_UID -o lo -j RETURN"
-                print tag " -A HNC_SELF_UID -p tcp -m multiport --sports 8443,8444,8080 -j RETURN"
-                print tag " -A HNC_SELF_UID -p tcp -m multiport --dports 8443,8444,8080 -j RETURN"
                 for (r = 1; r <= rcnt; r++) {
                     nu = 1; ulist[1] = r_uid[r]
-                    if (r_uid[r] >= 10000 && r_uid[r] <= 19999 && !((r_uid[r] + 10000) in seen_uid)) {
-                        ulist[++nu] = r_uid[r] + 10000
+                    app_id = r_uid[r] % 100000
+                    sb_uid = r_uid[r] + 10000
+                    # C064: 多用户/双开应用 appId 在 10000..19999 时自动配对 SDK Sandbox (uid + 10000)
+                    if (app_id >= 10000 && app_id <= 19999 && sb_uid <= 99999999 && \
+                        !(sb_uid in seen_uid) && !(sb_uid in prot_uid) && !((sb_uid % 100000) in prot_appid)) {
+                        ulist[++nu] = sb_uid
                     }
                     ntg = split(r_tgts[r], tarr, ",")
                     for (ui = 1; ui <= nu; ui++) {
@@ -409,7 +534,7 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
                             if (ip == "127.0.0.1" || ip == "::1" || ip == "0.0.0.0" || ip == "::") continue
                             if (prt != "" && prt ~ /^[0-9]+$/) {
                                 pnum = prt + 0
-                                if (pnum >= 1 && pnum <= 65535 && pnum != 8443 && pnum != 8444) {
+                                if (pnum >= 1 && pnum <= 65535 && pnum != 8443 && pnum != 8444 && pnum != 8080) {
                                     printf "%s -A HNC_SELF_UID -d %s -p tcp --dport %d -m owner --uid-owner %d -j REJECT --reject-with tcp-reset\n", tag, ip, pnum, u
                                     printf "%s -A HNC_SELF_UID -d %s -p udp --dport %d -m owner --uid-owner %d -j REJECT\n", tag, ip, pnum, u
                                 }
@@ -457,6 +582,7 @@ if [ "$_SF_UCNT" -eq 0 ] && [ "$_SF_DCNT" -eq 0 ]; then
     exit 0
 fi
 
+# C065: 严格核验双栈 restore 与 OUTPUT 挂载退出码, 同时保留缺 xt_string 或无 IPv6 filter 表的内核降级容错
 _SF_RC=0
 
 if [ "$_SF_UCNT" -gt 0 ]; then
@@ -464,14 +590,30 @@ if [ "$_SF_UCNT" -gt 0 ]; then
     _SF_UID6=$(printf '%s\n' "$_SF_PARSED" | sed -n 's/^UID6 //p')
     if sf_pipe_restore "$IPT_RESTORE" "${_SF_UID4}
 "; then
-        sf_ensure_link_one "$IPT" HNC_SELF_UID || _SF_RC=1
+        if ! sf_ensure_link_one "$IPT" HNC_SELF_UID; then
+            sf_log "ERROR: ipv4 hook HNC_SELF_UID failed: $SF_LAST_ERR"
+            _SF_RC=1
+        fi
     else
+        sf_log "ERROR: ipv4 restore HNC_SELF_UID failed: $SF_LAST_ERR"
         _SF_RC=1
     fi
     if [ "$SF_V6_OK" = "1" ]; then
         if sf_pipe_restore "$IP6T_RESTORE" "${_SF_UID6}
 "; then
-            sf_ensure_link_one "$IP6T" HNC_SELF_UID || true
+            if ! sf_ensure_link_one "$IP6T" HNC_SELF_UID; then
+                if sf_is_ipv6_unsupported "$SF_LAST_ERR"; then
+                    sf_log "WARN: ipv6 filter unsupported during HNC_SELF_UID hook, degraded to v4"
+                else
+                    sf_log "ERROR: ipv6 hook HNC_SELF_UID failed: $SF_LAST_ERR"
+                    _SF_RC=1
+                fi
+            fi
+        elif sf_is_ipv6_unsupported "$SF_LAST_ERR"; then
+            sf_log "WARN: ipv6 filter unsupported during HNC_SELF_UID restore, degraded to v4"
+        else
+            sf_log "ERROR: ipv6 restore HNC_SELF_UID failed: $SF_LAST_ERR"
+            _SF_RC=1
         fi
     fi
 else
@@ -483,12 +625,34 @@ if [ "$_SF_DCNT" -gt 0 ]; then
     _SF_DNS_BODY=$(printf '%s\n' "$_SF_PARSED" | sed -n 's/^DNS //p')
     if sf_pipe_restore "$IPT_RESTORE" "${_SF_DNS_BODY}
 "; then
-        sf_ensure_link_one "$IPT" HNC_SELF_DNS || true
+        if ! sf_ensure_link_one "$IPT" HNC_SELF_DNS; then
+            sf_log "ERROR: ipv4 hook HNC_SELF_DNS failed: $SF_LAST_ERR"
+            _SF_RC=1
+        fi
+    elif sf_is_xt_string_unsupported "$SF_LAST_ERR"; then
+        sf_log "WARN: xt_string missing on ipv4 kernel, HNC_SELF_DNS degraded (UID rules kept)"
+        sf_detach_chain_one "$IPT" HNC_SELF_DNS
+    else
+        sf_log "ERROR: ipv4 restore HNC_SELF_DNS failed: $SF_LAST_ERR"
+        _SF_RC=1
     fi
     if [ "$SF_V6_OK" = "1" ]; then
         if sf_pipe_restore "$IP6T_RESTORE" "${_SF_DNS_BODY}
 "; then
-            sf_ensure_link_one "$IP6T" HNC_SELF_DNS || true
+            if ! sf_ensure_link_one "$IP6T" HNC_SELF_DNS; then
+                if sf_is_ipv6_unsupported "$SF_LAST_ERR"; then
+                    sf_log "WARN: ipv6 filter unsupported during HNC_SELF_DNS hook, degraded"
+                else
+                    sf_log "ERROR: ipv6 hook HNC_SELF_DNS failed: $SF_LAST_ERR"
+                    _SF_RC=1
+                fi
+            fi
+        elif sf_is_xt_string_unsupported "$SF_LAST_ERR" || sf_is_ipv6_unsupported "$SF_LAST_ERR"; then
+            sf_log "WARN: xt_string or ipv6 filter unsupported on v6 kernel, HNC_SELF_DNS v6 degraded"
+            sf_detach_chain_one "$IP6T" HNC_SELF_DNS
+        else
+            sf_log "ERROR: ipv6 restore HNC_SELF_DNS failed: $SF_LAST_ERR"
+            _SF_RC=1
         fi
     fi
 else
@@ -497,5 +661,9 @@ else
 fi
 
 sf_log "applied uid_rules=$_SF_UCNT blocked_domains=$_SF_DCNT v6=$SF_V6_OK rc=$_SF_RC"
+if [ "$_SF_RC" -ne 0 ]; then
+    echo "SELF_FIREWALL=error uid_rules=$_SF_UCNT blocked_domains=$_SF_DCNT"
+    exit "$_SF_RC"
+fi
 echo "SELF_FIREWALL=on uid_rules=$_SF_UCNT blocked_domains=$_SF_DCNT"
-exit "$_SF_RC"
+exit 0

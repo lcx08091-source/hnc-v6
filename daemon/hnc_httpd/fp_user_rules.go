@@ -331,11 +331,14 @@ func actionDPICorrect(s *server, p map[string]string) actionResp {
 	var notes []string
 	base := dpiUserRule{AppID: appID, AppName: appName, Category: cat, MAC: mac, Created: now.Unix()}
 	if name != "" && kinds["domain"] {
+		_, sharedInfra := isSharedOrBlockedRuleDomain(s.hncDir, name)
 		switch {
 		case dpiECHPublicNames[name]:
 			notes = append(notes, "域名是 ECH 外层名, 未保存域名规则")
 		case dpiNameTooBroad(name):
 			notes = append(notes, "域名过于宽泛(公共后缀), 未保存域名规则")
+		case sharedInfra:
+			notes = append(notes, "域名属于公共基础设施或共享黑名单, 未保存域名规则")
 		default:
 			r := base
 			r.Kind, r.Value = "domain", name

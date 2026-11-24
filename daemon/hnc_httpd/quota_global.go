@@ -18,7 +18,28 @@ import (
 
 // globalQuotaOn 全局告警月度配额是否生效(读 alert 配置)。
 func (c *limitCtl) globalQuotaOn() bool {
+	return c.globalQuotaOnCached(false)
+}
+
+func (c *limitCtl) globalQuotaOnCached(useCache bool) bool {
 	acfg := alert.NewConfig(c.hncDir)
+	if useCache && c != nil && c.jsonCache != nil {
+		raw, err := c.jsonCache.read(acfg.AlertsConfigPath)
+		if err != nil {
+			return false
+		}
+		root, _ := raw.(map[string]interface{})
+		if root == nil {
+			return false
+		}
+		mq, _ := root["monthly_quota"].(map[string]interface{})
+		if mq == nil {
+			return false
+		}
+		en, _ := mq["enabled"].(bool)
+		lim, _ := toInt64(mq["limit_bytes"])
+		return en && lim > 0
+	}
 	uc := alert.LoadConfig(acfg.AlertsConfigPath)
 	return uc.MonthlyQuota.Enabled && uc.MonthlyQuota.LimitBytes > 0
 }
@@ -39,22 +60,29 @@ func (c *limitCtl) NoteUsageMonthRequest() {
 }
 
 // monthUsageLocked 本计费月每设备 rx+tx 合计 = max(自有累加, DPI 合计)。
-// 自有累加的 MonthKey 不是本计费月时视为 0(rollover 尚未发生, 旧值属于
-// 上个周期)。调用方持 mu。
+// 自有累加的 MonthKey 不是本计费月时视为 0, 且仅当 c.histMonKey == monKey 时合并
+// DPI 历史下限, 防止跨月首轮混入上月值。调用方持 mu。
 func (c *limitCtl) monthUsageLocked(ms time.Time) map[string]uint64 {
 	monKey := ms.Format("2006-01-02")
+	useHist := c.histMonKey == monKey
 	out := map[string]uint64{}
 	for mac, s := range c.st.Devices {
 		var own uint64
 		if s.Usage.MonthKey == monKey {
 			own = s.Usage.MonthBytes
 		}
-		out[mac] = maxU(own, c.histMon[mac])
+		if useHist {
+			out[mac] = maxU(own, c.histMon[mac])
+		} else {
+			out[mac] = own
+		}
 	}
-	// limitCtl 尚无状态的设备(刚出现在 DPI 历史里): 用 DPI 合计
-	for mac, v := range c.histMon {
-		if v > out[mac] {
-			out[mac] = v
+	if useHist {
+		// limitCtl 尚无状态的设备(刚出现在 DPI 历史里): 用 DPI 合计
+		for mac, v := range c.histMon {
+			if v > out[mac] {
+				out[mac] = v
+			}
 		}
 	}
 	return out
@@ -66,7 +94,7 @@ func (c *limitCtl) MonthUsage() map[string]uint64 {
 	if c == nil {
 		return nil
 	}
-	_, billingDay, _ := readObserved(c.hncDir)
+	billingDay := c.readBillingDay()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.monthUsageLocked(billingPeriodStart(time.Now(), billingDay))
@@ -81,7 +109,7 @@ func (c *limitCtl) MonthUsageSplit() (devices map[string]rxTxPair, periodStart t
 	if c == nil {
 		return nil, time.Time{}, 0, false
 	}
-	_, billingDay, _ := readObserved(c.hncDir)
+	billingDay := c.readBillingDay()
 	now := time.Now()
 	ms := billingPeriodStart(now, billingDay)
 	c.mu.Lock()
@@ -123,18 +151,26 @@ func (c *limitCtl) MonthUsageSplit() (devices map[string]rxTxPair, periodStart t
 // alert 配置里的 monthly_quota 比较, 生成 kind=monthly_quota 告警。
 // ID/Detail 文案/档位沿用 quota.go 的写法; 去重用状态里的
 // GlobalAlertWarn/GlobalAlertOver(存计费月 key, 跨月自动重置)。
-// 调用方持 mu(tick 内, saveState 之前)。
-func (c *limitCtl) checkGlobalQuotaLocked(monKey string, ms time.Time, now time.Time) {
+// 系统通知统一返回待投递切片由调用方在释放 c.mu 后异步发出, 杜绝 10s cmd notification 阻塞锁。
+func (c *limitCtl) checkGlobalQuotaLocked(monKey string, ms time.Time, now time.Time) []quotaAsyncNotif {
+	return c.checkGlobalQuotaCachedLocked(monKey, ms, now, false)
+}
+
+func (c *limitCtl) checkGlobalQuotaCachedLocked(monKey string, ms time.Time, now time.Time, useCache bool) []quotaAsyncNotif {
+	if useCache && !c.globalQuotaOnCached(true) {
+		return nil
+	}
 	acfg := alert.NewConfig(c.hncDir)
 	uc := alert.LoadConfig(acfg.AlertsConfigPath)
 	q := uc.MonthlyQuota
 	if !q.Enabled || q.LimitBytes <= 0 || !uc.Enabled {
-		return
+		return nil
 	}
 	used := c.monthUsageLocked(ms)
 	limit := uint64(q.LimitBytes)
 	warnBytes := limit * uint64(q.WarnAtPct) / 100
 	monthLabel := ms.Format("2006-01")
+	var notifs []quotaAsyncNotif
 	for mac, u := range used {
 		if limitSkipMAC(mac) || u < warnBytes {
 			continue
@@ -195,9 +231,13 @@ func (c *limitCtl) checkGlobalQuotaLocked(monKey string, ms time.Time, now time.
 			c.st.GlobalAlertOver[mac] = monKey
 		}
 		c.dirty = true
-		// 通知(best-effort)。超档不受免打扰限制; 预警档遵守。
+		// 通知(best-effort): 超档不受免打扰限制; 预警档遵守。收集至切片在 c.mu 锁外异步投递。
 		if kind == "over" || !alert.InQuietHours(now, uc.UnknownDevice) {
-			_ = alert.PostNotification("HNC · 月度配额", a.Detail)
+			notifs = append(notifs, quotaAsyncNotif{
+				title: "HNC · 月度配额",
+				body:  a.Detail,
+			})
 		}
 	}
+	return notifs
 }

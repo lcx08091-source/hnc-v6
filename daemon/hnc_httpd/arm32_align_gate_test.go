@@ -280,6 +280,27 @@ func httpdContainsAtomic64(t types.Type, seen map[types.Type]bool) bool {
 	return false
 }
 
+func httpdContainsAtomic64Slice(t types.Type, seen map[types.Type]bool) bool {
+	t = types.Unalias(t)
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *types.Slice:
+		return httpdContainsAtomic64(u.Elem(), map[types.Type]bool{}) || httpdContainsAtomic64Slice(u.Elem(), seen)
+	case *types.Array:
+		return u.Len() > 0 && httpdContainsAtomic64Slice(u.Elem(), seen)
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if httpdContainsAtomic64Slice(u.Field(i).Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func httpdContains64BitScalar(t types.Type, seen map[types.Type]bool) bool {
 	t = types.Unalias(t)
 	if httpdIsAtomic64Named(t) {
@@ -358,7 +379,9 @@ func httpdCheckStructAtomic64(
 	var violations []string
 	for i, f := range fields {
 		ft := f.Type()
-		if !httpdContainsAtomic64(ft, map[types.Type]bool{}) {
+		hasInlineAtomic := httpdContainsAtomic64(ft, map[types.Type]bool{})
+		hasSliceAtomic := httpdContainsAtomic64Slice(ft, map[types.Type]bool{})
+		if !hasInlineAtomic && !hasSliceAtomic {
 			continue
 		}
 		fieldPath := prefix + "." + f.Name()
@@ -368,15 +391,22 @@ func httpdCheckStructAtomic64(
 		}
 		totalArm := baseArmOff + armOffs[i]
 		totalPure := basePureOff + pureOffs[i]
-		if totalArm%8 != 0 || totalPure%8 != 0 {
-			violations = append(violations, fmt.Sprintf(
-				"%s: %s contains 64-bit atomic at 32-bit ARM offset=%d (rawOrderOffset=%d), want offset%%8==0",
-				fset.Position(fPos), fieldPath, totalArm, totalPure,
-			))
+		if hasInlineAtomic {
+			if totalArm%8 != 0 || totalPure%8 != 0 {
+				violations = append(violations, fmt.Sprintf(
+					"%s: %s contains 64-bit atomic at 32-bit ARM offset=%d (rawOrderOffset=%d), want offset%%8==0",
+					fset.Position(fPos), fieldPath, totalArm, totalPure,
+				))
+			}
+			violations = append(violations, httpdCheckNestedAtomic64(
+				fset, fPos, fieldPath, ft, armSizes, pureSizes, totalArm, totalPure, visited,
+			)...)
+		} else {
+			// Slice header is a 12-byte descriptor; check backing array element stride & layout from offset 0.
+			violations = append(violations, httpdCheckNestedAtomic64(
+				fset, fPos, fieldPath, ft, armSizes, pureSizes, 0, 0, visited,
+			)...)
 		}
-		violations = append(violations, httpdCheckNestedAtomic64(
-			fset, fPos, fieldPath, ft, armSizes, pureSizes, totalArm, totalPure, visited,
-		)...)
 	}
 	return violations
 }
@@ -410,6 +440,22 @@ func httpdCheckNestedAtomic64(
 				fset, pos, prefix+"[0]", u.Elem(), armSizes, pureSizes, baseArmOff, basePureOff, visited,
 			)...)
 		}
+	case *types.Slice:
+		if httpdContainsAtomic64(u.Elem(), map[types.Type]bool{}) {
+			elemArmSz := armSizes.Sizeof(u.Elem())
+			elemPureSz := pureSizes.Sizeof(u.Elem())
+			if elemArmSz%8 != 0 || elemPureSz%8 != 0 {
+				violations = append(violations, fmt.Sprintf(
+					"%s: %s slice element sizeof=%d (rawSize=%d) with 64-bit atomic violates sizeof%%8==0 on 32-bit ARM",
+					fset.Position(pos), prefix, elemArmSz, elemPureSz,
+				))
+			}
+		}
+		if httpdContainsAtomic64(u.Elem(), map[types.Type]bool{}) || httpdContainsAtomic64Slice(u.Elem(), map[types.Type]bool{}) {
+			violations = append(violations, httpdCheckNestedAtomic64(
+				fset, pos, prefix+"[0]", u.Elem(), armSizes, pureSizes, 0, 0, visited,
+			)...)
+		}
 	case *types.Struct:
 		if !httpdIsAtomic64Named(t) {
 			violations = append(violations, httpdCheckStructAtomic64(
@@ -430,9 +476,11 @@ func httpdSelectorChainOffset(
 		sel      *types.Selection
 		fieldStr string
 		arrElem  types.Type
+		isSlice  bool
 		pos      token.Pos
 	}
 	var steps []step
+	var pureSizes httpdPureArm32Sizes
 	cur := httpdStripParens(expr)
 	for {
 		switch n := cur.(type) {
@@ -457,14 +505,32 @@ func httpdSelectorChainOffset(
 				cur = nil
 				continue
 			}
-			if arr, isArr := tv.Type.Underlying().(*types.Array); isArr {
+			switch seqT := tv.Type.Underlying().(type) {
+			case *types.Array:
 				steps = append(steps, step{
-					arrElem:  arr.Elem(),
+					arrElem:  seqT.Elem(),
 					fieldStr: "[i]",
 					pos:      n.Lbrack,
 				})
 				cur = httpdStripParens(n.X)
-			} else {
+			case *types.Pointer:
+				if arr, isArr := seqT.Elem().Underlying().(*types.Array); isArr {
+					steps = append(steps, step{
+						arrElem:  arr.Elem(),
+						fieldStr: "[i]",
+						pos:      n.Lbrack,
+					})
+				}
+				cur = nil
+			case *types.Slice:
+				steps = append(steps, step{
+					arrElem:  seqT.Elem(),
+					isSlice:  true,
+					fieldStr: "[i]",
+					pos:      n.Lbrack,
+				})
+				cur = nil
+			default:
 				cur = nil
 			}
 		default:
@@ -484,10 +550,15 @@ func httpdSelectorChainOffset(
 		names = append(names, st.fieldStr)
 		if st.arrElem != nil {
 			esz := armSizes.Sizeof(st.arrElem)
-			if esz%8 != 0 {
+			psz := pureSizes.Sizeof(st.arrElem)
+			if esz%8 != 0 || psz%8 != 0 {
+				kind := "array"
+				if st.isSlice {
+					kind = "slice"
+				}
 				strideViolations = append(strideViolations, fmt.Sprintf(
-					"%s: indexed array element %s sizeof=%d violates sizeof%%8==0 for 64-bit address-taken field on 32-bit ARM",
-					fset.Position(st.pos), st.arrElem.String(), esz,
+					"%s: indexed %s element %s sizeof=%d (rawSize=%d) violates sizeof%%8==0 for 64-bit address-taken field on 32-bit ARM",
+					fset.Position(st.pos), kind, st.arrElem.String(), esz, psz,
 				))
 			}
 			continue
@@ -535,7 +606,7 @@ func auditHttpdFilesArm32(fset *token.FileSet, files []*ast.File, info *types.In
 			case *ast.TypeSpec:
 				if obj, ok := info.Defs[node.Name]; ok && obj != nil {
 					t := obj.Type()
-					if httpdContainsAtomic64(t, map[types.Type]bool{}) {
+					if httpdContainsAtomic64(t, map[types.Type]bool{}) || httpdContainsAtomic64Slice(t, map[types.Type]bool{}) {
 						if st, ok := t.Underlying().(*types.Struct); ok {
 							checkedStructs[st] = true
 						}
@@ -548,7 +619,7 @@ func auditHttpdFilesArm32(fset *token.FileSet, files []*ast.File, info *types.In
 				if tv, ok := info.Types[node]; ok {
 					if st, ok := tv.Type.Underlying().(*types.Struct); ok && !checkedStructs[st] {
 						checkedStructs[st] = true
-						if httpdContainsAtomic64(st, map[types.Type]bool{}) {
+						if httpdContainsAtomic64(st, map[types.Type]bool{}) || httpdContainsAtomic64Slice(st, map[types.Type]bool{}) {
 							violations = append(violations, httpdCheckStructAtomic64(
 								fset, node.Pos(), "<anonymous_struct>", st, armSizes, pureSizes, 0, 0, map[*types.Struct]bool{},
 							)...)
@@ -557,9 +628,14 @@ func auditHttpdFilesArm32(fset *token.FileSet, files []*ast.File, info *types.In
 				}
 			case *ast.ArrayType:
 				if tv, ok := info.Types[node]; ok {
-					if arr, ok := tv.Type.Underlying().(*types.Array); ok {
+					switch seqT := tv.Type.Underlying().(type) {
+					case *types.Array:
 						violations = append(violations, httpdCheckNestedAtomic64(
-							fset, node.Pos(), "<array>", arr, armSizes, pureSizes, 0, 0, map[*types.Struct]bool{},
+							fset, node.Pos(), "<array>", seqT, armSizes, pureSizes, 0, 0, map[*types.Struct]bool{},
+						)...)
+					case *types.Slice:
+						violations = append(violations, httpdCheckNestedAtomic64(
+							fset, node.Pos(), "<slice>", seqT, armSizes, pureSizes, 0, 0, map[*types.Struct]bool{},
 						)...)
 					}
 				}
@@ -589,7 +665,9 @@ func auditHttpdFilesArm32(fset *token.FileSet, files []*ast.File, info *types.In
 							arg0 := httpdStripParens(node.Args[0])
 							if unary, ok := arg0.(*ast.UnaryExpr); ok && unary.Op == token.AND {
 								target := httpdStripParens(unary.X)
-								if _, isSel := target.(*ast.SelectorExpr); isSel {
+								_, isSel := target.(*ast.SelectorExpr)
+								_, isIdx := target.(*ast.IndexExpr)
+								if isSel || isIdx {
 									if targetTV, ok := info.Types[target]; ok && httpdContains64BitScalar(targetTV.Type, map[types.Type]bool{}) {
 										off, chainDesc, isField, strideErrs := httpdSelectorChainOffset(fset, target, info, armSizes)
 										violations = append(violations, strideErrs...)
@@ -643,10 +721,42 @@ func TestArm32HttpdPackageZeroWhitelistAlignmentGate(t *testing.T) {
 		Importer: imp,
 		Sizes:    imp.armSizes,
 	}
-	if _, err := conf.Check("hnc_httpd", imp.fset, files, info); err != nil {
+	pkg, err := conf.Check("hnc_httpd", imp.fset, files, info)
+	if err != nil {
 		t.Fatalf("typecheck hnc_httpd (GOOS=linux/arm): %v", err)
 	}
-	allViolations := auditHttpdFilesArm32(imp.fset, files, info, imp.armSizes)
+	imp.cache["hnc_httpd"] = pkg
+	seenViolation := make(map[string]bool)
+	var allViolations []string
+	for _, v := range auditHttpdFilesArm32(imp.fset, files, info, imp.armSizes) {
+		if !seenViolation[v] {
+			seenViolation[v] = true
+			allViolations = append(allViolations, v)
+		}
+	}
+
+	if len(bp.XTestGoFiles) > 0 {
+		xFiles, xErr := httpdParseGoFiles(imp.fset, pkgDir, bp.XTestGoFiles)
+		if xErr != nil {
+			t.Fatalf("parse xtest files (linux): %v", xErr)
+		}
+		checkedFiles += len(xFiles)
+		xInfo := &types.Info{
+			Types:      make(map[ast.Expr]types.TypeAndValue),
+			Defs:       make(map[*ast.Ident]types.Object),
+			Uses:       make(map[*ast.Ident]types.Object),
+			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		}
+		if _, xCheckErr := conf.Check("hnc_httpd_test", imp.fset, xFiles, xInfo); xCheckErr != nil {
+			t.Fatalf("typecheck hnc_httpd_test (GOOS=linux/arm): %v", xCheckErr)
+		}
+		for _, v := range auditHttpdFilesArm32(imp.fset, xFiles, xInfo, imp.armSizes) {
+			if !seenViolation[v] {
+				seenViolation[v] = true
+				allViolations = append(allViolations, v)
+			}
+		}
+	}
 
 	if checkedFiles < 40 {
 		t.Fatalf("expected >= 40 files typechecked in daemon/hnc_httpd, got %d", checkedFiles)
@@ -692,6 +802,25 @@ type badArrayHolder struct {
 	arr [2]badArrayElem
 }
 
+type badSliceHolder struct {
+	flag  uint32
+	items []badArrayElem
+}
+
+type safeAlignedElem struct {
+	cnt atomic.Uint64
+}
+
+type safeSliceHolder struct {
+	flag  uint32
+	items []safeAlignedElem
+}
+
+type badRawSliceElem struct {
+	raw  int64
+	tail uint32
+}
+
 type badRaw64Target struct {
 	fd  int
 	raw uint64
@@ -700,9 +829,11 @@ type badRaw64Target struct {
 	}
 }
 
-func trigger(p *badRaw64Target) {
+func trigger(p *badRaw64Target, sl []badRawSliceElem, i int) {
 	atomic.StoreUint64(&p.raw, 9)
 	_ = unsafe.Pointer(&p.bpf)
+	atomic.AddInt64(&sl[i].raw, 1)
+	_ = unsafe.Pointer(&sl[i].raw)
 }
 `
 	fset := token.NewFileSet()
@@ -730,12 +861,18 @@ func trigger(p *badRaw64Target) {
 		"badAtomicStruct.cnt",
 		"badNestedOuter.sub",
 		"badArrayHolder.arr",
+		"badSliceHolder.items slice element",
+		"(rawSize=12) with 64-bit atomic violates sizeof%8==0",
+		"indexed slice element synthetic.badRawSliceElem sizeof=12",
 		"atomic.StoreUint64(&raw)",
 		"unsafe.Pointer(&bpf)",
 	} {
 		if !strings.Contains(joined, wantSub) {
 			t.Fatalf("expected synthetic gate to catch %q, got:\n%s", wantSub, joined)
 		}
+	}
+	if strings.Contains(joined, "safeSliceHolder") || strings.Contains(joined, "safeAlignedElem") {
+		t.Fatalf("expected safeSliceHolder to pass without false positive, got:\n%s", joined)
 	}
 }
 

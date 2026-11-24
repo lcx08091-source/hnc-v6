@@ -43,7 +43,7 @@ if [ -n "$iface" ] && IP link show dev "$iface" >/dev/null 2>&1; then
   _fl_out=$(TC filter show dev "$iface" 2>&1 || true)
   qdisc_first=$(printf '%s\n' "$_qd_out" | sed -n '1p')
   root_kind=$(printf '%s\n' "$qdisc_first" | awk '{print $2}')
-  [ "$root_kind" = "htb" ] && htb_ready=true
+  printf '%s\n' "$_qd_out" | grep -q '^qdisc htb 1:' 2>/dev/null && htb_ready=true
   printf '%s\n' "$_qd_out" | grep -q 'netem' 2>/dev/null && netem_seen=true
   class_count=$(printf '%s\n' "$_cl_out" | awk '/^class /{c++} END{print c+0}')
   filter_count=$(printf '%s\n' "$_fl_out" | awk '/^filter /{c++} END{print c+0}')

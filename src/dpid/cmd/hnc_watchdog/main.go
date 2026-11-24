@@ -339,7 +339,7 @@ func writeHeartbeat() {
 func acquireLock() bool {
 	if data, err := os.ReadFile(wdPidFile); err == nil {
 		oldPid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-		if oldPid > 0 && oldPid != os.Getpid() && processAlive(oldPid) {
+		if oldPid > 0 && oldPid != os.Getpid() && daemonPidAlive(oldPid, "hnc_watchdog", "watchdog.sh") {
 			age := readHeartbeatAge()
 			if age >= 0 && age < takeoverStaleSec {
 				logf("another watchdog already running pid=%d (heartbeat fresh, %ds)", oldPid, age)
@@ -348,7 +348,7 @@ func acquireLock() bool {
 			logf("watchdog pid=%d alive but heartbeat stale (age=%ds); taking over", oldPid, age)
 			_ = syscall.Kill(oldPid, syscall.SIGTERM)
 			time.Sleep(500 * time.Millisecond)
-			if processAlive(oldPid) {
+			if daemonPidAlive(oldPid, "hnc_watchdog", "watchdog.sh") {
 				_ = syscall.Kill(oldPid, syscall.SIGKILL)
 				time.Sleep(300 * time.Millisecond)
 			}
@@ -383,9 +383,72 @@ func processAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil && !isZombie(pid)
 }
 
+func isShellInterpreterBase(base string) bool {
+	switch base {
+	case "sh", "mksh", "ash", "dash", "bash", "busybox", "toybox":
+		return true
+	default:
+		return false
+	}
+}
+
+// daemonPidAlive 在 processAlive 基础上校验 wdProcRoot/<pid>/cmdline(回退 comm)匹配预期守护进程名,
+// 严防外部 pidfile 的数字 PID 回绕复用导致漏拉守护进程或 root 误杀系统进程。
+func daemonPidAlive(pid int, expectedNames ...string) bool {
+	if pid <= 0 || (pid == 1 && os.Getpid() != 1) || len(expectedNames) == 0 {
+		return false
+	}
+	if !processAlive(pid) {
+		return false
+	}
+	pidStr := strconv.Itoa(pid)
+	if raw, err := os.ReadFile(filepath.Join(wdProcRoot, pidStr, "cmdline")); err == nil {
+		if len(bytes.TrimRight(raw, "\x00 \t\r\n")) > 0 {
+			parts := bytes.Split(raw, []byte{0})
+			arg0 := strings.TrimSpace(string(parts[0]))
+			base0 := filepath.Base(arg0)
+			for _, exp := range expectedNames {
+				if exp != "" && (arg0 == exp || base0 == exp) {
+					return true
+				}
+			}
+			if isShellInterpreterBase(base0) && len(parts) > 1 {
+				arg1 := strings.TrimSpace(string(parts[1]))
+				if arg1 != "" && arg1 != "-c" {
+					base1 := filepath.Base(arg1)
+					for _, exp := range expectedNames {
+						if exp != "" && (arg1 == exp || base1 == exp) {
+							return true
+						}
+					}
+				}
+			}
+			return false
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(wdProcRoot, pidStr, "comm")); err == nil {
+		comm := strings.TrimSpace(string(raw))
+		if comm != "" {
+			for _, exp := range expectedNames {
+				if exp == "" {
+					continue
+				}
+				trunc := exp
+				if len(trunc) > 15 {
+					trunc = trunc[:15]
+				}
+				if comm == exp || comm == trunc {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // isZombie 进程已退出、只是还没被回收(/proc/<pid>/stat 状态 Z)。
 func isZombie(pid int) bool {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	b, err := os.ReadFile(filepath.Join(wdProcRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return false
 	}
@@ -762,12 +825,12 @@ func checkHttpdFrozen(pid int) (bool, string) {
 }
 
 func terminateFrozenDaemon(pid int) {
-	if pid <= 0 {
+	if !daemonPidAlive(pid, "hnc_httpd") {
 		return
 	}
 	_ = syscall.Kill(pid, syscall.SIGTERM)
 	time.Sleep(200 * time.Millisecond)
-	if processAlive(pid) {
+	if daemonPidAlive(pid, "hnc_httpd") {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -798,6 +861,7 @@ func ensureDaemonRunning(d daemonSpec) {
 	launcher := d.binPath
 	launcherArgs := d.args
 	watchPidFile := d.pidFile
+	expectedName := filepath.Base(launcher)
 	alivePid := 0
 
 	// Is the watched pidfile alive? (Prefer kernel pidfd handle when spawned by us)
@@ -810,16 +874,18 @@ func ensureDaemonRunning(d daemonSpec) {
 					} else {
 						untrackSpawnedProcess(watchPidFile, proc)
 					}
-				} else if processAlive(pid) {
+				} else if daemonPidAlive(pid, d.name, expectedName) {
 					alivePid = pid
+				} else {
+					untrackSpawnedProcess(watchPidFile, proc)
 				}
-			} else if processAlive(pid) {
+			} else if daemonPidAlive(pid, d.name, expectedName) {
 				alivePid = pid
 			}
 		}
 	}
 	if alivePid <= 0 {
-		if live := findLiveByName(filepath.Base(launcher)); live > 0 {
+		if live := findLiveByName(expectedName); live > 0 {
 			alivePid = live
 			_ = os.WriteFile(watchPidFile, []byte(strconv.Itoa(live)), 0o644)
 			logf("%s: live without pidfile, repaired (pid=%d)", d.name, live)
@@ -840,8 +906,12 @@ func ensureDaemonRunning(d daemonSpec) {
 		// 先跑 ./bin/dns_takeover.sh remove 解除 DNS 劫持保热点不断网, 再解冻并重拉 hnc_httpd
 		dnsTakeoverRemoveFn()
 		dnsRemoved = true
-		protectDaemonProcessFn(alivePid)
-		terminateFrozenDaemonFn(alivePid)
+		if daemonPidAlive(alivePid, d.name, expectedName) {
+			protectDaemonProcessFn(alivePid)
+			terminateFrozenDaemonFn(alivePid)
+		} else {
+			logf("WARN: %s pid=%d identity changed before terminate; skipping kill", d.name, alivePid)
+		}
 		if proc := lookupSpawnedProcess(watchPidFile, alivePid); proc != nil {
 			untrackSpawnedProcess(watchPidFile, proc)
 		}
@@ -905,9 +975,9 @@ func spawnDaemon(bin string, args []string, logPath, pidFile string) error {
 	return nil
 }
 
-// findLiveByName scans /proc for a process whose comm or exe basename matches.
+// findLiveByName scans wdProcRoot for a process whose comm or exe basename matches.
 func findLiveByName(name string) int {
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(wdProcRoot)
 	if err != nil {
 		return 0
 	}
@@ -920,12 +990,12 @@ func findLiveByName(name string) int {
 		if err != nil || pid <= 0 || pid == mypid {
 			continue
 		}
-		if data, err := os.ReadFile("/proc/" + e.Name() + "/comm"); err == nil {
+		if data, err := os.ReadFile(filepath.Join(wdProcRoot, e.Name(), "comm")); err == nil {
 			if strings.TrimSpace(string(data)) == name && !isZombie(pid) {
 				return pid
 			}
 		}
-		if data, err := os.ReadFile("/proc/" + e.Name() + "/cmdline"); err == nil {
+		if data, err := os.ReadFile(filepath.Join(wdProcRoot, e.Name(), "cmdline")); err == nil {
 			argv0 := strings.SplitN(string(data), "\x00", 2)[0]
 			if filepath.Base(argv0) == name && !isZombie(pid) {
 				return pid
@@ -1158,6 +1228,30 @@ func mainLoop() {
 	}
 }
 
+const cleanupRulesSuppressSec = 600
+
+// cleanupRulesMarkerActive 检查 run/cleanup_rules.marker 是否处于 600s 规则恢复抑制窗口内。
+// 若 marker 已过期(>=600s)或内容非法/未来越界, 自动清理过期文件并返回 false。
+func cleanupRulesMarkerActive(runPath string, now time.Time) bool {
+	if runPath == "" {
+		return false
+	}
+	markerPath := filepath.Join(runPath, "cleanup_rules.marker")
+	b, err := os.ReadFile(markerPath)
+	if err != nil {
+		return false
+	}
+	mts, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err == nil && mts > 0 {
+		age := now.Unix() - mts
+		if age >= -5 && age < cleanupRulesSuppressSec {
+			return true
+		}
+	}
+	_ = os.Remove(markerPath)
+	return false
+}
+
 func handlePending(throttle *restoreThrottle) time.Duration {
 	m4Writer.hotspotDown()
 	if throttle != nil {
@@ -1175,6 +1269,10 @@ func handlePending(throttle *restoreThrottle) time.Duration {
 		return intervalProbe
 	}
 	iface, ip := parts[0], parts[1]
+	if cleanupRulesMarkerActive(natRunDir, nowFn()) {
+		logf("STATE PENDING: cleanup_rules.marker active, deferring full_init on %s", iface)
+		return intervalProbe
+	}
 	logf("STATE PENDING -> ACTIVE:%s (ip=%s); running full_init", iface, ip)
 	res = runActionFn("full_init", iface, ip)
 	touchMainLoopStep()
@@ -1283,6 +1381,9 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		return intervalNormal
 
 	default:
+		if cleanupRulesMarkerActive(natRunDir, nowFn()) {
+			return intervalNormal
+		}
 		curIdx := readPositiveIfIndex(newIface)
 		if throttle != nil {
 			if prevIdx, exempt := throttle.tryExemptBandSwitch(newIface, curIdx); exempt {
@@ -1481,6 +1582,31 @@ func appLimitNextWait(idle, hasWork, quietOrNoClients bool, sinceLastApply time.
 	return rem
 }
 
+func appLimitStep(script, dirty, dataPath, runPath string, lastApply *time.Time) bool {
+	if hotspotIdleFn() {
+		return false
+	}
+	now := nowFn()
+	if cleanupRulesMarkerActive(runPath, now) {
+		return false
+	}
+	hasDirty := false
+	if _, err := os.Stat(dirty); err == nil {
+		hasDirty = true
+		_ = os.Remove(dirty)
+	}
+	hasWork := appLimitHasWork(dataPath, runPath)
+	if hasDirty || (hasWork && (lastApply == nil || lastApply.IsZero() || now.Sub(*lastApply) >= appLimitApplyEvery || now.Sub(*lastApply) < 0)) {
+		appApplyOnce(script)
+		appliedAt := nowFn()
+		if lastApply != nil {
+			*lastApply = appliedAt
+		}
+		hasWork = appLimitHasWork(dataPath, runPath)
+	}
+	return hasWork
+}
+
 func appLimitApplyLoop() {
 	script := binDir + "/apply_app_limits.sh"
 	dirty := runDir + "/app_limit.dirty"
@@ -1492,18 +1618,7 @@ func appLimitApplyLoop() {
 		idle := hotspotIdleFn()
 		hasWork := false
 		if !idle {
-			hasDirty := false
-			if _, err := os.Stat(dirty); err == nil {
-				hasDirty = true
-				_ = os.Remove(dirty)
-			}
-			hasWork = appLimitHasWork(dataDir, runDir)
-			now := nowFn()
-			if hasDirty || (hasWork && (lastApply.IsZero() || now.Sub(lastApply) >= appLimitApplyEvery || now.Sub(lastApply) < 0)) {
-				appApplyOnce(script)
-				lastApply = nowFn()
-				hasWork = appLimitHasWork(dataDir, runDir)
-			}
+			hasWork = appLimitStep(script, dirty, dataDir, runDir, &lastApply)
 		}
 		s := actSnapshotFn()
 		quietOrNoClients := s.OK && (s.Quiet || s.Level == activity.LevelNoClients)

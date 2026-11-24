@@ -491,10 +491,36 @@ func saveAppControls(hncDir string, f appControlsFile) error {
 // 结果确定(排序后截断), 否则每 10 秒展开结果都不同会反复重跑脚本。
 func appBlockItems(mac, source, ref, label string, until int64, apps []*catalogApp,
 	match func(appID, category string) bool, names map[string]ipName, ipApps map[string]ipApp, maxDomains int) []connBlock {
+	return appBlockItemsForDir("", mac, source, ref, label, until, apps, match, names, ipApps, maxDomains)
+}
+
+func appBlockDomainAllowed(hncDir, host, ownerAppID string, match func(appID, category string) bool) bool {
+	if isAppCtlSharedOrMultiTenantDomain(hncDir, host) {
+		return false
+	}
+	if payOwner := appCtlForeignPaymentOwner(host); payOwner != "" {
+		if ownerAppID != "" && ownerAppID != payOwner {
+			return false
+		}
+		if match != nil && !match(payOwner, "finance") {
+			return false
+		}
+	}
+	return true
+}
+
+func appBlockItemsForDir(hncDir, mac, source, ref, label string, until int64, apps []*catalogApp,
+	match func(appID, category string) bool, names map[string]ipName, ipApps map[string]ipApp, maxDomains int) []connBlock {
 	var sfx []string
 	seen := map[string]bool{}
 	for _, a := range apps {
+		if a == nil {
+			continue
+		}
 		for _, s := range a.Suffixes {
+			if !appBlockDomainAllowed(hncDir, s, a.ID, match) {
+				continue
+			}
 			if !seen[s] {
 				seen[s] = true
 				sfx = append(sfx, s)
@@ -544,6 +570,9 @@ func appBlockItems(mac, source, ref, label string, until int64, apps []*catalogA
 		if h == "" || covered(h) || !domainRe.MatchString(h) || len(h) > 253 {
 			continue
 		}
+		if !appBlockDomainAllowed(hncDir, h, n.App, match) {
+			continue
+		}
 		extraSet[h] = true
 	}
 	extra := make([]string, 0, len(extraSet))
@@ -556,8 +585,16 @@ func appBlockItems(mac, source, ref, label string, until int64, apps []*catalogA
 	}
 	var ips []string
 	for ip, a := range ipApps {
-		if a.ID == "" || !match(a.ID, strings.ToLower(a.Category)) || isPrivateIP(ip) || net.ParseIP(ip) == nil {
+		if a.ID == "" || !match(a.ID, strings.ToLower(a.Category)) || isPrivateIP(ip) || isNonExpandableBlockIP(ip) || net.ParseIP(ip) == nil {
 			continue
+		}
+		if nm, ok := names[ip]; ok {
+			if nm.Name != "" && !appBlockDomainAllowed(hncDir, nm.Name, a.ID, match) {
+				continue
+			}
+			if nm.App != "" && !match(nm.App, strings.ToLower(nm.Category)) {
+				continue
+			}
 		}
 		ips = append(ips, ip)
 	}
@@ -624,7 +661,7 @@ func (s *server) connBlockDerivedFrom(ctl appControlsFile, used map[string]int, 
 			apps, label = []*catalogApp{a}, a.Name
 		}
 		id := l.AppID
-		out = append(out, appBlockItems(l.MAC, connBlockSrcAppTime, id, label, until, apps,
+		out = append(out, appBlockItemsForDir(s.hncDir, l.MAC, connBlockSrcAppTime, id, label, until, apps,
 			func(appID, _ string) bool { return appID == id }, names, ipApps, appBlockMaxDomains)...)
 	}
 	for _, cb := range ctl.CategoryBlocks {
@@ -633,7 +670,7 @@ func (s *server) connBlockDerivedFrom(ctl appControlsFile, used map[string]int, 
 			apps = append(apps, cat.apps[id])
 		}
 		c := cb.Category
-		out = append(out, appBlockItems(cb.MAC, connBlockSrcCategory, c, "类别:"+c, 0, apps,
+		out = append(out, appBlockItemsForDir(s.hncDir, cb.MAC, connBlockSrcCategory, c, "类别:"+c, 0, apps,
 			func(appID, category string) bool {
 				if a := cat.apps[appID]; a != nil {
 					return a.Category == c

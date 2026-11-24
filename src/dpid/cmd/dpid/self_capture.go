@@ -574,12 +574,58 @@ func dispatchSelfCaptureEvent(
 	}
 }
 
-func lookupProcTCPUID(srcPort uint16, dstIP net.IP, dstPort uint16) (int, bool) {
-	if srcPort == 0 && dstPort == 0 {
-		return 0, false
+const (
+	procTCPScanMinInterval = 200 * time.Millisecond
+	procTCPScanMaxRows     = 4096
+)
+
+type procTCPRow struct {
+	lPort uint16
+	rPort uint16
+	rIP   net.IP
+	uid   int
+}
+
+var (
+	procTCPScanMu       sync.Mutex
+	lastProcTCPScanAt   time.Time
+	lastProcTCPPathsKey string
+	lastProcTCPRows     []procTCPRow
+)
+
+func extractNAT64IPv4(ip net.IP) net.IP {
+	p16 := ip.To16()
+	if len(p16) != 16 || p16[0] != 0x00 || p16[1] != 0x64 || p16[2] != 0xff || p16[3] != 0x9b {
+		return nil
 	}
-	var fallbackUID int
-	for _, p := range procNetTCPPaths {
+	wellKnown := p16[4] == 0 && p16[5] == 0 && p16[6] == 0 && p16[7] == 0 &&
+		p16[8] == 0 && p16[9] == 0 && p16[10] == 0 && p16[11] == 0
+	localUse := p16[4] == 0 && p16[5] == 1
+	if wellKnown || localUse {
+		return net.IPv4(p16[12], p16[13], p16[14], p16[15])
+	}
+	return nil
+}
+
+func sameProcRemoteIP(a, b net.IP) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	if a.Equal(b) {
+		return true
+	}
+	if a4 := extractNAT64IPv4(a); a4 != nil && a4.Equal(b) {
+		return true
+	}
+	if b4 := extractNAT64IPv4(b); b4 != nil && b4.Equal(a) {
+		return true
+	}
+	return false
+}
+
+func scanProcTCPRowsLocked(paths []string) []procTCPRow {
+	rows := make([]procTCPRow, 0, 128)
+	for _, p := range paths {
 		f, err := os.Open(p)
 		if err != nil {
 			continue
@@ -597,31 +643,59 @@ func lookupProcTCPUID(srcPort uint16, dstIP net.IP, dstPort uint16) (int, bool) 
 			}
 			_, lPort, ok1 := parseProcHexAddrPort(fields[1])
 			rIP, rPort, ok2 := parseProcHexAddrPort(fields[2])
-			if !ok1 || !ok2 {
-				continue
-			}
-			if dstPort != 0 && rPort != dstPort {
-				continue
-			}
-			if srcPort != 0 && lPort != srcPort {
+			if !ok1 || !ok2 || len(rIP) == 0 {
 				continue
 			}
 			u, uerr := strconv.Atoi(fields[7])
 			if uerr != nil || u <= 0 {
 				continue
 			}
-			if len(dstIP) > 0 && rIP != nil && rIP.Equal(dstIP) {
-				_ = f.Close()
-				return u, true
-			}
-			if fallbackUID == 0 {
-				fallbackUID = u
+			rows = append(rows, procTCPRow{
+				lPort: lPort,
+				rPort: rPort,
+				rIP:   rIP,
+				uid:   u,
+			})
+			if len(rows) >= procTCPScanMaxRows {
+				break
 			}
 		}
 		_ = f.Close()
+		if len(rows) >= procTCPScanMaxRows {
+			break
+		}
 	}
-	if fallbackUID > 0 {
-		return fallbackUID, true
+	return rows
+}
+
+func lookupProcTCPUID(srcPort uint16, dstIP net.IP, dstPort uint16) (int, bool) {
+	if (srcPort == 0 && dstPort == 0) || len(dstIP) == 0 {
+		return 0, false
+	}
+	paths := append([]string(nil), procNetTCPPaths...)
+	pathsKey := strings.Join(paths, "\x00")
+	now := time.Now()
+
+	procTCPScanMu.Lock()
+	if pathsKey != lastProcTCPPathsKey || lastProcTCPScanAt.IsZero() ||
+		now.Sub(lastProcTCPScanAt) >= procTCPScanMinInterval || now.Before(lastProcTCPScanAt) {
+		lastProcTCPRows = scanProcTCPRowsLocked(paths)
+		lastProcTCPScanAt = now
+		lastProcTCPPathsKey = pathsKey
+	}
+	rows := lastProcTCPRows
+	procTCPScanMu.Unlock()
+
+	for _, row := range rows {
+		if dstPort != 0 && row.rPort != dstPort {
+			continue
+		}
+		if srcPort != 0 && row.lPort != srcPort {
+			continue
+		}
+		if sameProcRemoteIP(row.rIP, dstIP) {
+			return row.uid, true
+		}
 	}
 	return 0, false
 }

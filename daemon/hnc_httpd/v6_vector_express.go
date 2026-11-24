@@ -139,21 +139,27 @@ type vectorExpressEngine struct {
 	applyHook       func(spec VectorExpressDataplaneSpec) error
 
 	// 单槽串行数据面下发协调器(杜绝并发 go runBin 乱序竞态)
-	dpMu             sync.Mutex
-	pendingDPJob     *expressDataplaneJob
-	dpRunning        bool
-	dpIdleCh         chan struct{}
-	lastMangleDigest string
-	dpEnabledFn      func(hncDir string) bool
-	nativeApplyFn    func(hncDir string, enable bool, gameMark uint32, bgCeilKbps int) error
-	mangleApplyFn    func(isIPv6 bool, payload string) error
-	invalidateFn     func(hncDir, iface string)
-	fallbackCmdFn    func(hncDir, script string, args ...string) (int, string)
-	pollInterval     time.Duration
-	holdDurOverride  time.Duration
-	activityHook     func() (<-chan struct{}, Activity)
-	simActiveHook    func() bool
-	signalHook       func(now time.Time) []VectorExpressDeviceSignal
+	dpMu               sync.Mutex
+	pendingDPJob       *expressDataplaneJob
+	dpRunning          bool
+	dpIdleCh           chan struct{}
+	lastMangleDigestV4 string
+	lastMangleDigestV6 string
+	dpApplySeq         uint64
+	appliedDPSeq       uint64
+	cfgSaveMu          sync.Mutex
+	cfgSaveSeq         uint64
+	lastSavedCfgSeq    uint64
+	dpEnabledFn        func(hncDir string) bool
+	nativeApplyFn      func(hncDir string, enable bool, gameMark uint32, bgCeilKbps int) error
+	mangleApplyFn      func(isIPv6 bool, payload string) error
+	invalidateFn       func(hncDir, iface string)
+	fallbackCmdFn      func(hncDir, script string, args ...string) (int, string)
+	pollInterval       time.Duration
+	holdDurOverride    time.Duration
+	activityHook       func() (<-chan struct{}, Activity)
+	simActiveHook      func() bool
+	signalHook         func(now time.Time) []VectorExpressDeviceSignal
 }
 
 func newVectorExpressEngine(s *server) *vectorExpressEngine {
@@ -215,6 +221,10 @@ func (e *vectorExpressEngine) ReloadFromDisk() {
 	e.cfg = defaultVectorExpressConfig()
 	e.loadConfigLocked()
 	e.mu.Unlock()
+	e.dpMu.Lock()
+	e.lastMangleDigestV4 = ""
+	e.lastMangleDigestV6 = ""
+	e.dpMu.Unlock()
 	if !e.isHotspotOffReadOnly() {
 		e.Wake()
 	}
@@ -244,15 +254,20 @@ func normalizeExpressConfig(c VectorExpressConfig) VectorExpressConfig {
 	return c
 }
 
-func (e *vectorExpressEngine) saveConfigLocked() error {
-	if e.srv == nil || e.srv.hncDir == "" {
+func (e *vectorExpressEngine) persistConfigBytesUnlocked(seq uint64, b []byte) error {
+	if e.srv == nil || e.srv.hncDir == "" || len(b) == 0 {
 		return nil
 	}
-	b, err := json.MarshalIndent(e.cfg, "", "  ")
-	if err != nil {
+	e.cfgSaveMu.Lock()
+	defer e.cfgSaveMu.Unlock()
+	if seq < e.lastSavedCfgSeq {
+		return nil
+	}
+	if err := discoverWriteAtomic(e.configPath(), b); err != nil {
 		return err
 	}
-	return discoverWriteAtomic(e.configPath(), b)
+	e.lastSavedCfgSeq = seq
+	return nil
 }
 
 // collectLiveSignals 从现有 flow_shape / fg_model / liveCalls / conntrack 零侵入聚合各设备信号。
@@ -336,11 +351,60 @@ func isRealtimeAppCategory(cat string) bool {
 		c == "voip" || c == "meeting" || c == "rtc"
 }
 
+// collectOnlineMACSet 聚合当前在线设备 MAC 集合（实时信号、devices.json online=true 与模拟在线设备）。
+// 严格在 e.mu 锁外调用，避免持锁期间发生磁盘/缓存读取。
+func (e *vectorExpressEngine) collectOnlineMACSet(now time.Time, signals []VectorExpressDeviceSignal) map[string]bool {
+	online := make(map[string]bool, len(signals))
+	for _, sig := range signals {
+		if cm := canonMAC(sig.MAC); cm != "" {
+			online[cm] = true
+		}
+	}
+	if e == nil || e.srv == nil || e.srv.hncDir == "" {
+		return online
+	}
+	if raw, err := e.srv.jsonCache.read(filepath.Join(e.srv.hncDir, "data", "devices.json")); err == nil {
+		if m, ok := raw.(map[string]interface{}); ok {
+			for mac, v := range m {
+				d, _ := v.(map[string]interface{})
+				if d == nil {
+					continue
+				}
+				if on, _ := d["online"].(bool); on {
+					if cm := canonMAC(mac); cm != "" {
+						online[cm] = true
+					}
+				}
+			}
+		}
+	}
+	if e.srv.simActive() {
+		views, _ := e.srv.simViews(now)
+		for i := range views {
+			if !views[i].D.Offline {
+				if cm := canonMAC(views[i].D.MAC); cm != "" {
+					online[cm] = true
+				}
+			}
+		}
+	}
+	return online
+}
+
 // Step 状态机单步推演（纯确定性输入 now + signals, 便于单元测试覆盖护航触发、P2P 排除与 60s 恢复）。
 func (e *vectorExpressEngine) Step(now time.Time, signals []VectorExpressDeviceSignal) map[string]any {
+	onlineSet := e.collectOnlineMACSet(now, signals)
+
 	e.mu.Lock()
 	cfg := e.cfg
 	prevState := e.state
+
+	var (
+		needApplyDP bool
+		dpSeq       uint64
+		dpSpec      VectorExpressDataplaneSpec
+		dpHook      func(spec VectorExpressDataplaneSpec) error
+	)
 
 	if !cfg.Enabled {
 		e.state = expressStateIdle
@@ -350,23 +414,27 @@ func (e *vectorExpressEngine) Step(now time.Time, signals []VectorExpressDeviceS
 		e.sinceAt = time.Time{}
 		e.lastRealtimeAt = time.Time{}
 		e.activeFlag.Store(0)
-		if prevState != expressStateIdle {
+		if prevState != expressStateIdle || e.lastApplied.Active || e.lastApplied.BgPoolCeilPct != 100 {
 			e.transitions.Add(1)
-			e.applyDataplaneLocked(now, false, nil)
+			needApplyDP = true
+			dpSeq, dpSpec, dpHook = e.prepareDataplaneLocked(now, false, nil)
 		}
 		snap := e.buildSnapshotLocked(now)
 		e.mu.Unlock()
+		if needApplyDP {
+			e.commitDataplaneUnlocked(dpSeq, dpSpec, dpHook)
+		}
 		return snap
 	}
 
 	forcedSet := make(map[string]bool, len(cfg.ForcedMACs))
-	for _, m := range cfg.ForcedMACs {
-		forcedSet[m] = true
-	}
-
 	escortMap := make(map[string]string)
 	for _, m := range cfg.ForcedMACs {
-		escortMap[m] = "manual_forced"
+		forcedSet[m] = true
+		// 仅当前真实在线的 ForcedMACs 才激活护航抢占，杜绝离线残留 MAC 长期压制全局后台池上限
+		if onlineSet[m] {
+			escortMap[m] = "manual_forced"
+		}
 	}
 
 	var p2pExcl []string
@@ -440,15 +508,20 @@ func (e *vectorExpressEngine) Step(now time.Time, signals []VectorExpressDeviceS
 
 	needActiveDP := e.state == expressStateActive || e.state == expressStateCooldown
 	macsChanged := !expressStringSliceEqual(e.escortedMACs, e.lastApplied.EscortedMACs)
-	if prevState != e.state || needActiveDP != e.lastApplied.Active || (needActiveDP && macsChanged) {
+	pctChanged := needActiveDP && e.cfg.BgCeilPct != e.lastApplied.BgPoolCeilPct
+	if prevState != e.state || needActiveDP != e.lastApplied.Active || (needActiveDP && macsChanged) || pctChanged {
 		if prevState != e.state || needActiveDP != e.lastApplied.Active {
 			e.transitions.Add(1)
 		}
-		e.applyDataplaneLocked(now, needActiveDP, e.escortedMACs)
+		needApplyDP = true
+		dpSeq, dpSpec, dpHook = e.prepareDataplaneLocked(now, needActiveDP, e.escortedMACs)
 	}
 
 	snap := e.buildSnapshotLocked(now)
 	e.mu.Unlock()
+	if needApplyDP {
+		e.commitDataplaneUnlocked(dpSeq, dpSpec, dpHook)
+	}
 	return snap
 }
 
@@ -705,10 +778,9 @@ func (e *vectorExpressEngine) OnRootRateChanged(_, _ int) {
 		ceilPct = expressDefaultBgCeilPct
 	}
 	macs := append([]string(nil), e.escortedMACs...)
-	iface := e.resolveCurrentIfaceLocked()
-	lastIface := e.lastActiveIface
 	e.mu.Unlock()
 
+	iface, lastIface := e.resolveCurrentIfaceAndLast()
 	bgKbps := e.computeBgCeilKbps(ceilPct)
 	upBgKbps := e.computeUpBgCeilKbps(ceilPct)
 
@@ -853,48 +925,60 @@ func (e *vectorExpressEngine) syncExpressMangleDataplane(hncDir string, active b
 		devIPs = e.srv.deviceIPsByMAC()
 	}
 	v4Payload, v6Payload := BuildVectorExpressManglePayloads(active, escortedMACs, devIPs)
-	digest := v4Payload + "\x00" + v6Payload
 
 	e.dpMu.Lock()
-	if e.lastMangleDigest == digest {
-		e.dpMu.Unlock()
+	needV4 := e.lastMangleDigestV4 != v4Payload
+	needV6 := e.lastMangleDigestV6 != v6Payload
+	e.dpMu.Unlock()
+	if !needV4 && !needV6 {
 		return
 	}
-	e.dpMu.Unlock()
 
 	if e.mangleApplyFn != nil {
-		e1 := e.mangleApplyFn(false, v4Payload)
-		e2 := e.mangleApplyFn(true, v6Payload)
-		if e1 == nil && e2 == nil {
-			e.dpMu.Lock()
-			e.lastMangleDigest = digest
-			e.dpMu.Unlock()
+		if needV4 {
+			if err := e.mangleApplyFn(false, v4Payload); err == nil {
+				e.dpMu.Lock()
+				e.lastMangleDigestV4 = v4Payload
+				e.dpMu.Unlock()
+			}
+		}
+		if needV6 {
+			if err := e.mangleApplyFn(true, v6Payload); err == nil {
+				e.dpMu.Lock()
+				e.lastMangleDigestV6 = v6Payload
+				e.dpMu.Unlock()
+			}
 		}
 		return
 	}
 
-	v4OK := true
-	if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
-		if err := pipeIptablesRestoreWithTimeout(v4Bin, []byte(v4Payload), iptRestoreTimeout); err != nil {
-			v4OK = false
-		} else if active && len(escortedMACs) > 0 {
-			ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("iptables"), expressMangleChainName, false)
+	if needV4 {
+		if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
+			if err := pipeIptablesRestoreWithTimeout(v4Bin, []byte(v4Payload), iptRestoreTimeout); err == nil {
+				if active && len(escortedMACs) > 0 {
+					ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("iptables"), expressMangleChainName, false)
+				}
+				e.dpMu.Lock()
+				e.lastMangleDigestV4 = v4Payload
+				e.dpMu.Unlock()
+			}
 		}
 	}
-	if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
-		if err := pipeIptablesRestoreWithTimeout(v6Bin, []byte(v6Payload), iptRestoreTimeout); err == nil && active && len(escortedMACs) > 0 {
-			ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("ip6tables"), expressMangleChainName, false)
+	if needV6 {
+		if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
+			if err := pipeIptablesRestoreWithTimeout(v6Bin, []byte(v6Payload), iptRestoreTimeout); err == nil {
+				if active && len(escortedMACs) > 0 {
+					ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("ip6tables"), expressMangleChainName, false)
+				}
+				e.dpMu.Lock()
+				e.lastMangleDigestV6 = v6Payload
+				e.dpMu.Unlock()
+			}
 		}
-	}
-	if v4OK {
-		e.dpMu.Lock()
-		e.lastMangleDigest = digest
-		e.dpMu.Unlock()
 	}
 }
 
-func (e *vectorExpressEngine) resolveCurrentIfaceLocked() string {
-	var iface string
+func (e *vectorExpressEngine) resolveCurrentIfaceAndLast() (iface, lastIface string) {
 	if e.srv != nil && e.srv.hncDir != "" {
 		iface = readHotspotIfaceName(e.srv.hncDir)
 	}
@@ -903,10 +987,13 @@ func (e *vectorExpressEngine) resolveCurrentIfaceLocked() string {
 			iface = act.HotspotIface
 		}
 	}
+	e.mu.Lock()
 	if iface != "" {
 		e.lastActiveIface = iface
 	}
-	return iface
+	lastIface = e.lastActiveIface
+	e.mu.Unlock()
+	return iface, lastIface
 }
 
 // WaitDataplaneIdle 等待单槽串行数据面消费协程处理完当前队列中的任务。
@@ -923,9 +1010,20 @@ func (e *vectorExpressEngine) WaitDataplaneIdle() {
 }
 
 func (e *vectorExpressEngine) enqueueDataplaneJob(job expressDataplaneJob, syncWait bool) {
+	e.enqueueDataplaneJobWithSeq(0, job, syncWait)
+}
+
+func (e *vectorExpressEngine) enqueueDataplaneJobWithSeq(seq uint64, job expressDataplaneJob, syncWait bool) bool {
 	cp := job
 	cp.escortedMACs = append([]string(nil), job.escortedMACs...)
 	e.dpMu.Lock()
+	if seq > 0 {
+		if seq < e.appliedDPSeq {
+			e.dpMu.Unlock()
+			return false
+		}
+		e.appliedDPSeq = seq
+	}
 	e.pendingDPJob = &cp
 	if !e.dpRunning {
 		e.dpRunning = true
@@ -937,6 +1035,7 @@ func (e *vectorExpressEngine) enqueueDataplaneJob(job expressDataplaneJob, syncW
 	if syncWait && idleCh != nil {
 		<-idleCh
 	}
+	return true
 }
 
 func (e *vectorExpressEngine) drainDataplaneJobs() {
@@ -1024,7 +1123,7 @@ func (e *vectorExpressEngine) executeDataplaneJob(job expressDataplaneJob) {
 	}
 }
 
-func (e *vectorExpressEngine) applyDataplaneLocked(now time.Time, active bool, macs []string) {
+func (e *vectorExpressEngine) prepareDataplaneLocked(now time.Time, active bool, macs []string) (uint64, VectorExpressDataplaneSpec, func(spec VectorExpressDataplaneSpec) error) {
 	ceilPct := 100
 	if active {
 		ceilPct = e.cfg.BgCeilPct
@@ -1048,33 +1147,38 @@ func (e *vectorExpressEngine) applyDataplaneLocked(now time.Time, active bool, m
 		UpdatedAt:       now.Unix(),
 	}
 	e.lastApplied = spec
-	iface := e.resolveCurrentIfaceLocked()
-	lastIface := e.lastActiveIface
+	e.dpApplySeq++
+	return e.dpApplySeq, spec, e.applyHook
+}
+
+func (e *vectorExpressEngine) commitDataplaneUnlocked(seq uint64, spec VectorExpressDataplaneSpec, hook func(spec VectorExpressDataplaneSpec) error) {
+	iface, lastIface := e.resolveCurrentIfaceAndLast()
 	bgKbps := 0
 	upBgKbps := 0
-	if active {
-		bgKbps = e.computeBgCeilKbps(ceilPct)
-		upBgKbps = e.computeUpBgCeilKbps(ceilPct)
+	if spec.Active {
+		bgKbps = e.computeBgCeilKbps(spec.BgPoolCeilPct)
+		upBgKbps = e.computeUpBgCeilKbps(spec.BgPoolCeilPct)
 	}
-
+	accepted := e.enqueueDataplaneJobWithSeq(seq, expressDataplaneJob{
+		active:          spec.Active,
+		bgCeilPct:       spec.BgPoolCeilPct,
+		bgCeilKbps:      bgKbps,
+		upBgCeilKbps:    upBgKbps,
+		escortedMACs:    spec.EscortedMACs,
+		iface:           iface,
+		lastActiveIface: lastIface,
+		hotspotOff:      false,
+	}, false)
+	if !accepted {
+		return
+	}
 	if e.srv != nil && e.srv.hncDir != "" {
 		if b, err := json.MarshalIndent(spec, "", "  "); err == nil {
 			_ = discoverWriteAtomic(e.stateRunPath(), b)
 		}
 	}
-	e.enqueueDataplaneJob(expressDataplaneJob{
-		active:          active,
-		bgCeilPct:       ceilPct,
-		bgCeilKbps:      bgKbps,
-		upBgCeilKbps:    upBgKbps,
-		escortedMACs:    cpMACs,
-		iface:           iface,
-		lastActiveIface: lastIface,
-		hotspotOff:      false,
-	}, false)
-
-	if e.applyHook != nil {
-		_ = e.applyHook(spec)
+	if hook != nil {
+		_ = hook(spec)
 	}
 }
 
@@ -1083,6 +1187,11 @@ func (e *vectorExpressEngine) resetForHotspotOff(now time.Time) {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	var iface string
+	if e.srv != nil && e.srv.hncDir != "" {
+		iface = readHotspotIfaceName(e.srv.hncDir)
+	}
+
 	e.mu.Lock()
 	prevState := e.state
 	prevActive := e.lastApplied.Active || e.activeFlag.Load() != 0 || e.lastApplied.BgPoolCeilPct != 100
@@ -1110,12 +1219,10 @@ func (e *vectorExpressEngine) resetForHotspotOff(now time.Time) {
 		UpdatedAt:       now.Unix(),
 	}
 	e.lastApplied = spec
+	e.dpApplySeq++
+	seq := e.dpApplySeq
 	if prevState != expressStateIdle || prevActive {
 		e.transitions.Add(1)
-	}
-	var iface string
-	if e.srv != nil && e.srv.hncDir != "" {
-		iface = readHotspotIfaceName(e.srv.hncDir)
 	}
 	lastIface := e.lastActiveIface
 	hook := e.applyHook
@@ -1127,7 +1234,7 @@ func (e *vectorExpressEngine) resetForHotspotOff(now time.Time) {
 		}
 	}
 
-	e.enqueueDataplaneJob(expressDataplaneJob{
+	e.enqueueDataplaneJobWithSeq(seq, expressDataplaneJob{
 		active:          false,
 		bgCeilPct:       100,
 		bgCeilKbps:      0,
@@ -1524,11 +1631,28 @@ func (s *server) apiVectorExpress(w http.ResponseWriter, r *http.Request) {
 			}
 			next.MaxConcurrentDstIPs = *req.MaxConcurrentDstIPs
 		}
+		prevCfg := eng.cfg
 		eng.cfg = normalizeExpressConfig(next)
-		err := eng.saveConfigLocked()
+		eng.cfgSaveSeq++
+		saveSeq := eng.cfgSaveSeq
+		cfgBytes, mErr := json.MarshalIndent(eng.cfg, "", "  ")
 		eng.mu.Unlock()
 
-		if err != nil {
+		if mErr != nil {
+			eng.mu.Lock()
+			if eng.cfgSaveSeq == saveSeq {
+				eng.cfg = prevCfg
+			}
+			eng.mu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write failed", "detail": mErr.Error()})
+			return
+		}
+		if err := eng.persistConfigBytesUnlocked(saveSeq, cfgBytes); err != nil {
+			eng.mu.Lock()
+			if eng.cfgSaveSeq == saveSeq {
+				eng.cfg = prevCfg
+			}
+			eng.mu.Unlock()
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write failed", "detail": err.Error()})
 			return
 		}

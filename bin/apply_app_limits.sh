@@ -351,6 +351,7 @@ compute_full_sig() {
         printf 'iface=%s|v6=%s\n' "$IFACE" "$IPV6_OK"
         cat "$LIMITS_FLAT" 2>/dev/null
         cat "$IP_APP_FLAT" 2>/dev/null
+        [ -s "$RUN/dpi_ipname.json" ] && cat "$RUN/dpi_ipname.json" 2>/dev/null
         [ -s "$DEVICES_FLAT" ] && cat "$DEVICES_FLAT" 2>/dev/null
         cat "$DEVICES" 2>/dev/null
         cat "$RULES" 2>/dev/null
@@ -847,8 +848,17 @@ global_ceil_kbit() {
             gs_dn=$(tr -d '\r\n' < "$RULES" 2>/dev/null | sed -nE 's/.*"global_shaper_down"[[:space:]]*:[[:space:]]*"?([0-9.a-zA-Z]+)"?.*/\1/p' | head -1)
             if [ -n "$gs_dn" ] && [ "$gs_dn" != "0" ]; then
                 case "$gs_dn" in
-                    *[a-zA-Z]*) k=$(to_kbit "$gs_dn") ;;
-                    *) k=$(awk -v v="$gs_dn" 'BEGIN{x=int(v*1000+0.5); if(x<1000)x=1000000; print x}') ;;
+                    *[a-zA-Z]*)
+                        if awk -v v="$gs_dn" 'BEGIN{n=v; sub(/[A-Za-z]+$/,"",n); exit !(n+0 <= 0)}'; then
+                            k=1000000
+                        else
+                            k=$(to_kbit "$gs_dn")
+                            [ "${k:-0}" -lt 64 ] && k=64
+                        fi
+                        ;;
+                    *)
+                        k=$(awk -v v="$gs_dn" 'BEGIN{v=v+0; if(v<=0){print 1000000; exit} x=int(v*1000+0.5); if(x<64)x=64; print x}')
+                        ;;
                 esac
                 echo "$k"
                 return 0
@@ -879,11 +889,132 @@ INCLUDE_SHARED=0
 tr -d '\n' < "$RULES" 2>/dev/null | \
     grep -Eq '"app_limit_include_shared_ips"[[:space:]]*:[[:space:]]*(true|"true"|1|"1"|"on")' && INCLUDE_SHARED=1
 
+SHARED_INFRA_TXT=""
+for _sif in \
+    "$HNC_DIR/etc/dpi_rules.d/shared_infra.txt" \
+    "$HNC_DIR/data/dpi_rules.d/shared_infra.txt" \
+    "${MODDIR:-}/data/dpi_rules.d/shared_infra.txt" \
+    "$(dirname "$0")/../data/dpi_rules.d/shared_infra.txt"; do
+    case "$_sif" in /data/dpi_rules.d/*) continue ;; esac
+    if [ -s "$_sif" ]; then
+        SHARED_INFRA_TXT="$_sif"
+        break
+    fi
+done
+unset _sif
+
 {
     echo "#sentinel -"
-    tr -d '\n' < "$IPNAME_JSON" 2>/dev/null | \
-        grep -oE '"[0-9A-Fa-f.:]+":\{[^{}]*\}' | \
-        sed -n 's/^"\([^"]*\)":{.*"app":"\([^"]*\)".*/\1 \2/p'
+    if [ -s "$IPNAME_JSON" ]; then
+        awk -v sif="$SHARED_INFRA_TXT" '
+        function add_rule(ln) {
+            sub(/#.*/, "", ln)
+            gsub(/^[ \t\r\n.]+|[ \t\r\n.]+$/, "", ln)
+            ln = tolower(ln)
+            if (ln == "" || ln ~ /[ \t\/]/) return
+            if (index(ln, "*") > 0) {
+                g_n++
+                globs[g_n] = ln
+            } else {
+                suf[ln] = 1
+            }
+        }
+        function reg_domain(h,   n, a, t2) {
+            n = split(h, a, ".")
+            if (n <= 2) return h
+            t2 = a[n-1] "." a[n]
+            if (n >= 3 && (t2 == "com.cn" || t2 == "net.cn" || t2 == "org.cn" || t2 == "gov.cn" || t2 == "ac.cn" || t2 == "co.uk" || t2 == "co.jp" || t2 == "com.hk" || t2 == "com.tw")) {
+                return a[n-2] "." a[n-1] "." a[n]
+            }
+            return t2
+        }
+        function glob_labels(pat, s,   pn, sn, pa, sa, i, r) {
+            pn = split(pat, pa, ".")
+            sn = split(s, sa, ".")
+            if (pn != sn) return 0
+            for (i = 1; i <= pn; i++) {
+                if (index(pa[i], "*") == 0) {
+                    if (pa[i] != sa[i]) return 0
+                } else {
+                    r = pa[i]
+                    gsub(/[^a-z0-9*-]/, "\\\\&", r)
+                    gsub(/\*/, "[^.]*", r)
+                    if (sa[i] !~ ("^" r "$")) return 0
+                }
+            }
+            return 1
+        }
+        function is_shared_host(h,   cur, dot, rd, i) {
+            gsub(/^[ \t\r\n.]+|[ \t\r\n.]+$/, "", h)
+            h = tolower(h)
+            if (h == "") return 0
+            cur = h
+            while (cur != "") {
+                if (cur in suf) return 1
+                dot = index(cur, ".")
+                if (dot <= 0) break
+                cur = substr(cur, dot + 1)
+            }
+            if (g_n > 0) {
+                rd = reg_domain(h)
+                for (i = 1; i <= g_n; i++) {
+                    if (glob_labels(globs[i], rd)) return 1
+                }
+            }
+            return 0
+        }
+        function is_alipay_host(h) {
+            h = tolower(h)
+            return (h == "alipay.com" || h ~ /\.alipay\.com$/ || h == "alipayobjects.com" || h ~ /\.alipayobjects\.com$/)
+        }
+        BEGIN {
+            g_n = 0
+            # 内置多租户共享托管后缀与跨应用共享基础设施兜底(即使测试目录未拷 shared_infra.txt 仍生效)
+            builtin = "github.io githubusercontent.com githubassets.com pages.dev workers.dev vercel.app netlify.app herokuapp.com appspot.com azurewebsites.net firebaseapp.com web.app cloudfunctions.net run.app snssdk.com pstatp.com alicdn.com aliyuncs.com wechatpay.cn mdap.alipay.com mobilegw.alipay.com akamaized.net cloudfront.net fastly.net cloudflare-dns.com alibabadns.com dnspod.cn myqcloud.com tencentcos.cn bytecdn.com byteimg.com"
+            bn = split(builtin, ba, " ")
+            for (bi = 1; bi <= bn; bi++) add_rule(ba[bi])
+            if (sif != "") {
+                while ((getline sl < sif) > 0) add_rule(sl)
+                close(sif)
+            }
+            s = ""
+        }
+        { s = s $0 " " }
+        END {
+            rest = s
+            while (match(rest, /"[0-9A-Fa-f.:]+"[[:space:]]*:[[:space:]]*\{[^{}]*\}/)) {
+                blk = substr(rest, RSTART, RLENGTH)
+                rest = substr(rest, RSTART + RLENGTH)
+                ip = blk
+                sub(/^"/, "", ip)
+                sub(/".*/, "", ip)
+                if (ip == "" || ip == "entries" || (ip !~ /\./ && ip !~ /:/)) continue
+                body = blk
+                sub(/^"[0-9A-Fa-f.:]+"[[:space:]]*:[[:space:]]*\{/, "", body)
+                sub(/\}[[:space:]]*$/, "", body)
+                app = ""; nm = ""
+                if (match(body, /"app"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+                    t = substr(body, RSTART, RLENGTH)
+                    sub(/^"app"[[:space:]]*:[[:space:]]*"/, "", t)
+                    sub(/"$/, "", t)
+                    app = t
+                }
+                if (match(body, /"name"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+                    t = substr(body, RSTART, RLENGTH)
+                    sub(/^"name"[[:space:]]*:[[:space:]]*"/, "", t)
+                    sub(/"$/, "", t)
+                    nm = t
+                }
+                if (nm != "" && is_shared_host(nm)) {
+                    print ip, "__shared_infra__"
+                } else if (nm != "" && is_alipay_host(nm) && app != "alipay") {
+                    print ip, "alipay"
+                } else if (app != "") {
+                    print ip, app
+                }
+            }
+        }' "$IPNAME_JSON"
+    fi
 } > "$IPNAME_APP_FLAT" 2>/dev/null
 
 : > "$IPSTATS_FLAT.tmp" 2>/dev/null
@@ -1316,6 +1447,8 @@ if [ "$applied" -gt 0 ] && [ "$batch_top_inited" = 1 ]; then
         "$HNC_DIR/bin/hnc_ipc" OFFLOAD_DISABLE_GLOBAL >/dev/null 2>&1 || true
     fi
 else
+    [ -s "$TREE_TMP" ] && mv -f "$TREE_TMP" "$AL_TREE_FILE" 2>/dev/null || true
+    reset_tc_app_limits 1
     rm -f "$AL_DEVS_FILE" "$AL_TREE_FILE" 2>/dev/null
     al_tc_unlock
     cleanup_ipt_app_limits

@@ -507,11 +507,21 @@ set_top_inner() {
 # json_doctor 按 basename 找最新有效备份一致, 也不会让 rules.json 的高频写把
 # templates.json / device_names.json 的备份挤光。
 prune_backups() {
-  _pb_keep="${HNC_JSON_BACKUP_KEEP:-5}"
+  _pb_keep="${HNC_JSON_BACKUP_KEEP:-30}"
   case "$_pb_keep" in ''|*[!0-9]*) _pb_keep=30 ;; esac
-  # shellcheck disable=SC2012  # 备份名由本脚本生成(<base>.<ts>.<pid>.bak), 无空白
-  ls -1t "$BACKUP_DIR/$1".*.bak 2>/dev/null | sed -n "$((_pb_keep + 1)),\$p" | while IFS= read -r _pb_f; do
+  # shellcheck disable=SC2012  # 备份名由本脚本生成(<base>.<ts>.<pid>.bak), 无空白; 排除 .bad.bak 防损坏备份挤占有效备份槽
+  ls -1t "$BACKUP_DIR/$1".*.bak 2>/dev/null | grep -v '\.bad\.bak$' | sed -n "$((_pb_keep + 1)),\$p" | while IFS= read -r _pb_f; do
     rm -f "$_pb_f" 2>/dev/null || true
+  done
+  return 0
+}
+
+prune_bad_backups() {
+  _pc_keep="${HNC_JSON_BAD_KEEP:-2}"
+  case "$_pc_keep" in ''|*[!0-9]*) _pc_keep=2 ;; esac
+  # shellcheck disable=SC2012
+  ls -1t "$BACKUP_DIR/$1".*.bad.bak 2>/dev/null | sed -n "$((_pc_keep + 1)),\$p" | while IFS= read -r _pc_f; do
+    rm -f "$_pc_f" 2>/dev/null || true
   done
   return 0
 }
@@ -830,7 +840,7 @@ del_device() {
 }
 
 # replace: 用 stdin 的内容整体替换文件(json_set.sh reset、json_doctor 从备份恢复)。
-# 新内容先校验; 现有文件可以是坏的(恢复场景), 照样先备份再替换。
+# 新内容先校验; 现有文件若有效则入 .bak 备份池, 若已损坏则另存为 <base>.<ts>.<pid>.bad.bak(最多 2 份), 绝不挤走有效 .bak 好备份。
 replace_file() {
   target="$1"
   target_dir="$(dirname "$target")"
@@ -844,10 +854,21 @@ replace_file() {
   validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: replacement JSON failed validation" >&2; return 2; }
   acquire_lock || return 1
   bak=""
+  _saved_valid_bak=0
   if [ -f "$target" ]; then
     ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-    bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
-    cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || bak=""
+    if validate_file "$target" >/dev/null 2>&1; then
+      bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
+      if cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null; then
+        _saved_valid_bak=1
+      else
+        bak=""
+      fi
+    else
+      corrupt_bak="$BACKUP_DIR/$target_base.$ts.$$.bad.bak"
+      cp -p "$target" "$corrupt_bak" 2>/dev/null || cp "$target" "$corrupt_bak" 2>/dev/null || true
+      prune_bad_backups "$target_base"
+    fi
   fi
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
@@ -856,7 +877,8 @@ replace_file() {
     [ -n "$bak" ] && [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
     return 1
   }
-  prune_backups "$target_base"
+  [ "$_saved_valid_bak" = "1" ] && prune_backups "$target_base"
+  return 0
 }
 
 array_add_unique() {

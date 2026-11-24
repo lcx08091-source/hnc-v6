@@ -44,6 +44,8 @@ const (
 	// PendingBreathingRoom pending 设备派发异步解析前的喘息
 	// (hnc_helpers.h HNC_PENDING_BREATHING_ROOM_SEC = 1 秒, 给 netlink 事件留缓冲)。
 	PendingBreathingRoom = 1 * time.Second
+	// MaxAsyncResolveRetries 同 IP 下针对 mac/oui/cache-* 设备的后台异步重查上限(换 IP 或清手动名重置)。
+	MaxAsyncResolveRetries = 2
 )
 
 // Linux 邻居表状态(netlink ndmsg.ndm_state, 内核 ABI 值)。neigh 包只导出了
@@ -72,9 +74,12 @@ type Device struct {
 // device Device 加上不进 JSON 的记账字段。
 type device struct {
 	Device
-	lastResolve    int64 // 上次发起解析(unix 秒)
-	pendingSince   int64 // 进入 pending 的时刻(unix 秒; >= PendingBreathingRoom 才派发)
-	reResolveForce bool  // 手动名被删除后允许用新解析结果替换
+	lastResolve     int64  // 上次发起解析(unix 秒)
+	pendingSince    int64  // 进入 pending 的时刻(unix 秒; >= PendingBreathingRoom 才派发)
+	reResolveForce  bool   // 手动名被删除后允许用新解析结果替换
+	resolveRetryIP  string // 当前异步重查计数绑定的主 IP
+	resolveRetries  int    // 同 IP 下已消耗的后台异步重试次数(<= MaxAsyncResolveRetries)
+	initialResolved bool   // 是否已完成首次全链解析(区分新设备首次解析与非首次后台重查)
 }
 
 // cand 一个 (MAC, IP) 表项的候选状态(换 IP 期间旧表项还在)。
@@ -97,6 +102,8 @@ type Table struct {
 	// Full pending 设备的完整解析链(manual → DHCP → mDNS → 缓存 → 厂商 → MAC,
 	// 对齐 resolve_hostname 的 1–6 级)。异步调用, 不在事件循环里。
 	Full func(mac, ip string) (hostname, src string)
+	// Quiet 息屏静默期判断钩子: 返回 true 时暂停非首次后台重查(新设备首次解析不受影响)。
+	Quiet func() bool
 }
 
 // NewTable 建表。iface 是热点网卡名; ifIndex 0 = 还不知道(事件不按 ifindex 过滤)。
@@ -139,12 +146,57 @@ func normMAC(mac string) string {
 	return m
 }
 
-// entryIP 事件的 IPv4(字符串); 非 IPv4 / 空 → ""(与 C 一样只认 IPv4)。
+// entryIP 事件的 IPv4(字符串); 非 IPv4 / 空 → ""(主条目 IP 只认 IPv4)。
 func entryIP(e neigh.Entry) string {
 	if e.IP == nil || e.IP.To4() == nil {
 		return ""
 	}
 	return e.IP.To4().String()
+}
+
+func isIPv6Entry(e neigh.Entry) bool {
+	return len(e.IP) > 0 && e.IP.To4() == nil && e.IP.To16() != nil && !e.IP.IsUnspecified() && !e.IP.IsMulticast()
+}
+
+// refreshIPv6OnlineLocked 对同热点口可达(NUD_REACHABLE)IPv6 邻居刷新已有 IPv4 在线设备的 LastSeen;
+// 严禁为尚未获得 IPv4 的纯 IPv6 邻居新建空 IP 条目。
+func (t *Table) refreshIPv6OnlineLocked(mac string, e neigh.Entry, now time.Time) bool {
+	if mac == "" || e.State&nudReachable == 0 || e.ConfirmedAgo > OfflineThreshold {
+		return false
+	}
+	d := t.devs[mac]
+	if d == nil || d.IP == "" {
+		return false
+	}
+	seen := now
+	if e.ConfirmedAgo > 0 {
+		seen = now.Add(-e.ConfirmedAgo)
+	}
+	seenUnix := seen.Unix()
+	if seenUnix <= d.LastSeen {
+		return false
+	}
+	d.LastSeen = seenUnix
+	d.Iface = t.iface
+	return true
+}
+
+func (d *device) syncMainIP(best string) bool {
+	if best == "" || best == d.IP {
+		if d.resolveRetryIP == "" && best != "" {
+			d.resolveRetryIP = best
+		}
+		return false
+	}
+	prev := d.IP
+	d.IP = best
+	if prev != "" {
+		d.resolveRetryIP = best
+		d.resolveRetries = 0
+	} else if d.resolveRetryIP == "" {
+		d.resolveRetryIP = best
+	}
+	return true
 }
 
 // stateRank 状态优先级(WORK-v5.31 §4 T1): REACHABLE > DELAY > PROBE > STALE。
@@ -180,12 +232,13 @@ func pickIP(cs map[string]cand) string {
 // Apply 一条邻居表事件(来自订阅)。返回表是否变化(变化 = 该写 devices.json)。
 //
 // 语义对齐 hotspotd.c nl_process:
-//   - 非热点 ifindex 忽略; 全零 MAC / 非 IPv4 忽略;
-//   - 表项可用(REACHABLE / STALE / DELAY / PROBE)→ 上线或更新: 刷新
-//     last_seen、重挑 IP、按 60 秒窗口重解析名字;
+//   - 非热点 ifindex 忽略; 全零 MAC 忽略;
+//   - 同热点口可达 IPv6 邻居仅刷新已有 IPv4 在线设备的 LastSeen(禁建空 IP 条目);
+//   - IPv4 表项可用(REACHABLE / STALE / DELAY / PROBE)→ 上线或更新: 刷新
+//     last_seen、重挑 IP、按 60 秒窗口与同 IP 重试上限重解析名字;
 //   - FAILED → 去掉这条候选, 一条不剩才下线(通知不带 MAC 时按 IP 找, 见
 //     failIPLocked; v5.32 审查);
-//   - 表项被回收(RTM_DELNEIGH, 非 FAILED)→ 只去掉这条候选, 不下线、不改 IP。
+//   - 表项被回收(RTM_DELNEIGH, 非 FAILED)→ 只去掉这条候选, 不下线, 剩余候选重挑主 IP。
 func (t *Table) Apply(e neigh.Entry, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -195,7 +248,13 @@ func (t *Table) Apply(e neigh.Entry, now time.Time) bool {
 	mac := normMAC(e.MAC)
 	ip := entryIP(e)
 	if !e.Deleted && e.Usable() {
-		if mac == "" || ip == "" {
+		if mac == "" {
+			return false
+		}
+		if ip == "" {
+			if isIPv6Entry(e) && e.State&nudReachable != 0 {
+				return t.refreshIPv6OnlineLocked(mac, e, now)
+			}
 			return false
 		}
 		seen := t.candidateSeenTimeLocked(mac, ip, e, now)
@@ -215,8 +274,7 @@ func (t *Table) Apply(e neigh.Entry, now time.Time) bool {
 			if _, ok := cs[ip]; ok {
 				delete(cs, ip)
 				if d := t.devs[m]; d != nil && len(cs) > 0 {
-					if best := pickIP(cs); best != "" && best != d.IP {
-						d.IP = best
+					if best := pickIP(cs); d.syncMainIP(best) {
 						changed = true
 					}
 				}
@@ -259,9 +317,8 @@ func (t *Table) failIPLocked(mac, ip string) bool {
 			changed = true
 			continue
 		}
-		// 还有别的表项(典型: 换 IP 后新表项在, 旧表项 FAILED): 重挑, 不下线。
-		if best := pickIP(cs); best != "" && best != d.IP {
-			d.IP = best
+		// 还有别的表项(典型: 刚换了 IP, 旧表项 FAILED): 重挑, 不下线。
+		if best := pickIP(cs); d.syncMainIP(best) {
 			changed = true
 		}
 	}
@@ -322,6 +379,7 @@ func (t *Table) applyOnlineLocked(mac, ip string, state uint16, now, seen time.T
 		t.cands[mac] = cs
 	}
 	cs[ip] = cand{state: state, lastEvent: seen}
+	best := pickIP(cs)
 
 	d := t.devs[mac]
 	if d == nil {
@@ -329,54 +387,69 @@ func (t *Table) applyOnlineLocked(mac, ip string, state uint16, now, seen time.T
 			t.evictOldestLocked()
 		}
 		d = &device{Device: Device{MAC: mac, Iface: t.iface}}
+		if best != "" {
+			d.IP = best
+			d.resolveRetryIP = best
+		}
 		hn, src := "00000000", "mac"
 		if t.Fast != nil {
 			hn, src = t.Fast(mac)
 		}
 		if src == "mac" {
-			src = "pending" // 对齐 C: mac 兜底 → 挂 pending, 等异步解析
+			src = "pending" // 对齐 C: mac 兜底 → 挂 pending, 等首次异步解析
 			d.pendingSince = nowUnix
+			d.initialResolved = false
+		} else {
+			d.initialResolved = true
 		}
 		d.Hostname, d.HostnameSrc = hn, src
 		d.lastResolve = nowUnix
 		t.devs[mac] = d
-	} else if now.Sub(time.Unix(d.lastResolve, 0)) >= ReResolveWindow {
-		// 严格遵守 60s ReResolveWindow 冷却(移除 d.HostnameSrc == "mac" 短路);
-		// 已有有效主机名时不降级为 MAC 兜底/pending。
-		hn, src := "00000000", "mac"
-		if t.Fast != nil {
-			hn, src = t.Fast(mac)
+	} else {
+		if best != "" {
+			d.syncMainIP(best)
 		}
-		if src != "mac" {
-			d.Hostname, d.HostnameSrc = hn, src
-			d.pendingSince = 0
-			d.reResolveForce = false
-		} else if d.HostnameSrc == "" || d.HostnameSrc == "pending" {
-			d.Hostname, d.HostnameSrc = hn, "pending"
-			if d.pendingSince == 0 {
-				d.pendingSince = nowUnix
+		if now.Sub(time.Unix(d.lastResolve, 0)) >= ReResolveWindow {
+			quiet := t.Quiet != nil && t.Quiet()
+			// 严格遵守 60s ReResolveWindow 冷却; 已有有效主机名时不降级为 MAC 兜底/pending。
+			hn, src := "00000000", "mac"
+			if t.Fast != nil {
+				hn, src = t.Fast(mac)
 			}
-		} else if d.HostnameSrc == "mac" {
-			// 尚无有效主机名: 保留展示名并按冷却排队异步重解析
-			if d.pendingSince == 0 {
-				d.pendingSince = nowUnix
+			if src != "mac" {
+				d.Hostname, d.HostnameSrc = hn, src
+				d.pendingSince = 0
+				d.reResolveForce = false
+				d.initialResolved = true
+				d.resolveRetries = 0
+				d.resolveRetryIP = d.IP
+			} else if d.HostnameSrc == "" || d.HostnameSrc == "pending" {
+				d.Hostname, d.HostnameSrc = hn, "pending"
+				if d.pendingSince == 0 {
+					d.pendingSince = nowUnix
+				}
+			} else if d.HostnameSrc == "manual" {
+				// 用户已删除手动名: 重置同 IP 重试计数, 保留当前展示名不闪烁 MAC, 异步重解析后允许替换
+				d.reResolveForce = true
+				d.resolveRetries = 0
+				d.resolveRetryIP = d.IP
+				if d.pendingSince == 0 {
+					d.pendingSince = nowUnix
+				}
+			} else if d.HostnameSrc == "mac" || hostnameSrcRank(d.HostnameSrc) < 4 {
+				// mac / oui / cache-* 后台重查: 同 IP 最多重试 MaxAsyncResolveRetries(2) 次, 息屏静默期暂停非首次重查
+				if d.resolveRetryIP != d.IP {
+					d.resolveRetryIP = d.IP
+					d.resolveRetries = 0
+				}
+				if !quiet && d.resolveRetries < MaxAsyncResolveRetries {
+					if d.pendingSince == 0 {
+						d.pendingSince = nowUnix
+					}
+				}
 			}
-		} else if d.HostnameSrc == "manual" {
-			// 用户已删除手动名: 保留当前展示名不闪烁 MAC, 异步重解析后允许替换
-			d.reResolveForce = true
-			if d.pendingSince == 0 {
-				d.pendingSince = nowUnix
-			}
-		} else if hostnameSrcRank(d.HostnameSrc) < 4 {
-			// oui / cache-* 尝试后台升级为实时 dhcp/mdns, 保留已有有效主机名不降级
-			if d.pendingSince == 0 {
-				d.pendingSince = nowUnix
-			}
+			d.lastResolve = nowUnix
 		}
-		d.lastResolve = nowUnix
-	}
-	if best := pickIP(cs); best != "" {
-		d.IP = best
 	}
 	d.Iface = t.iface
 	d.LastSeen = nowUnix
@@ -402,17 +475,26 @@ func (t *Table) evictOldestLocked() {
 //
 // 只有「新表项 / 状态变了」按事件处理; 已知且未变的表项完全跳过 —— 不刷
 // last_seen, 这样静默 STALE 的设备 90 秒后仍会离线(C 没有全量兜底, 这个
-// 行为与 C 一致)。dump 里的 FAILED / INCOMPLETE 表项走下线路径(丢事件兜底)。
+// 行为与 C 一致)。dump 里的 FAILED 表项走下线路径(丢事件兜底); 快照中已消失的
+// 旧 IPv4 候选从 cands 剔除并重挑剩余有效主 IP。
 func (t *Table) FullSync(es []neigh.Entry, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	changed := false
+	present := make(map[string]map[string]struct{})
+	sawIPv4 := false
+	sawIPv6 := false
 	for _, e := range es {
 		mac := normMAC(e.MAC)
 		if t.ifIndex != 0 && e.IfIndex != 0 && e.IfIndex != t.ifIndex {
 			continue
 		}
 		ip := entryIP(e)
+		if ip != "" {
+			sawIPv4 = true
+		} else if isIPv6Entry(e) {
+			sawIPv6 = true
+		}
 		if e.Deleted || !e.Usable() {
 			// FAILED 且还有设备认这个 IP → 补一次 FAILED(事件丢了也能追上; FAILED
 			// 表项不带 MAC, 按 IP 找, 见 failIPLocked)。已处理过的再遇到是空操作。
@@ -421,15 +503,52 @@ func (t *Table) FullSync(es []neigh.Entry, now time.Time) bool {
 			}
 			continue
 		}
-		if mac == "" || ip == "" {
+		if mac == "" {
 			continue
 		}
+		if ip == "" {
+			if isIPv6Entry(e) && e.State&nudReachable != 0 && t.refreshIPv6OnlineLocked(mac, e, now) {
+				changed = true
+			}
+			continue
+		}
+		pm := present[mac]
+		if pm == nil {
+			pm = make(map[string]struct{})
+			present[mac] = pm
+		}
+		pm[ip] = struct{}{}
 		if c, ok := t.cands[mac][ip]; ok && c.state == e.State {
 			continue // 已知且未变: 静默 STALE 不刷 last_seen
 		}
 		seen := t.candidateSeenTimeLocked(mac, ip, e, now)
 		if t.applyOnlineLocked(mac, ip, e.State, now, seen) {
 			changed = true
+		}
+	}
+
+	// 剔除本次 IPv4 快照中已消失的候选 cands 并重挑剩余有效主 IP(纯 IPv6 单栈切片不误删 IPv4 候选)。
+	if !(sawIPv6 && !sawIPv4) {
+		for m, cs := range t.cands {
+			pm := present[m]
+			removed := false
+			for cip := range cs {
+				if _, ok := pm[cip]; !ok {
+					delete(cs, cip)
+					removed = true
+				}
+			}
+			if len(cs) == 0 {
+				delete(t.cands, m)
+				continue
+			}
+			if removed {
+				if d := t.devs[m]; d != nil {
+					if best := pickIP(cs); d.syncMainIP(best) {
+						changed = true
+					}
+				}
+			}
 		}
 	}
 	return changed
@@ -456,10 +575,16 @@ func (t *Table) EvictOffline(now time.Time) int {
 func (t *Table) PendingDue(now time.Time) (string, string, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	quiet := t.Quiet != nil && t.Quiet()
 	mac, ip := "", ""
 	var oldest int64 = -1
 	for m, d := range t.devs {
 		if !d.isPending() {
+			continue
+		}
+		if quiet && d.initialResolved && !d.reResolveForce {
+			// 息屏静默期停非首次重查, 撤销排队恢复慢拍且不消耗重试配额
+			d.pendingSince = 0
 			continue
 		}
 		if now.Sub(time.Unix(d.pendingSince, 0)) < PendingBreathingRoom {
@@ -477,10 +602,15 @@ func (t *Table) PendingDue(now time.Time) (string, string, bool) {
 func (t *Table) HasPending() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	quiet := t.Quiet != nil && t.Quiet()
 	for _, d := range t.devs {
-		if d.isPending() {
-			return true
+		if !d.isPending() {
+			continue
 		}
+		if quiet && d.initialResolved && !d.reResolveForce {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -492,11 +622,37 @@ func (t *Table) ApplyResolution(mac, hostname, src string, now time.Time) bool {
 	defer t.mu.Unlock()
 	m := normMAC(mac)
 	d := t.devs[m]
-	if d == nil || hostname == "" || src == "" {
+	if d == nil {
+		return false
+	}
+	wasInitial := !d.initialResolved
+	wasForce := d.reResolveForce
+	if hostname == "" || src == "" {
+		if !wasInitial {
+			d.pendingSince = 0
+			d.lastResolve = now.Unix()
+			if !wasForce && d.resolveRetryIP == d.IP && d.resolveRetries < MaxAsyncResolveRetries {
+				d.resolveRetries++
+			}
+		}
 		return false // 设备已走 / 结果为空: 丢弃
 	}
 	d.pendingSince = 0
 	d.lastResolve = now.Unix()
+	d.initialResolved = true
+	if d.resolveRetryIP == "" {
+		d.resolveRetryIP = d.IP
+	}
+	if !wasInitial && !wasForce {
+		if hostnameSrcRank(src) >= 4 {
+			d.resolveRetries = 0
+		} else if d.resolveRetryIP == d.IP {
+			d.resolveRetries++
+		}
+	} else {
+		d.resolveRetries = 0
+		d.resolveRetryIP = d.IP
+	}
 	if !d.reResolveForce && hostnameSrcRank(d.HostnameSrc) >= 2 && hostnameSrcRank(src) < hostnameSrcRank(d.HostnameSrc) {
 		return false // 重解析不降级已有有效主机名
 	}

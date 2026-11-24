@@ -413,18 +413,24 @@ log "TC cleanup done"
 
 # ── 3. 清除 iptables 规则 ────────────────────────────────────
 log "Cleaning iptables chains (v4+v6)..."
-# 双栈幂等拆链(含 HNC_TUN_GUARD, HNC_ISOLATE, HNC_QUIC_APPLIM, HNC_SCALPEL 等全部子链)
+# 双栈幂等拆链(含 HNC_V6_EXPRESS, HNC_V6_LEASH, HNC_TUN_GUARD, HNC_ISOLATE, HNC_QUIC_APPLIM, HNC_SCALPEL 等全部转发/战术子链)
 _cleanup_ipt_stack() {
     _cmd="$1"
     _w="-w 2"
-    if [ -z "${HNC_TEST_MODE:-}" ]; then
+    if command -v hnc_ipt_wait_args >/dev/null 2>&1; then
+        _w=$(hnc_ipt_wait_args "$_cmd")
+    elif [ -z "${HNC_TEST_MODE:-}" ]; then
         "$_cmd" -w 2 -t filter -L -n >/dev/null 2>&1 || {
             "$_cmd" -t filter -L -n >/dev/null 2>&1 && _w=""
         }
     fi
     for _tc in "mangle PREROUTING  HNC_PREROUTE_GUARD" \
+               "mangle PREROUTING  HNC_V6_EXPRESS" \
+               "mangle PREROUTING  HNC_V6_LEASH" \
                "mangle PREROUTING  HNC_TUN_GUARD" \
                "mangle PREROUTING  HNC_RESTORE" \
+               "mangle FORWARD     HNC_V6_EXPRESS" \
+               "mangle FORWARD     HNC_V6_LEASH" \
                "mangle FORWARD     HNC_TUN_GUARD" \
                "mangle FORWARD     HNC_RESTORE" \
                "mangle FORWARD     HNC_MARK" \
@@ -435,6 +441,9 @@ _cleanup_ipt_stack() {
                "mangle POSTROUTING HNC_APP_LIMIT_DOWN" \
                "mangle FORWARD     HNC_APP_QOS_MARK" \
                "mangle POSTROUTING HNC_APP_QOS" \
+               "mangle POSTROUTING HNC_V6_EXPRESS" \
+               "mangle POSTROUTING HNC_V6_LEASH" \
+               "mangle POSTROUTING HNC_TUN_GUARD" \
                "mangle POSTROUTING HNC_SAVE" \
                "mangle POSTROUTING HNC_EGRESS_FIX" \
                "filter FORWARD     HNC_SCALPEL" \
@@ -443,6 +452,8 @@ _cleanup_ipt_stack() {
                "filter FORWARD     HNC_WHITELIST" \
                "filter FORWARD     HNC_QUIC" \
                "filter FORWARD     HNC_QUIC_APPLIM" \
+               "filter FORWARD     HNC_V6_EXPRESS" \
+               "filter FORWARD     HNC_V6_LEASH" \
                "filter FORWARD     HNC_CONNBLK" \
                "filter INPUT       HNC_CONNBLK_DNS" \
                "filter FORWARD     HNC_CONNBLK_DNS" \
@@ -461,8 +472,8 @@ _cleanup_ipt_stack() {
         # shellcheck disable=SC2086
         "$_cmd" $_w -t "$_t" -F "$_h" 2>/dev/null || true
     done
-    # 本机 OUTPUT 子链(HNC_SCALPEL_HOST / HNC_SELF_UID / HNC_SELF_DNS)与 webui_guard 一致:
-    # MODE=rules 仅清空热点转发限速规则, 不误拆本机持久应用防火墙; 全停/重启/卸载(all|restart)时完整拆净。
+    # 本机 OUTPUT 持久子链(HNC_SCALPEL_HOST / HNC_SELF_UID / HNC_SELF_DNS)与 webui_guard 一致:
+    # MODE=rules 仅清空热点转发限速规则, 不误拆本机持久应用防火墙; 仅全停/重启/卸载(all|restart)时拆净。
     if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
         for _oc in HNC_SCALPEL_HOST HNC_SELF_UID HNC_SELF_DNS; do
             _n=0
@@ -490,11 +501,11 @@ _cleanup_ipt_stack() {
         # shellcheck disable=SC2086
         "$_cmd" $_w -t mangle -X "$_al" 2>/dev/null || true
     done
-    for _h in HNC_PREROUTE_GUARD HNC_TUN_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_TCPMSS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE HNC_EGRESS_FIX; do
+    for _h in HNC_PREROUTE_GUARD HNC_V6_EXPRESS HNC_V6_LEASH HNC_TUN_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_TCPMSS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE HNC_EGRESS_FIX; do
         # shellcheck disable=SC2086
         "$_cmd" $_w -t mangle -X "$_h" 2>/dev/null || true
     done
-    for _h in HNC_SCALPEL HNC_ISOLATE HNC_CTRL HNC_WHITELIST HNC_QUIC HNC_QUIC_APPLIM HNC_CONNBLK HNC_CONNBLK_DNS HNC_ENCDNS HNC_ENCDNS_STRICT HNC_ENCDNS_DOT; do
+    for _h in HNC_SCALPEL HNC_ISOLATE HNC_CTRL HNC_WHITELIST HNC_QUIC HNC_QUIC_APPLIM HNC_V6_EXPRESS HNC_V6_LEASH HNC_CONNBLK HNC_CONNBLK_DNS HNC_ENCDNS HNC_ENCDNS_STRICT HNC_ENCDNS_DOT; do
         # shellcheck disable=SC2086
         "$_cmd" $_w -t filter -X "$_h" 2>/dev/null || true
     done
@@ -508,7 +519,7 @@ rm -f "$HNC_DIR/run"/app_limits.*.sig "$HNC_DIR/run/app_limits_ipstats.flat" "$H
       "$HNC_DIR/run"/app_qos.state "$HNC_DIR/run"/app_qos.sig "$HNC_DIR/run"/app_qos.plan \
       "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null || true
 # v5.22: WebUI 访问白名单链(INPUT 上按端口挂的跳转, 上面的 "-D INPUT -j 链" 删不掉,
-# 交给脚本自己拆)。rules 模式不拆: 它是访问控制, 不是用户要清的限速规则。
+# 交给脚本自己拆)。rules 模式不拆: 它是访问控制持久链, 不是用户要清的限速规则。
 if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
     rm -rf "$HNC_DIR/run/self_firewall.lock" 2>/dev/null || true
     [ -f "$HNC_DIR/bin/webui_guard.sh" ] && sh "$HNC_DIR/bin/webui_guard.sh" remove >/dev/null 2>&1 \
@@ -521,33 +532,31 @@ fi
 log "iptables cleanup done"
 
 # ── 4. 清理临时文件（保留 data/ 目录，用户配置不删）────────
-rm -f "$RUN"/*.pid "$RUN"/netevt_* "$RUN"/arp_hash "$RUN"/hotspotd.sock "$RUN"/dpid.netlink.event 2>/dev/null
+# C078: MODE=rules 下守护进程仍在运行, 严禁删除 *.pid、run/hotspotd.sock、run/hnc_state 等进程/IPC 运行态!
+rm -f "$RUN"/netevt_* "$RUN"/arp_hash 2>/dev/null
 rm -f "$HNC_DIR/run/hostname_cache" 2>/dev/null  # v5.33 前 shell 扫描的名字缓存(旧版残留)
 rm -rf "$HNC_DIR/run/v6" 2>/dev/null              # v3.4.0：v6_sync 快照目录
 # v3.5.0 P2-5: 清理(v5.33 前)device_detect.sh shell 扫描留下的临时文件
 rm -f "$RUN"/scan_tmp.* "$RUN"/scan_arp.* "$RUN"/.gc_* "$RUN"/.lock_check_* 2>/dev/null
-# v5.9.3 BUG-010:portal(v5.8.9 实验分支,最终未合入 main)的残留。run/ 清理是
-# 白名单式逐项 rm,历来不含 portal_*,三种 mode 一个都清不掉,只有 uninstall.sh
-# 的 `rm -rf run/` 会带走 —— 而日常清理和 v5.8.9-portal → v5.9.x 升级都不走那条。
-# 守卫:portal 若将来真的合入 main,bin/portal_manager.sh 必然存在,那时这行绝不
-# 能删会话表(用户会被强制重认证),合入时应显式删掉这几行而不是依赖守卫。
+# v5.9.3 BUG-010:portal(v5.8.9 实验分支,最终未合入 main)的残留。
+# 守卫:portal 若将来真的合入 main,bin/portal_manager.sh 必然存在,那时这行绝不能删会话表。
 if [ ! -f "$HNC_DIR/bin/portal_manager.sh" ]; then
     rm -f "$RUN/portal_pending.json" "$RUN/portal_sessions.json" 2>/dev/null
 fi
-rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" "$RUN/lock" "$RUN/tc_action.lock" "$RUN"/tc_action.lock.stale.* \
-       "$RUN/v6_sync.lock" "$RUN/stats_v6.lock" "$RUN/app_limits.lock" "$RUN/app_qos.lock" "$RUN/connblock.lock" "$RUN/self_firewall.lock" 2>/dev/null
+rm -rf "$RUN/tc_action.lock" "$RUN"/tc_action.lock.stale.* \
+       "$RUN/v6_sync.lock" "$RUN/stats_v6.lock" "$RUN/app_limits.lock" "$RUN/app_qos.lock" "$RUN/connblock.lock" 2>/dev/null
 # v3.9.1: stats 临时文件 + 日期标记(stats_raw / stats_daily 是用户数据,不删)
 rm -f "$RUN"/stats_map.* "$RUN"/rollup_names.* "$RUN"/rollup_agg.* "$RUN"/.s4.* "$RUN"/.s6.* "$RUN"/.sm.* \
       "$RUN"/.stats_* "$RUN"/tc_ifindex_* "$RUN/tc_restore_pending" 2>/dev/null
+if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
+    rm -f "$RUN"/*.pid "$RUN/hotspotd.sock" "$RUN/dpid.netlink.event" \
+          "$RUN/stats_last_date" "$RUN/watchdog_passive.marker" \
+          "$RUN/cleanup_rules.marker" "$RUN/hnc_state" 2>/dev/null
+    rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" "$RUN/lock" "$RUN/self_firewall.lock" 2>/dev/null
+fi
 if [ "$MODE" = "all" ]; then
     rm -f "$RUN"/conn_blocks.* "$RUN/connblock_caps.json" "$RUN/encdns_caps.json" 2>/dev/null
 fi
-rm -f "$RUN"/stats_last_date 2>/dev/null
-# v4.0.0-patch1.3: watchdog passive mode marker
-rm -f "$RUN/watchdog_passive.marker" 2>/dev/null
-# v4.0.0-patch1.5: watchdog Defer Init 状态文件
-# 清掉后下次 watchdog 启动会从 PENDING 重新开始
-rm -f "$RUN/hnc_state" 2>/dev/null
 
 # rc3.1 修 N-15R: 原 rc3 留 service.wanted marker 依赖 watchdog poll,
 # 但 watchdog 在上面 kill 循环里已经死了, 没人读 marker.

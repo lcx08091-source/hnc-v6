@@ -92,8 +92,35 @@ if { [ -z "$HNC_TEST_MODE" ] && [ "$RUN" = "/data/local/hnc/run" ]; } || [ "${HN
     else
         _hnc_rescue_run_tmpfs "$RUN_DIR"
         _live_daemon=0
-        if [ -f "$RUN/httpd.pid" ] && command -v pidfile_pid_matches >/dev/null 2>&1; then
-            pidfile_pid_matches "$RUN/httpd.pid" hnc_httpd && _live_daemon=1
+        if command -v pidfile_pid_matches >/dev/null 2>&1; then
+            for _pair in "httpd.pid:hnc_httpd" "watchdog.pid:hnc_watchdog" \
+                         "dpid_guard.pid:hnc_launcher" "launcher.pid:hnc_launcher" \
+                         "dpid.pid:hnc_dpid" "dpid.child.pid:hnc_dpid" \
+                         "hotspotd.pid:hotspotd"; do
+                _pf_n=${_pair%%:*}
+                _kw_n=${_pair#*:}
+                if [ -f "$RUN/$_pf_n" ] && pidfile_pid_matches "$RUN/$_pf_n" "$_kw_n"; then
+                    _live_daemon=1
+                    break
+                fi
+            done
+            unset _pair _pf_n _kw_n
+        fi
+        if [ "$_live_daemon" -eq 0 ] && command -v pid_matches >/dev/null 2>&1; then
+            _early_proot="${HNC_PROC_ROOT:-/proc}"
+            if [ "$_early_proot" != "/proc" ] || { [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "${HNC_TEST_TMPFS_FALLBACK:-0}" != "1" ]; }; then
+                for _ed in "$_early_proot"/[0-9]*; do
+                    [ -r "$_ed/cmdline" ] || continue
+                    _ep=${_ed##*/}
+                    for _ekw in hnc_httpd hnc_watchdog hnc_launcher hnc_dpid hotspotd; do
+                        if pid_matches "$_ep" "$_ekw"; then
+                            _live_daemon=1
+                            break 2
+                        fi
+                    done
+                done
+            fi
+            unset _early_proot _ed _ep _ekw
         fi
         if [ "$_live_daemon" -eq 0 ]; then
             if [ "${HNC_TEST_TMPFS_FALLBACK:-0}" != "1" ]; then
@@ -110,6 +137,7 @@ if { [ -z "$HNC_TEST_MODE" ] && [ "$RUN" = "/data/local/hnc/run" ]; } || [ "${HN
                 chmod 644 "$RUN/tmpfs_unavailable" 2>/dev/null || true
             fi
         fi
+        unset _live_daemon
     fi
 fi
 # 紧跟 mount -t tmpfs 之后(无论本次新挂载还是热重启已挂载), 确保 data/self_studio 就绪且 32M tmpfs 干净宽裕
@@ -121,9 +149,30 @@ _hnc_rescue_run_tmpfs "$RUN_DIR"
 chmod 700 "$HNC_DIR" "$HNC_DIR/logs" "$RUN" 2>/dev/null
 [ -d "$HNC_DIR/data" ] && chmod 700 "$HNC_DIR/data" 2>/dev/null
 [ -d "$HNC_DIR/data/self_studio" ] && chmod 0755 "$HNC_DIR/data/self_studio" 2>/dev/null || true
-# hotfix16.4 + v6.0 重启即焚: 清理陈旧的上行降级标记及运行态敏感瞬态文件(leakguard_events.json / shm_vector.bin)
+# hotfix16.4 + v6.0 重启即焚: 清理陈旧的上行降级标记及运行态敏感瞬态文件(leakguard_events.json);
+# C002: shm_vector.bin 仅在 hnc_dpid 未存活时删除, 防止热唤醒 unlink 掉存活 dpid 的活跃共享内存目录项!
 rm -f "$RUN/uplink_unsupported" "$RUN/uplink_fail_count" "$RUN/uplink_unsupported_logged" \
-      "$RUN_DIR/leakguard_events.json" "$RUN_DIR/shm_vector.bin" 2>/dev/null || true
+      "$RUN_DIR/leakguard_events.json" 2>/dev/null || true
+_dpid_live_early=0
+if command -v pidfile_pid_matches >/dev/null 2>&1; then
+    pidfile_pid_matches "$RUN_DIR/dpid.pid" hnc_dpid && _dpid_live_early=1
+    [ "$_dpid_live_early" -eq 0 ] && pidfile_pid_matches "$RUN_DIR/dpid.child.pid" hnc_dpid && _dpid_live_early=1
+fi
+if [ "$_dpid_live_early" -eq 0 ] && command -v pid_matches >/dev/null 2>&1; then
+    _dp_proot="${HNC_PROC_ROOT:-/proc}"
+    if [ "$_dp_proot" != "/proc" ] || { [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+        for _dd in "$_dp_proot"/[0-9]*; do
+            [ -r "$_dd/cmdline" ] || continue
+            if pid_matches "${_dd##*/}" hnc_dpid; then
+                _dpid_live_early=1
+                break
+            fi
+        done
+    fi
+    unset _dp_proot _dd
+fi
+[ "$_dpid_live_early" -eq 0 ] && rm -f "$RUN_DIR/shm_vector.bin" 2>/dev/null || true
+unset _dpid_live_early
 
 provision_fallback_tools() {
     if ! command -v hnc_provision_fallback_tools >/dev/null 2>&1; then
@@ -352,6 +401,8 @@ prune_stale_service_sentinels() {
 
 # Kill old buggy sentinel/service shells before this fixed service starts supervisors.
 prune_stale_service_sentinels
+echo "$$" > "$RUN/service.pid" 2>/dev/null || true
+trap 'rm -f "$RUN/service.pid" 2>/dev/null || true' EXIT
 
 log "=== HNC ${_HNC_SVC_VER:+$_HNC_SVC_VER }Service Starting ==="
 log "Android $(getprop ro.build.version.release) / $(getprop ro.product.brand) $(getprop ro.product.model)"
@@ -459,7 +510,7 @@ wait_for_network() {
     local max=60
     local cnt=0
     while [ $cnt -lt $max ]; do
-        if ip link show 2>/dev/null | grep -qE 'wlan|ap0|swlan'; then
+        if ip link show 2>/dev/null | grep -qE 'wlan|ap0|swlan|rmnet|ccmni|eth|usb'; then
             log "Network interface ready"
             return 0
         fi
@@ -480,6 +531,14 @@ wait_boot_complete() {
 }
 
 wait_boot_complete
+
+# ─── 本机应用防火墙与本机 DNS 拦截开机早恢复(在 wait_for_network 之前落表防漏包) ──
+if [ -s "$DATA_DIR/self_firewall.json" ] && [ -f "$HNC_DIR/bin/self_firewall_sync.sh" ]; then
+    sh "$HNC_DIR/bin/self_firewall_sync.sh" apply >> "$HNC_DIR/logs/service.log" 2>&1 \
+        && log "self_firewall: restored persisted rules from $DATA_DIR/self_firewall.json" \
+        || log "WARN: self_firewall apply failed on boot (hnc_httpd will retry)"
+fi
+
 wait_for_network
 
 log "defer-init: iface detection + tc/iptables init delegated to watchdog"
@@ -563,13 +622,6 @@ _hp_keep=$(pidfile_live_pid "$RUN/hotspotd.pid" hotspotd 2>/dev/null)
 if [ -f "$HNC_DIR/bin/webui_guard.sh" ]; then
     sh "$HNC_DIR/bin/webui_guard.sh" apply >> "$HNC_DIR/logs/service.log" 2>&1 \
         || log "WARN: webui_guard apply failed (HTTP-level guard in hnc_httpd still active)"
-fi
-
-# ─── 本机应用防火墙与本机 DNS 拦截开机恢复 ────────────────────
-if [ -s "$DATA_DIR/self_firewall.json" ] && [ -f "$HNC_DIR/bin/self_firewall_sync.sh" ]; then
-    sh "$HNC_DIR/bin/self_firewall_sync.sh" apply >> "$HNC_DIR/logs/service.log" 2>&1 \
-        && log "self_firewall: restored persisted rules from $DATA_DIR/self_firewall.json" \
-        || log "WARN: self_firewall apply failed on boot (hnc_httpd will retry)"
 fi
 
 # ─── shell pre-launch hnc_httpd ─────────────────────
@@ -660,6 +712,106 @@ if [ -x "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" ]; then
     [ -n "$HP" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$HP" -800 2>/dev/null || true
 fi
 
+# ─── dpid_launcher.choice 预探测(必须在启动 hnc_watchdog 之前落盘, 防止看门狗缺省误拉 launcher) ──
+DPID_BIN="$HNC_DIR/bin/hnc_dpid"
+DPID_LAUNCHER_C="$HNC_DIR/bin/hnc_launcher"
+FORK_PROBE="$HNC_DIR/bin/fork_probe"
+DPID_LAUNCHER="$DPID_BIN"
+DPID_CONFIG="$HNC_DIR/etc/dpi_config.json"
+DPID_PID="$RUN/dpid.pid"
+DPID_GUARD_PID="$RUN/dpid_guard.pid"
+
+find_live_dpid_guard_pid() {
+    local proot="${HNC_PROC_ROOT:-/proc}"
+    local d p
+    if [ "$proot" = "/proc" ] && { [ "${HNC_DIR:-/data/local/hnc}" != "/data/local/hnc" ] || [ -n "${HNC_TEST_MODE:-}" ]; }; then
+        return 1
+    fi
+    for d in "$proot"/[0-9]*; do
+        [ -r "$d/cmdline" ] || continue
+        p=${d##*/}
+        if pid_matches "$p" hnc_launcher; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+LAUNCHER_CHOICE=""
+if [ -x "$DPID_LAUNCHER_C" ] && [ -x "$FORK_PROBE" ]; then
+    if "$FORK_PROBE" /system/bin/true >/dev/null 2>&1; then
+        _launcher_test=$("$DPID_LAUNCHER_C" --version 2>&1)
+        _launcher_test_rc=$?
+        if echo "$_launcher_test" | grep -qE 'underaligned|Aborted|cannot execute|error:.*executable'; then
+            log "dpid launcher: hnc_launcher binary broken (TLS/Bionic mismatch), skip"
+            log "  diag: $(echo "$_launcher_test" | head -n 1)"
+        elif [ "$_launcher_test_rc" = "134" ] || [ "$_launcher_test_rc" = "137" ]; then
+            log "dpid launcher: hnc_launcher aborted (rc=$_launcher_test_rc), skip"
+        else
+            DPID_LAUNCHER="$DPID_LAUNCHER_C"
+            LAUNCHER_CHOICE="c_launcher"
+            log "dpid launcher: hnc_launcher (C) — fork_probe PASS + exec PASS"
+        fi
+        unset _launcher_test _launcher_test_rc
+    else
+        log "dpid launcher: fork_probe FAIL on this device"
+    fi
+fi
+
+if [ -z "$LAUNCHER_CHOICE" ]; then
+    log "dpid launcher: C launcher unavailable, direct mode (Go watchdog supervises hnc_dpid)"
+fi
+
+case "$LAUNCHER_CHOICE" in
+    c_launcher)     _dpid_choice="launcher" ;;
+    *)              _dpid_choice="direct" ;;
+esac
+_dlc_tmp="$RUN/dpid_launcher.choice.tmp.$$"
+if printf '%s\n' "$_dpid_choice" > "$_dlc_tmp" 2>/dev/null && [ -s "$_dlc_tmp" ]; then
+    mv -f "$_dlc_tmp" "$RUN/dpid_launcher.choice" 2>/dev/null || rm -f "$_dlc_tmp" 2>/dev/null || true
+else
+    rm -f "$_dlc_tmp" 2>/dev/null || true
+    printf '%s\n' "$_dpid_choice" > "$RUN/dpid_launcher.choice" 2>/dev/null || true
+fi
+unset _dlc_tmp
+log "dpid launcher choice persisted: $_dpid_choice (raw=$LAUNCHER_CHOICE)"
+
+if [ "$_dpid_choice" = "direct" ]; then
+    _res_lps=""
+    for _lpf in "$DPID_GUARD_PID" "$RUN/launcher.pid"; do
+        _cand_lp=$(pidfile_live_pid "$_lpf" hnc_launcher 2>/dev/null)
+        [ -n "$_cand_lp" ] && _res_lps="$_res_lps $_cand_lp"
+    done
+    _scan_lp=$(find_live_dpid_guard_pid)
+    [ -n "$_scan_lp" ] && _res_lps="$_res_lps $_scan_lp"
+    _res_proot="${HNC_PROC_ROOT:-/proc}"
+    if [ "$_res_proot" != "/proc" ] || { [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+        for _rd in "$_res_proot"/[0-9]*; do
+            [ -r "$_rd/cmdline" ] || continue
+            _rp=${_rd##*/}
+            pid_matches "$_rp" hnc_launcher && _res_lps="$_res_lps $_rp"
+        done
+    fi
+    _res_lps=$(printf '%s\n' $_res_lps | awk 'NF && !seen[$1]++ { print $1 }' | tr '\n' ' ')
+    if [ -n "$_res_lps" ]; then
+        for _lp in $_res_lps; do
+            [ -n "$_lp" ] && [ "$_lp" != "$$" ] && [ "$_lp" != "${PPID:-}" ] && kill "$_lp" 2>/dev/null || true
+        done
+        usleep 200000 2>/dev/null || sleep 1
+        for _lp in $_res_lps; do
+            [ -n "$_lp" ] && [ "$_lp" != "$$" ] && [ "$_lp" != "${PPID:-}" ] || continue
+            if pid_matches "$_lp" hnc_launcher && is_pid_alive "$_lp"; then
+                kill -9 "$_lp" 2>/dev/null || true
+            fi
+        done
+        rm -f "$DPID_GUARD_PID" "$RUN/launcher.pid" "$RUN/dpid.crashflag" "$RUN/dpid_crashflag" 2>/dev/null || true
+        log "dpid launcher: terminated residual hnc_launcher pids=[$_res_lps] in direct mode and cleared crashflag"
+    fi
+    unset _res_lps _lpf _cand_lp _scan_lp _res_proot _rd _rp _lp
+fi
+unset _dpid_choice
+
 # ─── 启动 Watchdog ──────────────────────────────────────────
 log "Starting watchdog..."
 prune_duplicate_watchdogs "service-prestart"
@@ -727,71 +879,6 @@ else
 fi
 
 # ─── hnc_dpid (DPI 被动观察 daemon) ────────────
-DPID_BIN="$HNC_DIR/bin/hnc_dpid"
-DPID_LAUNCHER_C="$HNC_DIR/bin/hnc_launcher"
-FORK_PROBE="$HNC_DIR/bin/fork_probe"
-DPID_LAUNCHER="$DPID_BIN"
-DPID_CONFIG="$HNC_DIR/etc/dpi_config.json"
-DPID_PID="$RUN/dpid.pid"
-DPID_GUARD_PID="$RUN/dpid_guard.pid"
-
-find_live_dpid_guard_pid() {
-    local proot="${HNC_PROC_ROOT:-/proc}"
-    local d p
-    if [ "$proot" = "/proc" ] && { [ "${HNC_DIR:-/data/local/hnc}" != "/data/local/hnc" ] || [ -n "${HNC_TEST_MODE:-}" ]; }; then
-        return 1
-    fi
-    for d in "$proot"/[0-9]*; do
-        [ -r "$d/cmdline" ] || continue
-        p=${d##*/}
-        if pid_matches "$p" hnc_launcher; then
-            echo "$p"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# launcher 探测
-LAUNCHER_CHOICE=""
-if [ -x "$DPID_LAUNCHER_C" ] && [ -x "$FORK_PROBE" ]; then
-    if "$FORK_PROBE" /system/bin/true >/dev/null 2>&1; then
-        _launcher_test=$("$DPID_LAUNCHER_C" --version 2>&1)
-        _launcher_test_rc=$?
-        if echo "$_launcher_test" | grep -qE 'underaligned|Aborted|cannot execute|error:.*executable'; then
-            log "dpid launcher: hnc_launcher binary broken (TLS/Bionic mismatch), skip"
-            log "  diag: $(echo "$_launcher_test" | head -n 1)"
-        elif [ "$_launcher_test_rc" = "134" ] || [ "$_launcher_test_rc" = "137" ]; then
-            log "dpid launcher: hnc_launcher aborted (rc=$_launcher_test_rc), skip"
-        else
-            DPID_LAUNCHER="$DPID_LAUNCHER_C"
-            LAUNCHER_CHOICE="c_launcher"
-            log "dpid launcher: hnc_launcher (C) — fork_probe PASS + exec PASS"
-        fi
-        unset _launcher_test _launcher_test_rc
-    else
-        log "dpid launcher: fork_probe FAIL on this device"
-    fi
-fi
-
-if [ -z "$LAUNCHER_CHOICE" ]; then
-    log "dpid launcher: C launcher unavailable, direct mode (Go watchdog supervises hnc_dpid)"
-fi
-
-case "$LAUNCHER_CHOICE" in
-    c_launcher)     _dpid_choice="launcher" ;;
-    *)              _dpid_choice="direct" ;;
-esac
-_dlc_tmp="$RUN/dpid_launcher.choice.tmp.$$"
-if printf '%s\n' "$_dpid_choice" > "$_dlc_tmp" 2>/dev/null && [ -s "$_dlc_tmp" ]; then
-    mv -f "$_dlc_tmp" "$RUN/dpid_launcher.choice" 2>/dev/null || rm -f "$_dlc_tmp" 2>/dev/null || true
-else
-    rm -f "$_dlc_tmp" 2>/dev/null || true
-    printf '%s\n' "$_dpid_choice" > "$RUN/dpid_launcher.choice" 2>/dev/null || true
-fi
-unset _dlc_tmp
-log "dpid launcher choice persisted: $_dpid_choice (raw=$LAUNCHER_CHOICE)"
-unset _dpid_choice
 
 
 if [ ! -x "$DPID_BIN" ]; then
@@ -1003,4 +1090,5 @@ fi
 _sent_pid="$!"
 echo "$_sent_pid" > "$RUN/sentinel.pid" 2>/dev/null || true
 command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$_sent_pid" -850 2>/dev/null || true
+rm -f "$RUN/service.pid" 2>/dev/null || true
 log "sentinel started (PID=$(cat "$RUN/sentinel.pid" 2>/dev/null), dpid_launcher=$DPID_LAUNCHER, scope=watchdog+rollback, ${_HNC_SVC_VER:-v6.1})"

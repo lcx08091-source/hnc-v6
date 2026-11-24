@@ -40,10 +40,11 @@ func actionHotspotScheduleSet(hncDir string, p map[string]string) actionResp {
 		if !ok {
 			continue
 		}
-		if rc, out := runBin(hncDir, "json_set.sh", "top", kv[1], v); rc != 0 {
-			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
+		if err := rulesStore.SetTop(hncDir, kv[1], v); err != nil {
+			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(err.Error())}
 		}
 	}
+	rulesStore.Invalidate(hncDir)
 	// 规则变了: 清掉边沿状态, 下一轮 watchdog 按新规则重新记录(不会立刻开/关热点)
 	_ = os.Remove(filepath.Join(hncDir, "run", "hotspot_schedule.last"))
 	return actionResp{OK: true}
@@ -54,9 +55,10 @@ func actionStaleTTLSet(hncDir string, p map[string]string) actionResp {
 	if err != nil || n < 0 || n > 3650 {
 		return actionResp{OK: false, Error: "bad params", Detail: "days must be 0-3650 (0 = never)"}
 	}
-	if rc, out := runBin(hncDir, "json_set.sh", "top", "stale_rule_ttl_days", strconv.Itoa(n)); rc != 0 {
-		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
+	if err := rulesStore.SetTop(hncDir, "stale_rule_ttl_days", n); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(err.Error())}
 	}
+	rulesStore.Invalidate(hncDir)
 	return actionResp{OK: true}
 }
 

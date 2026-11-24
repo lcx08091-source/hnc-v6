@@ -85,6 +85,7 @@ type ScalpelActiveRule struct {
 	ID          string       `json:"id"`
 	Scope       string       `json:"scope,omitempty"` // hotspot | host
 	UID         int          `json:"uid,omitempty"`
+	PeerUID     int          `json:"peer_uid,omitempty"`
 	HasUID      bool         `json:"-"`
 	Package     string       `json:"package,omitempty"`
 	Mode        string       `json:"mode"` // reset_5s | freeze_15m
@@ -563,8 +564,11 @@ func (e *flowScalpelEngine) resolveClientMAC(srcIP string) string {
 	if e == nil || e.srv == nil || e.srv.hncDir == "" || srcIP == "" {
 		return ""
 	}
-	_, macByIP := e.srv.buildDeviceDirectory()
-	return canonMAC(macByIP[srcIP])
+	_, macByIP := scalpelBuildDeviceDirectory(e.srv)
+	if mac := canonMAC(macByIP[srcIP]); mac != "" {
+		return mac
+	}
+	return scalpelInferUniqueV6PrefixMAC(srcIP, macByIP)
 }
 
 func scalpelSameBidirectionalTuple(a, b ScalpelTuple) bool {
@@ -833,7 +837,7 @@ func scalpelSameHostFreezeTarget(a, b ScalpelActiveRule) bool {
 	if a.Tuple.Proto != b.Tuple.Proto || a.Tuple.DstIP != b.Tuple.DstIP || a.Tuple.Dport != b.Tuple.Dport {
 		return false
 	}
-	return a.HasUID && b.HasUID && a.UID == b.UID
+	return a.HasUID && b.HasUID && (a.UID == b.UID || scalpelSameOrPairedHostUID(a.UID, b.UID))
 }
 
 func (e *flowScalpelEngine) upsertHostRuleLocked(cand ScalpelActiveRule) (changedV4, changedV6 bool) {
@@ -851,6 +855,7 @@ func (e *flowScalpelEngine) upsertHostRuleLocked(cand ScalpelActiveRule) (change
 		if matched {
 			ex.Tuple = cand.Tuple
 			ex.UID = cand.UID
+			ex.PeerUID = cand.PeerUID
 			ex.HasUID = cand.HasUID
 			if cand.Package != "" {
 				ex.Package = cand.Package
@@ -900,8 +905,9 @@ func (e *flowScalpelEngine) effectiveHostIptRunner() scalpelRestoreRunner {
 }
 
 // CutHost 执行手机本机双阶段真实斩流:
-//   Step 1: 五道防自锁门禁通过后，先发 NETLINK_SOCK_DIAG SOCK_DESTROY 销毁本机 socket + CTNETLINK 清 conntrack；
-//   Step 2: 原子提交 *filter 表 HNC_SCALPEL_HOST 独立子链 (挂载于 OUTPUT 链第 1 位)，到期自动回空链零开销。
+//   Step 1: 五道防自锁门禁（含按 uid % 100000 双向配对主应用 10000..19999 与 SDK 沙盒 20000..29999）通过后，
+//           先发 NETLINK_SOCK_DIAG SOCK_DESTROY 销毁本机 socket + CTNETLINK 清 conntrack；
+//   Step 2: 原子提交 *filter 表 HNC_SCALPEL_HOST 独立子链 (挂载于 OUTPUT 链第 1 位)，同步冻结配对主应用与 SDK 沙盒 UID，到期自动回空链零开销。
 func (e *flowScalpelEngine) CutHost(now time.Time, tuple ScalpelTuple, mode string, reqUID int, hasReqUID bool) (map[string]any, error) {
 	norm, _, isV6, err := validateScalpelTuple(tuple)
 	if err != nil {
@@ -944,6 +950,9 @@ func (e *flowScalpelEngine) CutHost(now time.Time, tuple ScalpelTuple, mode stri
 		}
 		return resp, guardErr
 	}
+
+	peerUID, hasPeer := scalpelPairHostSandboxUID(effUID)
+	freezeUIDs := scalpelOrderedHostFreezeUIDs(effUID)
 
 	// Step 1a: 纯 Go NETLINK_SOCK_DIAG (SOCK_DESTROY=21) 强制销毁本机 socket
 	sockSeq := uint32(e.seqGen.Add(1))
@@ -997,6 +1006,7 @@ func (e *flowScalpelEngine) CutHost(now time.Time, tuple ScalpelTuple, mode stri
 			ID:          fmt.Sprintf("sch_%d_rst", seq),
 			Scope:       scalpelHostScopeHost,
 			UID:         effUID,
+			PeerUID:     peerUID,
 			HasUID:      effUID >= 0,
 			Package:     id.Package,
 			Mode:        "reset_5s",
@@ -1017,6 +1027,7 @@ func (e *flowScalpelEngine) CutHost(now time.Time, tuple ScalpelTuple, mode stri
 				ID:          fmt.Sprintf("sch_%d_frz", seq),
 				Scope:       scalpelHostScopeHost,
 				UID:         effUID,
+				PeerUID:     peerUID,
 				HasUID:      true,
 				Package:     id.Package,
 				Mode:        "freeze_15m",
@@ -1097,11 +1108,17 @@ func (e *flowScalpelEngine) CutHost(now time.Time, tuple ScalpelTuple, mode stri
 		"host_active_rules":    hostActiveCnt,
 		"active_scalpel_rules": hostActiveCnt,
 	}
+	if hasPeer {
+		resp["peer_uid"] = peerUID
+	}
 	if sockNote != "" {
 		resp["sock_destroy_note"] = sockNote
 	}
 	if mode == scalpelModeFreeze15m {
 		resp["frozen_until"] = expFreeze.Unix()
+		if len(freezeUIDs) > 0 {
+			resp["freeze_uids"] = freezeUIDs
+		}
 	}
 	if ctErrStr != "" {
 		resp["conntrack_note"] = ctErrStr
@@ -1730,10 +1747,10 @@ func (s *server) apiScalpelFlows(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 本机流筛选: 当未指定热点设备 MAC 时纳入 scope=all|host
+	// 本机流筛选: 当未指定热点设备 MAC 时纳入 scope=all|host (按 uid 筛选时双向覆盖配对 SDK 沙盒)
 	if (qScope == scalpelHostScopeAll || qScope == scalpelHostScopeHost) && qMAC == "" {
 		for _, fl := range dual.HostList {
-			if hasUIDFilter && fl.UID != qUID {
+			if hasUIDFilter && fl.UID != qUID && !scalpelSameOrPairedHostUID(fl.UID, qUID) {
 				continue
 			}
 			if qIP != "" && fl.SrcIP != qIP && fl.DstIP != qIP {

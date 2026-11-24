@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // rollbackJSON hnc_rollback.sh 写的文件结构(字段名与 shell printf 一致)。
@@ -28,6 +29,16 @@ type rollbackJSON struct {
 	Reason string `json:"reason"`
 	At     int64  `json:"at"`
 	Action string `json:"action"`
+}
+
+// isStaleRollbackRecord 仅当 runtime_version 非空(且非 "0")且既不等于 from 也不等于 to 时,
+// 判定历史 rollback.json 为已升级跨越后的陈旧记录。
+func isStaleRollbackRecord(runtimeVer, from, to string) bool {
+	rv := strings.TrimSpace(runtimeVer)
+	if rv == "" || rv == "0" {
+		return false
+	}
+	return rv != strings.TrimSpace(from) && rv != strings.TrimSpace(to)
 }
 
 // rollbackOut /api/health 的 rollback 段。rolled=false 且无文件时整个为
@@ -55,6 +66,11 @@ func (s *server) rollbackStatus() *rollbackOut {
 	var r rollbackJSON
 	if json.Unmarshal(b, &r) != nil {
 		return nil
+	}
+	if rvBytes, err := os.ReadFile(filepath.Join(s.hncDir, "data", "runtime_version")); err == nil {
+		if isStaleRollbackRecord(string(rvBytes), r.From, r.To) {
+			return nil
+		}
 	}
 	out := &rollbackOut{
 		Rolled:   true,
@@ -153,6 +169,11 @@ func scRollbackItem(c *scCtx) scItem {
 	}
 	from, _ := m["from"].(string)
 	to, _ := m["to"].(string)
+	if isStaleRollbackRecord(c.readTrim(c.hnc("data", "runtime_version")), from, to) {
+		it.Status, it.Value = scOK, "正常"
+		it.Detail = "没有发生过当前版本的自动回滚"
+		return it
+	}
 	reason, _ := m["reason"].(string)
 	action, _ := m["action"].(string)
 	from, to = vcName(from), vcName(to)

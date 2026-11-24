@@ -723,15 +723,102 @@ func defaultCheckSchFQSysReady(hncDir string) bool {
 
 // ── 导出接口 1: TuneGlobalShaperNative (零子进程 Autorate 热调速) ─────────────
 
+var errGlobalShaperNeedIFBInit = errors.New("TuneGlobalShaperNative: ifb0 not initialized while uplink shaping requested")
+
+func systemSupportsIFB(hncDir string) bool {
+	ifbSup, ifbKnown := readCapabilityBool(hncDir, "ifb_supported")
+	if ifbKnown {
+		return ifbSup
+	}
+	return true
+}
+
 // TuneGlobalShaperNative 通过长连接 AF_NETLINK RTM_NEWTCLASS 原地更新下行热点口与 ifb0 的根类 1:1 带宽 (< 0.2ms, 0 子进程)。
 // 当处于单测假脚本环境 (!useNativeDataplane) 时立即返回错误, 由调用方无缝回退 runBin("tc_manager.sh", ...)。
 func TuneGlobalShaperNative(hncDir string, downKbps, upKbps int) error {
 	return tuneGlobalShaperOnActor(DefaultDataplaneActor(), hncDir, downKbps, upKbps)
 }
 
+// ResetGlobalShaperNative 将已建树的热点下行口与 ifb0 根类 1:1 复位至 1000mbit 并清零 shaperSpec,
+// 防止关闭全局限速时将 1000000 写入 shaperSpec 污染后续 VectorExpress 重放误把 ifb0 1:9999 压至 85%。
+func ResetGlobalShaperNative(hncDir string) error {
+	return resetGlobalShaperOnActor(DefaultDataplaneActor(), hncDir)
+}
+
+func resetGlobalShaperOnActor(actor *DataplaneActor, hncDir string) error {
+	if !useNativeDataplane(hncDir) {
+		return errors.New("native dataplane disabled for test/compat environment")
+	}
+	iface := readHotspotIfaceName(hncDir)
+	if iface == "" {
+		return errors.New("ResetGlobalShaperNative: hotspot interface inactive")
+	}
+	h := getDPTierHooks()
+	downIdx, _ := h.ifaceIndex(iface)
+	ifbIdx, _ := h.ifaceIndex("ifb0")
+	if downIdx <= 0 && ifbIdx <= 0 {
+		return fmt.Errorf("ResetGlobalShaperNative: resolve %s/ifb0 ifindex failed", iface)
+	}
+
+	return actor.Do("reset_global_shaper", func(a *DataplaneActor) error {
+		if a.reconcileMap == nil {
+			a.reconcileMap = make(map[string]string, 16)
+		}
+		a.trackIfindexLocked(hncDir, iface, downIdx)
+		a.trackIfindexLocked(hncDir, "ifb0", ifbIdx)
+		prevUpHadShaper := a.shaperSpec.upKbps > 0
+
+		unlock, lockErr := h.acquireLock(hncDir, "reset_global_shaper")
+		if lockErr != nil {
+			a.nlFallbacks.Add(1)
+			a.publishSnapshotLocked()
+			return lockErr
+		}
+		defer unlock()
+
+		if a.probeState.tier != DataplaneTierAtomicBatch {
+			nlErr := a.runWithPersistentSocket(h, func(fd int) error {
+				_, err := h.tuneShaperOnSock(fd, downIdx, 0, ifbIdx, 0)
+				return err
+			})
+			if nlErr == nil {
+				delete(a.reconcileMap, "shaper:"+hncDir+":"+iface)
+				delete(a.reconcileMap, "express:"+hncDir+":"+iface)
+				a.shaperSpec = v6ShaperDesiredState{}
+				a.savedForks.Add(1)
+				a.publishSnapshotLocked()
+				return nil
+			}
+			a.nlFallbacks.Add(1)
+			delete(a.reconcileMap, "express:"+hncDir+":"+iface)
+			delete(a.reconcileMap, "leash:"+hncDir+":"+iface)
+		}
+
+		tcLines := buildTier3GlobalShaperBatchLinesWithReset(iface, 0, downIdx > 0, ifbIdx > 0, 0, prevUpHadShaper)
+		if len(tcLines) > 0 {
+			if bErr := execTier3AtomicBatch(h, tcLines, nil, nil); bErr != nil {
+				a.publishSnapshotLocked()
+				return errors.New("ResetGlobalShaperNative: both netlink and tier3 batch failed")
+			}
+			a.tier3Batches.Add(1)
+		}
+		delete(a.reconcileMap, "shaper:"+hncDir+":"+iface)
+		delete(a.reconcileMap, "express:"+hncDir+":"+iface)
+		a.shaperSpec = v6ShaperDesiredState{}
+		a.publishSnapshotLocked()
+		return nil
+	})
+}
+
 func tuneGlobalShaperOnActor(actor *DataplaneActor, hncDir string, downKbps, upKbps int) error {
 	if !useNativeDataplane(hncDir) {
 		return errors.New("native dataplane disabled for test/compat environment")
+	}
+	if downKbps < 0 {
+		downKbps = 0
+	}
+	if upKbps < 0 {
+		upKbps = 0
 	}
 	if downKbps <= 0 && upKbps <= 0 {
 		return errors.New("TuneGlobalShaperNative: both downKbps and upKbps are <= 0")
@@ -743,17 +830,22 @@ func tuneGlobalShaperOnActor(actor *DataplaneActor, hncDir string, downKbps, upK
 
 	h := getDPTierHooks()
 	downIdx := 0
-	if downKbps > 0 {
-		idx, err := h.ifaceIndex(iface)
-		if err != nil || idx <= 0 {
-			return fmt.Errorf("TuneGlobalShaperNative: resolve %s ifindex: %w", iface, err)
-		}
+	if idx, err := h.ifaceIndex(iface); err == nil && idx > 0 {
 		downIdx = idx
+	} else if downKbps > 0 {
+		return fmt.Errorf("TuneGlobalShaperNative: resolve %s ifindex: %w", iface, err)
 	}
+
 	ifbIdx := 0
-	if upKbps > 0 {
-		if idx, err := h.ifaceIndex("ifb0"); err == nil && idx > 0 {
-			ifbIdx = idx
+	if idx, err := h.ifaceIndex("ifb0"); err == nil && idx > 0 {
+		ifbIdx = idx
+	}
+	if upKbps > 0 && ifbIdx <= 0 {
+		if systemSupportsIFB(hncDir) {
+			return errGlobalShaperNeedIFBInit
+		}
+		if downKbps <= 0 {
+			return errors.New("TuneGlobalShaperNative: uplink-only requested without IFB")
 		}
 	}
 
@@ -775,6 +867,9 @@ func tuneGlobalShaperOnActor(actor *DataplaneActor, hncDir string, downKbps, upK
 			return nil
 		}
 
+		prevDownHadShaper := a.shaperSpec.downKbps > 0
+		prevUpHadShaper := a.shaperSpec.upKbps > 0
+
 		unlock, lockErr := h.acquireLock(hncDir, "tune_global_shaper")
 		if lockErr != nil {
 			a.nlFallbacks.Add(1)
@@ -789,6 +884,9 @@ func tuneGlobalShaperOnActor(actor *DataplaneActor, hncDir string, downKbps, upK
 				return err
 			})
 			if nlErr == nil {
+				if a.shaperSpec.downKbps != downKbps || a.shaperSpec.upKbps != upKbps {
+					delete(a.reconcileMap, "express:"+hncDir+":"+iface)
+				}
 				a.reconcileMap[digestKey] = digestVal
 				a.shaperSpec = v6ShaperDesiredState{
 					iface:    iface,
@@ -807,10 +905,13 @@ func tuneGlobalShaperOnActor(actor *DataplaneActor, hncDir string, downKbps, upK
 		}
 
 		// Tier 3 内存原子批处理兜底 (单次 `tc -force -batch -` 管道, <= 1 次子进程)
-		tcLines := buildTier3GlobalShaperBatchLines(iface, downKbps, ifbIdx > 0, upKbps)
+		tcLines := buildTier3GlobalShaperBatchLinesWithReset(iface, downKbps, downIdx > 0 && prevDownHadShaper, ifbIdx > 0, upKbps, prevUpHadShaper)
 		if len(tcLines) > 0 {
 			if bErr := execTier3AtomicBatch(h, tcLines, nil, nil); bErr == nil {
 				a.tier3Batches.Add(1)
+				if a.shaperSpec.downKbps != downKbps || a.shaperSpec.upKbps != upKbps {
+					delete(a.reconcileMap, "express:"+hncDir+":"+iface)
+				}
 				a.reconcileMap[digestKey] = digestVal
 				a.shaperSpec = v6ShaperDesiredState{
 					iface:    iface,
@@ -888,12 +989,14 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 		upBgCeilBps := kbpsToBytesPerSec(reqUpBgCeilKbps)
 
 		// 铁律: 仅当全局上行整形已启用(upKbps > 0)且 upBgCeilBps < upRootBps 时才收紧 ifb0 1:9999;
-		// 当 upKbps == 0 时强制 upBgCeil = 0, 绝不误拿 1000mbit 根速率乱锁上行!
+		// 当 upKbps == 0 时强制 effUpBgCeilKbps = 0, 且若此前 expressSpec.upBgCeilKbps > 0 转为 0, 将 ifb0 1:9999 复位回 1000mbit(upRootBps)!
 		upBgCeil := uint64(0)
 		effUpBgCeilKbps := 0
 		if enable && upBgCeilBps > 0 && upKbps > 0 && upBgCeilBps < upRootBps {
 			upBgCeil = upBgCeilBps
 			effUpBgCeilKbps = reqUpBgCeilKbps
+		} else if enable && a.expressSpec.upBgCeilKbps > 0 {
+			upBgCeil = upRootBps
 		}
 
 		digestKey := "express:" + hncDir + ":" + iface
@@ -1166,8 +1269,9 @@ func applyUpdateLeashOnActor(actor *DataplaneActor, hncDir string, leashMark uin
 		}
 		a.trackIfindexLocked(hncDir, iface, downIdx)
 		a.trackIfindexLocked(hncDir, "ifb0", ifbIdx)
+		aqmMode := readTCLeafAQMMode(hncDir)
 		digestKey := "leash:" + hncDir + ":" + iface
-		digestVal := fmt.Sprintf("%d:%d:%t:0x%08x:%d", downIdx, ifbIdx, enable, leashMark&leashMask, rateKbps)
+		digestVal := fmt.Sprintf("%d:%d:%t:0x%08x:%d:%s", downIdx, ifbIdx, enable, leashMark&leashMask, rateKbps, aqmMode)
 		if prev, ok := a.reconcileMap[digestKey]; ok && prev == digestVal {
 			a.dedupHits.Add(1)
 			a.savedForks.Add(1)
@@ -1187,9 +1291,9 @@ func applyUpdateLeashOnActor(actor *DataplaneActor, hncDir string, leashMark uin
 		tick := readPschedTickInUsec()
 		var allMsgs [][]byte
 		if enable {
-			allMsgs = append(allMsgs, buildUpdateLeashUpsertBatch(downIdx, false, rateBps, leashMark, leashMask, tick)...)
+			allMsgs = append(allMsgs, swapBatchLeafToScaledPfifoIfOff(buildUpdateLeashUpsertBatch(downIdx, false, rateBps, leashMark, leashMask, tick), downIdx, rtnlHtbRootMaj|uint32(v6LeashClassMinor), v6LeashLeafDown, rateBps, aqmMode)...)
 			if ifbIdx > 0 {
-				allMsgs = append(allMsgs, buildUpdateLeashUpsertBatch(ifbIdx, true, rateBps, leashMark, leashMask, tick)...)
+				allMsgs = append(allMsgs, swapBatchLeafToScaledPfifoIfOff(buildUpdateLeashUpsertBatch(ifbIdx, true, rateBps, leashMark, leashMask, tick), ifbIdx, rtnlHtbRootMaj|uint32(v6LeashClassMinor), v6LeashLeafUp, rateBps, aqmMode)...)
 			}
 		} else {
 			allMsgs = append(allMsgs, buildUpdateLeashRemoveBatch(downIdx, false, leashMark, leashMask)...)
@@ -1241,9 +1345,32 @@ func isTCBatchDelLine(line string) bool {
 	return len(fs) >= 2 && (fs[1] == "del" || fs[1] == "delete")
 }
 
+func isTCBatchBusyOrPermError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	for _, hard := range []string{
+		"busy",
+		"ebusy",
+		"operation not permitted",
+		"permission denied",
+		"eperm",
+		"eacces",
+	} {
+		if strings.Contains(lower, hard) {
+			return true
+		}
+	}
+	return false
+}
+
 func isIgnorableTCBatchDelError(err error) bool {
 	if err == nil {
 		return true
+	}
+	if isTCBatchBusyOrPermError(err) {
+		return false
 	}
 	lower := strings.ToLower(err.Error())
 	for _, pat := range []string{
@@ -1316,7 +1443,7 @@ func runTier3RestoreWithFallback(h dpTierHooks, binPath string, payload []byte) 
 }
 
 // execTier3AtomicBatch 在内存拼装批处理缓冲并提交给:
-//  1. `tc -force -batch -` (容忍幂等预清理 `del` 不存在节点的退出码, 隔离确保主变更 `replace` 严格生效)
+//  1. `tc -force -batch -` (容忍幂等预清理 `del` 不存在节点的退出码, 但遇 busy/权限错误绝不静默吞掉)
 //  2. `iptables-restore -w 2 -> -w -> 无 -w --noflush`
 //  3. `ip6tables-restore -w 2 -> -w -> 无 -w --noflush`
 func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore []byte) error {
@@ -1332,6 +1459,9 @@ func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore 
 		payload := []byte(strings.Join(tcLines, "\n") + "\n")
 		subprocs++
 		if err := h.runTier3Cmd(tcBin, []string{"-force", "-batch", "-"}, payload); err != nil {
+			if isTCBatchBusyOrPermError(err) {
+				return fmt.Errorf("tier3 tc -batch failed: %w", err)
+			}
 			var delLines, mainLines []string
 			for _, ln := range tcLines {
 				if strings.TrimSpace(ln) == "" {
@@ -1347,7 +1477,7 @@ func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore 
 			if len(mainLines) == 0 && len(delLines) > 0 && isIgnorableTCBatchDelError(err) {
 				recovered = true
 			} else if len(mainLines) > 0 {
-				if len(delLines) > 0 {
+				if len(delLines) > 0 && isIgnorableTCBatchDelError(err) {
 					mainPayload := []byte(strings.Join(mainLines, "\n") + "\n")
 					if mErr := h.runTier3Cmd(tcBin, []string{"-force", "-batch", "-"}, mainPayload); mErr == nil {
 						recovered = true
@@ -1355,7 +1485,7 @@ func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore 
 						err = mErr
 					}
 				}
-				if !recovered {
+				if !recovered && !isTCBatchBusyOrPermError(err) {
 					if stripped, changed := stripFqCodelParamsInBatchLines(mainLines); changed {
 						fbPayload := []byte(strings.Join(stripped, "\n") + "\n")
 						if fbErr := h.runTier3Cmd(tcBin, []string{"-force", "-batch", "-"}, fbPayload); fbErr == nil {
@@ -1430,14 +1560,98 @@ func resolveDataplaneSystemBin(name string) string {
 	return ""
 }
 
-// resolveTier3LeafQdiscSpec 根据 <hncDir>/run/qdisc_caps.json 实测结果动态选择 Tier 3 叶子队列:
-// 默认或支持 fq_codel 时使用带参 fq_codel; 裁剪内核无 fq_codel 时按 fq -> sfq -> 按速率缩放 pfifo 自动降级。
+// readTCLeafAQMMode 与 bin/tc_manager.sh 的 leaf_aqm_mode 严格同源:
+// 优先读取 <hncDir>/run/tc_leaf_aqm 首行, 其次回退 rules.json 顶层 tc_leaf_aqm (auto|on|off)。
+func readTCLeafAQMMode(hncDir string) string {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		hncDir = strings.TrimSpace(os.Getenv("HNC_DIR"))
+	}
+	if hncDir == "" {
+		return "auto"
+	}
+	normalize := func(raw string) (string, bool) {
+		v := strings.ToLower(strings.TrimSpace(raw))
+		if idx := strings.IndexAny(v, "\r\n"); idx >= 0 {
+			v = strings.TrimSpace(v[:idx])
+		}
+		switch v {
+		case "on", "true", "1", "yes":
+			return "on", true
+		case "off", "false", "0", "no", "netem":
+			return "off", true
+		case "auto":
+			return "auto", true
+		default:
+			return "", false
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "tc_leaf_aqm")); err == nil && len(b) > 0 {
+		if m, ok := normalize(string(b)); ok {
+			return m
+		}
+	}
+	if root, err := rulesStore.ReadAll(hncDir); err == nil && len(root) > 0 {
+		if rawVal, exists := root["tc_leaf_aqm"]; exists && rawVal != nil {
+			if m, ok := normalize(fmt.Sprint(rawVal)); ok {
+				return m
+			}
+		}
+	} else if rb, rErr := os.ReadFile(filepath.Join(hncDir, "data", "rules.json")); rErr == nil && len(rb) > 0 {
+		var parsed map[string]any
+		if json.Unmarshal(rb, &parsed) == nil {
+			if rawVal, exists := parsed["tc_leaf_aqm"]; exists && rawVal != nil {
+				if m, ok := normalize(fmt.Sprint(rawVal)); ok {
+					return m
+				}
+			}
+		}
+	}
+	return "auto"
+}
+
+func swapBatchLeafToScaledPfifoIfOff(msgs [][]byte, ifindex int, parent, leafHandle uint32, rateBps uint64, aqmMode string) [][]byte {
+	if aqmMode != "off" {
+		return msgs
+	}
+	out := make([][]byte, 0, len(msgs))
+	for _, m := range msgs {
+		if len(m) >= rtnlMsgHdrLen && (uint16(m[4])|(uint16(m[5])<<8)) == rtnlNewQdisc {
+			out = append(out, buildPfifoScaledLeafMsg(rtnlNextSeq(), ifindex, parent, leafHandle, rateBps))
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func scaledPfifoSpecForRateKbps(rateKbps int) string {
+	limitPkts := uint64(128)
+	if rateBps := kbpsToBytesPerSec(rateKbps); rateBps > 0 {
+		bdp := (rateBps * 40) / (1000 * 1500)
+		if bdp < 16 {
+			limitPkts = 16
+		} else if bdp > 256 {
+			limitPkts = 256
+		} else {
+			limitPkts = bdp
+		}
+	}
+	return fmt.Sprintf("pfifo limit %d", limitPkts)
+}
+
+// resolveTier3LeafQdiscSpec 根据 <hncDir>/run/qdisc_caps.json 与 tc_leaf_aqm 动态选择 Tier 3 叶子队列:
+// tc_leaf_aqm=off (非 Express) 时直接挂按速率缩放 pfifo; 默认或支持 fq_codel 时使用带参 fq_codel;
+// 裁剪内核无 fq_codel 时按 fq -> sfq -> 按速率缩放 pfifo 自动降级。
 func resolveTier3LeafQdiscSpec(hncDir string, isExpress bool, rateKbps int) string {
 	defaultSpec := "fq_codel target 5ms interval 100ms quantum 1514 limit 1024"
 	if isExpress {
 		defaultSpec = "fq_codel target 2ms interval 40ms quantum 300 limit 512"
 	}
 	hncDir = strings.TrimSpace(hncDir)
+	if !isExpress && readTCLeafAQMMode(hncDir) == "off" {
+		return scaledPfifoSpecForRateKbps(rateKbps)
+	}
 	if hncDir == "" {
 		return defaultSpec
 	}
@@ -1471,32 +1685,32 @@ func resolveTier3LeafQdiscSpec(hncDir string, isExpress bool, rateKbps int) stri
 	if sup["sfq"] {
 		return "sfq perturb 10"
 	}
-	// pfifo 按约 40ms BDP 窗口缩放队列长度 [16, 256]
-	limitPkts := uint64(128)
-	if rateBps := kbpsToBytesPerSec(rateKbps); rateBps > 0 {
-		bdp := (rateBps * 40) / (1000 * 1500)
-		if bdp < 16 {
-			limitPkts = 16
-		} else if bdp > 256 {
-			limitPkts = 256
-		} else {
-			limitPkts = bdp
-		}
-	}
-	return fmt.Sprintf("pfifo limit %d", limitPkts)
+	return scaledPfifoSpecForRateKbps(rateKbps)
 }
 
 func buildTier3GlobalShaperBatchLines(iface string, downKbps int, hasIFB bool, upKbps int) []string {
+	return buildTier3GlobalShaperBatchLinesWithReset(iface, downKbps, false, hasIFB, upKbps, false)
+}
+
+func buildTier3GlobalShaperBatchLinesWithReset(iface string, downKbps int, resetDown bool, hasIFB bool, upKbps int, resetUp bool) []string {
 	var lines []string
-	if downKbps > 0 && iface != "" {
-		bK := (hncBurstBytesForRate(kbpsToBytesPerSec(downKbps), false) + 1023) / 1024
-		rateStr := strconv.Itoa(downKbps) + "kbit"
+	effDown := downKbps
+	if effDown <= 0 && resetDown {
+		effDown = dpDefaultRootRateKbp
+	}
+	if effDown > 0 && iface != "" {
+		bK := (hncBurstBytesForRate(kbpsToBytesPerSec(effDown), false) + 1023) / 1024
+		rateStr := strconv.Itoa(effDown) + "kbit"
 		bStr := strconv.FormatUint(uint64(bK), 10) + "k"
 		lines = append(lines, fmt.Sprintf("class replace dev %s parent 1: classid 1:1 htb rate %s ceil %s burst %s cburst %s", iface, rateStr, rateStr, bStr, bStr))
 	}
-	if hasIFB && upKbps > 0 {
-		bK := (hncBurstBytesForRate(kbpsToBytesPerSec(upKbps), false) + 1023) / 1024
-		rateStr := strconv.Itoa(upKbps) + "kbit"
+	effUp := upKbps
+	if effUp <= 0 && resetUp {
+		effUp = dpDefaultRootRateKbp
+	}
+	if hasIFB && effUp > 0 {
+		bK := (hncBurstBytesForRate(kbpsToBytesPerSec(effUp), false) + 1023) / 1024
+		rateStr := strconv.Itoa(effUp) + "kbit"
 		bStr := strconv.FormatUint(uint64(bK), 10) + "k"
 		lines = append(lines, fmt.Sprintf("class replace dev ifb0 parent 1: classid 1:1 htb rate %s ceil %s burst %s cburst %s", rateStr, rateStr, bStr, bStr))
 	}
@@ -1637,6 +1851,8 @@ func buildTier3VectorExpressBatchLinesWithCaps(
 				}
 			} else if configuredUpKbps > 0 && upBgCeilKbps > 0 && upBgCeilKbps < tg.rootKbps {
 				lines = append(lines, fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9999 htb rate %dkbit ceil %dkbit prio 7", tg.dev, upBgCeilKbps, upBgCeilKbps))
+			} else {
+				lines = append(lines, fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9999 htb rate %dkbit ceil %dkbit prio 7", tg.dev, tg.rootKbps, tg.rootKbps))
 			}
 		} else {
 			if masked != 0 {
@@ -1657,6 +1873,17 @@ func buildTier3VectorExpressBatchLinesWithCaps(
 }
 
 func buildTier3UpdateLeashBatchLines(iface string, hasIFB, enable bool, markVal, markMask uint32, rateKbps int, optHNCDir ...string) []string {
+	const low16Mask = uint32(0x0000ffff)
+	markVal &^= low16Mask
+	markMask &^= low16Mask
+	if markMask == 0 {
+		markMask = DefaultAppQoSMarkMask
+	}
+	masked := markVal & markMask
+	if masked == 0 {
+		masked = v6LeashDefaultMark & markMask
+	}
+
 	hncDir := ""
 	if len(optHNCDir) > 0 {
 		hncDir = optHNCDir[0]
@@ -1680,14 +1907,19 @@ func buildTier3UpdateLeashBatchLines(iface string, hasIFB, enable bool, markVal,
 			lines = append(lines,
 				fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9990 htb rate %dkbit ceil %dkbit burst 16k cburst 16k prio 7 quantum 1514", tg.dev, rateKbps, rateKbps),
 				fmt.Sprintf("qdisc replace dev %s parent 1:9990 handle %s %s", tg.dev, tg.leafID, leafSpec),
-				fmt.Sprintf("filter replace dev %s parent 1: protocol ip prio 6 handle 0x%x/0x%x fw flowid 1:9990", tg.dev, markVal, markMask),
-				fmt.Sprintf("filter replace dev %s parent 1: protocol ipv6 prio 7 handle 0x%x/0x%x fw flowid 1:9990", tg.dev, markVal, markMask),
+				fmt.Sprintf("filter replace dev %s parent 1: protocol ip prio 6 handle 0x%x/0x%x fw flowid 1:9990", tg.dev, masked, markMask),
+				fmt.Sprintf("filter replace dev %s parent 1: protocol ipv6 prio 7 handle 0x%x/0x%x fw flowid 1:9990", tg.dev, masked, markMask),
 			)
 		} else {
+			if masked != 0 {
+				lines = append(lines,
+					fmt.Sprintf("filter del dev %s parent 1: protocol all prio 6 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+					fmt.Sprintf("filter del dev %s parent 1: protocol ip prio 6 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+					fmt.Sprintf("filter del dev %s parent 1: protocol ipv6 prio 7 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+				)
+			}
 			lines = append(lines,
-				fmt.Sprintf("filter del dev %s parent 1: protocol ip prio 6", tg.dev),
-				fmt.Sprintf("filter del dev %s parent 1: protocol ipv6 prio 7", tg.dev),
-				fmt.Sprintf("qdisc del dev %s parent 1:9990", tg.dev),
+				fmt.Sprintf("qdisc del dev %s parent 1:9990 handle %s", tg.dev, tg.leafID),
 				fmt.Sprintf("class del dev %s parent 1:1 classid 1:9990", tg.dev),
 			)
 		}

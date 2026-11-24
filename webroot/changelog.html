@@ -19,6 +19,16 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-1-0-rc-6" data-version="v6.1.0-rc.6" data-version-code="6009306">
+  <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v6.1.0-rc.6(准正式版): 96 路跨层联动深审收口 · 待机零唤醒探活隔离 · 双卡信号消灭幽灵卡 3 · 看门狗防 PID 复用误杀 · 解封孤儿 IP 黑洞修复 · 支付宝防连坐独立拆分 · 本机防火墙公网收紧与限速模板修复 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-24 · versionCode 6009306</span></div>
+  <ul class="cl-list">
+    <li><b>待机零唤醒探活隔离与纯蜂窝开机提速</b>：将看门狗定期健康探活与免登录页面从活跃计时器中剥离，彻底解决开热点息屏后后台探活不断重置计时导致无法进入深度省电休眠的问题；修复纯移动数据开机未开 Wi-Fi 时的等待卡顿，开机即刻恢复本机防火墙并顺畅打开管理页。</li>
+    <li><b>双卡信号监测根治「幽灵卡 3」与看门狗防误杀</b>：统一信号监测的双卡槽位边界，过滤无效订阅号、虚拟软卡槽与 <span class="mono">v4-</span> 转换网卡前缀，杜绝冒出「卡 3」及卡 2 上网被错判为卡 1 压速；看门狗管理进程前强制核对 <span class="mono">/proc/&lt;pid&gt;/cmdline</span> 进程身份，彻底杜绝系统复用旧进程号后误杀系统进程。</li>
+    <li><b>拉黑解封孤儿 IP 黑洞修复与支付宝独立防连坐</b>：记录被拉黑设备当时的 IP 并绑定 MAC 精准清理，设备离线或重连换 IP 后解封不再漏删旧规则导致后续分到同 IP 的新设备断网；将 <span class="mono">alipay.com</span> 从淘宝拆分为独立「支付宝」金融分类规则并过滤公共共享底座域名，限制淘宝或禁用购物类不再误断支付宝付款。</li>
+    <li><b>本机防火墙公网端口收紧、多用户分身保护与备份导出补齐</b>：将管理端口豁免严格限制在回环与局域网内，堵住应用借外网同号端口绕过禁网的漏洞，防自锁保护同步覆盖多用户与应用双开分身；补齐本机 KSU 环境整机配置备份导出鉴权，优化连接手术台与抽屉返回键交互。</li>
+    <li><b>设备限速模板修复与刷机包门禁加固</b>：修复设置单向限速或解除限速模板传入 <span class="mono">0mbit</span> 报错阻断的问题，并在手机热点非 <span class="mono">.1</span> 网段时保护同网段上游路由器防误拦；升级 CI 发版标签一致性门禁与刷机包全组件核验，全仓 34 个规则分包与指纹库同步升至 <span class="mono">v6.1.0-rc.6</span>，自动更新通道继续锁定稳定版 <span class="mono">v6.0.1</span>。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v6-1-0-rc-5" data-version="v6.1.0-rc.5" data-version-code="6009305">
   <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v6.1.0-rc.5(准正式版): 热点与本机连接精准拆分 · 护航页克制玻璃风格重编 · 全新「本机守护」中心(实时联网透视/后台耗流耗电排行/四档防火墙) · 本机手术刀秒断与凭据/身份证号防泄露 · 机身与电池双温度精准校准 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-24 · versionCode 6009305</span></div>
   <ul class="cl-list">

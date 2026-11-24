@@ -78,6 +78,7 @@ function morphSheet(sh, from) {
   return a;
 }
 
+var _sheetPushedOverDrawer = false;
 function sheet(html, opt) {
   opt = opt || {};
   var sh = $('#sheet'); sh.classList.toggle('tall', !!opt.tall); sh.dataset.kind = opt.kind || '';
@@ -86,6 +87,15 @@ function sheet(html, opt) {
   if (already && prevClose) { try { prevClose(); } catch (_) {} }
   $('#sheet-body').innerHTML = html; sheetOnClose = opt.onClose || null;
   $('#scrim').classList.add('show'); sh.classList.add('show'); sh.scrollTop = 0;
+  var drEl = document.getElementById('v6-scalpel-drawer');
+  if (!already && drEl && drEl.classList.contains('show') && !_sheetPushedOverDrawer) {
+    try {
+      if (window.history && typeof window.history.pushState === 'function') {
+        window.history.pushState({ hncSheet: 1, hncScalpel: 1 }, '');
+        _sheetPushedOverDrawer = true;
+      }
+    } catch (_) {}
+  }
   placeSegs(sh);
   var usedSpring = sheetOpenFx(already);
   if (already && motionOn()) {
@@ -111,8 +121,20 @@ function sheetSettled(v) {
   return new Promise(function (res) { setTimeout(function () { res(v); }, Math.min(420, left)); });
 }
 
-function closeSheet(v) {
+function closeSheet(v, fromPop) {
   if ($('#sheet').classList.contains('show')) sheetCloseAt = performance.now();
+  if (_sheetPushedOverDrawer) {
+    _sheetPushedOverDrawer = false;
+    if (!fromPop) {
+      try {
+        if (window.history && window.history.state && window.history.state.hncSheet) {
+          window.__hncSkipNextPop = (typeof window.__hncSkipNextPop === 'number' ? window.__hncSkipNextPop : (window.__hncSkipNextPop ? 1 : 0)) + 1;
+          window.history.back();
+          setTimeout(function () { if (window.__hncSkipNextPop) window.__hncSkipNextPop = false; }, 300);
+        }
+      } catch (_) {}
+    }
+  }
   $('#scrim').classList.remove('show');
   var sh = $('#sheet'); sh.classList.remove('show'); sh.dataset.kind = '';
   sheetCloseFx(typeof v === 'number' ? v : 0);
@@ -373,8 +395,13 @@ function alertAction(kind, id, mac) {
     dr.addEventListener('lostpointercapture', endDrag);
   }
   window.addEventListener('popstate', function () {
+    if (window.__hncSkipNextPop) {
+      if (typeof window.__hncSkipNextPop === 'number' && window.__hncSkipNextPop > 1) window.__hncSkipNextPop--;
+      else window.__hncSkipNextPop = false;
+      return;
+    }
     var shEl = document.getElementById('sheet');
-    if (shEl && shEl.classList.contains('show')) { closeSheet(0); return; }
+    if (shEl && shEl.classList.contains('show')) { closeSheet(0, true); return; }
     if (dr && dr.classList.contains('show') && typeof closeScalpelDrawer === 'function') closeScalpelDrawer(true);
   });
 })();

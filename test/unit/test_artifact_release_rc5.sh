@@ -6,6 +6,14 @@
 # 必需文件, fixture 没跟, 导致这两个 unit test 红灯. 不改业务功能, 只把测试夹具
 # 补全跟得上当前 sanity gate.
 
+_ARC5_STANDALONE=0
+if ! command -v test_start >/dev/null 2>&1; then
+    _ARC5_STANDALONE=1
+    HNC_REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+    export HNC_REPO_ROOT
+    . "$HNC_REPO_ROOT/test/lib.sh"
+fi
+
 # 当前 artifact_sanity_check.sh 强制要求的所有文件
 # v5.22: 直接从 artifact_sanity_check.sh 的 "for req in ..." 读(与
 # test_ci_preflight_artifact_gate.sh 同法) —— 手抄清单曾落后于 gate(缺 clsact 产物、
@@ -76,13 +84,17 @@ make_minimal_module_zip_rc5() {
             cp "$src" "$dst"
         else
             case "$relpath" in
-                bin/hnc_dpid|bin/hnc_clsact_ctl|bin/hnc_watchdog|bin/hnc_launcher|bin/hotspotd)
+                bin/hnc_dpid|bin/hnc_clsact_ctl|bin/hnc_tc_ingress|bin/hnc_watchdog|bin/hnc_launcher|bin/fork_probe|bin/hotspotd|bin/hnc_ipc|bin/mdns_resolve)
                     if [ "$_httpd_m" = "28 00" ]; then
                         { printf '\177ELF\001\001\001'; dd if=/dev/zero bs=1 count=11 2>/dev/null; printf '\050\000'; printf '\nhnc_dpid 0.5.4 %s\n' "${embedded_ver:-$cur_ver}"; } > "$dst"
                     else
                         { printf '\177ELF\002\001\001'; dd if=/dev/zero bs=1 count=11 2>/dev/null; printf '\267\000'; printf '\nhnc_dpid 0.5.4 %s\n' "${embedded_ver:-$cur_ver}"; } > "$dst"
                     fi
                     chmod 755 "$dst"
+                    ;;
+                bin/hnc_applabel.dex)
+                    printf 'dex\n035\0io/hnc/applabel/AppLabel\n' > "$dst"
+                    chmod 644 "$dst"
                     ;;
                 *)
                     echo "# placeholder for $relpath (test fixture)" > "$dst"
@@ -111,27 +123,39 @@ _rc5_check_prereq() {
     return 0
 }
 
-test_start "v5.3 rc5 artifact_pick_flashable accepts a direct module ZIP"
-_rc5_check_prereq || return
-direct="$HNC_TEST_DIR/HNC-v5_3_0-rc5-arm64.zip"
-outdir="$HNC_TEST_DIR/picked_direct"
-make_minimal_module_zip_rc5 "$direct"
-out=$(sh "$HNC_REPO_ROOT/bin/artifact_pick_flashable.sh" "$direct" "$outdir" 2>&1); rc=$?
-assert_eq "0" "$rc" "direct module zip should pass artifact picker" || return
-assert_contains "$out" 'source ZIP already has module.prop at root' "picker should detect direct flashable zip" || return
-assert_contains "$out" 'flashable_artifact=' "picker should print flashable_artifact path" || return
-test_pass
+_rc5_test_direct() {
+    test_start "v5.3 rc5 artifact_pick_flashable accepts a direct module ZIP"
+    _rc5_check_prereq || return 0
+    direct="$HNC_TEST_DIR/HNC-v5_3_0-rc5-arm64.zip"
+    outdir="$HNC_TEST_DIR/picked_direct"
+    make_minimal_module_zip_rc5 "$direct"
+    out=$(sh "$HNC_REPO_ROOT/bin/artifact_pick_flashable.sh" "$direct" "$outdir" 2>&1); rc=$?
+    assert_eq "0" "$rc" "direct module zip should pass artifact picker" || return 0
+    assert_contains "$out" 'source ZIP already has module.prop at root' "picker should detect direct flashable zip" || return 0
+    assert_contains "$out" 'flashable_artifact=' "picker should print flashable_artifact path" || return 0
+    test_pass
+}
 
-test_start "v5.3 rc5 artifact_pick_flashable extracts Actions outer wrapper ZIP"
-_rc5_check_prereq || return
-inner="$HNC_TEST_DIR/HNC-v5_3_0-rc5-arm64.zip"
-outer="$HNC_TEST_DIR/actions-download-rc5.zip"
-outdir="$HNC_TEST_DIR/picked_outer"
-make_minimal_module_zip_rc5 "$inner"
-(cd "$HNC_TEST_DIR" && zip -q "$outer" "$(basename "$inner")")
-out=$(sh "$HNC_REPO_ROOT/bin/artifact_pick_flashable.sh" "$outer" "$outdir" 2>&1); rc=$?
-assert_eq "0" "$rc" "outer wrapper should be accepted after extracting inner module zip" || return
-assert_contains "$out" 'outer wrapper' "picker should identify Actions outer wrapper" || return
-assert_contains "$out" 'inner flashable ZIP extracted' "picker should extract inner flashable zip" || return
-assert_contains "$out" "flashable_artifact=$outdir/$(basename "$inner")" "picker should print extracted inner path" || return
-test_pass
+_rc5_test_outer() {
+    test_start "v5.3 rc5 artifact_pick_flashable extracts Actions outer wrapper ZIP"
+    _rc5_check_prereq || return 0
+    inner="$HNC_TEST_DIR/HNC-v5_3_0-rc5-arm64.zip"
+    outer="$HNC_TEST_DIR/actions-download-rc5.zip"
+    outdir="$HNC_TEST_DIR/picked_outer"
+    make_minimal_module_zip_rc5 "$inner"
+    (cd "$HNC_TEST_DIR" && zip -q "$outer" "$(basename "$inner")")
+    out=$(sh "$HNC_REPO_ROOT/bin/artifact_pick_flashable.sh" "$outer" "$outdir" 2>&1); rc=$?
+    assert_eq "0" "$rc" "outer wrapper should be accepted after extracting inner module zip" || return 0
+    assert_contains "$out" 'outer wrapper' "picker should identify Actions outer wrapper" || return 0
+    assert_contains "$out" 'inner flashable ZIP extracted' "picker should extract inner flashable zip" || return 0
+    assert_contains "$out" "flashable_artifact=$outdir/$(basename "$inner")" "picker should print extracted inner path" || return 0
+    test_pass
+}
+
+_rc5_test_direct
+_rc5_test_outer
+
+if [ "$_ARC5_STANDALONE" = 1 ]; then
+    print_test_summary
+    exit $?
+fi

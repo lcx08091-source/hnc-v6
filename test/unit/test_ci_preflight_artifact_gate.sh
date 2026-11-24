@@ -4,6 +4,14 @@
 # rc30.12.34 (TASK-B2): fixture 跟当前 artifact_sanity_check.sh 必需文件集对齐.
 # 同 test_artifact_release_rc5.sh 的修法.
 
+_CPAG_STANDALONE=0
+if ! command -v test_start >/dev/null 2>&1; then
+    _CPAG_STANDALONE=1
+    HNC_REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+    export HNC_REPO_ROOT
+    . "$HNC_REPO_ROOT/test/lib.sh"
+fi
+
 # 当前 sanity gate 强制要求的全部文件 (跟 bin/artifact_sanity_check.sh 一致)
 # v5.11: 直接从 artifact_sanity_check.sh 的 "for req in ..." 读必需文件清单,
 # 不再手抄一份(此前手抄清单落后于 gate —— 缺 clsact 产物等, 测试恒 FAIL)。
@@ -42,12 +50,16 @@ PROP
     done
     cp "$HNC_REPO_ROOT/webroot/json-health.html" "$root/webroot/json-health.html"
     # 源码树里没有 CI 现编的 ARM 二进制: 写一个最小 AArch64 ELF 头(e_machine=0xB7)占位
-    for elf in bin/hnc_dpid bin/hnc_clsact_ctl daemon/hnc_httpd/hnc_httpd; do
+    for elf in bin/hnc_dpid bin/hnc_watchdog bin/hnc_launcher bin/fork_probe \
+               bin/hotspotd bin/hnc_ipc bin/mdns_resolve bin/hnc_clsact_ctl \
+               bin/hnc_tc_ingress daemon/hnc_httpd/hnc_httpd; do
         mkdir -p "$(dirname "$root/$elf")"
         # 末尾带上 gate 用 strings 检查的名称/版本标记(dpid 名 + fixture 的 module 版本)
         { printf '\177ELF\002\001\001'; dd if=/dev/zero bs=1 count=11 2>/dev/null; printf '\267\000'; printf '\n%s\n%s\n' "hnc_dpid" "$(sed -n 's/^version=//p' "$root/module.prop")"; } > "$root/$elf"
         chmod 755 "$root/$elf"
     done
+    printf 'dex\n035\0io/hnc/applabel/AppLabel\n' > "$root/bin/hnc_applabel.dex"
+    chmod 644 "$root/bin/hnc_applabel.dex"
     # rc30.12.34 (TASK-B2): 补 sanity 必需文件. 来自 baseline 仓库 cp, 缺则占位.
     for relpath in $_REQ_FILES; do
         dst="$root/$relpath"
@@ -73,19 +85,46 @@ _zip_ok_artifact() {
     (cd "$repo" && zip -q "$zipfile" module.prop $_REQ_FILES)
 }
 
-if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-    test_start "ci_preflight artifact gate requires zip/unzip"
-    test_skip "zip/unzip unavailable"
-else
+_run_cpag_tests() {
+    if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+        test_start "ci_preflight artifact gate requires zip/unzip"
+        test_skip "zip/unzip unavailable"
+        return 0
+    fi
+
     test_start "ci_preflight artifact accepts matching module without C helper"
     repo="$HNC_TEST_DIR/repo_ok"
     make_repo_fixture "$repo"
     _zip_ok_artifact "$repo" "$HNC_TEST_DIR/ok.zip"
     out="$(cd "$repo" && sh bin/ci_preflight.sh --artifact "$HNC_TEST_DIR/ok.zip" 2>&1)"
     rc=$?
-    assert_eq "0" "$rc" "preflight should pass matching artifact" || return
-    assert_contains "$out" "artifact version matches source" || return
-    test_pass
+    assert_eq "0" "$rc" "preflight should pass matching artifact" \
+        && assert_contains "$out" "artifact version matches source" \
+        && test_pass
 
-    # v5.26 T8: hnc_json_c(C 版 JSON 助手)已删除, rejects-host-helper 用例随之移除。
+    test_start "artifact_sanity_check rejects leaked fake_api.js or tools/ and missing compiled binary"
+    repo="$HNC_TEST_DIR/repo_bad"
+    make_repo_fixture "$repo"
+    _zip_ok_artifact "$repo" "$HNC_TEST_DIR/leak.zip"
+    mkdir -p "$repo/tools/ui_mock"
+    echo "// mock" > "$repo/tools/ui_mock/fake_api.js"
+    (cd "$repo" && zip -q "$HNC_TEST_DIR/leak.zip" tools/ui_mock/fake_api.js)
+    out_leak="$(sh "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh" "$HNC_TEST_DIR/leak.zip" 2>&1)"
+    rc_leak=$?
+    cp "$HNC_TEST_DIR/leak.zip" "$HNC_TEST_DIR/missing_bin.zip"
+    zip -q -d "$HNC_TEST_DIR/missing_bin.zip" tools/ui_mock/fake_api.js bin/hnc_watchdog 2>/dev/null || true
+    out_miss="$(sh "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh" "$HNC_TEST_DIR/missing_bin.zip" 2>&1)"
+    rc_miss=$?
+    assert_ne "0" "$rc_leak" "sanity gate must reject leaked fake_api.js / tools/" \
+        && assert_contains "$out_leak" "dev/mock files" \
+        && assert_ne "0" "$rc_miss" "sanity gate must reject missing bin/hnc_watchdog" \
+        && assert_contains "$out_miss" "required file missing at ZIP root path: bin/hnc_watchdog" \
+        && test_pass
+}
+
+_run_cpag_tests
+
+if [ "$_CPAG_STANDALONE" = 1 ]; then
+    print_test_summary
+    exit $?
 fi

@@ -48,6 +48,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"hnc.io/dpid/alert"
@@ -61,6 +62,7 @@ const (
 )
 
 // macArchiveMu 串行化 mac_merge_archives.json 的读改写。
+// 严格锁序: rmacReconcileMu -> s.actionMu -> 子模块锁 -> macArchiveMu -> rmacMu -> macMergeMu -> macAliasMu。
 var macArchiveMu sync.Mutex
 
 // mergeOps 把"系统副作用"抽出来(规则动作 / 离线规则写回 / 同步脚本), 测试注入假的实现。
@@ -389,11 +391,18 @@ func actionDeviceMergeDismiss(s *server, p map[string]string) actionResp {
 	return actionResp{OK: true, Detail: "不再建议 " + from + " → " + to}
 }
 
-// deviceMerge 调用方持 s.actionMu(经 dispatchAction)。
+// deviceMerge 调用方持 s.actionMu(经 dispatchAction 或 rmacReconcile)。
 func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*mergeResult, error) {
 	h := s.hncDir
 	ops := macMergeOpsFor(s)
 	res := &mergeResult{}
+
+	// 在 s.actionMu 内拦截重复合并: 已合并的旧 MAC 其原规则/名称已被阶段二清理, 重复合并会生成空 FromSnap 覆盖原归档快照!
+	curAliases := loadMACAliases(h)
+	if rawTarget, alreadyMerged := curAliases[from]; alreadyMerged {
+		resolvedTarget := resolveMACAlias(curAliases, rawTarget)
+		return nil, &mergeErr{"conflict", fmt.Sprintf("旧设备 %s 已处于合并状态(指向 %s)，请勿重复合并；如需调整请先无损拆分", from, resolvedTarget)}
+	}
 
 	// ── 读取双方现状 ──
 	rs, err := readRuleStates(h)
@@ -901,21 +910,15 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 	{
 		var snap fileSnap
 		steps = append(steps, mergeStep{name: "mac_aliases", do: func() error {
-			snap = snapFile(macAliasesPath(h))
-			m := map[string]string{}
-			for k, v := range loadMACAliases(h) {
-				m[k] = v
+			var err error
+			snap, err = commitMACAliasStep(h, from, to, now.Unix())
+			if err != nil {
+				return err
 			}
-			addMACAlias(m, from, to)
 			mig["mac_aliases"] = true
-			return saveMACAliases(h, m)
+			return nil
 		}, undo: func() {
-			if snap.path != "" {
-				_ = snap.restore()
-				macAliasCache.mu.Lock()
-				macAliasCache.m = nil
-				macAliasCache.mu.Unlock()
-			}
+			undoMACAliasStep(snap)
 		}})
 	}
 
@@ -1447,6 +1450,35 @@ func cloneIdentMap(m map[string]interface{}) map[string]interface{} {
 	return cp
 }
 
+var knownDevicesRestoreMu sync.Mutex
+
+func withKnownDevicesFlock(knownPath string, fn func()) {
+	knownDevicesRestoreMu.Lock()
+	defer knownDevicesRestoreMu.Unlock()
+	if knownPath == "" {
+		fn()
+		return
+	}
+	dir := filepath.Dir(knownPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fn()
+		return
+	}
+	lockPath := filepath.Join(dir, ".known_devices.lock")
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		fn()
+		return
+	}
+	defer lf.Close()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		fn()
+		return
+	}
+	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	fn()
+}
+
 func readKnownDeviceSnap(hncDir, mac string) (existed bool, firstSeen, markedAt int64) {
 	cfg := alert.NewConfig(hncDir)
 	b, err := os.ReadFile(cfg.KnownDevicesPath)
@@ -1471,44 +1503,49 @@ func readKnownDeviceSnap(hncDir, mac string) (existed bool, firstSeen, markedAt 
 
 func restoreKnownDevicesAfterUnmerge(hncDir, from string, fromSnap macDeviceSnap, to string, toBefore macDeviceSnap) {
 	cfg := alert.NewConfig(hncDir)
-	raw := readJSONMap(cfg.KnownDevicesPath)
-	if raw == nil {
-		if !fromSnap.KnownExisted && !toBefore.KnownExisted {
-			return
-		}
-		raw = map[string]interface{}{"version": 1, "macs": map[string]interface{}{}}
+	if _, err := os.Stat(cfg.KnownDevicesPath); os.IsNotExist(err) && !fromSnap.KnownExisted && !toBefore.KnownExisted {
+		return
 	}
-	macs, _ := raw["macs"].(map[string]interface{})
-	if macs == nil {
-		macs = map[string]interface{}{}
-		raw["macs"] = macs
-	}
-	applyOne := func(mac string, sn macDeviceSnap) {
-		if !sn.KnownExisted {
-			delete(macs, mac)
-			return
-		}
-		entry := map[string]interface{}{}
-		if prev, ok := macs[mac].(map[string]interface{}); ok && prev != nil {
-			for k, v := range prev {
-				entry[k] = v
+	withKnownDevicesFlock(cfg.KnownDevicesPath, func() {
+		raw := readJSONMap(cfg.KnownDevicesPath)
+		if raw == nil {
+			if !fromSnap.KnownExisted && !toBefore.KnownExisted {
+				return
 			}
+			raw = map[string]interface{}{"version": 1, "macs": map[string]interface{}{}}
 		}
-		if sn.KnownFirstSeen > 0 {
-			entry["first_seen"] = sn.KnownFirstSeen
+		macs, _ := raw["macs"].(map[string]interface{})
+		if macs == nil {
+			macs = map[string]interface{}{}
+			raw["macs"] = macs
 		}
-		if sn.KnownMarkedAt > 0 {
-			entry["marked_known_at"] = sn.KnownMarkedAt
-		} else {
-			delete(entry, "marked_known_at")
+		applyOne := func(mac string, sn macDeviceSnap) {
+			if !sn.KnownExisted {
+				delete(macs, mac)
+				return
+			}
+			entry := map[string]interface{}{}
+			if prev, ok := macs[mac].(map[string]interface{}); ok && prev != nil {
+				for k, v := range prev {
+					entry[k] = v
+				}
+			}
+			if sn.KnownFirstSeen > 0 {
+				entry["first_seen"] = sn.KnownFirstSeen
+			}
+			if sn.KnownMarkedAt > 0 {
+				entry["marked_known_at"] = sn.KnownMarkedAt
+			} else {
+				delete(entry, "marked_known_at")
+			}
+			macs[mac] = entry
 		}
-		macs[mac] = entry
-	}
-	applyOne(to, toBefore)
-	applyOne(from, fromSnap)
-	if b, err := json.Marshal(raw); err == nil {
-		_ = discoverWriteAtomic(cfg.KnownDevicesPath, b)
-	}
+		applyOne(to, toBefore)
+		applyOne(from, fromSnap)
+		if b, err := json.MarshalIndent(raw, "", "  "); err == nil {
+			_ = discoverWriteAtomic(cfg.KnownDevicesPath, b)
+		}
+	})
 }
 
 func (s *server) buildMergeArchiveBeforeCommit(
@@ -2144,18 +2181,10 @@ func (s *server) deviceUnmerge(from, to string, auto bool, now time.Time) (*unme
 	}
 
 	// 公共收尾 A: 移除 mac_aliases.json 中的别名绑定
-	{
-		m := map[string]string{}
-		for k, v := range loadMACAliases(h) {
-			if k != from {
-				m[k] = v
-			}
-		}
-		if err := saveMACAliasesAt(h, m, nowU, nil); err != nil {
-			warn("mac_aliases: %v", err)
-		} else {
-			restoredSet["mac_aliases"] = true
-		}
+	if err := removeMACAliasFrom(h, from, nowU); err != nil {
+		warn("mac_aliases: %v", err)
+	} else {
+		restoredSet["mac_aliases"] = true
 	}
 
 	// 公共收尾 B: 清理 rmac_guard_state.json AutoInherited[to]

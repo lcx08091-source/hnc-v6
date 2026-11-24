@@ -1,6 +1,14 @@
 #!/system/bin/sh
 # test/unit/test_log_rotate.sh — Patch 1.6 log_rotate.sh 单元测试
 
+_LR_STANDALONE=0
+if ! command -v test_start >/dev/null 2>&1; then
+    _LR_STANDALONE=1
+    HNC_REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+    export HNC_REPO_ROOT
+    . "$HNC_REPO_ROOT/test/lib.sh"
+fi
+
 LR="$HNC_REPO_ROOT/bin/log_rotate.sh"
 
 # ─── helpers ────────────────────────────────────────────────────
@@ -39,20 +47,19 @@ test_start "single: under threshold → no rotate"
 init_logs
 make_size "$HNC_TEST_DIR/logs/foo.log" 1024   # 1 KB
 lr_one "$HNC_TEST_DIR/logs/foo.log" 1048576   # 1 MB 阈值
-assert_file_exists "$HNC_TEST_DIR/logs/foo.log" "原文件保留"
-assert_file_not_exists "$HNC_TEST_DIR/logs/foo.log.1" "未生成 .1"
-test_pass
+assert_file_exists "$HNC_TEST_DIR/logs/foo.log" "原文件保留" && \
+    assert_file_not_exists "$HNC_TEST_DIR/logs/foo.log.1" "未生成 .1" && \
+    test_pass
 
 test_start "single: over threshold → rotate .log → .1"
 init_logs
 make_size "$HNC_TEST_DIR/logs/foo.log" 2097152   # 2 MB
 lr_one "$HNC_TEST_DIR/logs/foo.log" 1048576      # 1 MB 阈值
-assert_file_exists "$HNC_TEST_DIR/logs/foo.log.1" ".1 已生成"
-# 原 .log 被 rename, 新的空 .log 应该存在
-assert_file_exists "$HNC_TEST_DIR/logs/foo.log" "新空 .log"
-sz=$(wc -c < "$HNC_TEST_DIR/logs/foo.log" | tr -d ' ')
-assert_eq "0" "$sz" "新 .log 是空的"
-test_pass
+sz=$(wc -c < "$HNC_TEST_DIR/logs/foo.log" 2>/dev/null | tr -d ' ')
+assert_file_exists "$HNC_TEST_DIR/logs/foo.log.1" ".1 已生成" && \
+    assert_file_exists "$HNC_TEST_DIR/logs/foo.log" "新空 .log" && \
+    assert_eq "0" "$sz" "新 .log 是空的" && \
+    test_pass
 
 test_start "single: 3-generation overwrite (.2 dropped)"
 init_logs
@@ -66,26 +73,26 @@ lr_one "$HNC_TEST_DIR/logs/foo.log" 1048576
 make_size "$HNC_TEST_DIR/logs/foo.log" 2097152
 lr_one "$HNC_TEST_DIR/logs/foo.log" 1048576
 # 第 3 次: .2 被覆盖, .1→.2, log→.1
-assert_file_exists "$HNC_TEST_DIR/logs/foo.log" "新 .log"
-assert_file_exists "$HNC_TEST_DIR/logs/foo.log.1" ".1 存在"
-assert_file_exists "$HNC_TEST_DIR/logs/foo.log.2" ".2 存在"
-assert_file_not_exists "$HNC_TEST_DIR/logs/foo.log.3" "没有 .3(只留三代)"
-test_pass
+assert_file_exists "$HNC_TEST_DIR/logs/foo.log" "新 .log" && \
+    assert_file_exists "$HNC_TEST_DIR/logs/foo.log.1" ".1 存在" && \
+    assert_file_exists "$HNC_TEST_DIR/logs/foo.log.2" ".2 存在" && \
+    assert_file_not_exists "$HNC_TEST_DIR/logs/foo.log.3" "没有 .3(只留三代)" && \
+    test_pass
 
 test_start "single: nonexistent file → no error"
 init_logs
 lr_one "$HNC_TEST_DIR/logs/does_not_exist.log" 1024
 rc=$?
-assert_eq "0" "$rc" "不存在的文件应静默成功"
-test_pass
+assert_eq "0" "$rc" "不存在的文件应静默成功" && \
+    test_pass
 
 test_start "single: custom threshold respected"
 init_logs
 make_size "$HNC_TEST_DIR/logs/foo.log" 100
 # 50 bytes 阈值 → 应该 rotate
 lr_one "$HNC_TEST_DIR/logs/foo.log" 50
-assert_file_exists "$HNC_TEST_DIR/logs/foo.log.1" "小阈值下触发 rotate"
-test_pass
+assert_file_exists "$HNC_TEST_DIR/logs/foo.log.1" "小阈值下触发 rotate" && \
+    test_pass
 
 # ═══ check 模式(批量) ══════════════════════════════════════════
 
@@ -95,24 +102,24 @@ make_size "$HNC_TEST_DIR/logs/a.log" 2097152
 make_size "$HNC_TEST_DIR/logs/b.log" 2097152
 make_size "$HNC_TEST_DIR/logs/c.log" 1024      # 不达阈值
 lr_check
-assert_file_exists "$HNC_TEST_DIR/logs/a.log.1" "a 被轮转"
-assert_file_exists "$HNC_TEST_DIR/logs/b.log.1" "b 被轮转"
-assert_file_not_exists "$HNC_TEST_DIR/logs/c.log.1" "c 未触发"
-test_pass
+assert_file_exists "$HNC_TEST_DIR/logs/a.log.1" "a 被轮转" && \
+    assert_file_exists "$HNC_TEST_DIR/logs/b.log.1" "b 被轮转" && \
+    assert_file_not_exists "$HNC_TEST_DIR/logs/c.log.1" "c 未触发" && \
+    test_pass
 
 test_start "check: empty logs dir → no error"
 init_logs
 lr_check
 rc=$?
-assert_eq "0" "$rc" "空目录应 ok"
-test_pass
+assert_eq "0" "$rc" "空目录应 ok" && \
+    test_pass
 
 test_start "check: missing logs dir → no error"
 rm -rf "$HNC_TEST_DIR/logs"
 lr_check
 rc=$?
-assert_eq "0" "$rc" "没有 logs 目录也应 ok"
-test_pass
+assert_eq "0" "$rc" "没有 logs 目录也应 ok" && \
+    test_pass
 
 # ═══ 原子性(rename 不会撕开) ══════════════════════════════════
 
@@ -128,9 +135,9 @@ rm "$HNC_TEST_DIR/logs/padding"
 lr_one "$HNC_TEST_DIR/logs/foo.log" 1048576
 
 # 验证 .1 里仍然有原始前三行
-head -3 "$HNC_TEST_DIR/logs/foo.log.1" | grep -q "line 1"
-assert_eq "0" "$?" "原文件内容保留在 .1 中"
-test_pass
+head -3 "$HNC_TEST_DIR/logs/foo.log.1" 2>/dev/null | grep -q "line 1"
+assert_eq "0" "$?" "原文件内容保留在 .1 中" && \
+    test_pass
 
 # ═══ v5.9.3 BUG-014 · copytruncate 语义 ═══════════════════════════
 #
@@ -195,3 +202,8 @@ assert_eq "0" "$hit" "cp 失败时原日志内容必须完好(cp 与 truncate �
     assert_ne "0" "$sz_after" "cp 失败时原日志不得被截断成 0 字节" && \
     assert_ne "0" "$rc" "cp 失败应返回非 0,让调用方能看出异常" && \
     test_pass
+
+if [ "$_LR_STANDALONE" = 1 ]; then
+    print_test_summary
+    exit $?
+fi

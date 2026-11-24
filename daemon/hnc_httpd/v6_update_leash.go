@@ -146,18 +146,22 @@ type updateLeashEngine struct {
 	wakeOnce sync.Once
 	wakeCh   chan struct{}
 
-	srv               *server
-	mu                sync.Mutex
-	cfg               UpdateLeashConfig
-	sessions          map[string]*UpdateLeashSession // key = mac + "|" + targetHostOrIP
-	bypassedSet       map[string]bool
-	pausedSet         map[string]bool
-	suffixCache       []string
-	applyHook         func(active []UpdateLeashSession)
-	lastPersistedKey  string
-	hasPersistedState bool
-	lastAppliedKbps   int
-	lastMangleDigest  string
+	srv                *server
+	mu                 sync.Mutex
+	cfg                UpdateLeashConfig
+	sessions           map[string]*UpdateLeashSession // key = mac + "|" + targetHostOrIP
+	bypassedSet        map[string]bool
+	pausedSet          map[string]bool
+	suffixCache        []string
+	applyHook          func(active []UpdateLeashSession)
+	lastPersistedKey   string
+	hasPersistedState  bool
+	lastAppliedKbps    int
+	lastMangleDigestV4 string
+	lastMangleDigestV6 string
+	cfgSaveMu          sync.Mutex
+	cfgSaveSeq         uint64
+	lastSavedCfgSeq    uint64
 
 	pollInterval     time.Duration
 	idleExpire       time.Duration
@@ -225,9 +229,13 @@ func (e *updateLeashEngine) Wake() {
 // LoopMode 返回当前更新拴绳协程的休眠/一次性释放定时器/活跃周期档位。
 func (e *updateLeashEngine) LoopMode() v6EngineLoopMode {
 	if e == nil {
-		return v6EngineModeSleeping
+		return v6EngineLoopModeSleepingFallback()
 	}
 	return v6EngineLoopMode(e.loopMode.Load())
+}
+
+func v6EngineLoopModeSleepingFallback() v6EngineLoopMode {
+	return v6EngineModeSleeping
 }
 
 func (e *updateLeashEngine) sampleLiveFlows() []UpdateFlowInput {
@@ -263,29 +271,112 @@ func (e *updateLeashEngine) loadConfigLocked() {
 	}
 }
 
-// ReloadFromDisk 在整机备份恢复后从磁盘重新加载 UpdateLeash 配置与更新规则后缀。
+// ReloadFromDisk 在整机备份恢复后从磁盘重新加载 UpdateLeash 配置、更新规则后缀，并与 conn_blocks.json 对齐 pausedSet。
 func (e *updateLeashEngine) ReloadFromDisk() {
 	if e == nil {
 		return
 	}
+	var (
+		cbf        connBlockFile
+		hasHncDir  bool
+	)
+	if e.srv != nil && e.srv.hncDir != "" {
+		hasHncDir = true
+		cbf = readConnBlocks(e.srv.hncDir)
+	}
+	now := time.Now()
+
 	e.mu.Lock()
 	e.cfg = defaultUpdateLeashConfig()
 	e.loadConfigLocked()
 	e.suffixCache = nil
 	e.reloadRuleSuffixesLocked()
+	e.lastMangleDigestV4 = ""
+	e.lastMangleDigestV6 = ""
+	e.hasPersistedState = false
+	e.lastPersistedKey = ""
+
+	if hasHncDir {
+		newPaused := make(map[string]bool)
+		for _, it := range cbf.Items {
+			cm := canonMAC(it.MAC)
+			if cm == "" || cm == "00:00:00:00:00:00" {
+				continue
+			}
+			grpHost := canonicalUpdateHostGroup(it.Value, it.Value)
+			if grpHost == "" {
+				continue
+			}
+			skey := cm + "|" + grpHost
+			matched, vendor := e.matchUpdateTargetLocked(it.Value, "")
+			if !matched {
+				matched, vendor = e.matchUpdateTargetLocked(grpHost, "")
+			}
+			if strings.Contains(it.Label, "UpdateLeash") || e.pausedSet[skey] || matched {
+				newPaused[skey] = true
+				delete(e.bypassedSet, skey)
+				if sess, exists := e.sessions[skey]; exists {
+					sess.Paused = true
+					sess.BypassOnce = false
+					sess.State = leashStatePaused
+					sess.AppliedKbps = 0
+				} else {
+					if vendor == "" {
+						vendor = "系统大包 OTA"
+					}
+					e.sessions[skey] = &UpdateLeashSession{
+						SessionKey:     skey,
+						MAC:            cm,
+						DstHost:        grpHost,
+						VendorLabel:    vendor,
+						State:          leashStatePaused,
+						Paused:         true,
+						FirstSeen:      now.Unix(),
+						UpdatedAt:      now.Unix(),
+						updatedTime:    now,
+						lastFlowTotals: make(map[string]uint64),
+					}
+				}
+			}
+		}
+		for oldKey := range e.pausedSet {
+			if newPaused[oldKey] {
+				continue
+			}
+			if sess, exists := e.sessions[oldKey]; exists {
+				if sess.DownBytes == 0 && len(sess.lastFlowTotals) == 0 {
+					delete(e.sessions, oldKey)
+				} else {
+					sess.Paused = false
+					if sess.State == leashStatePaused {
+						sess.State = leashStateGrace
+					}
+				}
+			}
+		}
+		e.pausedSet = newPaused
+	}
 	e.mu.Unlock()
-	e.Wake()
+
+	if !e.isHotspotOffReadOnly() {
+		e.Wake()
+	}
 }
 
-func (e *updateLeashEngine) saveConfigLocked() error {
-	if e.srv == nil || e.srv.hncDir == "" {
+func (e *updateLeashEngine) persistConfigBytesUnlocked(seq uint64, b []byte) error {
+	if e.srv == nil || e.srv.hncDir == "" || len(b) == 0 {
 		return nil
 	}
-	b, err := json.MarshalIndent(e.cfg, "", "  ")
-	if err != nil {
+	e.cfgSaveMu.Lock()
+	defer e.cfgSaveMu.Unlock()
+	if seq < e.lastSavedCfgSeq {
+		return nil
+	}
+	if err := discoverWriteAtomic(e.configPath(), b); err != nil {
 		return err
 	}
-	return discoverWriteAtomic(e.configPath(), b)
+	e.lastSavedCfgSeq = seq
+	return nil
 }
 
 func (e *updateLeashEngine) reloadRuleSuffixesLocked() {
@@ -716,44 +807,57 @@ func (e *updateLeashEngine) syncLeashMangleDataplane(leashed []UpdateLeashSessio
 		devIPs = e.srv.deviceIPsByMAC()
 	}
 	v4Payload, v6Payload := BuildUpdateLeashManglePayloads(leashed, devIPs)
-	digest := v4Payload + "\x00" + v6Payload
 
 	e.mu.Lock()
-	if e.lastMangleDigest == digest {
-		e.mu.Unlock()
-		return
-	}
+	needV4 := e.lastMangleDigestV4 != v4Payload
+	needV6 := e.lastMangleDigestV6 != v6Payload
 	mangleFn := e.mangleApplyFn
 	e.mu.Unlock()
+	if !needV4 && !needV6 {
+		return
+	}
 
 	if mangleFn != nil {
-		e1 := mangleFn(false, v4Payload)
-		e2 := mangleFn(true, v6Payload)
-		if e1 == nil && e2 == nil {
-			e.mu.Lock()
-			e.lastMangleDigest = digest
-			e.mu.Unlock()
+		if needV4 {
+			if err := mangleFn(false, v4Payload); err == nil {
+				e.mu.Lock()
+				e.lastMangleDigestV4 = v4Payload
+				e.mu.Unlock()
+			}
+		}
+		if needV6 {
+			if err := mangleFn(true, v6Payload); err == nil {
+				e.mu.Lock()
+				e.lastMangleDigestV6 = v6Payload
+				e.mu.Unlock()
+			}
 		}
 		return
 	}
 
-	v4OK := true
-	if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
-		if err := pipeIptablesRestoreWithTimeout(v4Bin, []byte(v4Payload), iptRestoreTimeout); err != nil {
-			v4OK = false
-		} else if len(leashed) > 0 {
-			ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("iptables"), leashMangleChainName, true)
+	if needV4 {
+		if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
+			if err := pipeIptablesRestoreWithTimeout(v4Bin, []byte(v4Payload), iptRestoreTimeout); err == nil {
+				if len(leashed) > 0 {
+					ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("iptables"), leashMangleChainName, true)
+				}
+				e.mu.Lock()
+				e.lastMangleDigestV4 = v4Payload
+				e.mu.Unlock()
+			}
 		}
 	}
-	if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
-		if err := pipeIptablesRestoreWithTimeout(v6Bin, []byte(v6Payload), iptRestoreTimeout); err == nil && len(leashed) > 0 {
-			ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("ip6tables"), leashMangleChainName, true)
+	if needV6 {
+		if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
+			if err := pipeIptablesRestoreWithTimeout(v6Bin, []byte(v6Payload), iptRestoreTimeout); err == nil {
+				if len(leashed) > 0 {
+					ensureV6TacticalMangleHooksOnBin(v6ResolveRestoreBinFn("ip6tables"), leashMangleChainName, true)
+				}
+				e.mu.Lock()
+				e.lastMangleDigestV6 = v6Payload
+				e.mu.Unlock()
+			}
 		}
-	}
-	if v4OK {
-		e.mu.Lock()
-		e.lastMangleDigest = digest
-		e.mu.Unlock()
 	}
 }
 
@@ -1140,9 +1244,49 @@ func (e *updateLeashEngine) runLoop(stop <-chan struct{}) {
 
 // ── HTTP: GET & POST /api/v6/update_leash ────────────────────────────────────
 
+func (e *updateLeashEngine) isHotspotOffReadOnly() bool {
+	if e == nil {
+		return false
+	}
+	_, act, sim := e.readActivity()
+	return act.Known && !act.HotspotActive && !sim
+}
+
+// ReadOnlySnapshot 在 HotspotOff 期间返回零副作用的纯内存只读快照,
+// 严禁采样 conntrack 或调用 ObserveFlows 覆写磁盘状态与触发数据面。
+func (e *updateLeashEngine) ReadOnlySnapshot() map[string]any {
+	e.mu.Lock()
+	cfg := e.cfg
+	sessions := e.sortedSessionsLocked()
+	e.mu.Unlock()
+	return map[string]any{
+		"ok":            true,
+		"enabled":       cfg.Enabled,
+		"grace_mb":      cfg.GraceMB,
+		"grace_bytes":   uint64(cfg.GraceMB) * 1024 * 1024,
+		"leash_kbps":    cfg.LeashKbps,
+		"leashed_count": int64(0),
+		"sessions":      sessions,
+		"config":        cfg,
+	}
+}
+
 func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 	eng := s.v6State().leash
+	isOffReadOnly := func() bool {
+		if eng.isHotspotOffReadOnly() {
+			return true
+		}
+		if act := activityNow(); act.Known && !act.HotspotActive && (s == nil || !s.simActive()) {
+			return true
+		}
+		return false
+	}
 	if r.Method == http.MethodGet {
+		if isOffReadOnly() {
+			writeJSON(w, http.StatusOK, eng.ReadOnlySnapshot())
+			return
+		}
 		live := eng.sampleLiveFlows()
 		if len(live) > 0 {
 			eng.ObserveFlows(time.Now(), live)
@@ -1171,6 +1315,7 @@ func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 		switch act {
 		case "", "config":
 			eng.mu.Lock()
+			prevCfg := eng.cfg
 			next := eng.cfg
 			if req.Enabled != nil {
 				next.Enabled = *req.Enabled
@@ -1192,10 +1337,30 @@ func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 				next.LeashKbps = *req.LeashKbps
 			}
 			eng.cfg = next
-			err := eng.saveConfigLocked()
+			eng.cfgSaveSeq++
+			saveSeq := eng.cfgSaveSeq
+			cfgBytes, mErr := json.MarshalIndent(eng.cfg, "", "  ")
 			eng.mu.Unlock()
-			if err != nil {
+			if mErr != nil {
+				eng.mu.Lock()
+				if eng.cfgSaveSeq == saveSeq {
+					eng.cfg = prevCfg
+				}
+				eng.mu.Unlock()
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write failed", "detail": mErr.Error()})
+				return
+			}
+			if err := eng.persistConfigBytesUnlocked(saveSeq, cfgBytes); err != nil {
+				eng.mu.Lock()
+				if eng.cfgSaveSeq == saveSeq {
+					eng.cfg = prevCfg
+				}
+				eng.mu.Unlock()
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write failed", "detail": err.Error()})
+				return
+			}
+			if isOffReadOnly() {
+				writeJSON(w, http.StatusOK, eng.ReadOnlySnapshot())
 				return
 			}
 			resp := eng.snapshot(false)
@@ -1204,41 +1369,106 @@ func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 
 		case "bypass_once":
 			mac := canonMAC(req.MAC)
-			host := canonicalUpdateHostGroup(req.DstHost, "")
+			rawHost := strings.TrimSpace(req.DstHost)
+			host := canonicalUpdateHostGroup(rawHost, "")
 			skey := strings.TrimSpace(req.SessionKey)
 			if skey == "" && mac != "" && host != "" {
 				skey = mac + "|" + host
 			}
+			type unpausePair struct {
+				mac     string
+				grpHost string
+			}
+			var unpaused []unpausePair
+
 			eng.mu.Lock()
 			matched := 0
 			if skey != "" {
+				wasPaused := eng.pausedSet[skey]
 				eng.bypassedSet[skey] = true
 				delete(eng.pausedSet, skey)
 				if sess, ok := eng.sessions[skey]; ok {
+					if sess.Paused {
+						wasPaused = true
+					}
 					sess.BypassOnce = true
 					sess.Paused = false
 					sess.State = leashStateBypassed
 					sess.AppliedKbps = 0
 				}
+				if parts := strings.SplitN(skey, "|", 2); len(parts) == 2 {
+					pm := canonMAC(parts[0])
+					ph := strings.TrimSpace(parts[1])
+					if pm != "" && ph != "" && (wasPaused || rawHost != "" || ph != "") {
+						unpaused = append(unpaused, unpausePair{mac: pm, grpHost: ph})
+					}
+				}
 				matched++
 			} else {
 				for k, sess := range eng.sessions {
 					if (mac == "" || sess.MAC == mac) && (host == "" || sess.DstHost == host) {
+						wasPaused := eng.pausedSet[k] || sess.Paused
 						eng.bypassedSet[k] = true
 						delete(eng.pausedSet, k)
 						sess.BypassOnce = true
 						sess.Paused = false
 						sess.State = leashStateBypassed
 						sess.AppliedKbps = 0
+						if wasPaused && sess.MAC != "" && sess.DstHost != "" {
+							unpaused = append(unpaused, unpausePair{mac: sess.MAC, grpHost: sess.DstHost})
+						}
 						matched++
 					}
 				}
 			}
 			eng.mu.Unlock()
-			resp := eng.snapshot(false)
+
+			// 同步清理底层 conn_blocks 中的暂停更新阻断项，防止 bypass_once 内存放行后内核仍继续 DROP
+			if s != nil && s.hncDir != "" && len(unpaused) > 0 {
+				delSeen := make(map[string]bool)
+				tryDel := func(m, target string) {
+					kind, normVal, ok := normalizeBlockTarget(target)
+					if !ok || m == "" {
+						return
+					}
+					dk := m + "|" + kind + "|" + normVal
+					if delSeen[dk] {
+						return
+					}
+					delSeen[dk] = true
+					_ = actionConnBlockDel(s, map[string]string{
+						"mac":   m,
+						"kind":  kind,
+						"value": normVal,
+					})
+				}
+				cbf := readConnBlocks(s.hncDir)
+				for _, up := range unpaused {
+					if rawHost != "" && (mac == "" || mac == up.mac) {
+						tryDel(up.mac, rawHost)
+					}
+					tryDel(up.mac, up.grpHost)
+					for _, it := range cbf.Items {
+						if canonMAC(it.MAC) != up.mac {
+							continue
+						}
+						itGrp := canonicalUpdateHostGroup(it.Value, it.Value)
+						if itGrp == up.grpHost || strings.EqualFold(strings.TrimSpace(it.Value), up.grpHost) {
+							tryDel(up.mac, it.Value)
+						}
+					}
+				}
+			}
+
+			var resp map[string]any
+			if isOffReadOnly() {
+				resp = eng.ReadOnlySnapshot()
+			} else {
+				resp = eng.snapshot(false)
+				eng.Wake()
+			}
 			resp["action"] = "bypass_once"
 			resp["bypassed_sessions"] = matched
-			eng.Wake()
 			writeJSON(w, http.StatusOK, resp)
 
 		case "pause_update", "resume_update":

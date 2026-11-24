@@ -444,6 +444,18 @@ func BuildAppLimitSubtreeNetlinkBatch(
 	hasAppQoS bool,
 	tickInUsec float64,
 ) ([][]byte, error) {
+	return buildAppLimitSubtreeNetlinkBatchWithAQM(ifindex, mid, parentRateBps, parentCeilBps, devMarkVal, devMarkMask, assignments, hasAppQoS, tickInUsec, "auto")
+}
+
+func buildAppLimitSubtreeNetlinkBatchWithAQM(
+	ifindex, mid int,
+	parentRateBps, parentCeilBps uint64,
+	devMarkVal, devMarkMask uint32,
+	assignments []V6AppLimitSlotAssignment,
+	hasAppQoS bool,
+	tickInUsec float64,
+	aqmMode string,
+) ([][]byte, error) {
 	if ifindex <= 0 {
 		return nil, fmt.Errorf("BuildAppLimitSubtreeNetlinkBatch: invalid ifindex %d", ifindex)
 	}
@@ -479,7 +491,7 @@ func BuildAppLimitSubtreeNetlinkBatch(
 		))
 	}
 
-	// 2. 逐条创建 1:9001+ 应用限速子类 + fq_codel 叶子 + prio 1 正交高位 fw 过滤器
+	// 2. 逐条创建 1:9001+ 应用限速子类 + 叶子队列(tc_leaf_aqm=off 时挂缩放 pfifo) + prio 1 正交高位 fw 过滤器
 	var reservedSum uint64
 	for _, asg := range assignments {
 		if asg.Mid != mid || asg.Slot < 1 || asg.Slot > v6AppLimitMaxSlots {
@@ -525,7 +537,11 @@ func BuildAppLimitSubtreeNetlinkBatch(
 			rateBps, ceilBps, burst, cburst, 0, 1, tickInUsec,
 		))
 		leafMaj := uint32(appMinor) << 16
-		msgs = append(msgs, buildFqCodelLeafMsg(rtnlNextSeq(), ifindex, appHandle, leafMaj, true))
+		if aqmMode == "off" {
+			msgs = append(msgs, buildPfifoScaledLeafMsg(rtnlNextSeq(), ifindex, appHandle, leafMaj, ceilBps))
+		} else {
+			msgs = append(msgs, buildFqCodelLeafMsg(rtnlNextSeq(), ifindex, appHandle, leafMaj, true))
+		}
 
 		markVal := (uint32(asg.Slot) << 26) & DefaultAppLimitMarkMask
 		msgs = append(msgs, buildFwFilterMsg(
@@ -552,7 +568,11 @@ func BuildAppLimitSubtreeNetlinkBatch(
 			rtnlNextSeq(), ifindex, parentHandle, defHandle,
 			defRate, parentCeilBps, 0, 0, 0, 2, tickInUsec,
 		))
-		msgs = append(msgs, buildFqCodelLeafMsg(rtnlNextSeq(), ifindex, defHandle, uint32(defMinor)<<16, true))
+		if aqmMode == "off" {
+			msgs = append(msgs, buildPfifoScaledLeafMsg(rtnlNextSeq(), ifindex, defHandle, uint32(defMinor)<<16, parentCeilBps))
+		} else {
+			msgs = append(msgs, buildFqCodelLeafMsg(rtnlNextSeq(), ifindex, defHandle, uint32(defMinor)<<16, true))
+		}
 		msgs = append(msgs, buildU32CatchAllFilterMsg(
 			rtnlNextSeq(), ifindex, parentHandle,
 			v6InnerPrioDefAll, rtnlEthPAll, defHandle,
@@ -768,6 +788,16 @@ func parseIPv6NeighDumpChunkCandidates(
 	byMAC map[string]map[string]ipv6NeighCandidate,
 	orderCounter *int,
 ) (bool, error) {
+	return parseIPv6NeighDumpChunkCandidatesWithSeq(b, 0, allowedIfindexes, byMAC, orderCounter)
+}
+
+func parseIPv6NeighDumpChunkCandidatesWithSeq(
+	b []byte,
+	wantSeq uint32,
+	allowedIfindexes map[int]bool,
+	byMAC map[string]map[string]ipv6NeighCandidate,
+	orderCounter *int,
+) (bool, error) {
 	const ndmsgLen = 12
 	for off := 0; off < len(b); {
 		rem := len(b) - off
@@ -776,6 +806,7 @@ func parseIPv6NeighDumpChunkCandidates(
 		}
 		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
 		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
+		msgSeq := binary.LittleEndian.Uint32(b[off+8 : off+12])
 		if msgLen < rtnlMsgHdrLen || msgLen > rem {
 			return false, fmt.Errorf("rtnl neigh dump: bad nlmsg_len %d", msgLen)
 		}
@@ -785,6 +816,9 @@ func parseIPv6NeighDumpChunkCandidates(
 			off = len(b)
 		} else {
 			off += adv
+		}
+		if wantSeq != 0 && msgSeq != wantSeq {
+			continue
 		}
 
 		switch msgType {
@@ -1082,12 +1116,19 @@ func (s *server) CurrentDynamicQoSRatios() QoSDynamicRatios {
 }
 
 var (
-	v6ResolveIfaceIndexFn  = nlIfaceIndexByName
-	v6DumpIPv6NeighborsFn  = DumpNativeIPv6Neighbors
-	v6EnsureBaseHooksFn    = ensureFirewallBaseHooksLinked
-	v6ResolveRestoreBinFn  = resolveIptablesRestoreBin
-	v6TriggerAppQoSFn      = defaultTriggerAppQoSScript
-	v6AppQoSSyncInFlight   atomic.Bool
+	v6ResolveIfaceIndexFn      = nlIfaceIndexByName
+	v6DumpIPv6NeighborsFn      = DumpNativeIPv6Neighbors
+	v6EnsureBaseHooksFn        = ensureFirewallBaseHooksLinked
+	v6ResolveRestoreBinFn      = resolveIptablesRestoreBin
+	v6TriggerAppQoSFn          = defaultTriggerAppQoSScript
+	v6AppQoSSyncInFlight       atomic.Bool
+	v6UpsertDeviceHTBWithDirFn = func(_ string, ifindex int, classMinor uint16, rateBps, ceilBps uint64, burstBytes, cburstBytes, quantum, markVal, markMask uint32, ipv4 string, isUplink bool) error {
+		return nlUpsertDeviceHTB(ifindex, classMinor, rateBps, ceilBps, burstBytes, cburstBytes, quantum, markVal, markMask, ipv4, isUplink)
+	}
+	v6DumpHTBClassStatsOnSockFn = func(_, _ int) (map[string]HTBClassStat, error) {
+		return nil, nil
+	}
+	v6ClearIngressPoliceFn = func(_ string, _ int) {}
 )
 
 func subtreeDeviceNeedsMark(hncDir, mac string, mid int, dm map[string]any) bool {
@@ -1215,7 +1256,7 @@ func BuildFirewallPayloads(hncDir string, root map[string]any, liveIPv4 map[stri
 		fmt.Fprintf(&v4, "-A HNC_CTRL -m mac --mac-source %s -p udp --dport 443 -j DROP\n", b.mac)
 		fmt.Fprintf(&v4, "-A HNC_CTRL -m mac --mac-source %s -j DROP\n", b.mac)
 		if b.ipv4 != "" {
-			fmt.Fprintf(&v4, "-A HNC_CTRL -s %s/32 -j DROP\n", b.ipv4)
+			fmt.Fprintf(&v4, "-A HNC_CTRL -s %s/32 -m mac --mac-source %s -j DROP\n", b.ipv4, b.mac)
 			fmt.Fprintf(&v4, "-A HNC_CTRL -d %s/32 -j DROP\n", b.ipv4)
 		}
 		fmt.Fprintf(&v6, "-A HNC_CTRL -m mac --mac-source %s -p udp --dport 443 -j DROP\n", b.mac)
@@ -1423,6 +1464,10 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 	var devSpecs []devRestoreSpec
 	midByMAC := make(map[string]int)
 	upLimitedMAC := make(map[string]bool)
+	var inactiveMids []int
+	var upInactiveMids []int
+	seenInactiveMid := make(map[int]bool)
+	seenUpInactiveMid := make(map[int]bool)
 
 	if devs, ok := root["devices"].(map[string]any); ok {
 		for rawMAC, rawObj := range devs {
@@ -1451,7 +1496,15 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 			}
 			appQoS := anyToRuleBool(dm["app_qos"]) && !deviceHasDelayOwner(dm)
 			hasAppLim := deviceHasAppLimitsForMAC(s.hncDir, "", mac, mid)
-			if dnBps == 0 && upBps == 0 && !appQoS && !hasAppLim {
+			if upBps == 0 && !deviceHasDelayOwner(dm) && !seenUpInactiveMid[mid] {
+				seenUpInactiveMid[mid] = true
+				upInactiveMids = append(upInactiveMids, mid)
+			}
+			if dnBps == 0 && upBps == 0 && !appQoS && !hasAppLim && !deviceHasDelayOwner(dm) && !anyToRuleBool(dm["sqm_enabled"]) {
+				if !seenInactiveMid[mid] {
+					seenInactiveMid[mid] = true
+					inactiveMids = append(inactiveMids, mid)
+				}
 				continue
 			}
 			midByMAC[mac] = mid
@@ -1468,6 +1521,8 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 			})
 		}
 	}
+	sort.Ints(inactiveMids)
+	sort.Ints(upInactiveMids)
 	sort.Slice(devSpecs, func(i, j int) bool { return devSpecs[i].mac < devSpecs[j].mac })
 
 	assignments := s.PlanAppLimitSlotAssignments(midByMAC)
@@ -1477,9 +1532,13 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 	}
 	rep.AppLimitClasses = len(assignments)
 
-	expActive, expMark, expBgCeilKbps := resolveActiveVectorExpressParams(s, s.hncDir)
+	globalV6Subtrees.mu.RLock()
+	prevAppLimCnt := globalV6Subtrees.lastRestore.AppLimitClasses
+	globalV6Subtrees.mu.RUnlock()
 
-	// 3. 若处于原生数据面环境且存在活跃下游口, 下发全部 HTB 设备类、二级子树与双栈防火墙
+	expActive, expMark, expBgCeilKbps, expUpBgCeilKbps := resolveActiveVectorExpressParamsFull(s, s.hncDir)
+
+	// 3. 若处于原生数据面环境且存在活跃下游口, 下发全部 HTB 设备类、二级子树与双栈防火墙, 并拆除已清空的旧类与旧链
 	if useNativeDataplane(s.hncDir) && len(downIfindexes) > 0 {
 		allowIfidx := make(map[int]bool, len(downIfindexes))
 		for _, idx := range downIfindexes {
@@ -1536,9 +1595,38 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 			}
 		}
 
+		activeDownMinors := make(map[uint16]bool, len(devSpecs))
+		activeUpMinors := make(map[uint16]bool, len(devSpecs))
+		activeAppQoSMids := make(map[int]bool, len(devSpecs))
+		wantAppMinors := make(map[uint16]bool, len(assignments)+len(devSpecs))
+		for _, ds := range devSpecs {
+			if mn, mErr := htbClassMinorForMid(ds.mid); mErr == nil {
+				activeDownMinors[mn] = true
+				if ds.upBps > 0 {
+					activeUpMinors[mn] = true
+				}
+			}
+			if ds.appQoSOn {
+				activeAppQoSMids[ds.mid] = true
+			}
+			if len(byDevAsg[ds.mid]) > 0 && !ds.appQoSOn {
+				wantAppMinors[v6AppLimitDefBase+uint16(ds.mid)] = true
+			}
+		}
+		for _, asg := range assignments {
+			wantAppMinors[asg.ClassMinor] = true
+		}
+
 		fd, sErr := openRTNetlinkSocket()
 		if sErr != nil {
 			rep.Warnings = append(rep.Warnings, sErr.Error())
+			if ifbIdx <= 0 {
+				for _, downName := range rep.DownstreamIfaces {
+					for _, mid := range upInactiveMids {
+						v6ClearIngressPoliceFn(downName, mid)
+					}
+				}
+			}
 			for _, ds := range devSpecs {
 				if ds.upBps > 0 && ifbIdx <= 0 {
 					markVal, markMask := readDeviceMarkSpec(s.hncDir, ds.mid)
@@ -1554,6 +1642,39 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 		} else {
 			defer closeRTNetlinkSocket(fd)
 			tick := readPschedTickInUsec()
+			aqmMode := readTCLeafAQMMode(s.hncDir)
+
+			// 3a. 先按 子过滤器 -> 子叶子 -> 1:9001+/1:9eXX/1:a0XX 子类 -> 父设备类(1:<cid> 与旧 1:10+mid) 逆序拆除已清空节点
+			for _, downIdx := range downIfindexes {
+				existing, _ := v6DumpHTBClassStatsOnSockFn(fd, downIdx)
+				tdBatch := buildStaleHTBTeardownBatch(
+					s.hncDir, downIdx, false, existing,
+					activeDownMinors, inactiveMids,
+					wantAppMinors, byDevAsg, activeAppQoSMids, prevAppLimCnt,
+				)
+				if len(tdBatch) > 0 {
+					nSent, _ := sendNetlinkBatchBestEffort(fd, tdBatch)
+					rep.NetlinkMessages += nSent
+				}
+			}
+			if ifbIdx > 0 {
+				existingUp, _ := v6DumpHTBClassStatsOnSockFn(fd, ifbIdx)
+				tdUpBatch := buildStaleHTBTeardownBatch(
+					s.hncDir, ifbIdx, true, existingUp,
+					activeUpMinors, upInactiveMids,
+					nil, nil, nil, 0,
+				)
+				if len(tdUpBatch) > 0 {
+					nSent, _ := sendNetlinkBatchBestEffort(fd, tdUpBatch)
+					rep.NetlinkMessages += nSent
+				}
+			} else {
+				for _, downName := range rep.DownstreamIfaces {
+					for _, mid := range upInactiveMids {
+						v6ClearIngressPoliceFn(downName, mid)
+					}
+				}
+			}
 
 			for _, ds := range devSpecs {
 				minor, mErr := htbClassMinorForMid(ds.mid)
@@ -1566,9 +1687,9 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 					effDn = DefaultHTBRootRateBps
 				}
 				for _, downIdx := range downIfindexes {
-					_ = nlUpsertDeviceHTB(downIdx, minor, effDn, effDn, 0, 0, 0, markVal, markMask, ds.ipv4, false)
+					_ = v6UpsertDeviceHTBWithDirFn(s.hncDir, downIdx, minor, effDn, effDn, 0, 0, 0, markVal, markMask, ds.ipv4, false)
 					if len(byDevAsg[ds.mid]) > 0 {
-						if batch, bErr := BuildAppLimitSubtreeNetlinkBatch(downIdx, ds.mid, effDn, effDn, markVal, markMask, byDevAsg[ds.mid], ds.appQoSOn, tick); bErr == nil {
+						if batch, bErr := buildAppLimitSubtreeNetlinkBatchWithAQM(downIdx, ds.mid, effDn, effDn, markVal, markMask, byDevAsg[ds.mid], ds.appQoSOn, tick, aqmMode); bErr == nil {
 							nSent, _ := sendNetlinkBatchBestEffort(fd, batch)
 							rep.NetlinkMessages += nSent
 							globalV6Subtrees.appLimitApplies.Add(1)
@@ -1583,7 +1704,7 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 					}
 				}
 				if ds.upBps > 0 && ifbIdx > 0 {
-					_ = nlUpsertDeviceHTB(ifbIdx, minor, ds.upBps, ds.upBps, 0, 0, 0, markVal, markMask, ds.ipv4, true)
+					_ = v6UpsertDeviceHTBWithDirFn(s.hncDir, ifbIdx, minor, ds.upBps, ds.upBps, 0, 0, 0, markVal, markMask, ds.ipv4, true)
 				} else if ds.upBps > 0 {
 					// GKI 6.1/6.6/6.12 无 CONFIG_IFB 场景: 全量恢复时补齐双栈入口 ingress police 上行限速
 					for _, downName := range rep.DownstreamIfaces {
@@ -1610,6 +1731,10 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 			if expActive {
 				expMask := resolveOrthogonalFilterMask(expMark, DefaultAppQoSMarkMask)
 				bgBps := kbpsToBytesPerSec(expBgCeilKbps)
+				upBgBps := kbpsToBytesPerSec(expUpBgCeilKbps)
+				if upBgBps == 0 {
+					upBgBps = DefaultHTBRootRateBps
+				}
 				for _, downIdx := range downIfindexes {
 					var eb [][]byte
 					eb = append(eb, buildVectorExpressLegacyCleanupBatch(s.hncDir, downIdx, false, expMark, expMask)...)
@@ -1620,14 +1745,14 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 				if ifbIdx > 0 {
 					var ub [][]byte
 					ub = append(ub, buildVectorExpressLegacyCleanupBatch(s.hncDir, ifbIdx, true, expMark, expMask)...)
-					ub = append(ub, buildVectorExpressUpsertBatch(ifbIdx, true, DefaultHTBRootRateBps, 0, expMark, expMask, tick)...)
+					ub = append(ub, buildVectorExpressUpsertBatch(ifbIdx, true, DefaultHTBRootRateBps, upBgBps, expMark, expMask, tick)...)
 					nSent, _ := sendNetlinkBatchBestEffort(fd, ub)
 					rep.NetlinkMessages += nSent
 				}
 			}
 		}
 
-		// 同步应用限速双栈防火墙链及顶层挂载跳转 (分表容错提交 + 缺 REJECT 自动降级 -j DROP, 严防连坐回滚 *mangle 打标)
+		// 同步应用限速双栈防火墙链及顶层挂载跳转; 若应用限速已全部清空则彻底拆除 HNC_APP_LIMIT* / HNC_AL_* / HNC_QUIC_APPLIM
 		if len(assignments) > 0 {
 			v4App, v6App := BuildAppLimitFirewallPayloads(assignments, liveIPv4, devIPv6ByMAC)
 			v4Restored := false
@@ -1650,6 +1775,21 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 			if v6Restored || v6ResolveRestoreBinFn("ip6tables-restore") == "" {
 				ensureAppLimitTopHooksOnBin(v6ResolveRestoreBinFn("ip6tables"))
 			}
+		} else {
+			_ = os.Remove(filepath.Join(s.hncDir, "run", "app_limits.devs"))
+			emptyV4, emptyV6 := buildEmptyAppLimitFirewallPayloads()
+			if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
+				if mOK, fOK, anyOK, _ := pipeRestoreTablesIsolated(v4Bin, emptyV4); mOK || fOK || anyOK {
+					rep.FirewallUpdated = true
+				}
+			}
+			if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
+				if mOK, fOK, anyOK, _ := pipeRestoreTablesIsolated(v6Bin, emptyV6); mOK || fOK || anyOK {
+					rep.FirewallUpdated = true
+				}
+			}
+			teardownEmptyAppLimitChainsOnBin(v6ResolveRestoreBinFn("iptables"))
+			teardownEmptyAppLimitChainsOnBin(v6ResolveRestoreBinFn("ip6tables"))
 		}
 
 		// 同步原生 IPv6 邻居过滤器 (持 run/v6_sync.lock 防与脚本竞态)
@@ -1697,6 +1837,265 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 		_ = discoverWriteAtomic(filepath.Join(s.hncDir, "run", "v6_native_restore.json"), append(b, '\n'))
 	}
 	return rep, nil
+}
+
+func isReservedRootHTBMinor(minor uint16) bool {
+	switch minor {
+	case 0, 0x0001, v6ExpressClassMinor, v6LeashClassMinor, rtnlDefMinor, v6LANFastlaneMinor:
+		return true
+	default:
+		return false
+	}
+}
+
+// buildStaleHTBTeardownBatch 按 (二级过滤器 -> 子叶子 -> 1:9001+/1:9eXX/1:a0XX 子类 -> 根过滤器 -> 父设备叶子 -> 1:<cid>/1:10+mid 父类)
+// 严格逆序生成幂等清理报文序列, 彻底杜绝清空限速或热恢复减量备份后残留孤儿 HTB 类。
+func buildStaleHTBTeardownBatch(
+	hncDir string,
+	ifindex int,
+	isUplink bool,
+	existing map[string]HTBClassStat,
+	activeDevMinors map[uint16]bool,
+	inactiveMids []int,
+	wantAppMinors map[uint16]bool,
+	byDevAsg map[int][]V6AppLimitSlotAssignment,
+	activeAppQoSMids map[int]bool,
+	prevAppLimCnt int,
+) [][]byte {
+	var msgs [][]byte
+
+	if !isUplink {
+		// 1. 拆除已清空或缩减的 1:9001..1:9998 与 1:9e01..1:9e63 应用限速子类及 1:a0XX AppQoS 子类
+		type childPair struct {
+			minor  uint16
+			parent uint32
+		}
+		var staleChildren []childPair
+		seenChild := make(map[uint16]bool)
+		for _, st := range existing {
+			if (st.HandleRaw & 0xffff0000) != rtnlHtbRootMaj {
+				continue
+			}
+			mn := uint16(st.HandleRaw & 0xffff)
+			isAppLim := (mn >= v6AppLimitMinorStart && mn <= v6AppLimitMinorEnd) ||
+				(mn > v6AppLimitDefBase && mn <= v6AppLimitDefBase+99)
+			if isAppLim && !wantAppMinors[mn] {
+				seenChild[mn] = true
+				staleChildren = append(staleChildren, childPair{minor: mn, parent: st.ParentRaw})
+				continue
+			}
+			if mn >= v6AppQoSMinorBase && mn < v6AppQoSMinorBase+400 {
+				mid := int(mn-v6AppQoSMinorBase) / 4
+				if mid < 1 || mid > 99 || !activeAppQoSMids[mid] {
+					seenChild[mn] = true
+					staleChildren = append(staleChildren, childPair{minor: mn, parent: st.ParentRaw})
+				}
+			}
+		}
+		sort.Slice(staleChildren, func(i, j int) bool { return staleChildren[i].minor < staleChildren[j].minor })
+
+		cleanedAppLimParent := make(map[uint32]bool)
+		for _, ch := range staleChildren {
+			chHandle := rtnlHtbRootMaj | uint32(ch.minor)
+			if ch.parent != 0 {
+				pMinor := uint16(ch.parent & 0xffff)
+				pMid, _ := midFromHTBClassMinor(pMinor)
+				if ch.minor >= v6AppLimitMinorStart && ch.minor <= v6AppLimitMinorEnd {
+					if len(byDevAsg[pMid]) == 0 {
+						if !cleanedAppLimParent[ch.parent] {
+							cleanedAppLimParent[ch.parent] = true
+							msgs = append(msgs,
+								buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, v6InnerPrioAppLim, rtnlEthPAll, ""),
+								buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, v6InnerPrioAppLim, rtnlEthPIP, ""),
+								buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, 3, rtnlEthPIPv6, ""),
+							)
+						}
+					} else {
+						slot := int(ch.minor-v6AppLimitMinorStart) + 1
+						if slot >= 1 && slot <= v6AppLimitMaxSlots {
+							h := (uint32(slot) << 26) & DefaultAppLimitMarkMask
+							msgs = append(msgs,
+								buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, h, v6InnerPrioAppLim, rtnlEthPAll, "fw"),
+								buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, h, v6InnerPrioAppLim, rtnlEthPIP, "fw"),
+								buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, h, 3, rtnlEthPIPv6, "fw"),
+							)
+						}
+					}
+				} else if ch.minor > v6AppLimitDefBase && ch.minor <= v6AppLimitDefBase+99 {
+					if !activeAppQoSMids[pMid] {
+						msgs = append(msgs,
+							buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, v6InnerPrioDefAll, rtnlEthPAll, ""),
+							buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, v6InnerPrioDefAll, rtnlEthPIP, ""),
+							buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, 10, rtnlEthPIPv6, ""),
+						)
+					}
+				} else if ch.minor >= v6AppQoSMinorBase {
+					msgs = append(msgs,
+						buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, v6InnerPrioAppQoS, rtnlEthPAll, ""),
+						buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, v6InnerPrioAppQoS, rtnlEthPIP, ""),
+						buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, 4, rtnlEthPIPv6, ""),
+					)
+					if len(byDevAsg[pMid]) == 0 {
+						msgs = append(msgs, buildDelFilterMsg(rtnlNextSeq(), ifindex, ch.parent, 0, v6InnerPrioDefAll, rtnlEthPAll, ""))
+					}
+				}
+			}
+			if ch.minor >= v6AppQoSMinorBase && ch.minor < v6AppQoSMinorBase+400 {
+				mid := int(ch.minor-v6AppQoSMinorBase) / 4
+				tier := int(ch.minor-v6AppQoSMinorBase) % 4
+				if mid >= 1 && mid <= 99 && tier >= 1 && tier <= 3 {
+					msgs = append(msgs, buildDelQdiscMsg(rtnlNextSeq(), ifindex, chHandle, appQoSLeafMajor(mid, tier)))
+				}
+			} else {
+				msgs = append(msgs, buildDelQdiscMsg(rtnlNextSeq(), ifindex, chHandle, uint32(ch.minor)<<16))
+			}
+			parent := ch.parent
+			if parent == 0 {
+				parent = rtnlHtbRootCls
+			}
+			msgs = append(msgs, buildDelClassMsg(rtnlNextSeq(), ifindex, parent, chHandle))
+		}
+
+		// 无内核 dump 数据时(如 mock 环境), 根据上次 AppLimitClasses 与退场 mid 补齐幂等拆子树报文
+		if len(existing) == 0 && prevAppLimCnt > len(wantAppMinors) {
+			for slot := 1; slot <= prevAppLimCnt && slot <= v6AppLimitMaxSlots; slot++ {
+				appMinor := v6AppLimitMinorStart + uint16(slot-1)
+				if wantAppMinors[appMinor] || seenChild[appMinor] {
+					continue
+				}
+				appHandle := rtnlHtbRootMaj | uint32(appMinor)
+				for _, mid := range inactiveMids {
+					if pm, err := htbClassMinorForMid(mid); err == nil {
+						pHandle := rtnlHtbRootMaj | uint32(pm)
+						msgs = append(msgs,
+							buildDelFilterMsg(rtnlNextSeq(), ifindex, pHandle, 0, v6InnerPrioAppLim, rtnlEthPAll, ""),
+							buildDelFilterMsg(rtnlNextSeq(), ifindex, pHandle, 0, v6InnerPrioDefAll, rtnlEthPAll, ""),
+							buildDelQdiscMsg(rtnlNextSeq(), ifindex, appHandle, uint32(appMinor)<<16),
+							buildDelClassMsg(rtnlNextSeq(), ifindex, pHandle, appHandle),
+						)
+					}
+				}
+			}
+		}
+		for _, mid := range inactiveMids {
+			if pm, err := htbClassMinorForMid(mid); err == nil {
+				pHandle := rtnlHtbRootMaj | uint32(pm)
+				defMinor := v6AppLimitDefBase + uint16(mid)
+				if !seenChild[defMinor] && !wantAppMinors[defMinor] {
+					defHandle := rtnlHtbRootMaj | uint32(defMinor)
+					msgs = append(msgs,
+						buildDelFilterMsg(rtnlNextSeq(), ifindex, pHandle, 0, v6InnerPrioAppLim, rtnlEthPAll, ""),
+						buildDelFilterMsg(rtnlNextSeq(), ifindex, pHandle, 0, v6InnerPrioDefAll, rtnlEthPAll, ""),
+						buildDelQdiscMsg(rtnlNextSeq(), ifindex, defHandle, uint32(defMinor)<<16),
+						buildDelClassMsg(rtnlNextSeq(), ifindex, pHandle, defHandle),
+					)
+				}
+			}
+		}
+	}
+
+	// 2. 拆除已清空设备的父 HTB 类 (覆盖标准 htbClassMinorForMid 1:<cid> 与旧式 1:10+mid 残留节点)
+	staleDevMinors := make(map[uint16]int) // minor -> mid (0 if unknown)
+	for _, st := range existing {
+		if (st.HandleRaw&0xffff0000) != rtnlHtbRootMaj || st.ParentRaw != rtnlHtbRootCls {
+			continue
+		}
+		mn := uint16(st.HandleRaw & 0xffff)
+		if isReservedRootHTBMinor(mn) || activeDevMinors[mn] {
+			continue
+		}
+		mid, _ := midFromHTBClassMinor(mn)
+		staleDevMinors[mn] = mid
+	}
+	for _, mid := range inactiveMids {
+		if mn, err := htbClassMinorForMid(mid); err == nil && !isReservedRootHTBMinor(mn) && !activeDevMinors[mn] {
+			staleDevMinors[mn] = mid
+		}
+		for _, legacyMn := range []uint16{uint16(10 + mid), uint16(0x0010 + mid)} {
+			if legacyMn > 1 && !isReservedRootHTBMinor(legacyMn) && !activeDevMinors[legacyMn] {
+				if _, exists := staleDevMinors[legacyMn]; !exists {
+					staleDevMinors[legacyMn] = mid
+				}
+			}
+		}
+	}
+
+	sortedDevMinors := make([]uint16, 0, len(staleDevMinors))
+	for mn := range staleDevMinors {
+		sortedDevMinors = append(sortedDevMinors, mn)
+	}
+	sort.Slice(sortedDevMinors, func(i, j int) bool { return sortedDevMinors[i] < sortedDevMinors[j] })
+
+	for _, mn := range sortedDevMinors {
+		mid := staleDevMinors[mn]
+		clsHandle := rtnlHtbRootMaj | uint32(mn)
+		u32Prio := u32FilterPrioForMinor(mn)
+		msgs = append(msgs, buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, 0, u32Prio, rtnlEthPIP, ""))
+		if mid >= 1 && mid <= 99 {
+			msgs = append(msgs, buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, 0, uint16(200+mid), rtnlEthPIPv6, ""))
+			markVal, markMask := readDeviceMarkSpec(hncDir, mid)
+			if h := markVal & markMask; h != 0 {
+				for _, spec := range deviceFWDeleteSpecs() {
+					msgs = append(msgs, buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, h, spec[0], spec[1], "fw"))
+				}
+			}
+		}
+		leafMaj := uint32(0x2000+(uint32(mn)&0x0fff)) << 16
+		if isUplink {
+			leafMaj = uint32(0x3000+(uint32(mn)&0x0fff)) << 16
+		}
+		msgs = append(msgs,
+			buildDelQdiscMsg(rtnlNextSeq(), ifindex, clsHandle, leafMaj),
+			buildDelClassMsg(rtnlNextSeq(), ifindex, rtnlHtbRootCls, clsHandle),
+		)
+	}
+	return msgs
+}
+
+func buildEmptyAppLimitFirewallPayloads() ([]byte, []byte) {
+	const empty = "*mangle\n:HNC_APP_LIMIT_UP - [0:0]\n:HNC_APP_LIMIT_DOWN - [0:0]\nCOMMIT\n*filter\n:HNC_QUIC_APPLIM - [0:0]\nCOMMIT\n"
+	return []byte(empty), []byte(empty)
+}
+
+func teardownEmptyAppLimitChainsOnBin(iptBin string) {
+	iptBin = strings.TrimSpace(iptBin)
+	if iptBin == "" {
+		return
+	}
+	for _, hook := range [][3]string{
+		{"mangle", "FORWARD", "HNC_APP_LIMIT_UP"},
+		{"mangle", "POSTROUTING", "HNC_APP_LIMIT_DOWN"},
+		{"mangle", "FORWARD", "HNC_APP_LIMIT"},
+		{"mangle", "POSTROUTING", "HNC_APP_LIMIT"},
+		{"filter", "FORWARD", "HNC_QUIC_APPLIM"},
+	} {
+		for tries := 0; tries < 4; tries++ {
+			if _, err := runSubtreeIptCmd(iptBin, "-t", hook[0], "-D", hook[1], "-j", hook[2]); err != nil {
+				break
+			}
+		}
+	}
+
+	var dynALChains []string
+	if saveOut, err := runSubtreeIptCmd(iptBin, "-t", "mangle", "-S"); err == nil && saveOut != "" {
+		for _, rawLn := range strings.Split(saveOut, "\n") {
+			fs := strings.Fields(strings.TrimSpace(rawLn))
+			if len(fs) >= 2 && fs[0] == "-N" && strings.HasPrefix(fs[1], "HNC_AL_") {
+				dynALChains = append(dynALChains, fs[1])
+			}
+		}
+	}
+
+	mangleChains := []string{"HNC_APP_LIMIT", "HNC_APP_LIMIT_UP", "HNC_APP_LIMIT_DOWN"}
+	mangleChains = append(mangleChains, dynALChains...)
+	for _, ch := range mangleChains {
+		_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-F", ch)
+	}
+	for _, ch := range mangleChains {
+		_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-X", ch)
+	}
+	_, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-F", "HNC_QUIC_APPLIM")
+	_, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-X", "HNC_QUIC_APPLIM")
 }
 
 func runSubtreeIptCmd(iptBin string, args ...string) (string, error) {
@@ -1776,7 +2175,7 @@ func findIptFirstChainRuleLine(listOut, saveOut, target string) int {
 
 // ensureAppLimitTopHooksOnBin 幂等确保单应用限速三条顶层跳转链就绪:
 //   - mangle/FORWARD -> HNC_APP_LIMIT_UP;
-//   - filter/FORWARD -> HNC_QUIC_APPLIM;
+//   - filter/FORWARD -> HNC_QUIC_APPLIM (置于 HNC_ISOLATE/HNC_CTRL/HNC_WHITELIST/HNC_QUIC 之后防越权抢占);
 //   - mangle/POSTROUTING -> HNC_APP_LIMIT_DOWN (严格位于 HNC_SAVE 之前, 防止尾部 HNC_EGRESS_FIX 覆盖前漏存 CONNMARK)。
 func ensureAppLimitTopHooksOnBin(iptBin string) {
 	iptBin = strings.TrimSpace(iptBin)
@@ -1809,7 +2208,16 @@ func ensureAppLimitTopHooksOnBin(iptBin string) {
 	// 2. filter/FORWARD -> HNC_QUIC_APPLIM
 	if _, err := runSubtreeIptCmd(iptBin, "-t", "filter", "-C", "FORWARD", "-j", "HNC_QUIC_APPLIM"); err != nil {
 		ensureChainExists("filter", "HNC_QUIC_APPLIM")
-		if _, iErr := runSubtreeIptCmd(iptBin, "-t", "filter", "-I", "FORWARD", "1", "-j", "HNC_QUIC_APPLIM"); iErr != nil {
+		fListOut, _ := runSubtreeIptCmd(iptBin, "-t", "filter", "-L", "FORWARD", "-n", "--line-numbers")
+		fSaveOut := ""
+		if findIptLastChainRuleLine(fListOut, "", "HNC_SCALPEL", "HNC_ISOLATE", "HNC_CTRL", "HNC_WHITELIST", "HNC_QUIC") == 0 {
+			fSaveOut, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-S", "FORWARD")
+		}
+		if anchorF := findIptLastChainRuleLine(fListOut, fSaveOut, "HNC_SCALPEL", "HNC_ISOLATE", "HNC_CTRL", "HNC_WHITELIST", "HNC_QUIC"); anchorF > 0 {
+			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "filter", "-I", "FORWARD", strconv.Itoa(anchorF+1), "-j", "HNC_QUIC_APPLIM"); iErr != nil {
+				_, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-A", "FORWARD", "-j", "HNC_QUIC_APPLIM")
+			}
+		} else if _, iErr := runSubtreeIptCmd(iptBin, "-t", "filter", "-I", "FORWARD", "1", "-j", "HNC_QUIC_APPLIM"); iErr != nil {
 			_, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-A", "FORWARD", "-j", "HNC_QUIC_APPLIM")
 		}
 	}

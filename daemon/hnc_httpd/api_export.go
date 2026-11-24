@@ -435,19 +435,56 @@ func (s *server) apiExport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// addSingleFileToZip copies one file into the zip at the given archive path.
-// Missing optional source files return Included=false, err=nil; ZIP/IO write errors (e.g. ENOSPC) are strictly propagated.
-func addSingleFileToZip(zw *zip.Writer, src, archivePath string) (trackInfo, error) {
-	info, err := os.Stat(src)
+func openRegularNoFollow(path string) (*os.File, os.FileInfo, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return trackInfo{Included: false}, nil
-		}
-		return trackInfo{Included: false}, err
+		return nil, nil, err
 	}
-	in, err := os.Open(src)
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, nil, syscall.ELOOP
+	}
+	flags := os.O_RDONLY
+	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+		flags |= syscall.O_NOFOLLOW
+	}
+	f, err := os.OpenFile(path, flags, 0)
 	if err != nil {
-		if os.IsNotExist(err) {
+		return nil, nil, err
+	}
+	fInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	if !fInfo.Mode().IsRegular() || !os.SameFile(info, fInfo) {
+		_ = f.Close()
+		return nil, nil, syscall.ELOOP
+	}
+	return f, fInfo, nil
+}
+
+func sanitizeExportDispositionFilename(name string) (string, bool) {
+	if name == "" || len(name) > 160 || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		return "", false
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c <= 0x20 || c >= 0x7f || c == '"' || c == '\'' || c == ';' || c == ':' {
+			return "", false
+		}
+		b.WriteByte(c)
+	}
+	return b.String(), true
+}
+
+// addSingleFileToZip copies one file into the zip at the given archive path.
+// Missing optional source files or rejected symlinks return Included=false, err=nil; ZIP/IO write errors (e.g. ENOSPC) are strictly propagated.
+func addSingleFileToZip(zw *zip.Writer, src, archivePath string) (trackInfo, error) {
+	in, info, err := openRegularNoFollow(src)
+	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, syscall.ELOOP) {
 			return trackInfo{Included: false}, nil
 		}
 		return trackInfo{Included: false}, err
@@ -493,7 +530,7 @@ func (s *server) addDailyJSONLToZip(zw *zip.Writer, prefix, archiveDir string, f
 			continue
 		}
 		for _, e := range entries {
-			if e.IsDir() {
+			if e.IsDir() || e.Type()&os.ModeSymlink != 0 {
 				continue
 			}
 			n := e.Name()
@@ -640,18 +677,19 @@ func (s *server) apiExportList(w http.ResponseWriter, r *http.Request) {
 	out := make([]item, 0, len(entries))
 	for _, e := range entries {
 		n := e.Name()
-		if !isExportArchive(n) { // v5.11: 诊断包 hnc-debug-*.tar.gz 也在这里
+		safeName, ok := sanitizeExportDispositionFilename(n)
+		if !ok || !isExportArchive(safeName) { // v5.11: 诊断包 hnc-debug-*.tar.gz 也在这里
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
+		info, err := os.Lstat(filepath.Join(s.exportsDir(), safeName))
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			continue
 		}
 		out = append(out, item{
-			Name:        n,
+			Name:        safeName,
 			Size:        info.Size(),
 			Modified:    info.ModTime().Format(time.RFC3339),
-			DownloadURL: "/api/exports/" + n,
+			DownloadURL: "/api/exports/" + safeName,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name > out[j].Name })
@@ -659,32 +697,43 @@ func (s *server) apiExportList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) apiExportFile(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/api/exports/")
-	if name == "" || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+	rawName := strings.TrimPrefix(r.URL.Path, "/api/exports/")
+	safeName, ok := sanitizeExportDispositionFilename(rawName)
+	if !ok {
 		http.Error(w, "invalid name", http.StatusBadRequest)
 		return
 	}
-	if !isExportArchive(name) {
+	if !isExportArchive(safeName) {
 		http.Error(w, "must end in .zip or .tar.gz (or be a hnc-selfcheck-*.txt/.json report)", http.StatusBadRequest)
 		return
 	}
-	path := filepath.Join(s.exportsDir(), name)
-	if info, err := os.Stat(path); err != nil || info.IsDir() {
+	path := filepath.Join(s.exportsDir(), safeName)
+	f, info, err := openRegularNoFollow(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		if errors.Is(err, syscall.ELOOP) {
+			http.Error(w, "symlink forbidden", http.StatusForbidden)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
+	defer f.Close()
 	ctype := "application/zip"
 	switch {
-	case strings.HasSuffix(name, ".tar.gz"):
+	case strings.HasSuffix(safeName, ".tar.gz"):
 		ctype = "application/gzip"
-	case strings.HasSuffix(name, ".txt"): // v5.20 自检报告
+	case strings.HasSuffix(safeName, ".txt"): // v5.20 自检报告
 		ctype = "text/plain; charset=utf-8"
-	case strings.HasSuffix(name, ".json"):
+	case strings.HasSuffix(safeName, ".json"):
 		ctype = "application/json; charset=utf-8"
 	}
 	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
-	http.ServeFile(w, r, path)
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+safeName+"\"")
+	http.ServeContent(w, r, safeName, info.ModTime(), f)
 }
 
 func getpropCmd(key string) (string, error) {

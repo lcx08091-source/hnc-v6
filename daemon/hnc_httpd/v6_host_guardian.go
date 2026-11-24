@@ -48,6 +48,7 @@ const (
 	guardianPowerRefreshMinCool = 15 * time.Second
 	guardianPowerCmdTimeout     = 5 * time.Second
 	guardianNetstatsCmdTimeout  = 8 * time.Second
+	guardianSingleFlightTimeout = 8 * time.Second
 	guardianMaxStreamBytes      = 32 << 20 // 32 MiB hard stream cap
 )
 
@@ -55,12 +56,12 @@ func init() {
 	RegisterServerVectorSyncProvider("host_guardian", guardianVectorSyncSummary)
 }
 
-// ─── SingleFlight (零外部依赖并发合并器) ─────────────────────────────
+// ─── SingleFlight (零外部依赖并发合并器, 独立后台超时防首连接取消连坐) ──────────
 
 type guardianSFCall struct {
-	wg  sync.WaitGroup
-	val any
-	err error
+	done chan struct{}
+	val  any
+	err  error
 }
 
 type guardianSingleFlight struct {
@@ -68,29 +69,54 @@ type guardianSingleFlight struct {
 	m  map[string]*guardianSFCall
 }
 
-func (g *guardianSingleFlight) Do(key string, fn func() (any, error)) (any, error) {
+func (g *guardianSingleFlight) DoCtx(callerCtx context.Context, key string, timeout time.Duration, fn func(ctx context.Context) (any, error)) (any, error) {
+	if callerCtx == nil {
+		callerCtx = context.Background()
+	}
+	if err := callerCtx.Err(); err != nil {
+		return nil, err
+	}
+	if timeout <= 0 {
+		timeout = guardianSingleFlightTimeout
+	}
+
 	g.mu.Lock()
 	if g.m == nil {
 		g.m = make(map[string]*guardianSFCall)
 	}
-	if c, ok := g.m[key]; ok {
+	c, dup := g.m[key]
+	if !dup {
+		c = &guardianSFCall{done: make(chan struct{})}
+		g.m[key] = c
 		g.mu.Unlock()
-		c.wg.Wait()
-		return c.val, c.err
-	}
-	c := new(guardianSFCall)
-	c.wg.Add(1)
-	g.m[key] = c
-	g.mu.Unlock()
 
-	defer func() {
-		g.mu.Lock()
-		delete(g.m, key)
+		go func(call *guardianSFCall) {
+			execCtx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			defer func() {
+				g.mu.Lock()
+				delete(g.m, key)
+				g.mu.Unlock()
+				close(call.done)
+			}()
+			call.val, call.err = fn(execCtx)
+		}(c)
+	} else {
 		g.mu.Unlock()
-		c.wg.Done()
-	}()
-	c.val, c.err = fn()
-	return c.val, c.err
+	}
+
+	select {
+	case <-c.done:
+		return c.val, c.err
+	case <-callerCtx.Done():
+		return nil, callerCtx.Err()
+	}
+}
+
+func (g *guardianSingleFlight) Do(key string, fn func() (any, error)) (any, error) {
+	return g.DoCtx(context.Background(), key, guardianSingleFlightTimeout, func(_ context.Context) (any, error) {
+		return fn()
+	})
 }
 
 // ─── BPF 采样器抽象接口 (支持单测无 Root 注入真实行为状态机) ──────────
@@ -933,11 +959,15 @@ func (e *guardianHostEngine) stopTrafficLeaseNow() {
 
 func (e *guardianHostEngine) touchAndSampleTrafficLease() (*bytestats.NetdDetailSnapshot, map[int]guardianUIDRate, bool, error) {
 	leaseTTL := e.effectiveLeaseTTL()
-	nowMono := monoNowNs()
-	e.leaseUntilMonoNs.Store(nowMono + int64(leaseTTL))
 
 	e.trafficMu.Lock()
 	defer e.trafficMu.Unlock()
+
+	nowMono := monoNowNs()
+	newDeadline := nowMono + int64(leaseTTL)
+	if prev := e.leaseUntilMonoNs.Load(); newDeadline > prev {
+		e.leaseUntilMonoNs.Store(newDeadline)
+	}
 
 	if e.bpfSampler != nil && e.leaseRunning.Load() {
 		ratesCopy := make(map[int]guardianUIDRate, len(e.liveRates))
@@ -961,6 +991,9 @@ func (e *guardianHostEngine) touchAndSampleTrafficLease() (*bytestats.NetdDetail
 	}
 
 	sampleMono := monoNowNs()
+	if postDeadline := sampleMono + int64(leaseTTL); postDeadline > e.leaseUntilMonoNs.Load() {
+		e.leaseUntilMonoNs.Store(postDeadline)
+	}
 	e.bpfSampler = sampler
 	e.latestBPFSnap = snap0
 	e.prevBPFSnap = snap0
@@ -980,18 +1013,29 @@ func (e *guardianHostEngine) touchAndSampleTrafficLease() (*bytestats.NetdDetail
 	e.leaseDoneCh = doneCh
 
 	tickDur := e.effectiveTickInterval()
-	go e.runTrafficLeaseLoop(stopCh, doneCh, tickDur)
+	go e.runTrafficLeaseLoop(stopCh, doneCh, sampler, tickDur)
 
 	return snap0, map[int]guardianUIDRate{}, true, nil
 }
 
-func (e *guardianHostEngine) runTrafficLeaseLoop(stopCh <-chan struct{}, doneCh chan<- struct{}, tickDur time.Duration) {
+func (e *guardianHostEngine) runTrafficLeaseLoop(stopCh <-chan struct{}, doneCh chan<- struct{}, mySampler guardianBPFSampler, tickDur time.Duration) {
 	defer close(doneCh)
 	tk := time.NewTicker(tickDur)
 	defer tk.Stop()
 
-	shutdown := func() {
+	shutdown := func(forced bool) bool {
 		e.trafficMu.Lock()
+		defer e.trafficMu.Unlock()
+		if !forced && monoNowNs() <= e.leaseUntilMonoNs.Load() && e.bpfSampler == mySampler && mySampler != nil {
+			// 持 trafficMu 二次复核发现租约刚被续期，绝不关闭采样器!
+			return false
+		}
+		if e.bpfSampler != mySampler {
+			if mySampler != nil {
+				_ = mySampler.Close()
+			}
+			return true
+		}
 		if e.bpfSampler != nil {
 			_ = e.bpfSampler.Close()
 			e.bpfSampler = nil
@@ -1003,19 +1047,19 @@ func (e *guardianHostEngine) runTrafficLeaseLoop(stopCh <-chan struct{}, doneCh 
 		e.totalRxBpsSnap.Store(0)
 		e.totalTxBpsSnap.Store(0)
 		e.leaseStops.Add(1)
-		e.trafficMu.Unlock()
+		return true
 	}
 
 	for {
 		select {
 		case <-stopCh:
-			shutdown()
+			shutdown(true)
 			return
 		case <-tk.C:
-			nowMono := monoNowNs()
-			if nowMono > e.leaseUntilMonoNs.Load() {
-				shutdown()
-				return
+			if monoNowNs() > e.leaseUntilMonoNs.Load() {
+				if shutdown(false) {
+					return
+				}
 			}
 
 			e.trafficMu.Lock()
@@ -1024,8 +1068,8 @@ func (e *guardianHostEngine) runTrafficLeaseLoop(stopCh <-chan struct{}, doneCh 
 			prevMono := e.prevBPFMonoNs
 			e.trafficMu.Unlock()
 
-			if sampler == nil {
-				shutdown()
+			if sampler == nil || sampler != mySampler {
+				shutdown(true)
 				return
 			}
 
@@ -1033,7 +1077,9 @@ func (e *guardianHostEngine) runTrafficLeaseLoop(stopCh <-chan struct{}, doneCh 
 			sampleMono := monoNowNs()
 			if err != nil {
 				e.trafficMu.Lock()
-				e.lastBPFErr = err
+				if e.bpfSampler == mySampler {
+					e.lastBPFErr = err
+				}
 				e.trafficMu.Unlock()
 				continue
 			}
@@ -1063,7 +1109,7 @@ func (e *guardianHostEngine) runTrafficLeaseLoop(stopCh <-chan struct{}, doneCh 
 			}
 
 			e.trafficMu.Lock()
-			if e.bpfSampler != nil {
+			if e.bpfSampler == mySampler && e.bpfSampler != nil {
 				e.latestBPFSnap = curSnap
 				e.prevBPFSnap = curSnap
 				e.prevBPFMonoNs = sampleMono
@@ -1153,13 +1199,13 @@ func (e *guardianHostEngine) fetchNetstatsDumpCached(parentCtx context.Context, 
 	}
 	e.netstatsMu.Unlock()
 
-	val, err := e.netstatsSF.Do(sfKey, func() (any, error) {
+	val, err := e.netstatsSF.DoCtx(parentCtx, sfKey, guardianNetstatsCmdTimeout, func(sfCtx context.Context) (any, error) {
 		var dump *nsDump
 		keepUIDOnly := func(section string, uid int) bool {
 			return section == "uid" && uid >= 0 && uid <= 100_000_000
 		}
 		if e.netstatsStreamFn != nil {
-			rc, err := e.netstatsStreamFn(parentCtx, full)
+			rc, err := e.netstatsStreamFn(sfCtx, full)
 			if err != nil {
 				return nil, err
 			}
@@ -1174,7 +1220,7 @@ func (e *guardianHostEngine) fetchNetstatsDumpCached(parentCtx context.Context, 
 			if full {
 				args = []string{"netstats", "--uid", "--full"}
 			}
-			err := e.execDumpsysStream(parentCtx, guardianNetstatsCmdTimeout, func(r io.Reader) error {
+			err := e.execDumpsysStream(sfCtx, guardianNetstatsCmdTimeout, func(r io.Reader) error {
 				var headPeek bytes.Buffer
 				tr := io.TeeReader(io.LimitReader(r, 512), &headPeek)
 				rest := io.MultiReader(tr, r)
@@ -2840,7 +2886,7 @@ func (e *guardianHostEngine) fetchPowerStatsCached(parentCtx context.Context, wa
 		}
 	}
 
-	val, err := e.powerSF.Do("batterystats", func() (any, error) {
+	val, err := e.powerSF.DoCtx(parentCtx, "batterystats", guardianSingleFlightTimeout, func(sfCtx context.Context) (any, error) {
 		curMono := monoNowNs()
 		e.powerMu.RLock()
 		innerCached := e.powerCache
@@ -2857,7 +2903,7 @@ func (e *guardianHostEngine) fetchPowerStatsCached(parentCtx context.Context, wa
 
 		var parsed *guardianParsedBatteryStats
 		if e.batterystatsStreamFn != nil {
-			rc, err := e.batterystatsStreamFn(parentCtx)
+			rc, err := e.batterystatsStreamFn(sfCtx)
 			if err != nil {
 				return nil, err
 			}
@@ -2868,7 +2914,7 @@ func (e *guardianHostEngine) fetchPowerStatsCached(parentCtx context.Context, wa
 			}
 			parsed = p
 		} else {
-			err := e.execDumpsysStream(parentCtx, guardianPowerCmdTimeout, func(r io.Reader) error {
+			err := e.execDumpsysStream(sfCtx, guardianPowerCmdTimeout, func(r io.Reader) error {
 				p, perr := parseBatterystatsChargedStream(r)
 				if perr != nil {
 					return perr
@@ -3174,19 +3220,51 @@ func (s *server) guardianReadSelfCaptureStatus() (enabled bool, mode string) {
 	if s == nil || s.hncDir == "" {
 		return false, "off"
 	}
+	flagExists := false
 	if _, err := os.Stat(s.selfFlagPath()); err == nil {
-		enabled = true
+		flagExists = true
 	}
+	optInExists := false
+	for _, rel := range []string{
+		filepath.Join("data", "self_capture.enabled"),
+		filepath.Join("data", "self_capture.optin"),
+	} {
+		if _, err := os.Stat(filepath.Join(s.hncDir, rel)); err == nil {
+			optInExists = true
+			break
+		}
+	}
+
 	mode = "off"
-	if raw, err := s.jsonCache.read(selfPolicyPath(s.hncDir)); err == nil {
+	studioOn := false
+	var (
+		raw  any
+		rerr error
+	)
+	if s.jsonCache != nil {
+		raw, rerr = s.jsonCache.read(selfPolicyPath(s.hncDir))
+	} else {
+		raw, rerr = readJSON(selfPolicyPath(s.hncDir))
+	}
+	if rerr == nil {
 		if m, ok := raw.(map[string]any); ok {
-			if md := strings.TrimSpace(asString(m["mode"])); md != "" {
+			if md := strings.ToLower(strings.TrimSpace(asString(m["mode"]))); md != "" {
 				mode = md
+				if md != "off" && md != "stop" {
+					studioOn = true
+				}
+			}
+			for _, k := range []string{"self_capture_opt_in", "self_capture_enabled", "opt_in", "enabled"} {
+				if bv, okb := m[k].(bool); okb && bv {
+					optInExists = true
+				}
 			}
 		}
-	} else if enabled {
+	}
+	if (mode == "" || (rerr != nil && mode == "off")) && (flagExists || optInExists) {
 		mode = "smart_screen"
 	}
+	enabled = flagExists || optInExists || studioOn
 	return enabled, mode
 }
 

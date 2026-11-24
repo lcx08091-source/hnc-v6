@@ -187,6 +187,29 @@ type knownFile struct {
 
 var ledgerMu sync.Mutex
 
+func withKnownDevicesLock(knownPath string, fn func() error) error {
+	ledgerMu.Lock()
+	defer ledgerMu.Unlock()
+	if knownPath == "" {
+		return fn()
+	}
+	dir := filepath.Dir(knownPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	lockPath := filepath.Join(dir, ".known_devices.lock")
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fn()
+	}
+	defer lf.Close()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		return fn()
+	}
+	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
 func loadKnownLedger(path string) *knownFile {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -224,18 +247,18 @@ func MarkKnown(cfg Config, mac string) error {
 	if mac == "" {
 		return errors.New("invalid mac")
 	}
-	ledgerMu.Lock()
-	defer ledgerMu.Unlock()
-	f := loadKnownLedger(cfg.KnownDevicesPath)
-	if e, ok := f.MACs[mac]; ok {
-		if e.MarkedKnownAt == 0 {
-			e.MarkedKnownAt = time.Now().Unix()
+	return withKnownDevicesLock(cfg.KnownDevicesPath, func() error {
+		f := loadKnownLedger(cfg.KnownDevicesPath)
+		if e, ok := f.MACs[mac]; ok {
+			if e.MarkedKnownAt == 0 {
+				e.MarkedKnownAt = time.Now().Unix()
+			}
+		} else {
+			now := time.Now().Unix()
+			f.MACs[mac] = &knownEntry{FirstSeen: now, MarkedKnownAt: now}
 		}
-	} else {
-		now := time.Now().Unix()
-		f.MACs[mac] = &knownEntry{FirstSeen: now, MarkedKnownAt: now}
-	}
-	return saveKnownLedger(cfg.KnownDevicesPath, f)
+		return saveKnownLedger(cfg.KnownDevicesPath, f)
+	})
 }
 
 // ──────────── devices.json reader ────────────
@@ -268,82 +291,96 @@ const (
 	alertsKeepBytes    = 1 << 20 // 滚动截断时保留最新 1 MiB 完整 JSONL 行
 )
 
-func truncateAlertsLocked(f *os.File, newLineLen int64) {
-	st, err := f.Stat()
-	if err != nil || st.Size()+newLineLen <= alertsMaxFileBytes {
-		return
-	}
+var alertsAppendMu sync.Mutex
+
+func rotateAndAppendAlertsLocked(path string, curSize int64, line []byte) error {
 	keep := int64(alertsKeepBytes)
-	if maxKeep := int64(alertsMaxFileBytes) - newLineLen; keep > maxKeep {
+	if maxKeep := int64(alertsMaxFileBytes) - int64(len(line)); keep > maxKeep {
 		keep = maxKeep
 	}
-	if keep <= 0 {
-		_ = f.Truncate(0)
-		_, _ = f.Seek(0, 0)
-		return
-	}
-	if keep > st.Size() {
-		keep = st.Size()
-	}
-	offset := st.Size() - keep
-	buf := make([]byte, keep)
-	n, rerr := f.ReadAt(buf, offset)
-	if rerr != nil && n == 0 {
-		_ = f.Truncate(0)
-		_, _ = f.Seek(0, 0)
-		return
-	}
-	buf = buf[:n]
-	if offset > 0 {
-		nl := -1
-		for i, c := range buf {
-			if c == '\n' {
-				nl = i
-				break
+	var kept []byte
+	if keep > 0 && curSize > 0 {
+		if keep > curSize {
+			keep = curSize
+		}
+		if rf, err := os.Open(path); err == nil {
+			offset := curSize - keep
+			buf := make([]byte, keep)
+			n, rerr := rf.ReadAt(buf, offset)
+			_ = rf.Close()
+			if rerr == nil || n > 0 {
+				buf = buf[:n]
+				if offset > 0 {
+					nl := -1
+					for i, c := range buf {
+						if c == '\n' {
+							nl = i
+							break
+						}
+					}
+					if nl >= 0 && nl+1 < len(buf) {
+						kept = buf[nl+1:]
+					}
+				} else {
+					kept = buf
+				}
 			}
 		}
-		if nl >= 0 && nl+1 < len(buf) {
-			buf = buf[nl+1:]
-		} else {
-			buf = nil
+	}
+	merged := make([]byte, 0, len(kept)+len(line))
+	if len(kept) > 0 {
+		merged = append(merged, kept...)
+		if merged[len(merged)-1] != '\n' {
+			merged = append(merged, '\n')
 		}
 	}
-	if err := f.Truncate(0); err != nil {
-		return
-	}
-	_, _ = f.Seek(0, 0)
-	if len(buf) > 0 {
-		_, _ = f.Write(buf)
-	}
+	merged = append(merged, line...)
+	return writeFileAtomic(path, merged)
 }
 
-// Append v5.26 T7: 往 run/alerts.jsonl 追加一条告警的唯一权威实现。
-// httpd 与看门狗两个进程会同时追加同一文件, O_APPEND 只保证不覆盖、
-// 不保证整行原子 —— flock(LOCK_EX) 后先校验 2MB 上限滚动截断, 再一次 Write 写完整行。
+func appendAlertUnderLock(path string, line []byte) error {
+	if st, err := os.Stat(path); err == nil && st.Size()+int64(len(line)) > alertsMaxFileBytes {
+		return rotateAndAppendAlertsLocked(path, st.Size(), line)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(line)
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
+}
+
+// Append v5.26 T7 + C083: 往 run/alerts.jsonl 追加一条告警的唯一权威实现。
+// 使用稳定旁路锁文件 path+".lock" 进行跨进程 flock(LOCK_EX), 超过 2MB 上限时通过
+// 临时文件 fsync + Rename 原子替换替代原地 Truncate(0), 防止无锁读者读到空文件或半截行。
 func Append(path string, a Alert) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	b, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
 	line := append(b, '\n')
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		// flock 不可用(如某些 FUSE)时退化为直接写, 与旧行为一致。
-		truncateAlertsLocked(f, int64(len(line)))
-		_, werr := f.Write(line)
-		return werr
+
+	alertsAppendMu.Lock()
+	defer alertsAppendMu.Unlock()
+
+	lockPath := path + ".lock"
+	lf, lerr := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if lerr != nil {
+		return appendAlertUnderLock(path, line)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	truncateAlertsLocked(f, int64(len(line)))
-	_, err = f.Write(line)
-	return err
+	defer lf.Close()
+	if ferr := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); ferr != nil {
+		return appendAlertUnderLock(path, line)
+	}
+	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	return appendAlertUnderLock(path, line)
 }
 
 func appendAlert(path string, a Alert) error { return Append(path, a) }
@@ -437,9 +474,14 @@ func detectUnknownDevices(cfg Config, uc AlertConfig) (int, error) {
 		return 0, nil
 	}
 
-	ledgerMu.Lock()
-	ledger := loadKnownLedger(cfg.KnownDevicesPath)
-	ledgerMu.Unlock()
+	var ledger *knownFile
+	_ = withKnownDevicesLock(cfg.KnownDevicesPath, func() error {
+		ledger = loadKnownLedger(cfg.KnownDevicesPath)
+		return nil
+	})
+	if ledger == nil {
+		ledger = &knownFile{Version: 1, MACs: map[string]*knownEntry{}}
+	}
 
 	now := time.Now().Unix()
 	emitted := 0
@@ -515,22 +557,21 @@ func detectUnknownDevices(cfg Config, uc AlertConfig) (int, error) {
 	}
 
 	if dirty {
-		// v5.12: 保存前重新读盘再合并, 不直接写回扫描开始时的快照。扫描期间
-		// (含 postNotification 子进程, 可达数秒)httpd 的 MarkKnown 写入的
-		// 条目/MarkedKnownAt 否则会被旧快照整体覆盖丢失。
-		ledgerMu.Lock()
-		cur := loadKnownLedger(cfg.KnownDevicesPath)
-		for mac, e := range ledger.MACs {
-			if ce, ok := cur.MACs[mac]; ok {
-				if ce.FirstSeen == 0 {
-					ce.FirstSeen = e.FirstSeen
+		// v5.12 + C083: 保存前在跨进程 .known_devices.lock flock 下重新读盘再合并,
+		// 不直接写回扫描开始时的快照, 防 httpd(MarkKnown/mac_merge)与看门狗并发互踩。
+		_ = withKnownDevicesLock(cfg.KnownDevicesPath, func() error {
+			cur := loadKnownLedger(cfg.KnownDevicesPath)
+			for mac, e := range ledger.MACs {
+				if ce, ok := cur.MACs[mac]; ok {
+					if ce.FirstSeen == 0 {
+						ce.FirstSeen = e.FirstSeen
+					}
+					continue
 				}
-				continue
+				cur.MACs[mac] = e
 			}
-			cur.MACs[mac] = e
-		}
-		_ = saveKnownLedger(cfg.KnownDevicesPath, cur)
-		ledgerMu.Unlock()
+			return saveKnownLedger(cfg.KnownDevicesPath, cur)
+		})
 	}
 	return emitted, nil
 }

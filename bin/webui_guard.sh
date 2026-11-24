@@ -186,12 +186,33 @@ check_sta_ap_same() {
 }
 
 upstream_lan_ifaces() {
-    local _ap _up="" _lup="" _idj _list="" _cand
+    local _ap _up="" _lup="" _tup="" _defrt="" _idj _list="" _cand _hotspot_set _st="" _tk _tv _ti _sys_net _wp _w _extra_wlans=""
     _ap=$(detect_ap_iface)
+    _hotspot_set=" $_ap "
+    if [ -e "$HNC_DIR/run/hnc_state" ] && [ -r "$HNC_DIR/run/hnc_state" ]; then
+        _st=$(head -n 1 "$HNC_DIR/run/hnc_state" 2>/dev/null | tr -d ' \t\r\n')
+    fi
     if [ -f "$HNC_DIR/run/iface_detect.json" ] && [ -r "$HNC_DIR/run/iface_detect.json" ]; then
         _idj=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null) || _idj=""
         _up=$(printf '%s' "$_idj" | grep -oE '"upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
         _lup=$(printf '%s' "$_idj" | grep -oE '"local_upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        _tup=$(printf '%s' "$_idj" | grep -oE '"tether_upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        _defrt=$(printf '%s' "$_idj" | grep -oE '"default_route_ifaces"[[:space:]]*:[[:space:]]*\[[^]]*\]' | head -1 \
+                 | sed 's/^[^[]*\[//; s/\]$//' | tr ',"' '  ')
+        # 仅在未处于 PENDING/PASSIVE 关热点态时采纳 wifi_tether / local_only 作为活跃热点口排除集
+        if [ -z "$_st" ] || [ "${_st#ACTIVE:}" != "$_st" ]; then
+            for _tk in wifi_tether local_only; do
+                _tv=$(printf '%s' "$_idj" | grep -oE "\"${_tk}\"[[:space:]]*:[[:space:]]*\\[[^]]*\\]" | head -1 \
+                      | sed 's/^[^[]*\[//; s/\]$//' | tr ',"' '  ')
+                for _ti in $_tv; do
+                    valid_ifname "$_ti" && [ "$_ti" != "wlan0" ] && _hotspot_set="$_hotspot_set$_ti "
+                done
+            done
+        fi
+    fi
+    # 真机 T+0 兜底: 若 iface_detect.json 尚未产出 default_route_ifaces, 从路由表实时读取默认路由出口
+    if [ -z "$_defrt" ] && [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ] && command -v ip >/dev/null 2>&1; then
+        _defrt=$(ip route show table all 2>/dev/null | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "dev") print $(i+1) }' | sort -u | tr '\n' ' ')
     fi
     # 公共 Wi-Fi 上游 STA(wlan0): 仅当当前热点口不是 wlan0 时封堵, 保护单芯片 wlan0 AP 机型
     if [ "$_ap" != "wlan0" ]; then
@@ -202,11 +223,25 @@ upstream_lan_ifaces() {
         eth*) ;;
         *) _list="$_list eth+" ;;
     esac
-    # 动态识别到的其他非热点上游口(如双 Wi-Fi STA 副口 wlan1)
-    for _cand in "$_up" "$_lup"; do
+    # C079: 枚举系统 wlan[1-9]*(支持 HNC_SYS_NET 测试钩子), 对非 *_ap 且非活跃热点口的副 Wi-Fi 口追加 WAN 防护
+    _sys_net="${HNC_SYS_NET:-/sys/class/net}"
+    if [ -d "$_sys_net" ]; then
+        for _wp in "$_sys_net"/wlan[1-9]*; do
+            [ -e "$_wp" ] || continue
+            _w="${_wp##*/}"
+            valid_ifname "$_w" || continue
+            [ "$_w" = "$_ap" ] && continue
+            case "$_hotspot_set" in *" $_w "*) continue ;; esac
+            case "$_w" in *_ap|*_ap[0-9]*|*_ap_*) continue ;; esac
+            _extra_wlans="$_extra_wlans $_w"
+        done
+    fi
+    # C079: 动态合并 upstream / local_upstream / tether_upstream / default_route_ifaces 及非热点 wlan[1-9]*
+    for _cand in "$_up" "$_lup" "$_tup" $_defrt $_extra_wlans; do
         valid_ifname "$_cand" || continue
         [ "$_cand" = "$_ap" ] && continue
         [ "$_cand" = "lo" ] && continue
+        case "$_hotspot_set" in *" $_cand "*) continue ;; esac
         case "$_cand" in
             rmnet*|ccmni*|wwan*|seth_*|sipa_eth*|gti*|v4-*|clat*|eth*|tun*|wg*|ppp*|tailscale*|utun*|sing_tun*) continue ;;
         esac

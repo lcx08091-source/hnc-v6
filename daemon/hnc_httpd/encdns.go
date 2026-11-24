@@ -135,6 +135,7 @@ func actionEncdnsSet(s *server, p map[string]string) actionResp {
 	encdnsCountersInvalidate()
 	rc, out := runBin(s.hncDir, "encdns_sync.sh")
 	encdnsCountersInvalidate()
+	s.refreshDNSTKBlocklist(time.Now())
 	out = lastLine(strings.TrimSpace(out))
 	if rc != 0 {
 		return actionResp{OK: false, Error: "encdns sync failed", Detail: out}

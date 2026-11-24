@@ -158,7 +158,11 @@ jobs:
             echo "Release mode: will create tag+release $TAG at $GITHUB_SHA"
           elif printf '%s' "$GITHUB_REF" | grep -q '^refs/tags/v'; then
             TAG="$GITHUB_REF_NAME"
-            echo "Tag-push mode: release for $TAG"
+            echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$' \
+              || { echo "ERROR: git tag '$TAG' 格式非法" >&2; exit 1; }
+            [ "$TAG" = "$MODULE_VERSION" ] \
+              || { echo "ERROR: git tag '$TAG' != module.prop version '$MODULE_VERSION'" >&2; exit 1; }
+            echo "Tag-push mode: release for $TAG (verified == module.prop)"
           elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
             # v5.16.1: push main 自动发版 —— 以 module.prop 版本为 tag
             CAND="$MODULE_VERSION"

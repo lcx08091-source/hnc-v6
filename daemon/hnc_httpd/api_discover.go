@@ -766,6 +766,7 @@ func actionDiscoverConfirm(s *server, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "bad params", Detail: "invalid category"}
 	}
 	var sufs []string
+	var skippedShared []string
 	for _, x := range strings.Split(p["suffixes"], ",") {
 		x = strings.ToLower(strings.TrimSpace(x))
 		if x == "" {
@@ -774,12 +775,29 @@ func actionDiscoverConfirm(s *server, p map[string]string) actionResp {
 		if !suffixRe.MatchString(x) || len(x) > 253 {
 			return actionResp{OK: false, Error: "bad params", Detail: "invalid suffix: " + x}
 		}
+		if _, blocked := isSharedOrBlockedRuleDomain(s.hncDir, x); blocked {
+			skippedShared = append(skippedShared, x)
+			continue
+		}
 		sufs = append(sufs, x)
 	}
-	if len(sufs) == 0 {
+	if len(sufs) == 0 && len(skippedShared) == 0 {
 		if g := s.findGroup(id); g != nil {
-			sufs = strList(g["suffixes"])
+			for _, x := range strList(g["suffixes"]) {
+				x = strings.ToLower(strings.TrimSpace(x))
+				if x == "" || !suffixRe.MatchString(x) || len(x) > 253 {
+					continue
+				}
+				if _, blocked := isSharedOrBlockedRuleDomain(s.hncDir, x); blocked {
+					skippedShared = append(skippedShared, x)
+					continue
+				}
+				sufs = append(sufs, x)
+			}
 		}
+	}
+	if len(sufs) == 0 && len(skippedShared) > 0 {
+		return actionResp{OK: false, Error: "shared infra", Detail: "公共基础设施或共享黑名单域名不能保存为单一应用规则: " + strings.Join(skippedShared, ", ")}
 	}
 	if len(sufs) == 0 || len(sufs) > 30 {
 		return actionResp{OK: false, Error: "bad params", Detail: "1-30 suffixes required"}

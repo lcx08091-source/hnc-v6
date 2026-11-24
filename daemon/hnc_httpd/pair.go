@@ -60,7 +60,7 @@ func canonicalOriginHostPort(scheme, hostport string) string {
 
 // isCrossSiteFormRequest 拦截跨站表单请求(防跨站 PIN 配额耗尽与登出 CSRF):
 //   - Sec-Fetch-Site 为 "cross-site" 直接拒绝;
-//   - Origin 非空时, 其解析出的 host(含非默认端口)必须与当前请求 r.Host 一致;
+//   - Origin 非空时, TLS 连接强制要求 Origin 为 https://, 且解析出的 host(含非默认端口)必须与当前请求 r.Host 一致;
 //   - 无 Origin 且非 cross-site 的命令行工具/同源请求正常放行。
 func isCrossSiteFormRequest(r *http.Request) bool {
 	if r == nil {
@@ -77,6 +77,14 @@ func isCrossSiteFormRequest(r *http.Request) bool {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return true
 	}
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	if r.TLS != nil {
+		if scheme != "https" {
+			return true
+		}
+	} else if scheme != "http" && scheme != "https" {
+		return true
+	}
 	reqHost := strings.TrimSpace(r.Host)
 	if reqHost == "" && r.URL != nil {
 		reqHost = strings.TrimSpace(r.URL.Host)
@@ -87,7 +95,11 @@ func isCrossSiteFormRequest(r *http.Request) bool {
 	if strings.EqualFold(u.Host, reqHost) {
 		return false
 	}
-	return canonicalOriginHostPort(u.Scheme, u.Host) != canonicalOriginHostPort(u.Scheme, reqHost)
+	reqScheme := scheme
+	if r.TLS != nil {
+		reqScheme = "https"
+	}
+	return canonicalOriginHostPort(scheme, u.Host) != canonicalOriginHostPort(reqScheme, reqHost)
 }
 
 // pairPending 从 $RUN/pair_pending 读出的配对记录
@@ -293,6 +305,7 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	// 路径(下方 Remove + truncate 兜底), 不阻断合法配对。
 	pendingPath := filepath.Join(s.hncDir, "run", "pair_pending")
 	claimedPath := pendingPath + ".claimed"
+	claimedByRename := false
 	if err := os.Rename(pendingPath, claimedPath); err != nil {
 		if os.IsNotExist(err) {
 			writePairError(w, http.StatusBadRequest, "no active pairing")
@@ -300,6 +313,7 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("WARN: pair_pending claim rename failed: %v (falling back to remove)", err)
 	} else {
+		claimedByRename = true
 		defer os.Remove(claimedPath)
 	}
 
@@ -320,18 +334,14 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 		// 不阻止用户登入,只是本机 UI 少了通知
 	}
 
-	// 删 pair_pending(防止重用) - 一次性 PIN
-	// rc3.1.34 修 #6: 之前 `_ = os.Remove(...)` 静默. 如果 remove 失败 (磁盘满 /
-	// 文件被并发改名 / 权限错), 同一个 PIN 文件仍能被下一个请求读到 → 理论上
-	// PIN 重放 (rate limit 5 次/分钟内). 本是一次性 PIN 的安全契约破裂.
-	// 现在: log + 强制 truncate 兜底. truncate 把文件清空, 即使 Remove 没成功
-	// 也让 readPending 走 "expired" 路径拒绝.
-	// v5.11: 正常情况下 pending 已在上方被 rename 认领, 这里是 NotExist 空操作。
-	if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
-		log.Printf("WARN: pair_pending remove failed (PIN replay risk): %v, attempting truncate", err)
-		// 兜底: 清空文件内容. readPending 会因 unmarshal 失败拒绝.
-		if tErr := os.WriteFile(pendingPath, []byte(""), 0600); tErr != nil {
-			log.Printf("CRIT: pair_pending truncate also failed: %v · subsequent PINs may replay until next genPair", tErr)
+	// 仅当上方 os.Rename 未认领成功(降级分支)时才按路径删除/截断 pendingPath,
+	// 严禁在已认领情况下二次 os.Remove(pendingPath), 避免慢速 bcrypt 期间误删主人刚生成的新配对码。
+	if !claimedByRename {
+		if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("WARN: pair_pending remove failed (PIN replay risk): %v, attempting truncate", err)
+			if tErr := os.WriteFile(pendingPath, []byte(""), 0600); tErr != nil {
+				log.Printf("CRIT: pair_pending truncate also failed: %v · subsequent PINs may replay until next genPair", tErr)
+			}
 		}
 	}
 

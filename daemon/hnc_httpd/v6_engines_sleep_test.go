@@ -251,14 +251,14 @@ func TestV6VectorExpressSleepUnlimitAndDualTrackFallback(t *testing.T) {
 		t.Fatalf("expected 0 wakeups in NoClients after cooldown release, got %d -> %d", samplesNoClients, got)
 	}
 
-	// (e) NoClients 下配置静态 ForcedMACs + Wake(): 静态同步一次后直接停表 0 唤醒, 绝不死循环!
+	// (e) NoClients 下配置离线静态 ForcedMACs + Wake(): 离线 MAC 不误激活护航, 静态同步一次后直接停表 0 唤醒, 绝不死循环!
 	exp.mu.Lock()
 	exp.cfg.ForcedMACs = []string{"aa:bb:cc:dd:ee:77"}
 	exp.mu.Unlock()
 	exp.Wake()
 
-	waitEngineCond(t, 2*time.Second, "ForcedMACs static sync in NoClients then sleep", func() bool {
-		return exp.isActive() && exp.LoopMode() == v6EngineModeSleeping
+	waitEngineCond(t, 2*time.Second, "ForcedMACs offline static sync in NoClients stays idle and sleeps", func() bool {
+		return !exp.isActive() && exp.LoopMode() == v6EngineModeSleeping
 	})
 	transAfterForced := exp.transitions.Load()
 	time.Sleep(70 * time.Millisecond)

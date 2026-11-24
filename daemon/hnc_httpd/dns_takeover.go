@@ -55,6 +55,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -1401,11 +1402,26 @@ func sameStrings(a, b []string) bool {
 	return true
 }
 
+func dnsProbeHealthyRcode(rc int) bool {
+	return rc >= 0 && rc != dnsRcodeRefused && rc != dnsRcodeServFail
+}
+
+func (t *dnsTakeover) probeHealthy(addr string, timeout time.Duration) (time.Duration, error) {
+	rtt, rc, err := t.probe(addr, timeout)
+	if err != nil {
+		return 0, err
+	}
+	if !dnsProbeHealthyRcode(rc) {
+		return rtt, errors.New("probe rcode " + dnsRcodeName(rc))
+	}
+	return rtt, nil
+}
+
 // chooseUpstream custom > tether(各 v4 地址 :53)> system。返回 ("", "") = 都不通
 func (t *dnsTakeover) chooseUpstream(cfg dnsTKConf, v4 []string) (string, string) {
 	ok := func(addr string) bool {
-		_, rc, err := t.probe(addr, dnsTKProbeTimeout)
-		return err == nil && rc != dnsRcodeRefused
+		_, err := t.probeHealthy(addr, dnsTKProbeTimeout)
+		return err == nil
 	}
 	if cfg.Upstream != "" {
 		if up := dnsNormUpstream(cfg.Upstream); up != "" && ok(up) {
@@ -1536,7 +1552,7 @@ func (t *dnsTakeover) tickLocked() {
 	t.refreshBlocklist(now)
 	fwd.maybeCheckNetSig(now)
 
-	// 2. 上游: 没选过 / 非 tether 每分钟重探(优先回到 tether)
+	// 2. 上游: 没选过 / 切网触发了 onFlush 重置 / 非 tether 每分钟重探(优先回到 tether)
 	t.mu.Lock()
 	up, kind, checked := t.upstream, t.upstreamKind, t.upCheckedAt
 	t.mu.Unlock()
@@ -1544,19 +1560,15 @@ func (t *dnsTakeover) tickLocked() {
 	if cfg.Upstream != "" {
 		wantUp = dnsNormUpstream(cfg.Upstream)
 	}
-	if up == "" || (wantUp != "" && up != wantUp) || (wantUp == "" && kind == "custom") ||
+	if up == "" || checked.IsZero() || (wantUp != "" && up != wantUp) || (wantUp == "" && kind == "custom") ||
 		(kind != "tether" && now.Sub(checked) > time.Minute) {
 		nu, nk := t.chooseUpstream(cfg, v4)
+		fwd.SetUpstream(nu)
 		t.mu.Lock()
 		t.upCheckedAt = now
-		if nu != "" {
-			t.upstream, t.upstreamKind = nu, nk
-		}
+		t.upstream, t.upstreamKind = nu, nk
 		up = t.upstream
 		t.mu.Unlock()
-		if nu != "" {
-			fwd.SetUpstream(nu)
-		}
 	}
 	if up == "" {
 		t.failOpenLocked("no_upstream", true)
@@ -1573,11 +1585,11 @@ func (t *dnsTakeover) tickLocked() {
 		return
 	}
 
-	// 4. 自检(经转发器 → 上游), 失败重试一次
+	// 4. 自检(经转发器 → 上游, 拒绝 SERVFAIL/REFUSED), 失败重试一次
 	self := net.JoinHostPort(listen[0], strconv.Itoa(t.port))
-	rtt, _, perr := t.probe(self, dnsTKProbeTimeout)
+	rtt, perr := t.probeHealthy(self, dnsTKProbeTimeout)
 	if perr != nil {
-		rtt, _, perr = t.probe(self, dnsTKProbeTimeout)
+		rtt, perr = t.probeHealthy(self, dnsTKProbeTimeout)
 	}
 	t.mu.Lock()
 	if perr == nil {
@@ -1649,13 +1661,24 @@ func (t *dnsTakeover) tickLocked() {
 	t.mu.Unlock()
 }
 
+func (t *dnsTakeover) onForwarderFlush() {
+	if t == nil {
+		return
+	}
+	t.names.clear()
+	t.mu.Lock()
+	t.upCheckedAt = time.Time{}
+	t.mu.Unlock()
+	t.wake()
+}
+
 // openForwarder 开转发器; v6 地址绑不上(还在 DAD 等)时退回只监听 v4。
 // 返回实际监听的 IP 列表。
 func (t *dnsTakeover) openForwarder(listen []string) (*dnsForwarder, []string, error) {
 	mk := func() *dnsForwarder {
 		nf := newDNSForwarder()
 		nf.macOf, nf.blocked, nf.onLog, nf.onAnswer = t.macOf, t.blocked, t.onLog, t.names.record
-		nf.onFlush = t.names.clear
+		nf.onFlush = t.onForwarderFlush
 		nf.netSig = t.currentUpstreamSig
 		return nf
 	}

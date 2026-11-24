@@ -532,14 +532,48 @@ func (a *SelfAttribAggregator) SetConduitUIDs(uids map[int]struct{}) {
 	a.mu.Unlock()
 }
 
+func (a *SelfAttribAggregator) resetUIDStateLocked(uid int) {
+	delete(a.snisByUID, uid)
+	delete(a.rulesByUID, uid)
+	for sni, uidSet := range a.unmatchedSNIs {
+		if _, has := uidSet[uid]; has {
+			delete(uidSet, uid)
+			if len(uidSet) == 0 {
+				delete(a.unmatchedSNIs, sni)
+			}
+		}
+	}
+	if a.conduitUIDs != nil {
+		delete(a.conduitUIDs, uid)
+	}
+	delete(a.currByteCounters, uid)
+	delete(a.prevByteCounters, uid)
+	suf := "|" + strconv.Itoa(uid)
+	for k := range a.seenTuples {
+		if strings.HasSuffix(k, suf) {
+			delete(a.seenTuples, k)
+		}
+	}
+	delete(a.appsByUID, uid)
+}
+
 func (a *SelfAttribAggregator) ensureAppLocked(uid int, now int64) *SelfApp {
+	curPkg := a.resolvePkgByUIDLocked(uid)
 	app := a.appsByUID[uid]
 	if app != nil {
-		return app
+		if curPkg != "" && app.Pkg != "" && app.Pkg != curPkg {
+			a.resetUIDStateLocked(uid)
+			app = nil
+		} else {
+			if app.Pkg == "" && curPkg != "" {
+				app.Pkg = curPkg
+			}
+			return app
+		}
 	}
 	app = &SelfApp{
 		UID:       uid,
-		Pkg:       a.resolvePkgByUIDLocked(uid),
+		Pkg:       curPkg,
 		FirstSeen: now,
 		LastSeen:  now,
 	}
@@ -834,10 +868,25 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 	a.lastTick = now.Unix()
 	a.unknownConns = unknownConns
 
+	// Evict stale per-UID cached state if an uninstalled UID was reassigned to a different package.
+	for uid, app := range a.appsByUID {
+		if app == nil {
+			continue
+		}
+		if pkg := resolvePkgInMap(pkgMap, uid); pkg != "" && app.Pkg != "" && app.Pkg != pkg {
+			a.resetUIDStateLocked(uid)
+		}
+	}
+
 	// Walk rows: bump active_conns + cumulative TotalConns counters per uid.
 	activeByUID := make(map[int]int, 64)
 	for _, r := range rows {
 		activeByUID[r.UID]++
+		if r.Pkg != "" {
+			if existing := a.appsByUID[r.UID]; existing != nil && existing.Pkg != "" && existing.Pkg != r.Pkg {
+				a.resetUIDStateLocked(r.UID)
+			}
+		}
 		// Cumulative dedupe by full tuple
 		tupleKey := r.Proto + "|" + r.Local + "|" + r.Remote + "|" + strconv.Itoa(r.UID)
 		if _, seen := a.seenTuples[tupleKey]; !seen {
@@ -948,6 +997,14 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 			a.pkgCache = make(map[int]string)
 		}
 		return a.pkgCache
+	}
+	for uid, app := range a.appsByUID {
+		if app == nil {
+			continue
+		}
+		if newPkg := resolvePkgInMap(m, uid); newPkg != "" && app.Pkg != "" && app.Pkg != newPkg {
+			a.resetUIDStateLocked(uid)
+		}
 	}
 	a.pkgCache = m
 	a.pkgCacheLoadedAt = time.Now()

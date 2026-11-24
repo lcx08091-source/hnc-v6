@@ -77,16 +77,43 @@ run() {
     "$@" 2>/dev/null
 }
 
-if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ]; then
-    iptables -w 2 -t filter -L -n >/dev/null 2>&1 || {
-        iptables -t filter -L -n >/dev/null 2>&1 && IPT="iptables"
-    }
+if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ] && command -v iptables >/dev/null 2>&1; then
+    iptables -w 2 -t filter -L -n >/dev/null 2>&1
+    if [ $? -eq 2 ]; then
+        iptables -w -t filter -L -n >/dev/null 2>&1
+        [ $? -eq 2 ] && IPT="iptables" || IPT="iptables -w"
+    fi
 fi
 if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ] && command -v ip6tables >/dev/null 2>&1; then
-    ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || {
-        ip6tables -t filter -L -n >/dev/null 2>&1 && IP6T="ip6tables"
-    }
+    ip6tables -w 2 -t filter -L -n >/dev/null 2>&1
+    if [ $? -eq 2 ]; then
+        ip6tables -w -t filter -L -n >/dev/null 2>&1
+        [ $? -eq 2 ] && IP6T="ip6tables" || IP6T="ip6tables -w"
+    fi
 fi
+
+command -v hnc_fwd_insert_pos >/dev/null 2>&1 || {
+    hnc_fwd_insert_pos() {
+        local _c="$1" _t="$2" _p
+        [ -n "$_c" ] && [ -n "$_t" ] || { echo 1; return 0; }
+        _p=$($_c -t filter -S FORWARD 2>/dev/null | awk -v target="$_t" '
+            BEGIN {
+                ord["HNC_SCALPEL"]=1; ord["HNC_ISOLATE"]=2; ord["HNC_CTRL"]=3
+                ord["HNC_WHITELIST"]=4; ord["HNC_QUIC"]=5; ord["HNC_QUIC_APPLIM"]=6
+                ord["HNC_ENCDNS"]=7; ord["HNC_CONNBLK_DNS"]=8; ord["HNC_CONNBLK"]=9
+                t_ord = ord[target] + 0; idx = 0; last_pred = 0
+            }
+            $1 == "-A" && $2 == "FORWARD" {
+                idx++; ch = ""
+                for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") { ch = $(i+1); break }
+                if (ch != "" && (ch in ord) && ord[ch] < t_ord) last_pred = idx
+            }
+            END { printf "%d\n", last_pred + 1 }
+        ' 2>/dev/null)
+        case "$_p" in ''|*[!0-9]*|0) _p=1 ;; esac
+        printf '%s\n' "$_p"
+    }
+}
 
 v6=0
 command -v ip6tables >/dev/null 2>&1 && $IP6T -t filter -L -n >/dev/null 2>&1 && v6=1
@@ -363,9 +390,13 @@ EOF
     if [ "$gstate" = dot ] || [ "$gstate" = strict ]; then
         jump_sel "$T" "$(chain_for "$gstate")" -i "$iface"
     fi
-    for C in INPUT FORWARD; do
-        run $T -t filter -I "$C" 1 -j "$C_MAIN" || log "WARN: v$fam link $C failed"
-    done
+    run $T -t filter -I INPUT 1 -j "$C_MAIN" || log "WARN: v$fam link INPUT failed"
+    if [ "$DRY" = "1" ]; then
+        _fpos=1
+    else
+        _fpos=$(hnc_fwd_insert_pos "$T" "$C_MAIN")
+    fi
+    run $T -t filter -I FORWARD "$_fpos" -j "$C_MAIN" || log "WARN: v$fam link FORWARD failed"
 done
 [ "$ndev" -gt "$MAX_DEVICES" ] && ndev=$MAX_DEVICES
 log "global=$gstate iface=${iface:-?} devices=$ndev rules=$nr string_layer=$S4/$S6 v6=$v6"

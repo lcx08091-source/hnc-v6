@@ -146,22 +146,51 @@ func (h *HistorySampler) Tick(now time.Time) {
 	h.trimOldFiles(now)
 }
 
+const histStaleRandMACAgeSec = 24 * 3600
+
+func isLocallyAdministeredHistMAC(mac string) bool {
+	if len(mac) < 2 {
+		return false
+	}
+	switch mac[1] {
+	case '2', '3', '6', '7', 'a', 'b', 'e', 'f':
+		return true
+	default:
+		return false
+	}
+}
+
 // collect walks the Writer's per-client app aggregates, computes byte deltas
 // since the last tick, and returns the rows to append. Holds the writer's
 // mutex for as little time as possible.
 func (h *HistorySampler) collect(now time.Time) []historySample {
+	ts := now.Unix()
+
 	h.w.mu.Lock()
 	type snapRow struct {
 		mac, appID, app, cat string
 		tx, rx               uint64
 	}
 	rows := make([]snapRow, 0, 64)
-	for _, c := range h.w.clients {
+	for clientKey, c := range h.w.clients {
 		if c == nil {
 			continue
 		}
 		mac := normalizeHistMAC(c.ClientMAC)
 		if mac == "" {
+			continue
+		}
+		// Evict expired randomized-MAC entries (idle > 24h) so neither Writer.clients
+		// nor HistorySampler.lastTx/lastRx grow unboundedly across daily MAC rotations.
+		if isLocallyAdministeredHistMAC(mac) && c.LastSeen > 0 && ts-c.LastSeen > histStaleRandMACAgeSec {
+			delete(h.w.macIndex, strings.ToLower(c.ClientMAC))
+			if c.Flows != nil {
+				h.w.totalActiveFlows -= len(c.Flows.flows)
+				if h.w.totalActiveFlows < 0 {
+					h.w.totalActiveFlows = 0
+				}
+			}
+			delete(h.w.clients, clientKey)
 			continue
 		}
 		if c.Apps == nil {
@@ -183,13 +212,14 @@ func (h *HistorySampler) collect(now time.Time) []historySample {
 	}
 	h.w.mu.Unlock()
 
-	ts := now.Unix()
 	out := make([]historySample, 0, len(rows))
+	liveKeys := make(map[string]struct{}, len(rows))
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, r := range rows {
 		key := r.mac + "\x00" + r.appID
+		liveKeys[key] = struct{}{}
 		prevTx := h.lastTx[key]
 		prevRx := h.lastRx[key]
 		var dTx, dRx uint64
@@ -223,6 +253,19 @@ func (h *HistorySampler) collect(now time.Time) []historySample {
 			TX:    dTx,
 			RX:    dRx,
 		})
+	}
+	for k := range h.lastTx {
+		if _, ok := liveKeys[k]; !ok {
+			delete(h.lastTx, k)
+			delete(h.lastRx, k)
+			delete(h.lastSnap, k)
+		}
+	}
+	for k := range h.lastRx {
+		if _, ok := liveKeys[k]; !ok {
+			delete(h.lastRx, k)
+			delete(h.lastSnap, k)
+		}
 	}
 	return out
 }

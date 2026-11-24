@@ -17,7 +17,7 @@
   }
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.5', VCODE = String(META.versionCode || '6009305');
+  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.6', VCODE = String(META.versionCode || '6009306');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1', MOCK_HS_ACTIVE = true;
 
@@ -48,8 +48,8 @@
 
   /* ═════════════ 应用目录(id → 名称 / 类别 / 常见域名) ═════════════ */
   var APP = {
-    douyin: ['抖音', 'short_video', ['v26-dy.douyinvod.com', 'api5-normal-lq.amemv.com', 'p26-sign.douyinpic.com']],
-    kuaishou: ['快手', 'short_video', ['txmov2.a.kwimgs.com', 'api.gifshow.com']],
+    douyin: ['抖音', 'video', ['v26-dy.douyinvod.com', 'api5-normal-lq.amemv.com', 'p26-sign.douyinpic.com']],
+    kuaishou: ['快手', 'video', ['txmov2.a.kwimgs.com', 'api.gifshow.com']],
     wechat: ['微信', 'social', ['szextshort.weixin.qq.com', 'mmsns.qpic.cn', 'wx.qlogo.cn']],
     honor_of_kings: ['王者荣耀', 'game', ['pvp.qq.com', 'gamesafe.qq.com']],
     genshin: ['原神', 'game', ['hk4e-sdk.mihoyo.com', 'autopatchcn.yuanshen.com']],
@@ -69,7 +69,7 @@
     taobao: ['淘宝', 'shopping', ['gw.alicdn.com', 'acs.m.taobao.com']],
     weibo: ['微博', 'social', ['api.weibo.cn']],
     netease_music: ['网易云音乐', 'music', ['interface.music.163.com']],
-    windows_update: ['Windows 更新', 'system_update', ['tlu.dl.delivery.mp.microsoft.com', 'settings-win.data.microsoft.com']],
+    windows_update: ['Windows 更新', 'system-update', ['tlu.dl.delivery.mp.microsoft.com', 'settings-win.data.microsoft.com']],
     teams: ['Microsoft Teams', 'office', ['teams.microsoft.com']],
     _tunnel: ['VPN/代理隧道', 'tunnel', []]
   };
@@ -95,7 +95,7 @@
       live: [['douyin', 0.78], ['bilibili', 0.12], ['wechat', 0.05]], hist: ['douyin', 'bilibili', 'wechat', 'xiaohongshu'],
       fg: { state: 'active', screen_state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.93, label: '正在用：抖音', evidence_tags: ['即时连接', '触控划屏'], companion: { app_id: 'qqmusic', name: 'QQ音乐', mode: 'audio', label: '后台音频播放', bps: 192000 }, dual_stack: { v6_pct: 88, qos_cov: 'dual_stack_ok', escape_alert: false, limit_mbps: 24, actual_mbps: 16.2 }, reasons: ['域名解析后 22ms 立即连接，流量呈连续上划刷视频特征', '域名命中 *.douyinvod.com（IPv4/IPv6 双栈限速均已生效）', '播放缓冲充足，视频流畅播放保护中'] },
       traffic_type: { type: 'short_video', label: '刷短视频' },
-      app_time_limits: [{ app_id: 'douyin', name: '抖音', category: 'short_video', minutes: 60, used_sec: 3120, used_min: 52, exhausted: false, enforced: true }],
+      app_time_limits: [{ app_id: 'douyin', name: '抖音', category: 'video', minutes: 60, used_sec: 3120, used_min: 52, exhausted: false, enforced: true }],
       category_blocks: [{ category: 'game', app_count: 6, ts: T - 3 * 86400, enforced: true }],
       blocks: [{ kind: 'domain', value: 'yuanshen.com', label: '原神', source: 'category', ref: 'game' }, { kind: 'domain', value: 'pvp.qq.com', label: '王者荣耀', source: 'category', ref: 'game' }] },
     { mac: '3a:91:d4:6b:02:5f', ip: '192.168.43.31', hostname: 'MacBook Pro', hostname_src: 'manual', vendor: 'Apple', online: true, mark_id: 4,
@@ -708,26 +708,26 @@
     });
     var idb = 0.89;
     var MOCK_L3_SUBS = [
-      'hnc-curated-v6.1.0-rc.5-dedup#00-core-meta',
-      'hnc-curated-v6.1.0-rc.5#01-short-video', 'hnc-curated-v6.1.0-rc.5#02-video-live', 'hnc-curated-v6.1.0-rc.5#03-social-im',
-      'hnc-curated-v6.1.0-rc.5#04-games-cn', 'hnc-curated-v6.1.0-rc.5#05-games-global', 'hnc-curated-v6.1.0-rc.5#06-shopping-life',
-      'hnc-curated-v6.1.0-rc.5#07-music-audio', 'hnc-curated-v6.1.0-rc.5#08-reading-news', 'hnc-curated-v6.1.0-rc.5#09-office-edu',
-      'hnc-curated-v6.1.0-rc.5#10-cloud-drive', 'hnc-curated-v6.1.0-rc.5#11-finance-bank', 'hnc-curated-v6.1.0-rc.5#12-travel-map',
-      'hnc-curated-v6.1.0-rc.5#13-ai-tools', 'hnc-curated-v6.1.0-rc.5#14-dev-tech', 'hnc-curated-v6.1.0-rc.5#15-app-stores',
-      'hnc-curated-v6.1.0-rc.5#16-oem-vendors', 'hnc-curated-v6.1.0-rc.5#17-iot-smart', 'hnc-curated-v6.1.0-rc.5#18-tv-ott',
-      'hnc-curated-v6.1.0-rc.5#19-carrier-isp', 'hnc-curated-v6.1.0-rc.5#20-gov-public', 'hnc-curated-v6.1.0-rc.5#21-auto-ev',
-      'hnc-curated-v6.1.0-rc.5#22-health-sport', 'hnc-curated-v6.1.0-rc.5#23-food-retail', 'hnc-curated-v6.1.0-rc.5#24-social-global',
-      'hnc-curated-v6.1.0-rc.5#25-stream-global', 'hnc-curated-v6.1.0-rc.5#26-browser-search', 'hnc-curated-v6.1.0-rc.5#27-mail-collab',
-      'hnc-curated-v6.1.0-rc.5#28-security-dns', 'hnc-curated-v6.1.0-rc.5#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.5#30-cdn-infra',
-      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.5#47-v2fly-b',
-      'hnc-curated-v6.1.0-rc.5#95-system-updates', 'hnc-curated-v6.1.0-rc.5#96-system-updates-v6'
+      'hnc-curated-v6.1.0-rc.6-dedup#00-core-meta',
+      'hnc-curated-v6.1.0-rc.6#01-short-video', 'hnc-curated-v6.1.0-rc.6#02-video-live', 'hnc-curated-v6.1.0-rc.6#03-social-im',
+      'hnc-curated-v6.1.0-rc.6#04-games-cn', 'hnc-curated-v6.1.0-rc.6#05-games-global', 'hnc-curated-v6.1.0-rc.6#06-shopping-life',
+      'hnc-curated-v6.1.0-rc.6#07-music-audio', 'hnc-curated-v6.1.0-rc.6#08-reading-news', 'hnc-curated-v6.1.0-rc.6#09-office-edu',
+      'hnc-curated-v6.1.0-rc.6#10-cloud-drive', 'hnc-curated-v6.1.0-rc.6#11-finance-bank', 'hnc-curated-v6.1.0-rc.6#12-travel-map',
+      'hnc-curated-v6.1.0-rc.6#13-ai-tools', 'hnc-curated-v6.1.0-rc.6#14-dev-tech', 'hnc-curated-v6.1.0-rc.6#15-app-stores',
+      'hnc-curated-v6.1.0-rc.6#16-oem-vendors', 'hnc-curated-v6.1.0-rc.6#17-iot-smart', 'hnc-curated-v6.1.0-rc.6#18-tv-ott',
+      'hnc-curated-v6.1.0-rc.6#19-carrier-isp', 'hnc-curated-v6.1.0-rc.6#20-gov-public', 'hnc-curated-v6.1.0-rc.6#21-auto-ev',
+      'hnc-curated-v6.1.0-rc.6#22-health-sport', 'hnc-curated-v6.1.0-rc.6#23-food-retail', 'hnc-curated-v6.1.0-rc.6#24-social-global',
+      'hnc-curated-v6.1.0-rc.6#25-stream-global', 'hnc-curated-v6.1.0-rc.6#26-browser-search', 'hnc-curated-v6.1.0-rc.6#27-mail-collab',
+      'hnc-curated-v6.1.0-rc.6#28-security-dns', 'hnc-curated-v6.1.0-rc.6#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.6#30-cdn-infra',
+      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.6#47-v2fly-b',
+      'hnc-curated-v6.1.0-rc.6#95-system-updates', 'hnc-curated-v6.1.0-rc.6#96-system-updates-v6'
     ];
     return {
       available: true,
       state: {
         schema_version: '2.0', generated_at: t - 2, version: VER, mode: 'af_packet', interface: IFACE, tls_reassembly: true, ipv6_capture: true, offload_hint: false,
         uptime_s: round(up), stats: stats, clients: clients, client_count: Object.keys(clients).length, health: 'ok', rebind_count: 1,
-        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true, dfp_rule_version: 'hnc-dfp-v6.1.0-rc.5',
+        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true, dfp_rule_version: 'hnc-dfp-v6.1.0-rc.6',
         conntrack_available: true, conntrack_readable: true, conntrack_path: '/proc/net/nf_conntrack', conntrack_flows: 412,
         unidentified_ratio: { total_bytes: round(sumDays(1)), identified_bytes: round(sumDays(1) * idb), ratio: 1 - idb },
         evidence_summary: { total: 48211 + round(up / 10), by_source: { sni: 31022, dns: 12840, ja4: 2210, ip_owner: 2139 } },
@@ -740,11 +740,9 @@
 
   /* ═════════════ 应用时长 / 前台时间线 ═════════════ */
   var CATS = [
-    ['short_video', ['douyin', '抖音'], ['kuaishou', '快手'], ['weishi', '微视']],
-    ['video', ['bilibili', 'B站'], ['iqiyi', '爱奇艺'], ['tencent_video', '腾讯视频'], ['youku', '优酷']],
+    ['video', ['douyin', '抖音'], ['kuaishou', '快手'], ['weishi', '微视'], ['bilibili', 'B站'], ['iqiyi', '爱奇艺'], ['tencent_video', '腾讯视频'], ['youku', '优酷'], ['douyu', '斗鱼'], ['huya', '虎牙']],
     ['game', ['honor_of_kings', '王者荣耀'], ['genshin', '原神'], ['peacekeeper', '和平精英'], ['eggy_party', '蛋仔派对'], ['mc', '我的世界'], ['nintendo_online', 'Nintendo Switch Online']],
     ['social', ['wechat', '微信'], ['xiaohongshu', '小红书'], ['weibo', '微博'], ['qq', 'QQ']],
-    ['live', ['douyu', '斗鱼'], ['huya', '虎牙']],
     ['shopping', ['taobao', '淘宝'], ['jd', '京东'], ['pdd', '拼多多']],
     ['music', ['qqmusic', 'QQ音乐'], ['netease_music', '网易云音乐']],
     ['reading', ['zhihu', '知乎'], ['fanqie', '番茄小说']]
@@ -1725,16 +1723,10 @@
     self_dns_unblock: function (p) { return J(v6ApplySelfFirewallMutation(Object.assign({ action: 'self_dns_unblock' }, p || {}))); }
   };
   function doAction(body) {
-    var name = body && body.action, p = (body && body.params) || {}, fn = ACT[name];
-    if (!fn) return { ok: true, detail: '' };
-    try { var det = fn(p); return det ? { ok: true, detail: det } : { ok: true }; }
-    catch (e) {
-      if (e && e.status != null) {
-        var dStr = (e.body && e.body.detail) ? String(e.body.detail) : '';
-        return { ok: false, error: e.message, detail: dStr };
-      }
-      throw e;
-    }
+    var name = body && body.action, p = (body && body.params) || {}, fn = name ? ACT[name] : null;
+    if (!fn) throw err('unknown action', 400, { detail: String(name || '') });
+    var det = fn(p);
+    return det ? { ok: true, detail: det } : { ok: true };
   }
   var POST = {
     '/api/action': doAction,
@@ -1754,7 +1746,7 @@
   };
 
 
-  /* ═════════════ HNC v6.1.0-rc.5 · 本机+热点双栈守护、防火墙与 LeakGuard 仿真层 ═════════════ */
+  /* ═════════════ HNC v6.1.0-rc.6 · 本机+热点双栈守护、防火墙与 LeakGuard 仿真层 ═════════════ */
   function v6MockInfraGuard(host) {
     var h = String(host || '').trim().toLowerCase();
     if (!h) return null;
@@ -2729,6 +2721,8 @@
     var reasons = {};
     if (V6_EXP_STATE.enabled && MOCK_HS_ACTIVE) {
       V6_EXP_STATE.forced_macs.forEach(function (m) {
+        var dm = dev(m);
+        if (dm && !dm.online) return;
         if (escorted.indexOf(m) < 0) escorted.push(m);
         reasons[m] = '手动常驻锁定零排队护航 (PRIO 0)';
       });
@@ -2872,6 +2866,9 @@
       shell_temp_c: shellTc,
       shell_temp_available: V6_TH_STATE.shell_temp_available,
       battery_spoof_suspected: V6_TH_STATE.battery_spoof_suspected,
+      capacity_pct: V6_TH_STATE.capacity_pct,
+      status: V6_TH_STATE.bat_status,
+      is_charging: !!V6_TH_STATE.is_charging,
       battery: {
         available: true,
         temp_c: batTc,
@@ -3440,20 +3437,29 @@
     if (!unb) {
       var ig = (evHit && evHit.infra_guard) || v6MockInfraGuard(host);
       if (ig && ig.level === 'hard_block') {
-        throw err('核心公共基础设施域名禁止封禁', 409, {
+        var hbDetail = '该域名属于系统联网探测或核心公共服务，封禁会导致联网异常，建议改用「忽略误报」。';
+        throw err('guard_hard_block', 409, {
           guard_level: 'hard_block',
+          requires_confirm: false,
           target_scope: targetScope,
+          vendor: ig.label,
           provider: ig.label,
-          reason_zh: '该域名属于系统联网探测或核心公共服务，封禁会导致联网异常，建议改用「忽略误报」。'
+          dst_host: host,
+          detail: hbDetail,
+          reason_zh: hbDetail
         });
       }
       if (ig && ig.level === 'warn_confirm' && !(b && b.force)) {
-        throw err('共享公共底座封禁需二次确认', 409, {
+        var wcDetail = '该域名属于「' + ig.label + '」多应用共用节点，封禁后可能连带影响使用同一加速节点的其他正常应用。';
+        throw err('guard_warn_confirm', 409, {
           guard_level: 'warn_confirm',
           requires_confirm: true,
           target_scope: targetScope,
+          vendor: ig.label,
           provider: ig.label,
-          reason_zh: '该域名属于「' + ig.label + '」多应用共用节点，封禁后可能连带影响使用同一加速节点的其他正常应用。'
+          dst_host: host,
+          detail: wcDetail,
+          reason_zh: wcDetail
         });
       }
       if (doHotspot && alsoIp && kind === 'domain') {

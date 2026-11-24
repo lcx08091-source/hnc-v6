@@ -89,19 +89,55 @@ command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
 _IPT_RESOLVED=0
+_ipt_probe_wait_bin() {
+    local _b="$1" _rc
+    "$_b" -w 2 -t filter -L -n >/dev/null 2>&1
+    _rc=$?
+    if [ "$_rc" -eq 2 ]; then
+        "$_b" -w -t filter -L -n >/dev/null 2>&1
+        _rc=$?
+        if [ "$_rc" -eq 2 ]; then
+            printf '%s\n' "$_b"
+        else
+            printf '%s -w\n' "$_b"
+        fi
+    else
+        # rc=0 或 rc=4(短暂 xtables 锁竞争超时)等非语法错误: 保持 -w 2 绝不误清!
+        printf '%s -w 2\n' "$_b"
+    fi
+}
 _ipt_resolve() {
     [ "$_IPT_RESOLVED" = "1" ] && return 0
     _IPT_RESOLVED=1
-    if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
-        iptables -w 2 -t filter -L -n >/dev/null 2>&1 || {
-            iptables -t filter -L -n >/dev/null 2>&1 && IPT="iptables"
-        }
+    if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v iptables >/dev/null 2>&1; then
+        IPT=$(_ipt_probe_wait_bin iptables)
     fi
     if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || {
-            ip6tables -t filter -L -n >/dev/null 2>&1 && IP6T="ip6tables"
-        }
+        IP6T=$(_ipt_probe_wait_bin ip6tables)
     fi
+}
+
+command -v hnc_fwd_insert_pos >/dev/null 2>&1 || {
+    hnc_fwd_insert_pos() {
+        local _c="$1" _t="$2" _p
+        [ -n "$_c" ] && [ -n "$_t" ] || { echo 1; return 0; }
+        _p=$($_c -t filter -S FORWARD 2>/dev/null | awk -v target="$_t" '
+            BEGIN {
+                ord["HNC_SCALPEL"]=1; ord["HNC_ISOLATE"]=2; ord["HNC_CTRL"]=3
+                ord["HNC_WHITELIST"]=4; ord["HNC_QUIC"]=5; ord["HNC_QUIC_APPLIM"]=6
+                ord["HNC_ENCDNS"]=7; ord["HNC_CONNBLK_DNS"]=8; ord["HNC_CONNBLK"]=9
+                t_ord = ord[target] + 0; idx = 0; last_pred = 0
+            }
+            $1 == "-A" && $2 == "FORWARD" {
+                idx++; ch = ""
+                for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") { ch = $(i+1); break }
+                if (ch != "" && (ch in ord) && ord[ch] < t_ord) last_pred = idx
+            }
+            END { printf "%d\n", last_pred + 1 }
+        ' 2>/dev/null)
+        case "$_p" in ''|*[!0-9]*|0) _p=1 ;; esac
+        printf '%s\n' "$_p"
+    }
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -213,6 +249,64 @@ _ensure_link() {
     if ipv6_table_ok "$table"; then
         $IP6T -t "$table" -C "$parent" -j "$child" 2>/dev/null \
             || $IP6T -t "$table" -I "$parent" "$pos" -j "$child" 2>/dev/null
+    fi
+}
+
+_ensure_fwd_ordered_one() {
+    local _cmd="$1" _child="$2" _st _pos
+    [ -n "$_cmd" ] && [ -n "$_child" ] || return 0
+    _st=$($_cmd -t filter -S FORWARD 2>/dev/null | awk -v target="$_child" '
+        BEGIN {
+            ord["HNC_SCALPEL"]=1; ord["HNC_ISOLATE"]=2; ord["HNC_CTRL"]=3
+            ord["HNC_WHITELIST"]=4; ord["HNC_QUIC"]=5; ord["HNC_QUIC_APPLIM"]=6
+            ord["HNC_ENCDNS"]=7; ord["HNC_CONNBLK_DNS"]=8; ord["HNC_CONNBLK"]=9
+            t_ord = ord[target] + 0; idx = 0; cnt = 0; t_idx = 0; max_pred = 0; min_succ = 0
+        }
+        $1 == "-A" && $2 == "FORWARD" {
+            idx++; ch = ""
+            for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") { ch = $(i+1); break }
+            if (ch == target) { cnt++; t_idx = idx }
+            else if (ch != "" && (ch in ord)) {
+                if (ord[ch] < t_ord) max_pred = idx
+                else if (ord[ch] > t_ord && min_succ == 0) min_succ = idx
+            }
+        }
+        END {
+            if (idx == 0) { print "probe_check"; exit }
+            if (cnt == 0) { print "missing"; exit }
+            if (cnt > 1 || (max_pred > 0 && t_idx < max_pred) || (min_succ > 0 && t_idx > min_succ)) {
+                print "misordered"; exit
+            }
+            print "ok"
+        }
+    ' 2>/dev/null)
+    case "$_st" in
+        ok) return 0 ;;
+        probe_check)
+            if $_cmd -t filter -C FORWARD -j "$_child" 2>/dev/null; then
+                return 0
+            fi
+            _pos=$(hnc_fwd_insert_pos "$_cmd" "$_child")
+            $_cmd -t filter -I FORWARD "$_pos" -j "$_child" 2>/dev/null
+            ;;
+        misordered)
+            ipt_del_all "$_cmd" -t filter -D FORWARD -j "$_child"
+            _pos=$(hnc_fwd_insert_pos "$_cmd" "$_child")
+            $_cmd -t filter -I FORWARD "$_pos" -j "$_child" 2>/dev/null
+            ;;
+        *)
+            _pos=$(hnc_fwd_insert_pos "$_cmd" "$_child")
+            $_cmd -t filter -I FORWARD "$_pos" -j "$_child" 2>/dev/null
+            ;;
+    esac
+}
+
+_ensure_fwd_ordered_link() {
+    _ipt_resolve
+    local _child="$1"
+    _ensure_fwd_ordered_one "$IPT" "$_child"
+    if ipv6_filter_ok; then
+        _ensure_fwd_ordered_one "$IP6T" "$_child"
     fi
 }
 
@@ -406,11 +500,11 @@ init_chains() {
 
     # ── HNC_CTRL (filter/FORWARD): 黑名单 DROP ───────────────
     _ensure_chain filter HNC_CTRL
-    _ensure_link filter FORWARD HNC_CTRL 1
+    _ensure_fwd_ordered_link HNC_CTRL
 
     # ── HNC_WHITELIST (filter/FORWARD): 白名单模式 ───────────
     _ensure_chain filter HNC_WHITELIST
-    _ensure_link filter FORWARD HNC_WHITELIST 2
+    _ensure_fwd_ordered_link HNC_WHITELIST
 
     log "=== Chains initialized OK ==="
 }
@@ -517,6 +611,7 @@ _gc_stale_ips_for_mac() {
 unmark_device() {
     local ip=$1 mac=$2 mark_id=$3
     local mark; mark=$(hnc_dev_mark_hex "$mark_id") || return 0
+    local mark_short _um_ips _um_ip
 
     log "Unmarking $ip ($mac) mark=${mark}/${DEV_MARK_MASK}"
 
@@ -529,14 +624,32 @@ unmark_device() {
     # 必须在删 $IPT 规则之前调用，否则它找不到 mark）
     sh "$HNC_DIR/bin/v6_sync.sh" clear "$mac" 2>/dev/null || true
 
-    # v5.12: ip 为空(设备离线、rules.json 也无 IP)时只删 MAC-only 规则,
-    # 不拼 `-s ""` 这类非法参数。
-    if [ -n "$ip" ]; then
-        ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$ip" -m mac --mac-source "$mac" \
+    mark_short=$(printf '0x%x' $(( 0x00800000 | (mark_id << 16) )))
+    _um_ips=$($IPT -t mangle -S HNC_MARK 2>/dev/null | awk -v m="$mac" -v mk="$mark" -v mks="$mark_short" '
+        function strip_cidr(a) { sub(/\/32$/, "", a); return a }
+        $1 == "-A" && $2 == "HNC_MARK" {
+            hm = 0; hk = 0; s = ""; d = ""
+            for (i = 3; i <= NF; i++) {
+                if ($i == "--mac-source" && tolower($(i+1)) == tolower(m)) hm = 1
+                if ($i == "--set-xmark" || $i == "--set-mark") {
+                    t = tolower($(i+1))
+                    if (index(t, tolower(mk)) == 1 || index(t, tolower(mks)) == 1) hk = 1
+                }
+                if ($i == "-s") s = strip_cidr($(i+1))
+                if ($i == "-d") d = strip_cidr($(i+1))
+            }
+            if (hm && s != "") print s
+            if (hk && d != "") print d
+        }
+    ' | sort -u)
+
+    for _um_ip in $ip $_um_ips; do
+        case "$_um_ip" in ''|*[!0-9.]*) continue ;; esac
+        ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$_um_ip" -m mac --mac-source "$mac" \
             -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
-        ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" \
+        ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$_um_ip" \
             -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
-    fi
+    done
     ipt_dual_del_all -t mangle -D HNC_MARK \
         -m mac --mac-source "$mac" -m mark --mark "0x0/${DEV_MARK_MASK}" \
         -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
@@ -549,12 +662,35 @@ unmark_device() {
 
 # ═══════════════════════════════════════════════════════════════
 # 黑名单
-# v4: MAC + 源 IP + 目标 IP 三重 DROP + TCP REJECT 立即断连
+# v4: MAC + 源 IP(强制绑定 MAC 防 DHCP 复用误杀) + 目标 IP DROP + TCP REJECT 立即断连
 # v6: MAC DROP + TCP REJECT
 # ═══════════════════════════════════════════════════════════════
+_collect_ctrl_ips_for_mac() {
+    local _m="$1"
+    [ -n "$_m" ] || return 0
+    $IPT -t filter -S HNC_CTRL 2>/dev/null | awk -v m="$_m" '
+        $1 == "-A" && $2 == "HNC_CTRL" {
+            hm = 0; s = ""
+            for (i = 3; i <= NF; i++) {
+                if ($i == "--mac-source" && tolower($(i+1)) == tolower(m)) hm = 1
+                if ($i == "-s") { s = $(i+1); sub(/\/32$/, "", s) }
+            }
+            if (hm && s != "") print s
+        }
+    ' | sort -u
+}
+
 blacklist_add() {
-    local ip=$1 mac=$2
+    local ip=$1 mac=$2 _old_ips _oip
     log "Blacklist add: $ip ($mac)"
+
+    _old_ips=$(_collect_ctrl_ips_for_mac "$mac")
+    for _oip in $_old_ips; do
+        case "$_oip" in ''|*[!0-9.]*) continue ;; esac
+        ipt_del_all "$IPT" -t filter -D HNC_CTRL -s "$_oip" -m mac --mac-source "$mac" -j DROP
+        ipt_del_all "$IPT" -t filter -D HNC_CTRL -s "$_oip" -j DROP
+        ipt_del_all "$IPT" -t filter -D HNC_CTRL -d "$_oip" -j DROP
+    done
 
     # 清旧（幂等）
     ipt_dual_del_all -t filter -D HNC_CTRL -m mac --mac-source "$mac" -j DROP
@@ -565,13 +701,17 @@ blacklist_add() {
     # v4+v6：MAC DROP
     ipt_dual -t filter -A HNC_CTRL -m mac --mac-source "$mac" -j DROP
 
-    # 仅 v4：按 IP 的 DROP（双向都拦）
-    if [ -n "$ip" ]; then
-        ipt_del_all "$IPT" -t filter -D HNC_CTRL -s "$ip" -j DROP
-        ipt_del_all "$IPT" -t filter -D HNC_CTRL -d "$ip" -j DROP
-        $IPT -t filter -A HNC_CTRL -s "$ip" -j DROP
-        $IPT -t filter -A HNC_CTRL -d "$ip" -j DROP
-    fi
+    # 仅 v4：上行强制带 -m mac --mac-source 防孤儿 IP 误杀新设备，下行按 -d IP 拦截
+    case "$ip" in
+        ''|*[!0-9.]*) ;;
+        *.*.*.*)
+            ipt_del_all "$IPT" -t filter -D HNC_CTRL -s "$ip" -m mac --mac-source "$mac" -j DROP
+            ipt_del_all "$IPT" -t filter -D HNC_CTRL -s "$ip" -j DROP
+            ipt_del_all "$IPT" -t filter -D HNC_CTRL -d "$ip" -j DROP
+            $IPT -t filter -A HNC_CTRL -s "$ip" -m mac --mac-source "$mac" -j DROP
+            $IPT -t filter -A HNC_CTRL -d "$ip" -j DROP
+            ;;
+    esac
 
     # TCP RESET 立即断现有连接（v4 + v6 独立处理，有 DROP 降级）
     $IPT -t filter -I HNC_CTRL 1 -m mac --mac-source "$mac" \
@@ -586,18 +726,32 @@ blacklist_add() {
 }
 
 blacklist_remove() {
-    local ip=$1 mac=$2
-    log "Blacklist remove: $ip ($mac)"
+    local ip=$1 mac=$2 old_blocked_ip=${3:-} _ctrl_ips _rule_blk_ip _all_ips _bip _seen_ips=" "
+    log "Blacklist remove: $ip ($mac) old=${old_blocked_ip:-}"
+
+    _ctrl_ips=$(_collect_ctrl_ips_for_mac "$mac")
+    _rule_blk_ip=""
+    if [ -n "$mac" ] && [ -f "$HNC_DIR/data/rules.json" ]; then
+        _rule_blk_ip=$(tr -d '\r\n' < "$HNC_DIR/data/rules.json" 2>/dev/null \
+            | grep -oiE "\"$mac\"[[:space:]]*:[[:space:]]*\\{[^}]*\\}" | head -1 \
+            | grep -oE '"blocked_ip"[[:space:]]*:[[:space:]]*"[0-9.]+"' | head -1 \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+    fi
 
     ipt_dual_del_all -t filter -D HNC_CTRL -m mac --mac-source "$mac" -j DROP
     ipt_dual_del_all -t filter -D HNC_CTRL -m mac --mac-source "$mac" \
         -p tcp -j REJECT --reject-with tcp-reset
     ipt_dual_del_all -t filter -D HNC_CTRL -m mac --mac-source "$mac" -p tcp -j DROP
 
-    if [ -n "$ip" ]; then
-        ipt_del_all "$IPT" -t filter -D HNC_CTRL -s "$ip" -j DROP
-        ipt_del_all "$IPT" -t filter -D HNC_CTRL -d "$ip" -j DROP
-    fi
+    _all_ips=$(printf '%s %s %s %s' "$ip" "$old_blocked_ip" "$_ctrl_ips" "$_rule_blk_ip" | tr ',' ' ')
+    for _bip in $_all_ips; do
+        case "$_bip" in ''|*[!0-9.]*) continue ;; esac
+        case "$_seen_ips" in *" $_bip "*) continue ;; esac
+        _seen_ips="$_seen_ips$_bip "
+        ipt_del_all "$IPT" -t filter -D HNC_CTRL -s "$_bip" -m mac --mac-source "$mac" -j DROP
+        ipt_del_all "$IPT" -t filter -D HNC_CTRL -s "$_bip" -j DROP
+        ipt_del_all "$IPT" -t filter -D HNC_CTRL -d "$_bip" -j DROP
+    done
     # Patch 4.b: blacklist_remove 是幂等清理 — 同 unmark_device,强制 return 0
     return 0
 }
@@ -605,25 +759,45 @@ blacklist_remove() {
 # ═══════════════════════════════════════════════════════════════
 # 白名单模式（v4+v6）
 # ═══════════════════════════════════════════════════════════════
-# v5.11: HNC_WHITELIST 无条件挂在 FORWARD 上, 旧实现在链尾追加裸 DROP ——
-# 从外网回来的应答包(源是公网、没有热点设备的 MAC)同样命中 DROP, 白名单
-# 设备自己也上不了网。现在:
-#   1. 链首放行 ESTABLISHED,RELATED(应答方向与已建立连接);
-#   2. DROP 只拦从热点接口进来的包(-i <iface>); 拿不到接口时退回裸 DROP,
-#      但有第 1 条兜底, 应答包不会被误杀。
+# C038 修复:
+#   1. 存在热点口 $iface 时, 链首仅对 `! -i $iface` 放行 ESTABLISHED,RELATED 回包,
+#      严禁无条件放行从热点口进来的存量 ESTABLISHED 包(否则非白名单设备已有长连接不断);
+#   2. 链尾对非白名单热点设备尾置 TCP RST(缺 REJECT 容错) + DROP 立即切断存量长连接;
+#   3. 动态维护 filter/FORWARD 链序锚点 HNC_ISOLATE -> HNC_CTRL -> HNC_WHITELIST。
 whitelist_mode_on() {
     local iface=${1:-}
-    [ -n "$iface" ] || iface=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -n 1)
+    [ -n "$iface" ] || iface=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
+    if [ -z "$iface" ] && [ ! -e "$HNC_DIR/run/hnc_state" ]; then
+        for _wf in "$HNC_DIR/run/active_iface" "$HNC_DIR/run/hotspot_iface"; do
+            [ -f "$_wf" ] || continue
+            iface=$(head -n 1 "$_wf" 2>/dev/null | tr -d ' \t\r\n')
+            [ -n "$iface" ] && break
+        done
+    fi
     case "$iface" in *[!A-Za-z0-9_.-]*) iface="" ;; esac
-    ipt_dual_q -t filter -D HNC_WHITELIST -j DROP
-    [ -n "$iface" ] && ipt_dual_q -t filter -D HNC_WHITELIST -i "$iface" -j DROP
-    ipt_dual_q -t filter -D HNC_WHITELIST -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-    ipt_dual    -t filter -I HNC_WHITELIST 1 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+
+    ipt_dual_del_all -t filter -D HNC_WHITELIST -j DROP
+    ipt_dual_del_all -t filter -D HNC_WHITELIST -p tcp -j REJECT --reject-with tcp-reset
+    ipt_dual_del_all -t filter -D HNC_WHITELIST -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
     if [ -n "$iface" ]; then
+        ipt_dual_del_all -t filter -D HNC_WHITELIST -i "$iface" -j DROP
+        ipt_dual_del_all -t filter -D HNC_WHITELIST -i "$iface" -p tcp -j REJECT --reject-with tcp-reset
+        ipt_dual_del_all -t filter -D HNC_WHITELIST ! -i "$iface" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+        ipt_dual -t filter -I HNC_WHITELIST 1 ! -i "$iface" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+        $IPT -t filter -A HNC_WHITELIST -i "$iface" -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        if ipv6_filter_ok; then
+            $IP6T -t filter -A HNC_WHITELIST -i "$iface" -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        fi
         ipt_dual -t filter -A HNC_WHITELIST -i "$iface" -j DROP
     else
+        ipt_dual -t filter -I HNC_WHITELIST 1 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+        $IPT -t filter -A HNC_WHITELIST -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        if ipv6_filter_ok; then
+            $IP6T -t filter -A HNC_WHITELIST -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        fi
         ipt_dual -t filter -A HNC_WHITELIST -j DROP
     fi
+    _ensure_fwd_ordered_link HNC_WHITELIST
     log "Whitelist mode ON (iface=${iface:-any})"
 }
 
@@ -640,9 +814,10 @@ whitelist_add() {
     ipt_dual_del_all -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j ACCEPT
     ipt_dual -t filter -I HNC_WHITELIST 1 -m mac --mac-source "$mac" -j RETURN
     if [ -n "$ip" ]; then
+        ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -m mac --mac-source "$mac" -j RETURN
         ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -j RETURN
         ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -j ACCEPT
-        $IPT -t filter -I HNC_WHITELIST 1 -s "$ip" -j RETURN
+        $IPT -t filter -I HNC_WHITELIST 1 -s "$ip" -m mac --mac-source "$mac" -j RETURN
     fi
     log "Whitelist add: $ip ($mac)"
 }
@@ -652,6 +827,7 @@ whitelist_remove() {
     ipt_dual_del_all -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j RETURN
     ipt_dual_del_all -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j ACCEPT
     if [ -n "$ip" ]; then
+        ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -m mac --mac-source "$mac" -j RETURN
         ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -j RETURN
         ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -j ACCEPT
     fi
@@ -776,17 +952,17 @@ cleanup() {
     # 兜底回收应用限速、应用 QoS 与 v6 战术子链(严格只删 HNC 热点转发链, 绝不误拆本机 OUTPUT 持久防火墙或宿主 ROM 规则)
     for _T in "$IPT" "$(ipv6_mangle_ok && echo "$IP6T")"; do
         [ -z "$_T" ] && continue
-        for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_QOS_MARK HNC_V6_EXPRESS HNC_V6_LEASH; do
+        for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_QOS_MARK HNC_V6_EXPRESS HNC_V6_LEASH HNC_TUN_GUARD; do
             for _k in 1 2 3 4; do $_T -t mangle -D FORWARD -j "$_ac" 2>/dev/null || break; done
         done
-        for _ac in HNC_V6_EXPRESS HNC_V6_LEASH; do
+        for _ac in HNC_V6_EXPRESS HNC_V6_LEASH HNC_TUN_GUARD; do
             for _k in 1 2 3 4; do $_T -t mangle -D PREROUTING -j "$_ac" 2>/dev/null || break; done
         done
-        for _ac in HNC_APP_LIMIT_DOWN HNC_APP_QOS HNC_V6_EXPRESS HNC_V6_LEASH; do
+        for _ac in HNC_APP_LIMIT_DOWN HNC_APP_QOS HNC_V6_EXPRESS HNC_V6_LEASH HNC_TUN_GUARD; do
             for _k in 1 2 3 4; do $_T -t mangle -D POSTROUTING -j "$_ac" 2>/dev/null || break; done
         done
         for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS HNC_APP_QOS_IP HNC_APP_QOS_MARK \
-                   HNC_V6_EXPRESS HNC_V6_LEASH \
+                   HNC_V6_EXPRESS HNC_V6_LEASH HNC_TUN_GUARD \
                    $($_T -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}'); do
             $_T -t mangle -F "$_ac" 2>/dev/null || true
             $_T -t mangle -X "$_ac" 2>/dev/null || true
@@ -1285,9 +1461,9 @@ case "$1" in
         rc=$?
         mac_unlock "$3"
         exit $rc ;;
-    blacklist_remove)
+    blacklist_remove|bl_del)
         mac_lock "$3" || exit 11
-        blacklist_remove "$2" "$3"
+        blacklist_remove "$2" "$3" "$4"
         rc=$?
         mac_unlock "$3"
         exit $rc ;;
@@ -1317,7 +1493,8 @@ case "$1" in
                 [ -n "$_iso_if" ] || { gate_unlock; exit 1; }
                 $_T -t filter -N HNC_ISOLATE 2>/dev/null || $_T -t filter -F HNC_ISOLATE 2>/dev/null
                 $_T -t filter -A HNC_ISOLATE -i "$_iso_if" -o "$_iso_if" -j DROP 2>/dev/null
-                $_T -t filter -I FORWARD 1 -j HNC_ISOLATE 2>/dev/null
+                _iso_pos=$(hnc_fwd_insert_pos "$_T" HNC_ISOLATE)
+                $_T -t filter -I FORWARD "$_iso_pos" -j HNC_ISOLATE 2>/dev/null
             else
                 $_T -t filter -X HNC_ISOLATE 2>/dev/null || true
             fi

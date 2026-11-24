@@ -1886,6 +1886,14 @@ func (e *leakGuardEngine) currentActivity() (<-chan struct{}, Activity, bool) {
 	return ch, act, simOn
 }
 
+func (e *leakGuardEngine) hostCaptureAwake(act Activity) bool {
+	if e == nil || e.srv == nil || e.srv.hncDir == "" || act.screenOff() {
+		return false
+	}
+	_, err := os.Stat(e.srv.selfFlagPath())
+	return err == nil
+}
+
 func (e *leakGuardEngine) runLoop(stop <-chan struct{}) {
 	if e == nil {
 		<-stop
@@ -1916,7 +1924,8 @@ func (e *leakGuardEngine) runLoop(stop <-chan struct{}) {
 
 	for {
 		actCh, act, simOn := e.currentActivity()
-		shouldSleep := act.Known && !simOn && (!act.HotspotActive || (act.ClientsOnline <= 0 && !act.WebUIActive && leakSSEActiveConns.Load() == 0))
+		hotspotAwake := act.HotspotActive && (act.ClientsOnline > 0 || act.WebUIActive || leakSSEActiveConns.Load() > 0)
+		shouldSleep := act.Known && !simOn && !hotspotAwake && !e.hostCaptureAwake(act)
 		if shouldSleep {
 			if !sleeping {
 				// 进入休眠停表前先执行一次收尾同步, 随后彻底停表 0 唤醒
@@ -2344,7 +2353,21 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 }
 
 func applyConnBlockActionForMACs(s *server, act, kind, normVal string, targetMACs []string, scriptExists bool) (applied int, lastDetail string, errResp *actionResp) {
+	applied, lastDetail, _, errResp = applyConnBlockActionTrackMACs(s, act, kind, normVal, targetMACs, scriptExists)
+	return applied, lastDetail, errResp
+}
+
+func applyConnBlockActionTrackMACs(s *server, act, kind, normVal string, targetMACs []string, scriptExists bool) (applied int, lastDetail string, mutatedMACs []string, errResp *actionResp) {
+	preSet := make(map[string]bool)
+	if s != nil && s.hncDir != "" {
+		for _, it := range readConnBlocks(s.hncDir).Items {
+			if it.Kind == kind && strings.EqualFold(it.Value, normVal) {
+				preSet[strings.ToLower(strings.TrimSpace(it.MAC))] = true
+			}
+		}
+	}
 	for _, mac := range targetMACs {
+		nm := strings.ToLower(strings.TrimSpace(mac))
 		params := map[string]string{
 			"mac":   mac,
 			"kind":  kind,
@@ -2360,19 +2383,55 @@ func applyConnBlockActionForMACs(s *server, act, kind, normVal string, targetMAC
 		if resp.OK {
 			applied++
 			lastDetail = resp.Detail
+			if act == "block" && !preSet[nm] && resp.Detail != "已经封锁过了" {
+				mutatedMACs = append(mutatedMACs, nm)
+				preSet[nm] = true
+			} else if act == "unblock" && preSet[nm] {
+				mutatedMACs = append(mutatedMACs, nm)
+				delete(preSet, nm)
+			}
 			continue
 		}
 		if resp.Error == "sync failed" && !scriptExists {
 			applied++
 			lastDetail = "saved (sandbox no connblock_sync.sh)"
+			if act == "block" && !preSet[nm] {
+				mutatedMACs = append(mutatedMACs, nm)
+				preSet[nm] = true
+			} else if act == "unblock" && preSet[nm] {
+				mutatedMACs = append(mutatedMACs, nm)
+				delete(preSet, nm)
+			}
 			continue
 		}
 		if act == "unblock" && resp.Error == "not found" {
 			continue
 		}
-		return applied, lastDetail, &resp
+		if len(mutatedMACs) > 0 {
+			rbAct := "unblock"
+			if act == "unblock" {
+				rbAct = "block"
+			}
+			for _, rbMAC := range mutatedMACs {
+				rbParams := map[string]string{
+					"mac":   rbMAC,
+					"kind":  kind,
+					"value": normVal,
+					"label": "LeakGuard 反制",
+				}
+				if rbAct == "block" {
+					_ = actionConnBlockAdd(s, rbParams)
+				} else {
+					_ = actionConnBlockDel(s, rbParams)
+				}
+			}
+			if s != nil {
+				s.refreshDNSTKBlocklist(time.Now())
+			}
+		}
+		return applied, lastDetail, nil, &resp
 	}
-	return applied, lastDetail, nil
+	return applied, lastDetail, mutatedMACs, nil
 }
 
 // apiLeakGuardBlockDomain POST /api/leakguard/block-domain
@@ -2511,14 +2570,18 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 	}
 
 	var (
-		targetMACs      []string
-		applied         int
-		lastDetail      string
-		skippedSharedIP bool
-		skippedIPVendor string
-		blockedAlsoIP   string
-		normAlsoIP      string
-		unblockedIPs    []string
+		targetMACs          []string
+		applied             int
+		lastDetail          string
+		skippedSharedIP     bool
+		skippedIPVendor     string
+		blockedAlsoIP       string
+		normAlsoIP          string
+		unblockedIPs        []string
+		hotspotScriptExists bool
+		mutatedMainMACs     []string
+		addedAlsoIPMACs     []string
+		removedAlsoIPMACs   map[string][]string
 	)
 
 	if doHotspot {
@@ -2528,6 +2591,7 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 			targetMACs = []string{reqMAC}
 		} else {
 			macSet := make(map[string]bool)
+			var evCandMACs []string
 			eng.mu.Lock()
 			for _, ev := range eng.events {
 				if validMAC(ev.MAC) {
@@ -2536,11 +2600,16 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 						evHost = strings.ToLower(ev.DstHost)
 					}
 					if evHost == normVal || strings.HasSuffix(evHost, "."+normVal) || ev.DstIP == normVal {
-						macSet[ev.MAC] = true
+						evCandMACs = append(evCandMACs, ev.MAC)
 					}
 				}
 			}
 			eng.mu.Unlock()
+			for _, em := range evCandMACs {
+				if !isProtectedMAC(s.hncDir, em) {
+					macSet[em] = true
+				}
+			}
 			for mac := range s.deviceIPsByMAC() {
 				if validMAC(mac) && !isProtectedMAC(s.hncDir, mac) {
 					macSet[mac] = true
@@ -2562,13 +2631,12 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 			sort.Strings(targetMACs)
 		}
 
-		scriptExists := false
 		if stFile, err := os.Stat(filepath.Join(s.hncDir, "bin", "connblock_sync.sh")); err == nil && !stFile.IsDir() {
-			scriptExists = true
+			hotspotScriptExists = true
 		}
 
 		var errResp *actionResp
-		applied, lastDetail, errResp = applyConnBlockActionForMACs(s, act, kind, normVal, targetMACs, scriptExists)
+		applied, lastDetail, mutatedMainMACs, errResp = applyConnBlockActionTrackMACs(s, act, kind, normVal, targetMACs, hotspotScriptExists)
 		if errResp != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"ok":     false,
@@ -2586,8 +2654,9 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 						skippedSharedIP = true
 						skippedIPVendor = vendor
 					} else {
-						if _, _, ipErr := applyConnBlockActionForMACs(s, "block", "ip", normAlsoIP, targetMACs, scriptExists); ipErr == nil {
+						if _, _, ipAdded, ipErr := applyConnBlockActionTrackMACs(s, "block", "ip", normAlsoIP, targetMACs, hotspotScriptExists); ipErr == nil {
 							blockedAlsoIP = normAlsoIP
+							addedAlsoIPMACs = ipAdded
 						}
 					}
 				} else {
@@ -2612,14 +2681,28 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			eng.mu.Unlock()
+			removedAlsoIPMACs = make(map[string][]string, len(unblockedIPs))
 			for _, uip := range unblockedIPs {
-				if _, _, ipErr := applyConnBlockActionForMACs(s, "unblock", "ip", uip, targetMACs, scriptExists); ipErr != nil {
+				_, _, ipRemoved, ipErr := applyConnBlockActionTrackMACs(s, "unblock", "ip", uip, targetMACs, hotspotScriptExists)
+				if ipErr != nil {
+					for prevIP, prevMACs := range removedAlsoIPMACs {
+						if len(prevMACs) > 0 {
+							_, _, _ = applyConnBlockActionForMACs(s, "block", "ip", prevIP, prevMACs, hotspotScriptExists)
+						}
+					}
+					if len(mutatedMainMACs) > 0 {
+						_, _, _ = applyConnBlockActionForMACs(s, "block", kind, normVal, mutatedMainMACs, hotspotScriptExists)
+					}
+					s.refreshDNSTKBlocklist(time.Now())
 					writeJSON(w, http.StatusInternalServerError, map[string]any{
 						"ok":     false,
 						"error":  ipErr.Error,
 						"detail": ipErr.Detail,
 					})
 					return
+				}
+				if len(ipRemoved) > 0 {
+					removedAlsoIPMACs[uip] = ipRemoved
 				}
 			}
 		}
@@ -2629,6 +2712,15 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 		if act == "block" {
 			// 上方已完成三级基础设施守卫确认, 此处传 force=true 直接落盘并同步 HNC_SELF_DNS
 			if _, _, _, herr := sf.BlockDomain(normVal, true); herr != nil {
+				if doHotspot {
+					if len(addedAlsoIPMACs) > 0 && normAlsoIP != "" {
+						_, _, _ = applyConnBlockActionForMACs(s, "unblock", "ip", normAlsoIP, addedAlsoIPMACs, hotspotScriptExists)
+					}
+					if len(mutatedMainMACs) > 0 {
+						_, _, _ = applyConnBlockActionForMACs(s, "unblock", kind, normVal, mutatedMainMACs, hotspotScriptExists)
+					}
+					s.refreshDNSTKBlocklist(time.Now())
+				}
 				writeJSON(w, http.StatusBadRequest, map[string]any{
 					"ok":     false,
 					"error":  "self_dns_block_failed",
@@ -2644,6 +2736,17 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 			}
 		} else {
 			if _, _, herr := sf.UnblockDomain(normVal); herr != nil {
+				if doHotspot {
+					for prevIP, prevMACs := range removedAlsoIPMACs {
+						if len(prevMACs) > 0 {
+							_, _, _ = applyConnBlockActionForMACs(s, "block", "ip", prevIP, prevMACs, hotspotScriptExists)
+						}
+					}
+					if len(mutatedMainMACs) > 0 {
+						_, _, _ = applyConnBlockActionForMACs(s, "block", kind, normVal, mutatedMainMACs, hotspotScriptExists)
+					}
+					s.refreshDNSTKBlocklist(time.Now())
+				}
 				writeJSON(w, http.StatusBadRequest, map[string]any{
 					"ok":     false,
 					"error":  "self_dns_unblock_failed",

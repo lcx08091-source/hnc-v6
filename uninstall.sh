@@ -28,15 +28,29 @@ rm -rf /sys/fs/bpf/hnc 2>/dev/null || true
 # 留下一个 tombstone (用户重装时不会误导)
 # rc38 (SEC-1): 备份目录收权 700 + 全部备份文件 600（rules.json 含 hotspot_pass，
 # remote_tokens.json 含已配对远程管理凭据）。
-mkdir -p /data/local/hnc_backup 2>/dev/null
-chmod 700 /data/local/hnc_backup 2>/dev/null || true
-for _bf in rules.json device_names.json templates.json remote_tokens.json tokens.json; do
+_BACKUP_DIR=${HNC_BACKUP_DIR:-/data/local/hnc_backup}
+mkdir -p "$_BACKUP_DIR" 2>/dev/null
+chmod 700 "$_BACKUP_DIR" 2>/dev/null || true
+for _bf in rules.json device_names.json templates.json remote_tokens.json tokens.json \
+           self_firewall.json mac_aliases.json conn_blocks.json app_limits.json \
+           limit_policies.json autorate.json alerts_config.json app_controls.json \
+           dns_takeover.json encdns.json dpi_user_rules.json phone_usage_config.json \
+           dpi_experiment.json device_ident_override.json startup_fp.json fp_prototypes.json \
+           dpi_self_config.json leakguard_config.json vector_express.json update_leash.json \
+           thermo_cruise.json rmac_policy.json webui_access.json dpi_fp_prototypes.json \
+           self_policy.json; do
     if [ -f "$HNC/data/$_bf" ]; then
-        cp -f "$HNC/data/$_bf" "/data/local/hnc_backup/${_bf}.last" 2>/dev/null
-        chmod 600 "/data/local/hnc_backup/${_bf}.last" 2>/dev/null || true
+        cp -f "$HNC/data/$_bf" "$_BACKUP_DIR/${_bf}.last" 2>/dev/null
+        chmod 600 "$_BACKUP_DIR/${_bf}.last" 2>/dev/null || true
     fi
 done
-unset _bf
+for _v6f in "$HNC"/data/v6_*.json; do
+    [ -f "$_v6f" ] || continue
+    _v6bn=${_v6f##*/}
+    cp -f "$_v6f" "$_BACKUP_DIR/${_v6bn}.last" 2>/dev/null
+    chmod 600 "$_BACKUP_DIR/${_v6bn}.last" 2>/dev/null || true
+done
+unset _bf _v6f _v6bn _BACKUP_DIR
 
 # 删除运行状态 (pid / lock / pair pending / bpf 状态)
 umount -l "$HNC/run" 2>/dev/null || true

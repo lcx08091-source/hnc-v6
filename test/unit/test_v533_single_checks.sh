@@ -9,6 +9,14 @@
 # 「改动前会失败」: v5.32 的四个 action 都存在(退 0 / 1); service.sh 按 remote_enabled
 # 带 -bind 0.0.0.0 而看门狗不带参数; do_migrate 杀 httpd 并删 httpd_bind_ip。
 
+_V533_STANDALONE=0
+if ! command -v test_start >/dev/null 2>&1; then
+    _V533_STANDALONE=1
+    HNC_REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+    export HNC_REPO_ROOT
+    . "$HNC_REPO_ROOT/test/lib.sh"
+fi
+
 WD="$HNC_REPO_ROOT/bin/watchdog.sh"
 
 test_start "v5.33 watchdog.sh: 四个检查 action 已删(退 64), 动手的 action 还在"
@@ -51,7 +59,7 @@ grep -q 'httpd_bind_ip' "$HNC_REPO_ROOT/post-fs-data.sh" || bad="$bad post-fs-da
 # 现编的二进制外都必须在源码树里 —— v5.33 第 4 步删 hnc_clsact_watchdog.sh 时漏改这两张
 # 清单, CI 打包检查会以「required file missing」失败。
 test_start "v5.33 必需文件清单: 非 CI 构建产物都在源码树里(删文件时清单要跟着改)"
-built='daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/hnc_clsact_ctl bin/hnc_clsact.o'
+built='daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/hnc_watchdog bin/hnc_launcher bin/fork_probe bin/hotspotd bin/hnc_ipc bin/mdns_resolve bin/hnc_clsact_ctl bin/hnc_tc_ingress bin/hnc_clsact.o bin/hnc_applabel.dex'
 missing=""
 for f in $(sed -n 's/^for req in \(.*\); do$/\1/p' "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh") \
          $(sed -n '/# 4. Required files/{n;s/^for f in \(.*\); do$/\1/p}' "$HNC_REPO_ROOT/bin/ci_preflight.sh"); do
@@ -60,3 +68,8 @@ for f in $(sed -n 's/^for req in \(.*\); do$/\1/p' "$HNC_REPO_ROOT/bin/artifact_
 done
 n=$(sed -n 's/^for req in \(.*\); do$/\1/p' "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh" | wc -w)
 [ -z "$missing" ] && [ "$n" -gt 10 ] && test_pass || test_fail "清单里有源码树没有的文件:$missing (artifact 清单 $n 项)"
+
+if [ "$_V533_STANDALONE" = 1 ]; then
+    print_test_summary
+    exit $?
+fi

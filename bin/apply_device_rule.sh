@@ -132,8 +132,25 @@ get_ip() {
 # rules.json fallback IP, used when the device is offline but old IP-specific
 # iptables DROP/MARK rules need cleanup.
 get_rule_ip() {
-    local mac=$1
-    sh "$JSON_SET" device_get "$mac" ip 2>/dev/null | awk 'NR==1{print; exit}'
+    local mac=$1 _rip
+    _rip=$(sh "$JSON_SET" device_get "$mac" ip 2>/dev/null | awk 'NR==1{print; exit}')
+    if [ -z "$_rip" ]; then
+        local _lmac
+        _lmac=$(printf '%s' "$mac" | tr 'A-Z' 'a-z')
+        [ "$_lmac" != "$mac" ] && _rip=$(sh "$JSON_SET" device_get "$_lmac" ip 2>/dev/null | awk 'NR==1{print; exit}')
+    fi
+    if valid_ipv4 "$_rip"; then printf '%s\n' "$_rip"; else echo ""; fi
+}
+
+get_blocked_ip() {
+    local mac=$1 _bip
+    _bip=$(sh "$JSON_SET" device_get "$mac" blocked_ip 2>/dev/null | awk 'NR==1{print; exit}')
+    if [ -z "$_bip" ]; then
+        local _lmac
+        _lmac=$(printf '%s' "$mac" | tr 'A-Z' 'a-z')
+        [ "$_lmac" != "$mac" ] && _bip=$(sh "$JSON_SET" device_get "$_lmac" blocked_ip 2>/dev/null | awk 'NR==1{print; exit}')
+    fi
+    if valid_ipv4 "$_bip"; then printf '%s\n' "$_bip"; else echo ""; fi
 }
 
 # ── helper: 读/分配 mark_id ──────────────────────────────────────
@@ -339,6 +356,38 @@ case "$CMD" in
         if [ $TC_RC -eq 8 ]; then
             PARTIAL_TC="uplink"
             UP_MBPS=0
+            if ! num_gt0 "$DN_MBPS"; then
+                log "tc set_limit partial rc=8 with down=0 -> effective 0/0 limit; rolling back (mac=$MAC mid=$MID)"
+                DELAY_ENABLED=$(sh "$JSON_SET" device_get "$MAC" delay_enabled 2>/dev/null)
+                DELAY_MS=$(sh "$JSON_SET" device_get "$MAC" delay_ms 2>/dev/null)
+                JITTER_MS=$(sh "$JSON_SET" device_get "$MAC" jitter_ms 2>/dev/null)
+                LOSS_PCT=$(sh "$JSON_SET" device_get "$MAC" loss_pct 2>/dev/null)
+                HAS_DELAY=0
+                [ "$DELAY_ENABLED" = "true" ] && HAS_DELAY=1
+                num_gt0 "$DELAY_MS" && HAS_DELAY=1
+                num_gt0 "$JITTER_MS" && HAS_DELAY=1
+                num_gt0 "$LOSS_PCT" && HAS_DELAY=1
+                _CID_CHK="$MID"; [ "$MID" = "1" ] && _CID_CHK=100
+                HAS_SUBCLASS=0
+                if [ -n "$IFACE" ]; then
+                    grep -qx "$IFACE $_CID_CHK" "$HNC_DIR/run/app_qos.state" 2>/dev/null && HAS_SUBCLASS=1
+                    grep -qx "$IFACE $_CID_CHK" "$HNC_DIR/run/app_limits.devs" 2>/dev/null && HAS_SUBCLASS=1
+                fi
+                if [ "$HAS_DELAY" = "0" ] && [ "$HAS_SUBCLASS" = "0" ]; then
+                    sh "$TC" remove "$IFACE" "$MID" >> "$LOG" 2>&1 || true
+                    sh "$IPT" unmark "$IP" "$MAC" "$MID" >> "$LOG" 2>&1 || log "rollback iptables unmark warn (mid=$MID)"
+                    notify_offload "$MAC" 0
+                fi
+                js_set_dev ip "$IP"
+                js_set_dev down_mbps 0
+                js_set_dev up_mbps 0
+                js_set_dev limit_enabled false
+                js_set_dev last_seen_persist "$(now_ts)"
+                js_set_dev_flush
+                [ -x "$HNC_DIR/bin/hnc_clsact_sync.sh" ] && \
+                    sh "$HNC_DIR/bin/hnc_clsact_sync.sh" >> "$LOG" 2>&1 || true
+                emit_err "uplink shaping unsupported on this kernel/ROM and downlink limit is 0"
+            fi
             log "tc set_limit partial: uplink failed, downlink kept (mac=$MAC mid=$MID)"
         fi
         notify_offload "$MAC" 1
@@ -458,28 +507,41 @@ case "$CMD" in
 
     bl_add)
         IP=$(get_ip "$MAC")
-        log "bl_add mac=$MAC ip=${IP:-(no-ip)}"
+        OLD_BLOCKED_IP=$(get_blocked_ip "$MAC")
+        log "bl_add mac=$MAC ip=${IP:-(no-ip)} old_blocked_ip=${OLD_BLOCKED_IP:-(none)}"
         if [ -n "$IP" ]; then
+            if [ -n "$OLD_BLOCKED_IP" ] && [ "$OLD_BLOCKED_IP" != "$IP" ]; then
+                sh "$IPT" blacklist_remove "$OLD_BLOCKED_IP" "$MAC" >> "$LOG" 2>&1 || true
+            fi
             sh "$IPT" blacklist_add "$IP" "$MAC" >> "$LOG" 2>&1 \
                 || emit_err "iptables blacklist_add failed (see apply.log)"
         else
             sh "$IPT" blacklist_add "" "$MAC" >> "$LOG" 2>&1 \
                 || emit_err "iptables blacklist_add failed (mac-only path, see apply.log)"
         fi
-        if sh "$JSON_SET" bl_add "$MAC" >/dev/null 2>&1; then
+        _bl_json_ok=1
+        sh "$JSON_SET" bl_add "$MAC" >/dev/null 2>&1 || _bl_json_ok=0
+        if [ -n "$IP" ]; then
+            sh "$JSON_SET" device "$MAC" blocked_ip "$IP" >> "$LOG" 2>&1 || _bl_json_ok=0
+        fi
+        if [ "$_bl_json_ok" = "1" ]; then
             log "bl_add OK"
             echo "ok"
         else
-            log "bl_add applied to iptables but JSON bl_add failed"
+            log "bl_add applied to iptables but JSON bl_add/blocked_ip failed"
             echo "error: partial_json_fail=blacklist_add"
             exit 8
         fi
         ;;
 
     bl_del)
-        IP=$(get_ip "$MAC")
+        LIVE_IP=$(get_ip "$MAC")
+        BLOCKED_IP=$(get_blocked_ip "$MAC")
+        IP="$LIVE_IP"
+        [ -z "$IP" ] && IP="$BLOCKED_IP"
         [ -z "$IP" ] && IP=$(get_rule_ip "$MAC")
-        log "bl_del mac=$MAC ip=${IP:-(no-ip)}"
+        valid_ipv4 "$IP" || IP=""
+        log "bl_del mac=$MAC ip=${IP:-(no-ip)} blocked_ip=${BLOCKED_IP:-(none)}"
         if [ -n "$IP" ]; then
             sh "$IPT" blacklist_remove "$IP" "$MAC" >> "$LOG" 2>&1 \
                 || log "iptables blacklist_remove warn (rule may not exist)"
@@ -487,7 +549,15 @@ case "$CMD" in
             sh "$IPT" blacklist_remove "" "$MAC" >> "$LOG" 2>&1 \
                 || log "iptables blacklist_remove warn (mac-only path)"
         fi
+        if [ -n "$BLOCKED_IP" ] && [ "$BLOCKED_IP" != "$IP" ]; then
+            sh "$IPT" blacklist_remove "$BLOCKED_IP" "$MAC" >> "$LOG" 2>&1 \
+                || log "iptables blacklist_remove old blocked_ip=$BLOCKED_IP warn"
+        fi
         if sh "$JSON_SET" bl_del "$MAC" >/dev/null 2>&1; then
+            if [ -n "$BLOCKED_IP" ]; then
+                sh "$JSON_SET" device "$MAC" blocked_ip "" >> "$LOG" 2>&1 \
+                    || log "WARN: failed to clear blocked_ip for $MAC"
+            fi
             log "bl_del OK"
             echo "ok"
         else

@@ -55,11 +55,70 @@ _httpd_ready() {
     _port_ready "$LOOP_PORT"
 }
 
+_is_service_sh_pid() {
+    _isp_p="$1"
+    _isp_proot="${HNC_PROC_ROOT:-/proc}"
+    case "$_isp_p" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_isp_p" = "$$" ] && return 1
+    [ -n "${PPID:-}" ] && [ "$_isp_p" = "$PPID" ] && return 1
+    kill -0 "$_isp_p" 2>/dev/null || [ "$_isp_proot" != "/proc" ] || return 1
+    [ -r "$_isp_proot/$_isp_p/cmdline" ] || return 1
+    _isp_a0=$(tr '\000' '\n' < "$_isp_proot/$_isp_p/cmdline" 2>/dev/null | sed -n '1p')
+    _isp_a1=$(tr '\000' '\n' < "$_isp_proot/$_isp_p/cmdline" 2>/dev/null | sed -n '2p')
+    case "$_isp_a0" in
+        */hotspot_net_ctl/service.sh|*/hotspot_network_control/service.sh|/data/adb/hnc/service.sh|"$MODDIR/service.sh")
+            return 0
+            ;;
+    esac
+    case "${_isp_a0##*/}" in
+        sh|mksh|ash|dash|busybox|toybox)
+            [ "$_isp_a1" = "-c" ] && return 1
+            case "$_isp_a1" in
+                */hotspot_net_ctl/service.sh|*/hotspot_network_control/service.sh|/data/adb/hnc/service.sh|"$MODDIR/service.sh")
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
+_service_starting() {
+    _ss_proot="${HNC_PROC_ROOT:-/proc}"
+    if [ -f "$RUN/service.pid" ]; then
+        _ss_spid=$(head -n 1 "$RUN/service.pid" 2>/dev/null | tr -dc '0-9')
+        if [ -n "$_ss_spid" ] && _is_service_sh_pid "$_ss_spid"; then
+            return 0
+        fi
+    fi
+    _ss_sent=""
+    if [ -f "$RUN/sentinel.pid" ]; then
+        _ss_sent=$(head -n 1 "$RUN/sentinel.pid" 2>/dev/null | tr -dc '0-9')
+        if [ -n "$_ss_sent" ] && _is_service_sh_pid "$_ss_sent"; then
+            return 1
+        fi
+    fi
+    [ -d "$_ss_proot" ] || return 1
+    for _ss_d in "$_ss_proot"/[0-9]*; do
+        [ -r "$_ss_d/cmdline" ] || continue
+        _ss_p=${_ss_d##*/}
+        [ -n "$_ss_sent" ] && [ "$_ss_p" = "$_ss_sent" ] && continue
+        if _is_service_sh_pid "$_ss_p"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 if ! _httpd_ready; then
-    echo "- HNC: WebUI 守护进程未就绪，正在后台唤醒服务..."
-    if [ -f "$MODDIR/service.sh" ]; then
+    if _service_starting; then
+        echo "- HNC: 检测到服务正在启动中，等待 WebUI 就绪..."
+    elif [ -f "$MODDIR/service.sh" ]; then
+        echo "- HNC: WebUI 守护进程未就绪，正在后台唤醒服务..."
         mkdir -p "$HNC_DIR/logs" 2>/dev/null
         nohup sh "$MODDIR/service.sh" </dev/null >>"$HNC_DIR/logs/service.log" 2>&1 &
+    fi
+    if [ -f "$MODDIR/service.sh" ] || _service_starting; then
         # 最多等待 12 秒(24 * 0.5s), 轮询 httpd.pid 存活且 :8444 监听就绪
         _wait_i=0
         while [ "$_wait_i" -lt 24 ]; do

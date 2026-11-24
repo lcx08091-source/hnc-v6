@@ -1861,6 +1861,17 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		cur = map[string]interface{}{"slot": 0, "carrier": puUnknownSIM, "sub_id": curSIM.SubID}
 	}
 
+	cycStr := cycleStart.Format("20060102")
+	var anchorSim1, anchorSim2 interface{}
+	if cfg.AnchorCycle == cycStr && len(cfg.AnchorGB) > 0 {
+		if v, ok := cfg.AnchorGB["1"]; ok && !math.IsNaN(v) && v >= 0 {
+			anchorSim1 = v
+		}
+		if v, ok := cfg.AnchorGB["2"]; ok && !math.IsNaN(v) && v >= 0 {
+			anchorSim2 = v
+		}
+	}
+
 	resp := map[string]interface{}{
 		"period":      period,
 		"since":       since.Unix(),
@@ -1872,7 +1883,7 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		"config": map[string]interface{}{
 			"billing_day": cfg.BillingDay, "warn_percent": cfg.WarnPercent,
 			"plan_sim1_gb": cfg.PlanGB["1"], "plan_sim2_gb": cfg.PlanGB["2"],
-			"anchor_sim1_gb": cfg.AnchorGB["1"], "anchor_sim2_gb": cfg.AnchorGB["2"],
+			"anchor_sim1_gb": anchorSim1, "anchor_sim2_gb": anchorSim2,
 			"use_netstats": cfg.netstatsMode(),
 		},
 		"totals": map[string]puRxTx{

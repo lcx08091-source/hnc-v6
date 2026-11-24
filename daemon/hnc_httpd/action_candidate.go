@@ -25,6 +25,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"hnc.io/dpid/output"
 )
 
 const (
@@ -46,6 +48,33 @@ func validApex(s string) (string, bool) {
 	return s, true
 }
 
+// isSharedOrBlockedRuleDomain 统一检查域名是否命中 shared_infra、IsAutoDetectedInfra 或 auto_expand_blocklist 黑名单。
+func isSharedOrBlockedRuleDomain(hncDir, host string) (string, bool) {
+	h := rpNormHost(host)
+	if h == "" {
+		return "", false
+	}
+	si := loadSharedInfra(hncDir)
+	if si != nil && si.Match(h) {
+		return "shared_infra", true
+	}
+	if reason, ok := output.IsAutoDetectedInfra(h, si); ok {
+		return reason, true
+	}
+	blocked := loadMergedAutoExpandBlockSet(hncDir)
+	for cur := h; ; {
+		if blocked[cur] {
+			return "blocklist", true
+		}
+		i := strings.IndexByte(cur, '.')
+		if i < 0 || i+1 >= len(cur) {
+			break
+		}
+		cur = cur[i+1:]
+	}
+	return "", false
+}
+
 // Serialize writes per-file to avoid lost updates from concurrent clicks.
 var (
 	candidateDecisionsMu  sync.Mutex
@@ -64,11 +93,47 @@ type blocklistFile struct {
 	Comment     string   `json:"_comment,omitempty"`
 }
 
+func mergeFactoryAutoExpandBlocklist(hncDir string, dst *blocklistFile) bool {
+	if dst == nil {
+		return false
+	}
+	seen := make(map[string]bool, len(dst.BlockedApex))
+	clean := make([]string, 0, len(dst.BlockedApex)+64)
+	for _, x := range dst.BlockedApex {
+		if ap, ok := validApex(x); ok && !seen[ap] {
+			seen[ap] = true
+			clean = append(clean, ap)
+		}
+	}
+	added := false
+	for _, p := range []string{
+		filepath.Join(moduleDir(hncDir), "data", "auto_expand_blocklist.json"),
+		filepath.Join(hncDir, "data", "auto_expand_blocklist.json"),
+	} {
+		var fb blocklistFile
+		if err := readJSONInto(p, &fb); err != nil {
+			continue
+		}
+		for _, x := range fb.BlockedApex {
+			if ap, ok := validApex(x); ok && !seen[ap] {
+				seen[ap] = true
+				clean = append(clean, ap)
+				added = true
+			}
+		}
+	}
+	dst.BlockedApex = clean
+	return added
+}
+
 // actionCandidatePromote appends an apex to the user-approved promote list.
 func actionCandidatePromote(hncDir string, p map[string]string) actionResp {
 	apex, ok := validApex(p["apex"])
 	if !ok {
 		return actionResp{OK: false, Error: "bad params", Detail: "invalid apex (expected a lowercase domain like example.com)"}
+	}
+	if reason, blocked := isSharedOrBlockedRuleDomain(hncDir, apex); blocked {
+		return actionResp{OK: false, Error: "shared infra", Detail: fmt.Sprintf("%s is shared infrastructure (%s) and cannot be promoted", apex, reason)}
 	}
 	path := filepath.Join(hncDir, candidateDecisionsRelPath)
 
@@ -105,15 +170,22 @@ func actionCandidateReject(hncDir string, p map[string]string) actionResp {
 	if err := readJSONInto(path, &f); err != nil {
 		return actionResp{OK: false, Error: "read failed", Detail: err.Error()}
 	}
-	if contains(f.BlockedApex, apex) {
+	alreadyInEtc := contains(f.BlockedApex, apex)
+	mergedFactory := mergeFactoryAutoExpandBlocklist(hncDir, &f)
+	if alreadyInEtc && !mergedFactory {
 		return actionResp{OK: true, Detail: fmt.Sprintf("%s already blocklisted", apex)}
 	}
-	f.BlockedApex = append(f.BlockedApex, apex)
+	if !contains(f.BlockedApex, apex) {
+		f.BlockedApex = append(f.BlockedApex, apex)
+	}
 	if f.Comment == "" {
 		f.Comment = "共享基础设施 / 用户拒绝的 apex; 不自动归到任何 app。"
 	}
 	if err := writeJSONAtomic(path, &f); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	}
+	if alreadyInEtc {
+		return actionResp{OK: true, Detail: fmt.Sprintf("%s already blocklisted", apex)}
 	}
 	return actionResp{OK: true, Detail: fmt.Sprintf("blocklisted %s — any existing promotion is demoted within 60s", apex)}
 }

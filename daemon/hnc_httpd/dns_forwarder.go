@@ -136,27 +136,39 @@ type dnsForwarder struct {
 	tcpSem   chan struct{}
 	bgSem    chan struct{}
 	tcpConns map[net.Conn]bool
-	latMu    sync.Mutex
-	lat      [dnsLatRing]float64
-	latN     int
-	latPos   int
+	latMu       sync.Mutex
+	lat         [dnsLatRing]float64
+	latN        int
+	latPos      int
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
 }
 
 func newDNSForwarder() *dnsForwarder {
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	f := &dnsForwarder{
-		timeout:   dnsFwdUpTimeout,
-		staleWait: dnsStaleFastWait,
-		cache:     newDNSCache(dnsCacheMaxEntries, dnsCacheMaxBytes),
-		limiter:   newDNSRateLimiter(dnsRateDefaultPerSec, dnsRateDefaultBurst, dnsRateMaxClients),
-		local:     map[string]bool{},
-		sem:       make(chan struct{}, dnsFwdMaxInflight),
-		tcpSem:    make(chan struct{}, dnsFwdMaxTCPConns),
-		bgSem:     make(chan struct{}, dnsFwdMaxStaleBg),
-		tcpConns:  map[net.Conn]bool{},
+		timeout:     dnsFwdUpTimeout,
+		staleWait:   dnsStaleFastWait,
+		cache:       newDNSCache(dnsCacheMaxEntries, dnsCacheMaxBytes),
+		limiter:     newDNSRateLimiter(dnsRateDefaultPerSec, dnsRateDefaultBurst, dnsRateMaxClients),
+		local:       map[string]bool{},
+		sem:         make(chan struct{}, dnsFwdMaxInflight),
+		tcpSem:      make(chan struct{}, dnsFwdMaxTCPConns),
+		bgSem:       make(chan struct{}, dnsFwdMaxStaleBg),
+		tcpConns:    map[net.Conn]bool{},
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
 	}
 	f.upstream.Store("")
 	f.blockMode.Store("nxdomain")
 	return f
+}
+
+func (f *dnsForwarder) baseCtx() context.Context {
+	if f != nil && f.closeCtx != nil {
+		return f.closeCtx
+	}
+	return context.Background()
 }
 
 func (f *dnsForwarder) FlushCache() {
@@ -279,6 +291,9 @@ func (f *dnsForwarder) ListenAddrs() []string {
 }
 
 func (f *dnsForwarder) closeLocked() {
+	if f.closeCancel != nil {
+		f.closeCancel()
+	}
 	for _, c := range f.udp {
 		c.Close()
 	}
@@ -524,6 +539,9 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 	}
 	if m.Rcode == dnsRcodeServFail {
 		f.st.servfail.Add(1)
+		f.st.upErrs.Add(1)
+	} else if m.Rcode == dnsRcodeRefused {
+		f.st.upErrs.Add(1)
 	}
 	captiveHijack := dnsHasCaptiveHijackAnswer(m)
 	if (isProbe || captiveHijack) && m.Rcode == dnsRcodeNoError && m.ANCount > 0 {
@@ -551,7 +569,7 @@ type dnsExchResult struct {
 // handleWithStale 存在有效保活候选时: 前台等待上游最多 staleWait(800ms);
 // 800ms 内拿到非 SERVFAIL 合法应答直接回新包(REFUSED/FORMERR/NXDOMAIN 绝不回退);
 // 超时、网络错误或 SERVFAIL 时立即返回重写后的陈旧记录(TTL=5, 清 AA, 不调 onAnswer);
-// 后台在途单次上游查询受 bgSem(64) 并发封顶保护, 若在原 timeout(2500ms)内返回则静默刷入新缓存;
+// 后台在途单次上游查询受 bgSem(64) 并发封顶保护, 纳入 wg 并随 Close() 取消, 若在原 timeout(2500ms)内返回则静默刷入新缓存;
 // 超出 bgSem 上限时主动取消上游连接并丢弃后台刷新, 杜绝弱网风暴下 goroutine 堆积。
 func (f *dnsForwarder) handleWithStale(
 	query []byte, q dnsQuery, proto, key, mac string, t0 time.Time,
@@ -585,10 +603,20 @@ func (f *dnsForwarder) handleWithStale(
 	if f.timeout > 0 && wait >= f.timeout {
 		res.resp, res.err = f.exchange(query, q, proto)
 	} else {
-		ctx, cancelExch := context.WithCancel(context.Background())
+		f.mu.Lock()
+		if f.closed {
+			f.mu.Unlock()
+			return fallback()
+		}
+		f.wg.Add(1)
+		f.mu.Unlock()
+
+		base := f.baseCtx()
+		ctx, cancelExch := context.WithCancel(base)
 		ch := make(chan dnsExchResult, 1)
 		bgSave := make(chan bool, 1)
 		go func() {
+			defer f.wg.Done()
 			r, err := f.exchangeCtx(ctx, query, q, proto)
 			ch <- dnsExchResult{resp: r, err: err}
 			if <-bgSave {
@@ -598,7 +626,7 @@ func (f *dnsForwarder) handleWithStale(
 						<-f.bgSem
 					}
 				}()
-				if err == nil {
+				if err == nil && ctx.Err() == nil {
 					m, perr := dnsParseResponse(r)
 					if perr != nil || !dnsSameQuestion(q, m) {
 						f.st.upErrs.Add(1)
@@ -606,6 +634,11 @@ func (f *dnsForwarder) handleWithStale(
 					}
 					if m.Rcode == dnsRcodeServFail {
 						f.st.servfail.Add(1)
+						f.st.upErrs.Add(1)
+						return
+					}
+					if m.Rcode == dnsRcodeRefused {
+						f.st.upErrs.Add(1)
 						return
 					}
 					if m.Flags&dnsFlagTC == 0 {
@@ -620,7 +653,17 @@ func (f *dnsForwarder) handleWithStale(
 			tm.Stop()
 			cancelExch()
 			bgSave <- false
+		case <-base.Done():
+			tm.Stop()
+			cancelExch()
+			bgSave <- false
+			return fallback()
 		case <-tm.C:
+			if base.Err() != nil {
+				cancelExch()
+				bgSave <- false
+				return fallback()
+			}
 			if f.bgSem == nil {
 				bgSave <- true
 			} else {
@@ -646,7 +689,11 @@ func (f *dnsForwarder) handleWithStale(
 	}
 	if m.Rcode == dnsRcodeServFail {
 		f.st.servfail.Add(1)
+		f.st.upErrs.Add(1)
 		return fallback()
+	}
+	if m.Rcode == dnsRcodeRefused {
+		f.st.upErrs.Add(1)
 	}
 	outResp := res.resp
 	captiveHijack := dnsHasCaptiveHijackAnswer(m)
@@ -685,7 +732,7 @@ func dnsLogAnswers(m dnsMsgInfo) []string {
 
 // exchange 发往上游: UDP(TC → TCP 重取)或 TCP
 func (f *dnsForwarder) exchange(query []byte, q dnsQuery, proto string) ([]byte, error) {
-	return f.exchangeCtx(context.Background(), query, q, proto)
+	return f.exchangeCtx(f.baseCtx(), query, q, proto)
 }
 
 func (f *dnsForwarder) exchangeCtx(ctx context.Context, query []byte, q dnsQuery, proto string) ([]byte, error) {

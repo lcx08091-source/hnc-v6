@@ -498,7 +498,7 @@ func (m *signalMonitor) recordHistoryLocked(st *hostSignalStatus, curRTT float64
 
 // isWifiSTAUpstream 判断热点当前上游是否为 Wi-Fi STA 中继链路(排除本地下行热点 AP 自身接口)。
 func isWifiSTAUpstream(det ifaceDetect, upIf string) bool {
-	up := strings.TrimSpace(upIf)
+	up := strings.TrimPrefix(strings.TrimSpace(upIf), "v4-")
 	ap := strings.TrimSpace(det.Iface)
 	if up != "" && ap != "" && up == ap {
 		return false
@@ -575,9 +575,9 @@ func sampleWifiSTASignal(upIf, apIface string, nowUnix int64, runWifiCmd func() 
 func (m *signalMonitor) sampleHostSignal(s *server) hostSignalStatus {
 	now := time.Now()
 	det := readIfaceDetect(m.hncDir)
-	upIf := det.TetherUpstream
+	upIf := strings.TrimPrefix(strings.TrimSpace(det.TetherUpstream), "v4-")
 	if upIf == "" {
-		upIf = det.Upstream
+		upIf = strings.TrimPrefix(strings.TrimSpace(det.Upstream), "v4-")
 	}
 
 	// Wi-Fi STA 上游独立通道: 即使桥接熔断也可走 /proc/net/wireless 零 Binder 纯文件兜底, 且绝不回退蜂窝!
@@ -1362,7 +1362,7 @@ func dumpTelephonyRegistryHeadCtx(parentCtx context.Context, timeout time.Durati
 	truncated := false
 	for sc.Scan() {
 		line := sc.Text()
-		if strings.HasPrefix(strings.TrimSpace(line), "local logs:") || lines >= 2500 {
+		if puIsLocalLogsHeader(line) || lines >= 2500 {
 			truncated = true
 			break
 		}
@@ -1386,9 +1386,9 @@ func runFastSystemCmd(timeout time.Duration, name string, args ...string) (strin
 }
 
 var (
-	rePhoneBlock     = regexp.MustCompile(`^\s*Phone Id\s*=\s*(\d+)`)
-	reActiveSub      = regexp.MustCompile(`mActiveDataSubId\s*=\s*(-?\d+)`)
-	reSubIDField     = regexp.MustCompile(`\bmSubId\s*=\s*(\d+)`)
+	rePhoneBlock     = regexp.MustCompile(`^\s*Phone Id\s*=\s*(-?\d+)`)
+	reActiveSub      = regexp.MustCompile(`(?i)\b(?:mActiveDataSubId|active\s*data\s*sub(?:scription)?\s*id)\s*[=:]\s*(-?\d+)`)
+	reSubIDField     = regexp.MustCompile(`\bmSubId\s*=\s*(-?\d+)`)
 	reNrSignal       = regexp.MustCompile(`CellSignalStrengthNr:\s*\{[^}]*?ssRsrp\s*=\s*(-?\d+)[^}]*?ssRsrq\s*=\s*(-?\d+)[^}]*?ssSinr\s*=\s*(-?\d+)`)
 	reLteSignal      = regexp.MustCompile(`CellSignalStrengthLte:[^,}\n]*?\brssi\s*=\s*(-?\d+)\s+rsrp\s*=\s*(-?\d+)\s+rsrq\s*=\s*(-?\d+)\s+rssnr\s*=\s*(-?\d+)`)
 	reAccessTech     = regexp.MustCompile(`accessNetworkTechnology\s*=\s*([A-Za-z0-9_ -]+)`)
@@ -1467,8 +1467,10 @@ type parsedPhoneSlot struct {
 	FallbackLTEBWMHz  int
 	FallbackLTEPCI    int
 	HasFallbackLTEPCI bool
+	SawSubID          bool
 }
 
+func sigValidSubID(v int) bool   { return v > 0 && v != sigUnavailable }
 func validRSRP(v int) bool      { return v != sigUnavailable && v >= -145 && v <= -40 }
 func validRSRQ(v int) bool      { return v != sigUnavailable && v >= -30 && v <= 0 }
 func validSINR(v int) bool      { return v != sigUnavailable && v >= -25 && v <= 50 }
@@ -1476,6 +1478,55 @@ func validRSSI(v int) bool      { return v != sigUnavailable && v >= -120 && v <
 func validNRPCI(v int) bool     { return v >= 0 && v <= 1007 }
 func validLTEPCI(v int) bool    { return v >= 0 && v <= 503 }
 func validWifiNoise(v int) bool { return v >= -120 && v <= -40 }
+
+func sigLineIndent(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ':
+			n++
+		case '\t':
+			n += 2
+		default:
+			return n
+		}
+	}
+	return n
+}
+
+func sigIsRegistryTopSection(trimmed string) bool {
+	low := strings.ToLower(trimmed)
+	return strings.HasPrefix(low, "registrations:") ||
+		strings.HasPrefix(low, "local logs") ||
+		strings.HasPrefix(low, "mdefaultsubid=") ||
+		strings.HasPrefix(low, "defaultsubid=") ||
+		strings.HasPrefix(low, "carrier privilege") ||
+		strings.HasPrefix(low, "subscription")
+}
+
+func sigResolveMaxSlots(raw string) int {
+	tripleHW := puIsubTripleSimRE.MatchString(raw)
+	modemCount := 0
+	for _, line := range strings.Split(raw, "\n") {
+		if puIsLocalLogsHeader(line) {
+			break
+		}
+		if m := puIsubModemCountRE.FindStringSubmatch(line); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+				modemCount = n
+				break
+			}
+		}
+	}
+	switch {
+	case modemCount == 1:
+		return 1
+	case tripleHW && modemCount >= 3:
+		return 3
+	default:
+		return 2
+	}
+}
 
 func parseBandsBracket(s string, prefix string) string {
 	for _, part := range strings.Split(s, ",") {
@@ -1488,19 +1539,37 @@ func parseBandsBracket(s string, prefix string) string {
 }
 
 func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignalStatus {
-	activeSubID := -1
-	if m := reActiveSub.FindStringSubmatch(raw); m != nil {
-		activeSubID, _ = strconv.Atoi(m[1])
-	}
+	wantIface = strings.TrimPrefix(strings.TrimSpace(wantIface), "v4-")
+	maxSlots := sigResolveMaxSlots(raw)
+	activeSubID := 0
 
 	var slots []*parsedPhoneSlot
 	var cur *parsedPhoneSlot
+	curIndent := -1
 	for _, line := range strings.Split(raw, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "local logs:") {
+		if puIsLocalLogsHeader(line) {
+			cur = nil
 			break
 		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if activeSubID == 0 {
+			if m := reActiveSub.FindStringSubmatch(line); m != nil {
+				if id, err := strconv.Atoi(m[1]); err == nil && sigValidSubID(id) {
+					activeSubID = id
+				}
+			}
+		}
 		if m := rePhoneBlock.FindStringSubmatch(line); m != nil {
-			pid, _ := strconv.Atoi(m[1])
+			pid, err := strconv.Atoi(m[1])
+			if err != nil || pid < 0 || pid >= maxSlots {
+				cur = nil
+				curIndent = -1
+				continue
+			}
+			curIndent = sigLineIndent(line)
 			cur = &parsedPhoneSlot{PhoneID: pid, Ifaces: map[string]bool{}}
 			slots = append(slots, cur)
 			continue
@@ -1508,8 +1577,19 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		if cur == nil {
 			continue
 		}
-		if m := reSubIDField.FindStringSubmatch(line); m != nil && cur.SubID == 0 {
-			cur.SubID, _ = strconv.Atoi(m[1])
+		lineIndent := sigLineIndent(line)
+		if sigIsRegistryTopSection(trimmed) || lineIndent == 0 || (curIndent > 0 && lineIndent <= curIndent) {
+			cur = nil
+			curIndent = -1
+			continue
+		}
+		if m := reSubIDField.FindStringSubmatch(line); m != nil {
+			cur.SawSubID = true
+			if cur.SubID == 0 {
+				if id, err := strconv.Atoi(m[1]); err == nil && sigValidSubID(id) {
+					cur.SubID = id
+				}
+			}
 		}
 		if m := reOperatorLong.FindStringSubmatch(line); m != nil && cur.AlphaLong == "" {
 			if v := cleanOperatorToken(m[1]); v != "" {
@@ -1532,6 +1612,9 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		for _, im := range reDataIface.FindAllStringSubmatch(line, -1) {
 			if im[1] != "" {
 				cur.Ifaces[im[1]] = true
+				if phys := strings.TrimPrefix(im[1], "v4-"); phys != "" {
+					cur.Ifaces[phys] = true
+				}
 			}
 		}
 		if m := reNrSignal.FindStringSubmatch(line); m != nil {
@@ -1724,6 +1807,19 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		}
 	}
 
+	filteredSlots := make([]*parsedPhoneSlot, 0, len(slots))
+	for _, sl := range slots {
+		mcc := ""
+		if len(sl.MCCMNC) >= 3 {
+			mcc = sl.MCCMNC[:3]
+		}
+		if puIsCloudVirtualSim(mcc, "", sl.AlphaLong, sl.AlphaShort) {
+			continue
+		}
+		filteredSlots = append(filteredSlots, sl)
+	}
+	slots = filteredSlots
+
 	var chosen *parsedPhoneSlot
 	if wantIface != "" {
 		for _, sl := range slots {
@@ -1743,6 +1839,9 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 	}
 	if chosen == nil {
 		for _, sl := range slots {
+			if sl.SawSubID && sl.SubID <= 0 {
+				continue
+			}
 			if sl.HasNRValid || sl.HasLTEValid {
 				chosen = sl
 				break
@@ -1755,8 +1854,9 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 
 	if wantIface == "" {
 		for ifc := range chosen.Ifaces {
-			wantIface = ifc
-			break
+			if !strings.HasPrefix(ifc, "v4-") && (wantIface == "" || ifc < wantIface) {
+				wantIface = ifc
+			}
 		}
 	}
 

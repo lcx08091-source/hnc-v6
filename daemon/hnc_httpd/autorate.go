@@ -230,6 +230,28 @@ func (c *autorateCtl) Config() autorateConfig {
 	return cp
 }
 
+func (c *autorateCtl) resetDisabledStateLocked(sleepReason string) {
+	c.appliedIface = ""
+	c.appliedDown = 0
+	c.appliedUp = 0
+	c.st.State = "disabled"
+	c.st.SleepReason = sleepReason
+	c.st.ActualDownMbps = 0
+	c.st.ActualUpMbps = 0
+	c.st.LoadDown = 0
+	c.st.LoadUp = 0
+	c.st.BaseRTTMs = 0
+	c.st.RTTMs = 0
+	c.st.DeltaRTTMs = 0
+	c.st.DiagnosisCode = ""
+	c.fastRTT = 0
+	c.lastBackoffAt = time.Time{}
+	c.prevSampleAt = time.Time{}
+	c.prevDev = nil
+	c.lastSignalRAT = ""
+	c.lastUpstreamIface = ""
+}
+
 func (c *autorateCtl) DisableFromStaticShaper() {
 	c.mu.Lock()
 	srv := c.srv
@@ -239,10 +261,7 @@ func (c *autorateCtl) DisableFromStaticShaper() {
 	}
 	c.cfg.Enabled = false
 	c.syncStatusConfigLocked(c.cfg)
-	c.st.State = "disabled"
-	c.st.SleepReason = ""
-	c.st.RTTMs = 0
-	c.st.DeltaRTTMs = 0
+	c.resetDisabledStateLocked("")
 	c.st.UpdatedAt = time.Now().Unix()
 	cfgCopy := c.cfg
 	c.mu.Unlock()
@@ -303,15 +322,11 @@ func (c *autorateCtl) ApplyConfig(next autorateConfig, hotspotIface string) acti
 		c.appliedDown = initDown
 		c.appliedUp = initUp
 		c.st.State = "sleeping"
+		c.st.RTTMs = 0
+		c.st.DeltaRTTMs = 0
 	} else {
-		c.appliedIface = ""
-		c.appliedDown = 0
-		c.appliedUp = 0
-		c.st.State = "disabled"
-		c.st.SleepReason = ""
+		c.resetDisabledStateLocked("")
 	}
-	c.st.RTTMs = 0
-	c.st.DeltaRTTMs = 0
 	c.st.UpdatedAt = time.Now().Unix()
 	c.mu.Unlock()
 
@@ -656,11 +671,7 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 		cfg := ctl.Config()
 		if !cfg.Enabled {
 			ctl.mu.Lock()
-			ctl.st.State = "disabled"
-			ctl.st.SleepReason = "autorate_disabled"
-			ctl.st.RTTMs = 0
-			ctl.st.DeltaRTTMs = 0
-			ctl.prevSampleAt = time.Time{}
+			ctl.resetDisabledStateLocked("autorate_disabled")
 			ctl.mu.Unlock()
 			_, _ = s.shaperArbiter().UpdateAutorate(time.Now(), "", false, 0, 0, false)
 			select {
@@ -780,9 +791,25 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	actualDownMbps := (float64(downBytes) * 8.0) / (dt * 1e6)
 	actualUpMbps := (float64(upBytes) * 8.0) / (dt * 1e6)
 
+	ctl.mu.RLock()
+	curDown := ctl.st.CurDownMbps
+	curUp := ctl.st.CurUpMbps
+	baseRTT := ctl.st.BaseRTTMs
+	prevRAT := ctl.lastSignalRAT
+	prevUpstream := ctl.lastUpstreamIface
+	ctl.mu.RUnlock()
+
+	loadDown := actualDownMbps / math.Max(1.0, curDown)
+	loadUp := actualUpMbps / math.Max(1.0, curUp)
+	maxLoad := math.Max(loadDown, loadUp)
+
 	var sig hostSignalStatus
 	if s.signalCtl != nil {
-		sig = s.signalCtl.Snapshot(s)
+		if maxLoad < autorateIdleTraffic {
+			sig = s.signalCtl.PeekCached(s)
+		} else {
+			sig = s.signalCtl.Snapshot(s)
+		}
 	}
 	effDownMax := cfg.DownMaxMbps
 	effUpMax := cfg.UpMaxMbps
@@ -795,20 +822,8 @@ func (s *server) autorateStep(cfg autorateConfig) {
 		effUpMax = math.Max(cfg.UpMinMbps, cfg.UpMaxMbps*sig.RFCeilingFactor)
 	}
 
-	ctl.mu.RLock()
-	curDown := ctl.st.CurDownMbps
-	curUp := ctl.st.CurUpMbps
-	baseRTT := ctl.st.BaseRTTMs
-	prevRAT := ctl.lastSignalRAT
-	prevUpstream := ctl.lastUpstreamIface
-	ctl.mu.RUnlock()
-
 	upstreamChanged := upstreamIface != "" && prevUpstream != "" && upstreamIface != prevUpstream
 	ratChanged := sig.Available && sig.RAT != "" && prevRAT != "" && ratGeneration(sig.RAT) != ratGeneration(prevRAT)
-
-	loadDown := actualDownMbps / math.Max(1.0, curDown)
-	loadUp := actualUpMbps / math.Max(1.0, curUp)
-	maxLoad := math.Max(loadDown, loadUp)
 
 	midDown := (cfg.DownMinMbps + effDownMax) * 0.55
 	midUp := (cfg.UpMinMbps + effUpMax) * 0.55

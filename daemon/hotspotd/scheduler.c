@@ -81,6 +81,9 @@ static struct {
     int               eempty_retry_pending;
     int               eempty_fast_credits;
 
+    /* C035: 跟踪 OFFLOAD_DISABLE_GLOBAL 全局压制态, 防末台单设备解限时误写回 U64_MAX */
+    int               force_global_disabled;
+
     pthread_mutex_t   worker_lock;
     pthread_cond_t    worker_cond;
 } sched = {
@@ -96,7 +99,36 @@ static struct {
     .worker_refresh_count     = 0,
     .eempty_retry_pending     = 0,
     .eempty_fast_credits      = 0,
+    .force_global_disabled    = 0,
 };
+
+static int is_offload_guard_fallback_active(void)
+{
+    const char *hnc_dir = getenv("HNC_DIR");
+    if (!hnc_dir || hnc_dir[0] == '\0')
+        hnc_dir = "/data/local/hnc";
+
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/run/offload_guard.state", hnc_dir);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return 0;
+
+    FILE *f = fopen(path, "re");
+    if (!f)
+        return 0;
+
+    int active = 0;
+    char line[64];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "fallback=1", 10) == 0 &&
+            (line[10] == '\0' || line[10] == '\r' || line[10] == '\n')) {
+            active = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return active;
+}
 
 /* ══════════════════════════════════════════════════════════
  * 内部小工具: mac 规范化 + 集合操作
@@ -337,32 +369,51 @@ static int rebuild_from_rules(void)
     int added = 0;
     char *p = obj_start + 1;
     while (p < dev_end) {
-        /* 找下一个 "aa:bb:cc:dd:ee:ff" MAC 字符串 (作为 key) */
+        /* 找下一个 JSON 字符串 (正确跳过 \\ 与 \" 转义) */
         char *q = strchr(p, '"');
         if (!q || q >= dev_end) break;
 
-        /* 必须是 17 字符 MAC 格式 */
+        char *str_end = q + 1;
+        while (str_end < dev_end && *str_end) {
+            if (*str_end == '\\') {
+                str_end++;
+                if (str_end >= dev_end || !*str_end) break;
+                str_end++;
+                continue;
+            }
+            if (*str_end == '"') break;
+            str_end++;
+        }
+        if (str_end >= dev_end || *str_end != '"') break;
+
+        /* 必须是 17 字符 MAC 格式且后跟 ':' 与 '{' (设备对象 key) */
+        char *after_key = str_end + 1;
+        while (after_key < dev_end && isspace((unsigned char)*after_key))
+            after_key++;
+        char *block_open = NULL;
+        if (after_key < dev_end && *after_key == ':') {
+            char *val_p = after_key + 1;
+            while (val_p < dev_end && isspace((unsigned char)*val_p))
+                val_p++;
+            if (val_p < dev_end && *val_p == '{')
+                block_open = val_p;
+        }
+
         int is_mac = 0;
-        if (q + 18 < dev_end && q[3] == ':' && q[6] == ':' &&
-            q[9] == ':' && q[12] == ':' && q[15] == ':' && q[18] == '"') {
+        if (block_open != NULL && (str_end - (q + 1)) == 17 &&
+            q[3] == ':' && q[6] == ':' &&
+            q[9] == ':' && q[12] == ':' && q[15] == ':') {
             is_mac = 1;
         }
 
         if (!is_mac) {
-            /* skip this string */
-            p = strchr(q + 1, '"');
-            if (!p) break;
-            p++;
+            p = str_end + 1;
             continue;
         }
 
         char mac_raw[18];
         memcpy(mac_raw, q + 1, 17);
         mac_raw[17] = '\0';
-
-        /* 找这个 MAC 对应的 block: 冒号后 '{...}' */
-        char *block_open = strchr(q + 19, '{');
-        if (!block_open) break;
 
         /* brace-count 找 block 结尾 */
         int d = 1, in_s = 0, esc = 0;
@@ -655,31 +706,51 @@ static void *worker_main(void *arg)
         int prev_ifindex = sched.primary_upstream_ifindex;
         apply_primary_upstream_locked(p_rc, p_idx, p_name);
         int now_ifindex = sched.primary_upstream_ifindex;
-        /* 关键: 之前没探到 (=0) 现在探到了, 且当前有限速设备 → 立即触发
+        int has_suppression = (sched.limited_count > 0 || sched.force_global_disabled);
+        /* 关键: 之前没探到 (=0) 现在探到了, 且当前有限速/全局压制 → 立即触发
          * disable. 否则即便探到上游, adapter 状态还停留在
          * "fallback disable_global", 不会切换到精准 disable_upstream. */
         int need_retrigger = (prev_ifindex == 0 && now_ifindex > 0
-                              && sched.limited_count > 0);
+                              && has_suppression);
         /* 上游切换 (e.g. WiFi 下线切 4G): 老 ifindex 还在 disabled_set
          * 里, 新 ifindex 没被 disable. 也要 retrigger. */
         if (prev_ifindex > 0 && now_ifindex > 0 && prev_ifindex != now_ifindex
-            && sched.limited_count > 0) {
+            && has_suppression) {
             need_retrigger = 1;
         }
         if (need_retrigger) {
             fprintf(stderr, "[sched] periodic re-probe: upstream %d -> %d, retriggering disable\n",
                     prev_ifindex, now_ifindex);
-            trigger_adapter_disable_locked();
+            if (sched.force_global_disabled && sched.adapter && sched.adapter->disable_global) {
+                offload_err_t ge = sched.adapter->disable_global();
+                if (ge == OFFLOAD_EEMPTY) {
+                    sched.eempty_retry_pending = 1;
+                } else if (ge == OFFLOAD_OK) {
+                    sched.eempty_retry_pending = 0;
+                    sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
+                }
+            } else {
+                trigger_adapter_disable_locked();
+            }
         }
-        /* v5.9.0: EEMPTY 待重试且仍有限速设备 → 本轮直接重触发一次 */
-        if (sched.eempty_retry_pending && sched.limited_count > 0 && !need_retrigger) {
+        /* v5.9.0: EEMPTY 待重试且仍有限速设备或全局压制 → 本轮直接重触发一次 */
+        if (sched.eempty_retry_pending && has_suppression && !need_retrigger) {
             sched.eempty_retry_pending = 0;
             fprintf(stderr, "[sched] EEMPTY re-try: triggering disable again\n");
-            trigger_adapter_disable_locked();   /* 仍空会再次置 pending */
+            if (sched.force_global_disabled && sched.adapter && sched.adapter->disable_global) {
+                offload_err_t ge = sched.adapter->disable_global();
+                if (ge == OFFLOAD_EEMPTY) {
+                    sched.eempty_retry_pending = 1;
+                } else if (ge == OFFLOAD_OK) {
+                    sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
+                }
+            } else {
+                trigger_adapter_disable_locked();   /* 仍空会再次置 pending */
+            }
         }
-        /* 决定下一轮等待: 若已无限速设备则清零 pending, 否则有快速额度时 5s, 其余回落 60s */
+        /* 决定下一轮等待: 若已无限速且无全局压制则清零 pending, 否则有快速额度时 5s, 其余回落 60s */
         next_wait_sec = HNC_SCHED_REFRESH_INTERVAL_SEC;
-        if (sched.limited_count == 0) {
+        if (!has_suppression) {
             sched.eempty_retry_pending = 0;
             sched.eempty_fast_credits  = 0;
         } else if (sched.eempty_retry_pending && sched.eempty_fast_credits > 0) {
@@ -760,14 +831,19 @@ int hnc_scheduler_init(void)
         pthread_condattr_destroy(&cattr);
     }
     offload_set_sleep_fn(scheduler_sleep_interruptible);
+    sched.force_global_disabled = 0;
 
-    /* 初次探测上游 (probe 锁外 / apply 锁内) */
+    /* 初次探测上游 (probe 锁外 / apply 锁内, 同步拷贝栈缓冲防与 worker 竞态) */
+    int init_ifindex = 0;
+    char init_ifname[HNC_SCHED_IFNAME_LEN] = {0};
     {
         int p_idx = 0;
         char p_name[HNC_SCHED_IFNAME_LEN] = {0};
         int p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
         pthread_mutex_lock(&sched.lock);
         apply_primary_upstream_locked(p_rc, p_idx, p_name);
+        init_ifindex = sched.primary_upstream_ifindex;
+        snprintf(init_ifname, sizeof(init_ifname), "%s", sched.primary_upstream_ifname);
         pthread_mutex_unlock(&sched.lock);
     }
 
@@ -780,32 +856,57 @@ int hnc_scheduler_init(void)
         sched.adapter->shutdown();
         return -1;
     }
-    sched.worker_started = 1;
 
+    pthread_mutex_lock(&sched.lock);
+    sched.worker_started = 1;
     sched.initialized = 1;
+    init_ifindex = sched.primary_upstream_ifindex;
+    snprintf(init_ifname, sizeof(init_ifname), "%s", sched.primary_upstream_ifname);
+    pthread_mutex_unlock(&sched.lock);
+
     fprintf(stderr, "[sched] init OK (adapter=%s gran=%s upstream=%s/%d)\n",
             sched.adapter->name,
             offload_gran_str(sched.adapter->granularity),
-            sched.primary_upstream_ifname,
-            sched.primary_upstream_ifindex);
+            init_ifname,
+            init_ifindex);
 
-    /* v5.0 alpha.3 P0-B: 从 rules.json 重建 limited_macs
-     * 如果有限速设备, 触发一次 adapter disable, 重建 BPF offload 屏蔽
-     * 这样重启后不需要手动 apply_device_rule.sh, 限速自动恢复 */
+    /* v5.0 alpha.3 P0-B: 从 rules.json 重建 limited_macs (并兼顾 offload_guard.state 全局压制)
+     * 如果有限速设备或全局压制生效, 触发一次 adapter disable, 重建 BPF offload 屏蔽 */
     int rebuilt = rebuild_from_rules();
-    if (rebuilt > 0) {
+    int guard_fb = is_offload_guard_fallback_active();
+    if (rebuilt > 0 || guard_fb) {
         int p_idx = 0;
         char p_name[HNC_SCHED_IFNAME_LEN] = {0};
         int p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
+        int reb_ifindex = 0;
+        char reb_ifname[HNC_SCHED_IFNAME_LEN] = {0};
+
         pthread_mutex_lock(&sched.lock);
         apply_primary_upstream_locked(p_rc, p_idx, p_name);
         sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
-        trigger_adapter_disable_locked();
+        if (guard_fb) {
+            sched.force_global_disabled = 1;
+            if (sched.adapter && sched.adapter->disable_global) {
+                offload_err_t ge = sched.adapter->disable_global();
+                if (ge == OFFLOAD_EEMPTY)
+                    sched.eempty_retry_pending = 1;
+                else if (ge == OFFLOAD_OK)
+                    sched.eempty_retry_pending = 0;
+            } else {
+                trigger_adapter_disable_locked();
+            }
+        } else {
+            trigger_adapter_disable_locked();
+        }
+        reb_ifindex = sched.primary_upstream_ifindex;
+        snprintf(reb_ifname, sizeof(reb_ifname), "%s", sched.primary_upstream_ifname);
         pthread_mutex_unlock(&sched.lock);
-        fprintf(stderr, "[sched] rebuild: triggered adapter disable (count=%d upstream=%s/%d)\n",
+
+        fprintf(stderr, "[sched] rebuild: triggered adapter disable (count=%d global_fb=%d upstream=%s/%d)\n",
                 rebuilt,
-                sched.primary_upstream_ifname,
-                sched.primary_upstream_ifindex);
+                guard_fb,
+                reb_ifname,
+                reb_ifindex);
     }
 
     return 0;
@@ -835,6 +936,7 @@ void hnc_scheduler_shutdown(void)
     offload_set_sleep_fn(NULL);
     pthread_cond_destroy(&sched.worker_cond);
 
+    sched.force_global_disabled = 0;
     sched.initialized = 0;
     fprintf(stderr, "[sched] shutdown done\n");
 }
@@ -856,12 +958,16 @@ void hnc_scheduler_notify_device_limit_changed(const char *mac, int is_limited)
     int old_count, new_count;
     int triggered_disable = 0, triggered_restore = 0;
 
-    /* 仅在可能发生 0 -> >0 跃迁时于锁外探测主上游, 避免批量限速/解除限速时重复探测 */
+    /* 仅在可能发生 0 -> >0 跃迁时于锁外探测主上游, 避免批量限速/解除限速时重复探测;
+     * 解限分支于锁外检查 offload_guard.state, 避免持锁做文件 I/O */
     int may_need_probe = 0;
+    int ext_guard_fb = 0;
     if (is_limited) {
         pthread_mutex_lock(&sched.lock);
         may_need_probe = (sched.limited_count == 0);
         pthread_mutex_unlock(&sched.lock);
+    } else {
+        ext_guard_fb = is_offload_guard_fallback_active();
     }
 
     int p_idx = 0;
@@ -890,9 +996,16 @@ void hnc_scheduler_notify_device_limit_changed(const char *mac, int is_limited)
         sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
         triggered_disable = 1;
     } else if (old_count > 0 && new_count == 0) {
-        sched.eempty_retry_pending = 0;
-        sched.eempty_fast_credits  = 0;
-        triggered_restore = 1;
+        if (sched.force_global_disabled || ext_guard_fb) {
+            if (ext_guard_fb)
+                sched.force_global_disabled = 1;
+            fprintf(stderr,
+                    "[sched] last limited device removed while global offload suppression active; skipping restore_global\n");
+        } else {
+            sched.eempty_retry_pending = 0;
+            sched.eempty_fast_credits  = 0;
+            triggered_restore = 1;
+        }
     }
 
     if (triggered_disable)  trigger_adapter_disable_locked();
@@ -928,6 +1041,7 @@ offload_err_t hnc_scheduler_force_disable_global(void)
         pthread_mutex_unlock(&sched.lock);
         return OFFLOAD_ENOTSUP;
     }
+    sched.force_global_disabled = 1;
     offload_err_t e = sched.adapter->disable_global();
     if (e == OFFLOAD_EEMPTY) {
         sched.eempty_retry_pending = 1;
@@ -948,9 +1062,10 @@ offload_err_t hnc_scheduler_force_restore_global(void)
         pthread_mutex_unlock(&sched.lock);
         return OFFLOAD_ENOTSUP;
     }
-    sched.limited_count        = 0; /* 强制 restore 隐含清空集合与重试状态 */
-    sched.eempty_retry_pending = 0;
-    sched.eempty_fast_credits  = 0;
+    sched.force_global_disabled = 0;
+    sched.limited_count         = 0; /* 强制 restore 隐含清空集合与重试状态 */
+    sched.eempty_retry_pending  = 0;
+    sched.eempty_fast_credits   = 0;
     offload_err_t e = sched.adapter->restore_global();
     pthread_mutex_unlock(&sched.lock);
     return e;
@@ -1012,6 +1127,33 @@ void hnc_scheduler_get_summary(hnc_offload_summary_t *out)
     pthread_mutex_unlock(&sched.lock);
 }
 
+static void sched_json_escape_str(const char *src, char *dst, size_t cap)
+{
+    size_t j = 0U;
+    if (cap == 0U)
+        return;
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+    for (size_t i = 0U; src[i] != '\0' && j + 1U < cap; i++) {
+        unsigned char ch = (unsigned char)src[i];
+        if (ch == '"' || ch == '\\') {
+            if (j + 2U >= cap) break;
+            dst[j++] = '\\';
+            dst[j++] = (char)ch;
+        } else if (ch < 0x20U) {
+            if (j + 6U >= cap) break;
+            int w = snprintf(dst + j, cap - j, "\\u%04x", (unsigned int)ch);
+            if (w <= 0) break;
+            j += (size_t)w;
+        } else {
+            dst[j++] = (char)ch;
+        }
+    }
+    dst[j] = '\0';
+}
+
 int hnc_scheduler_summary_to_json(const hnc_offload_summary_t *s,
                                    char *buf, size_t buf_size)
 {
@@ -1049,6 +1191,11 @@ ok:
      * 加一个空语句让标签后跟语句而非声明 */
     (void)0;
 
+    char safe_adapter[sizeof(s->adapter_name) * 6U + 4U];
+    char safe_ifname[sizeof(s->primary_upstream_ifname) * 6U + 4U];
+    sched_json_escape_str(s->adapter_name, safe_adapter, sizeof(safe_adapter));
+    sched_json_escape_str(s->primary_upstream_ifname, safe_ifname, sizeof(safe_ifname));
+
     int n = snprintf(buf, buf_size,
         "{"
         "\"adapter\":{\"name\":\"%s\",\"type\":%d,\"granularity\":%d},"
@@ -1064,7 +1211,7 @@ ok:
         "\"worker_running\":%s,"
         "\"worker_last_refresh_ts\":%lld,"
         "\"worker_refresh_count\":%lld",
-        s->adapter_name,
+        safe_adapter,
         s->adapter_type,
         s->adapter_gran,
         s->active ? "true" : "false",
@@ -1075,7 +1222,7 @@ ok:
         dis_arr,
         s->limited_device_count,
         s->primary_upstream_ifindex,
-        s->primary_upstream_ifname,
+        safe_ifname,
         s->worker_running ? "true" : "false",
         (long long)s->worker_last_refresh_ts,
         (long long)s->worker_refresh_count

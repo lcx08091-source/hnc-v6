@@ -63,8 +63,10 @@ func TestThermoRC4SensorAdaptiveUnitsSentinelsAndCircuitBreaker(t *testing.T) {
 		{psPath, "85", 8.5},
 		{psPath, "36.5", 36.5},
 		{tzPath, "42000", 42.0},
-		{tzPath, "420", 42.0},
-		{tzPath, "42", 42.0},
+		{tzPath, "500", 0.5},
+		{tzPath, "420", 0.4},
+		{tzPath, "42", 0.0},
+		{tzPath, "42.5", 42.5},
 	}
 	for _, tc := range unitCases {
 		got, reason, ok := parseSysfsTempCelsiusDetail(tc.path, tc.raw)

@@ -548,26 +548,56 @@ func (w *Writer) WriteWithHostFlows(updatedMonoNs int64, hotspotFlows uint32, ho
 			return err
 		}
 	} else {
-		// Fallback path: write inactive slot via pwrite first, then update top header
-		// (or write full image on very first initialization).
-		if w.seq == 0 {
-			clear(w.imageBuf[:])
-			copy(w.imageBuf[0:HeaderSize], w.hdrBuf[:])
-			copy(w.imageBuf[slotOff:slotOff+SlotSize], w.slotBuf[:])
-			if _, err := w.file.WriteAt(w.imageBuf[:], 0); err != nil {
-				return fmt.Errorf("shm pwrite init: %w", err)
-			}
-		} else {
-			if _, err := w.file.WriteAt(w.slotBuf[:], int64(slotOff)); err != nil {
-				return fmt.Errorf("shm pwrite slot: %w", err)
-			}
-			if _, err := w.file.WriteAt(w.hdrBuf[:], 0); err != nil {
-				return fmt.Errorf("shm pwrite header: %w", err)
-			}
+		if err := w.writeToPwriteLocked(slotIdx, slotOff, oddLatch, evenLatch); err != nil {
+			return err
 		}
 	}
 
 	w.seq = nextSeq
+	return nil
+}
+
+var testPwriteAfterOddLatchHook func()
+
+func (w *Writer) writeToPwriteLocked(slotIdx, slotOff int, oddLatch, evenLatch uint64) error {
+	if w.seq == 0 {
+		altOff := HeaderSize + (slotIdx^1)*SlotSize
+		clear(w.imageBuf[:SlotSize])
+		if _, err := w.file.WriteAt(w.imageBuf[:SlotSize], int64(altOff)); err != nil {
+			return fmt.Errorf("shm pwrite init alt slot: %w", err)
+		}
+	}
+
+	var oddBuf, evenBuf [8]byte
+	binary.LittleEndian.PutUint64(oddBuf[:], oddLatch)
+	binary.LittleEndian.PutUint64(evenBuf[:], evenLatch)
+
+	// Step 1: mark target inactive slot BeginSeq and EndSeq as oddLatch before mutating payload.
+	if _, err := w.file.WriteAt(oddBuf[:], int64(slotOff)); err != nil {
+		return fmt.Errorf("shm pwrite latch begin odd: %w", err)
+	}
+	if _, err := w.file.WriteAt(oddBuf[:], int64(slotOff+slotEndSeqOff)); err != nil {
+		return fmt.Errorf("shm pwrite latch end odd: %w", err)
+	}
+	if testPwriteAfterOddLatchHook != nil {
+		testPwriteAfterOddLatchHook()
+	}
+
+	// Step 2: write slot payload while BeginSeq/EndSeq remain oddLatch.
+	if _, err := w.file.WriteAt(w.slotBuf[8:slotEndSeqOff], int64(slotOff+8)); err != nil {
+		return fmt.Errorf("shm pwrite slot payload: %w", err)
+	}
+
+	// Step 3: seal EndSeq then BeginSeq with evenLatch, then publish top-level header.
+	if _, err := w.file.WriteAt(evenBuf[:], int64(slotOff+slotEndSeqOff)); err != nil {
+		return fmt.Errorf("shm pwrite latch end even: %w", err)
+	}
+	if _, err := w.file.WriteAt(evenBuf[:], int64(slotOff)); err != nil {
+		return fmt.Errorf("shm pwrite latch begin even: %w", err)
+	}
+	if _, err := w.file.WriteAt(w.hdrBuf[:], 0); err != nil {
+		return fmt.Errorf("shm pwrite header: %w", err)
+	}
 	return nil
 }
 
@@ -691,6 +721,19 @@ func (r *Reader) IsMmapped() bool {
 
 // Path returns the backing file path.
 func (r *Reader) Path() string { return r.path }
+
+// FileInfo returns os.FileInfo for the underlying open file descriptor.
+func (r *Reader) FileInfo() (os.FileInfo, error) {
+	if r == nil || r.closed.Load() != 0 {
+		return nil, ErrClosed
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.closed.Load() != 0 || r.file == nil {
+		return nil, ErrClosed
+	}
+	return r.file.Stat()
+}
 
 // Read decodes a consistent Snapshot by value.
 func (r *Reader) Read() (Snapshot, error) {

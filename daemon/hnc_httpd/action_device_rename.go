@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // device_names.json file lives under <HNC_DIR>/data/, format is a flat
@@ -63,6 +64,7 @@ func actionDeviceRename(hncDir string, p map[string]string) actionResp {
 	if err := saveDeviceNames(path, names); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
+	invalidateJSONCaches(path)
 
 	if name == "" {
 		return actionResp{OK: true, Detail: fmt.Sprintf("cleared name for %s", mac)}
@@ -139,23 +141,19 @@ func normalizeMAC(s string) string {
 	return string(out)
 }
 
-// validDeviceName: empty (clear) is OK; otherwise 1-32 printable, no control chars.
+// validDeviceName: empty (clear) is OK; otherwise 1-32 printable UTF-8 bytes,
+// rejecting control chars (<0x20, 0x7f), double quotes, and backslashes while preserving '/'.
 func validDeviceName(s string) bool {
 	if s == "" {
 		return true // empty = clear
 	}
-	if len(s) > 32 {
+	if len(s) > 32 || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if r == '\n' || r == '\r' || r == '\t' {
+		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
 			return false
 		}
-		if r < 0x20 {
-			return false
-		}
-		// Disallow ", \, control chars that could break JSON encoding.
-		// json.Marshal handles escapes, but we filter for cleanliness.
 	}
 	return true
 }

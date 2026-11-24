@@ -74,30 +74,99 @@ hnc_ipt_wait_args() {
                 ;;
         esac
     fi
-    _hiw_res=""
-    if "$_hiw_bin" -w 2 -n -L OUTPUT >/dev/null 2>&1; then
+    _hiw_res="-w 2"
+    _hiw_cache_ok=1
+    "$_hiw_bin" -w 2 -n -L OUTPUT >/dev/null 2>&1
+    _hiw_rc=$?
+    if [ "$_hiw_rc" -eq 0 ]; then
         _hiw_res="-w 2"
-    elif "$_hiw_bin" -w -n -L OUTPUT >/dev/null 2>&1; then
-        _hiw_res="-w"
-    else
-        _hiw_res=""
-    fi
-    if [ "$_hiw_key" = "ip6t" ]; then
-        _HNC_IP6T_WAIT_PROBED=1; _HNC_IP6T_WAIT_ARGS="$_hiw_res"
-    else
-        _HNC_IPT_WAIT_PROBED=1; _HNC_IPT_WAIT_ARGS="$_hiw_res"
-    fi
-    if [ -d "$_hiw_run" ] && [ -w "$_hiw_run" ]; then
-        if [ -n "$_hiw_res" ]; then
-            printf '%s\n' "$_hiw_res" > "$_hiw_cf.tmp.$$" 2>/dev/null \
-                && mv -f "$_hiw_cf.tmp.$$" "$_hiw_cf" 2>/dev/null || rm -f "$_hiw_cf.tmp.$$" 2>/dev/null
+    elif [ "$_hiw_rc" -eq 2 ]; then
+        "$_hiw_bin" -w -n -L OUTPUT >/dev/null 2>&1
+        _hiw_rc=$?
+        if [ "$_hiw_rc" -eq 0 ]; then
+            _hiw_res="-w"
+        elif [ "$_hiw_rc" -eq 2 ]; then
+            if "$_hiw_bin" -n -L OUTPUT >/dev/null 2>&1; then
+                _hiw_res=""
+            else
+                _hiw_res="-w 2"
+                _hiw_cache_ok=0
+            fi
         else
-            printf 'none\n' > "$_hiw_cf.tmp.$$" 2>/dev/null \
-                && mv -f "$_hiw_cf.tmp.$$" "$_hiw_cf" 2>/dev/null || rm -f "$_hiw_cf.tmp.$$" 2>/dev/null
+            _hiw_res="-w"
+            _hiw_cache_ok=0
+        fi
+    else
+        # rc=4(短暂 xtables 锁竞争超时)或 rc=1 等非语法错误: 保持 -w 2 绝不清空或写死 none
+        _hiw_res="-w 2"
+        _hiw_cache_ok=0
+    fi
+    if [ "$_hiw_cache_ok" = "1" ]; then
+        if [ "$_hiw_key" = "ip6t" ]; then
+            _HNC_IP6T_WAIT_PROBED=1; _HNC_IP6T_WAIT_ARGS="$_hiw_res"
+        else
+            _HNC_IPT_WAIT_PROBED=1; _HNC_IPT_WAIT_ARGS="$_hiw_res"
+        fi
+        if [ -d "$_hiw_run" ] && [ -w "$_hiw_run" ]; then
+            if [ -n "$_hiw_res" ]; then
+                printf '%s\n' "$_hiw_res" > "$_hiw_cf.tmp.$$" 2>/dev/null \
+                    && mv -f "$_hiw_cf.tmp.$$" "$_hiw_cf" 2>/dev/null || rm -f "$_hiw_cf.tmp.$$" 2>/dev/null
+            else
+                printf 'none\n' > "$_hiw_cf.tmp.$$" 2>/dev/null \
+                    && mv -f "$_hiw_cf.tmp.$$" "$_hiw_cf" 2>/dev/null || rm -f "$_hiw_cf.tmp.$$" 2>/dev/null
+            fi
         fi
     fi
     printf '%s\n' "$_hiw_res"
-    unset _hiw_bin _hiw_key _hiw_run _hiw_cf _hiw_res
+    unset _hiw_bin _hiw_key _hiw_run _hiw_cf _hiw_res _hiw_rc _hiw_cache_ok
+    return 0
+}
+
+# hnc_fwd_insert_pos <ipt_cmd> <target_chain>
+# 动态计算 filter/FORWARD 子链挂载位置, 严守链序锚点铁律:
+#   HNC_SCALPEL -> HNC_ISOLATE -> HNC_CTRL -> HNC_WHITELIST -> HNC_QUIC -> HNC_QUIC_APPLIM -> HNC_ENCDNS -> HNC_CONNBLK_DNS -> HNC_CONNBLK
+# 空链或无前驱链时恒返回 1。
+hnc_fwd_insert_pos() {
+    _hfip_cmd="$1"
+    _hfip_tgt="$2"
+    if [ -z "$_hfip_cmd" ] || [ -z "$_hfip_tgt" ]; then
+        echo 1
+        unset _hfip_cmd _hfip_tgt
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    _hfip_pos=$($_hfip_cmd -t filter -S FORWARD 2>/dev/null | awk -v target="$_hfip_tgt" '
+        BEGIN {
+            ord["HNC_SCALPEL"] = 1
+            ord["HNC_ISOLATE"] = 2
+            ord["HNC_CTRL"] = 3
+            ord["HNC_WHITELIST"] = 4
+            ord["HNC_QUIC"] = 5
+            ord["HNC_QUIC_APPLIM"] = 6
+            ord["HNC_ENCDNS"] = 7
+            ord["HNC_CONNBLK_DNS"] = 8
+            ord["HNC_CONNBLK"] = 9
+            t_ord = ord[target] + 0
+            idx = 0
+            last_pred = 0
+        }
+        $1 == "-A" && $2 == "FORWARD" {
+            idx++
+            ch = ""
+            for (i = 3; i < NF; i++) {
+                if ($i == "-j" || $i == "-g") { ch = $(i+1); break }
+            }
+            if (ch != "" && (ch in ord) && ord[ch] < t_ord) {
+                last_pred = idx
+            }
+        }
+        END {
+            printf "%d\n", last_pred + 1
+        }
+    ' 2>/dev/null)
+    case "$_hfip_pos" in ''|*[!0-9]*|0) _hfip_pos=1 ;; esac
+    printf '%s\n' "$_hfip_pos"
+    unset _hfip_cmd _hfip_tgt _hfip_pos
     return 0
 }
 

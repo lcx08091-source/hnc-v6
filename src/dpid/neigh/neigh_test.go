@@ -2,7 +2,9 @@ package neigh
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -224,3 +226,57 @@ func TestParseCacheinfoConfirmed(t *testing.T) {
 		t.Fatalf("没有 cacheinfo 应为 0: %+v", es)
 	}
 }
+
+func TestSubReadMsgTruncatedReturnsENOBUFS(t *testing.T) {
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	defer syscall.Close(fds[0])
+
+	rf := os.NewFile(uintptr(fds[1]), "neigh-trunc-test")
+	if rf == nil {
+		syscall.Close(fds[1])
+		t.Fatal("os.NewFile returned nil")
+	}
+	raw, err := rf.SyscallConn()
+	if err != nil {
+		_ = rf.Close()
+		t.Fatalf("SyscallConn: %v", err)
+	}
+	sub := &Sub{
+		file: rf,
+		raw:  raw,
+		buf:  make([]byte, 64),
+	}
+	defer sub.Close()
+
+	// 发送大于接收缓冲(64B)的数据报: Recvfrom(MSG_TRUNC) 返回真实长度 > len(buf), 必须转为 ENOBUFS 触发重同步
+	oversized := cat(
+		neighMsg(rtmNewNeigh, 7, NUDReachable, "192.168.43.10", "02:5a:00:00:00:01"),
+		neighMsg(rtmNewNeigh, 7, NUDReachable, "192.168.43.11", "02:5a:00:00:00:02"),
+	)
+	if len(oversized) <= len(sub.buf) {
+		t.Fatalf("expected oversized > %d, got %d", len(sub.buf), len(oversized))
+	}
+	if _, err := syscall.Write(fds[0], oversized); err != nil {
+		t.Fatalf("write oversized: %v", err)
+	}
+	if _, err := sub.Read(); !errors.Is(err, syscall.ENOBUFS) {
+		t.Fatalf("expected syscall.ENOBUFS on MSG_TRUNC oversized datagram, got %v", err)
+	}
+
+	// 随后发送正常大小报文应正常解析恢复
+	normal := neighMsg(rtmNewNeigh, 7, NUDReachable, "192.168.43.12", "02:5a:00:00:00:03")
+	if len(normal) > len(sub.buf) {
+		t.Fatalf("expected normal <= %d, got %d", len(sub.buf), len(normal))
+	}
+	if _, err := syscall.Write(fds[0], normal); err != nil {
+		t.Fatalf("write normal: %v", err)
+	}
+	es, err := sub.Read()
+	if err != nil || len(es) != 1 || es[0].IP.String() != "192.168.43.12" {
+		t.Fatalf("expected normal recovery entry, got es=%+v err=%v", es, err)
+	}
+}
+

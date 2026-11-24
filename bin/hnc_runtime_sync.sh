@@ -75,16 +75,103 @@ echo "runtime sync: $MODDIR -> $HNC_DIR"
 # v5.9.3 BUG-009: 资源目录 755(这里没有凭据; 顶层 / data / logs / run 的 700 由调用方收)
 mkdir -p "$HNC_DIR/bin" "$HNC_DIR/webroot" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null
 chmod 755 "$HNC_DIR/bin" "$HNC_DIR/webroot" "$HNC_DIR/daemon" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null
-fix_perms   # 先修模块目录, cp 出来的权限就对
-cp -rf "$MODDIR/bin/"* "$HNC_DIR/bin/" 2>/dev/null || true
-cp -rf "$MODDIR/webroot/"* "$HNC_DIR/webroot/" 2>/dev/null || true
-if [ -f "$MODDIR/module.prop" ]; then
-    cp -f "$MODDIR/module.prop" "$HNC_DIR/module.prop" 2>/dev/null || true
-    chmod 644 "$HNC_DIR/module.prop" 2>/dev/null || true
-fi
+fix_perms   # 先修模块目录权限与 SELinux 上下文
 
 _first_tok() { set -- $1; printf '%s' "${1:-}"; }
 _first_two_tok() { set -- $1; printf '%s:%s' "${1:-}" "${2:-}"; }
+
+# _files_same <src> <dst>: 内容完全一致返回 0, 否则返回 1
+_files_same() {
+    _fs_a="$1"
+    _fs_b="$2"
+    [ -f "$_fs_a" ] && [ -f "$_fs_b" ] && [ ! -L "$_fs_b" ] || return 1
+    if command -v cmp >/dev/null 2>&1; then
+        cmp -s "$_fs_a" "$_fs_b" 2>/dev/null && return 0
+        return 1
+    elif command -v sha256sum >/dev/null 2>&1; then
+        _s_a=$(_first_tok "$(sha256sum "$_fs_a" 2>/dev/null)")
+        _s_b=$(_first_tok "$(sha256sum "$_fs_b" 2>/dev/null)")
+        [ -n "$_s_a" ] && [ "$_s_a" = "$_s_b" ] && return 0
+        return 1
+    elif command -v cksum >/dev/null 2>&1; then
+        _c_a=$(_first_two_tok "$(cksum "$_fs_a" 2>/dev/null)")
+        _c_b=$(_first_two_tok "$(cksum "$_fs_b" 2>/dev/null)")
+        [ "$_c_a" != ":" ] && [ "$_c_a" = "$_c_b" ] && return 0
+        return 1
+    fi
+    return 1
+}
+
+_is_native_bin_name() {
+    case " $NATIVE_BINS .hnc_mc sh hnc_httpd " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# _sync_file <src> <dst> <default_mode>: 差异检测 + 同目录 .tmp.$$ + mv -f 原子覆盖(根治 ETXTBSY 与半截文件)
+_sync_file() {
+    _sf_src="$1"
+    _sf_dst="$2"
+    _sf_mode="${3:-644}"
+    [ -e "$_sf_src" ] || [ -L "$_sf_src" ] || return 0
+    _sf_tmp="${_sf_dst}.tmp.$$"
+    if [ -L "$_sf_src" ]; then
+        rm -f "$_sf_tmp" 2>/dev/null || true
+        if cp -af "$_sf_src" "$_sf_tmp" 2>/dev/null; then
+            mv -f "$_sf_tmp" "$_sf_dst" 2>/dev/null || rm -f "$_sf_tmp" 2>/dev/null || true
+        else
+            rm -f "$_sf_tmp" 2>/dev/null || true
+            cp -af "$_sf_src" "$_sf_dst" 2>/dev/null || true
+        fi
+        return 0
+    fi
+    [ -f "$_sf_src" ] || return 0
+    if _files_same "$_sf_src" "$_sf_dst"; then
+        chmod "$_sf_mode" "$_sf_dst" 2>/dev/null || true
+        return 0
+    fi
+    rm -f "$_sf_tmp" 2>/dev/null || true
+    if cp -f "$_sf_src" "$_sf_tmp" 2>/dev/null && { [ ! -s "$_sf_src" ] || [ -s "$_sf_tmp" ]; }; then
+        chmod "$_sf_mode" "$_sf_tmp" 2>/dev/null || true
+        if _is_native_bin_name "${_sf_dst##*/}"; then
+            fix_exec "$_sf_tmp"
+        fi
+        mv -f "$_sf_tmp" "$_sf_dst" 2>/dev/null || rm -f "$_sf_tmp" 2>/dev/null || true
+    else
+        rm -f "$_sf_tmp" 2>/dev/null || true
+    fi
+}
+
+_sync_tree() {
+    _st_src="$1"
+    _st_dst="$2"
+    _st_defmode="${3:-644}"
+    [ -d "$_st_src" ] || return 0
+    mkdir -p "$_st_dst" 2>/dev/null || true
+    chmod 755 "$_st_dst" 2>/dev/null || true
+    rm -f "$_st_dst"/*.tmp.* "$_st_dst"/.[!.]*.tmp.* 2>/dev/null || true
+    for _st_item in "$_st_src"/*; do
+        [ -e "$_st_item" ] || [ -L "$_st_item" ] || continue
+        _st_bn=${_st_item##*/}
+        case "$_st_bn" in *.tmp.*|*.new.*) continue ;; esac
+        if [ -d "$_st_item" ] && [ ! -L "$_st_item" ]; then
+            ( _sync_tree "$_st_item" "$_st_dst/$_st_bn" "$_st_defmode" )
+        else
+            _st_m="$_st_defmode"
+            if [ -x "$_st_item" ] || _is_native_bin_name "$_st_bn"; then
+                _st_m=755
+            fi
+            _sync_file "$_st_item" "$_st_dst/$_st_bn" "$_st_m"
+        fi
+    done
+}
+
+_sync_tree "$MODDIR/bin" "$HNC_DIR/bin" 755
+_sync_tree "$MODDIR/webroot" "$HNC_DIR/webroot" 644
+if [ -f "$MODDIR/module.prop" ]; then
+    _sync_file "$MODDIR/module.prop" "$HNC_DIR/module.prop" 644
+fi
 
 H_MOD="$MODDIR/daemon/hnc_httpd/hnc_httpd"
 H_RUN="$HNC_DIR/daemon/hnc_httpd/hnc_httpd"
@@ -93,26 +180,15 @@ if [ ! -f "$H_MOD" ]; then
     echo "runtime sync WARN: module hnc_httpd missing at $H_MOD"
 elif [ ! -s "$H_RUN" ]; then
     _need_httpd=1
-elif command -v cmp >/dev/null 2>&1; then
-    cmp -s "$H_MOD" "$H_RUN" 2>/dev/null || _need_httpd=1
-elif command -v sha256sum >/dev/null 2>&1; then
-    _s_mod=$(_first_tok "$(sha256sum "$H_MOD" 2>/dev/null)")
-    _s_run=$(_first_tok "$(sha256sum "$H_RUN" 2>/dev/null)")
-    if [ -z "$_s_mod" ] || [ "$_s_mod" != "$_s_run" ]; then
-        _need_httpd=1
+elif ! _files_same "$H_MOD" "$H_RUN"; then
+    if ! command -v cmp >/dev/null 2>&1 && ! command -v sha256sum >/dev/null 2>&1 && ! command -v cksum >/dev/null 2>&1; then
+        echo "runtime sync WARN: cmp/sha256sum/cksum unavailable, forcing refresh of $H_RUN"
     fi
-elif command -v cksum >/dev/null 2>&1; then
-    _c_mod=$(_first_two_tok "$(cksum "$H_MOD" 2>/dev/null)")
-    _c_run=$(_first_two_tok "$(cksum "$H_RUN" 2>/dev/null)")
-    if [ "$_c_mod" = ":" ] || [ "$_c_mod" != "$_c_run" ]; then
-        _need_httpd=1
-    fi
-else
-    echo "runtime sync WARN: cmp/sha256sum/cksum unavailable, forcing refresh of $H_RUN"
     _need_httpd=1
 fi
 if [ "$_need_httpd" = "1" ]; then
-    _h_tmp="$H_RUN.new.$$"
+    _h_tmp="$H_RUN.tmp.$$"
+    rm -f "$_h_tmp" 2>/dev/null || true
     if cp -f "$H_MOD" "$_h_tmp" 2>/dev/null && [ -s "$_h_tmp" ]; then
         fix_exec "$_h_tmp"
         # 旧 httpd 还在跑就先停(占着 8444, 新进程起不来)。

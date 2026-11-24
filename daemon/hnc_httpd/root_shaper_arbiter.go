@@ -13,6 +13,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -678,17 +679,29 @@ func (a *RootShaperArbiter) EffectiveRateKbps() (downKbps, upKbps int) {
 	return snap.EffectiveDownKbps, snap.EffectiveUpKbps
 }
 
-// ReplayAfterRestore 在 NativeFullRestoreV6 重建 tc 树后强制重放当前仲裁器生效上限。
+// IsThermoRecovering 纯内存零 IO 查询当前仲裁器是否处于温控降温爬坡恢复期。
+func (a *RootShaperArbiter) IsThermoRecovering() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	recovering := a.thermoRecovering
+	a.mu.Unlock()
+	return recovering
+}
+
+// ReplayAfterRestore 在 NativeFullRestoreV6 重建 tc 树后强制重放当前仲裁器生效上限(含 0 总带宽复位旧 1:1)。
 func (a *RootShaperArbiter) ReplayAfterRestore(now time.Time, iface string) ArbiterSnapshot {
 	if a == nil {
 		return ArbiterSnapshot{ThrottleSources: []string{}}
 	}
 	a.mu.Lock()
 	a.syncPassiveInputsLocked()
+	prevActive := a.appliedActive
 	snap := a.recomputeLocked(now, iface)
 	a.mu.Unlock()
 
-	if snap.EffectiveDownKbps > 0 || snap.EffectiveUpKbps > 0 {
+	if snap.EffectiveDownKbps > 0 || snap.EffectiveUpKbps > 0 || prevActive {
 		_ = a.applyArbitratedState(snap, true, false)
 	}
 	return snap
@@ -784,8 +797,8 @@ func executeRootShaperDataplane(hncDir, iface string, active bool, downKbps, upK
 	if !active {
 		InvalidateDataplaneReconcileNative(hncDir, "")
 		if useNativeDataplane(hncDir) {
-			// 原生模式将 1:1 复位回默认 1000Mbit 根速率
-			if err := TuneGlobalShaperNative(hncDir, dpDefaultRootRateKbp, dpDefaultRootRateKbp); err == nil {
+			// 原生模式将已建树口 1:1 复位回默认 1000Mbit 根速率并清零 shaperSpec, 严防 1000000 污染 Express 上行重放
+			if err := ResetGlobalShaperNative(hncDir); err == nil {
 				return nil
 			}
 		}
@@ -806,15 +819,15 @@ func executeRootShaperDataplane(hncDir, iface string, active bool, downKbps, upK
 		upStr = mbpsToTcRate(float64(upKbps) / 1000.0)
 	}
 
-	// 若可走 Go 原生 Netlink 且非强制脚本初始化测试环境, 优先零子进程原地热更新 1:1
-	if !preferFullSetup && useNativeDataplane(hncDir) {
-		if err := TuneGlobalShaperNative(hncDir, downKbps, upKbps); err == nil {
+	// 若可走 Go 原生 Netlink 且 ifb0 已就绪(或无需初始化 IFB), 优先零子进程原地热更新 1:1
+	needIFBInit := false
+	if useNativeDataplane(hncDir) {
+		nErr := TuneGlobalShaperNative(hncDir, downKbps, upKbps)
+		if nErr == nil {
 			return nil
 		}
-	}
-	if preferFullSetup && useNativeDataplane(hncDir) {
-		if err := TuneGlobalShaperNative(hncDir, downKbps, upKbps); err == nil {
-			return nil
+		if errors.Is(nErr, errGlobalShaperNeedIFBInit) {
+			needIFBInit = true
 		}
 	}
 
@@ -823,7 +836,7 @@ func executeRootShaperDataplane(hncDir, iface string, active bool, downKbps, upK
 		return nil
 	}
 	subCmd := "global_shaper_tune"
-	if !prevActive || preferFullSetup {
+	if !prevActive || preferFullSetup || needIFBInit {
 		subCmd = "global_shaper"
 	}
 	var rc int

@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hnc.io/dpid/alert"
@@ -47,10 +49,49 @@ type rmacStateFile struct {
 	Guarded       map[string]rmacGuardEntry     `json:"guarded,omitempty"` // 仅用于 v5.37 旧版残留自动清理
 }
 
+// 严格锁序: rmacReconcileMu -> s.actionMu -> 子模块锁 -> macArchiveMu -> rmacMu -> macMergeMu -> macAliasMu。
+// 持 s.actionMu 时严禁反拿 rmacReconcileMu(统一经 triggerRMACReconcileAsync 单缓冲 channel 非阻塞唤醒串行后台协程)。
 var (
-	rmacMu        sync.Mutex
-	rmacFlushedLS = map[string]map[string]int64{} // hncDir -> (offline random mac -> flushed last_seen 水位)
+	rmacReconcileMu  sync.Mutex
+	rmacMu           sync.Mutex
+	rmacFlushedLS    = map[string]map[string]int64{} // hncDir -> (offline random mac -> flushed last_seen 水位)
+	rmacAsyncRunners sync.Map                        // *server -> *rmacAsyncRunner
 )
+
+type rmacAsyncRunner struct {
+	wakeCh  chan struct{}
+	running atomic.Bool
+}
+
+func (s *server) triggerRMACReconcileAsync() {
+	if s == nil {
+		return
+	}
+	actual, _ := rmacAsyncRunners.LoadOrStore(s, &rmacAsyncRunner{
+		wakeCh: make(chan struct{}, 1),
+	})
+	r := actual.(*rmacAsyncRunner)
+	select {
+	case r.wakeCh <- struct{}{}:
+	default:
+	}
+	if r.running.CompareAndSwap(false, true) {
+		go func() {
+			for {
+				select {
+				case <-r.wakeCh:
+					s.rmacReconcile(time.Now())
+				default:
+					r.running.Store(false)
+					if len(r.wakeCh) > 0 && r.running.CompareAndSwap(false, true) {
+						continue
+					}
+					return
+				}
+			}
+		}()
+	}
+}
 
 func defaultRMACPolicy() rmacPolicy {
 	return rmacPolicy{
@@ -179,12 +220,18 @@ func saveRMACStateAt(hncDir string, st rmacStateFile, now int64) {
 	}
 }
 
-// rmacReconcile 在后台 MacMergeLoop 周期内执行:
+// rmacReconcile 在后台 MacMergeLoop 周期或策略变更异步唤醒协程内串行执行:
 //  0. 自动解除旧版本遗留的陌生随机 MAC 默认限速/隔离护栏, 并裁剪过期 AutoInherited;
 //     0.5 旧 MAC 重新上线自动无损秒拆(核验合并后真实重连水位);
 //  1. 高置信度随机 MAC 自动无感继承(旧设备离线 + 未命中 MutexApart + 综合评分 >= auto_inherit_score);
 //  2. 离线短命无规则随机 MAC 自动清理陈旧邻居与记录, 防止 /24 租约池膨胀。
 func (s *server) rmacReconcile(now time.Time) {
+	if s == nil {
+		return
+	}
+	rmacReconcileMu.Lock()
+	defer rmacReconcileMu.Unlock()
+
 	pol := loadRMACPolicy(s.hncDir)
 	nowU := now.Unix()
 
@@ -308,14 +355,17 @@ func (s *server) rmacReconcile(now time.Time) {
 		macMergeMu.Lock()
 		mf := loadMacMergeFile(s.hncDir)
 		macMergeMu.Unlock()
-		cachedAliases := loadMACAliases(s.hncDir)
-		aliases := make(map[string]string, len(cachedAliases))
-		for k, v := range cachedAliases {
-			aliases[k] = v
-		}
+		aliases := loadMACAliases(s.hncDir)
 		names, _ := loadDeviceNames(filepath.Join(s.hncDir, deviceNamesRelPath))
 
-		for newMAC, cands := range mf.Suggestions {
+		sugMACs := make([]string, 0, len(mf.Suggestions))
+		for m := range mf.Suggestions {
+			sugMACs = append(sugMACs, m)
+		}
+		sort.Strings(sugMACs)
+
+		for _, newMAC := range sugMACs {
+			cands := mf.Suggestions[newMAC]
 			if len(cands) == 0 || onlineIP[newMAC] == "" || !isRandomizedMAC(newMAC) {
 				continue
 			}
@@ -336,22 +386,39 @@ func (s *server) rmacReconcile(now time.Time) {
 				continue
 			}
 			oldName := macDisplayName(names, mf, best.OldMAC)
+
 			s.actionMu.Lock()
-			_, err := s.deviceMerge(best.OldMAC, newMAC, true, now)
+			macMergeMu.Lock()
+			mfLatest := loadMacMergeFile(s.hncDir)
+			_, disNow := mfLatest.Dismissed[macMergeDismissKey(newMAC, best.OldMAC)]
+			apartNow := isMacMutexApart(mfLatest, newMAC, best.OldMAC, nowU)
+			macMergeMu.Unlock()
+			alLatest := loadMACAliases(s.hncDir)
+			_, newGone := alLatest[newMAC]
+			_, oldGone := alLatest[best.OldMAC]
+
+			var err error
+			if disNow || apartNow || newGone || oldGone {
+				err = errors.New("stale auto-inherit candidate")
+			} else {
+				_, err = s.deviceMerge(best.OldMAC, newMAC, true, now)
+				if err == nil {
+					rmacMu.Lock()
+					st := loadRMACState(s.hncDir)
+					st.AutoInherited[newMAC] = rmacAutoInheritRec{
+						OldMAC:  best.OldMAC,
+						OldName: oldName,
+						Score:   best.Score,
+						Ts:      nowU,
+					}
+					saveRMACStateAt(s.hncDir, st, nowU)
+					rmacMu.Unlock()
+				}
+			}
 			s.actionMu.Unlock()
+
 			if err == nil {
 				aliases[best.OldMAC] = newMAC
-				rmacMu.Lock()
-				st := loadRMACState(s.hncDir)
-				st.AutoInherited[newMAC] = rmacAutoInheritRec{
-					OldMAC:  best.OldMAC,
-					OldName: oldName,
-					Score:   best.Score,
-					Ts:      nowU,
-				}
-				saveRMACStateAt(s.hncDir, st, nowU)
-				rmacMu.Unlock()
-
 				cfg := alert.NewConfig(s.hncDir)
 				if alert.LoadConfig(cfg.AlertsConfigPath).Enabled {
 					_ = alert.Append(cfg.AlertsJSONLPath, alert.Alert{
@@ -435,16 +502,23 @@ func actionRMACPolicySet(s *server, p map[string]string) actionResp {
 			return actionResp{OK: false, Error: "bad params", Detail: "invalid client_isolation"}
 		}
 		cur.ClientIsolation = b
-		_, _ = runBin(s.hncDir, "json_set.sh", "top", "client_isolation_enabled", map[bool]string{true: "true", false: "false"}[b])
+		if err := rulesStore.SetTop(s.hncDir, "client_isolation_enabled", b); err != nil {
+			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(err.Error())}
+		}
+		rulesStore.Invalidate(s.hncDir)
 		if ap := s.currentHotspotIface(); ap != "" {
-			_, _ = runBin(s.hncDir, "iptables_manager.sh", "set_isolation", ap, map[bool]string{true: "on", false: "off"}[b])
+			if st, err := os.Stat(filepath.Join(s.hncDir, "bin", "iptables_manager.sh")); err == nil && !st.IsDir() {
+				if rc, out := runBin(s.hncDir, "iptables_manager.sh", "set_isolation", ap, map[bool]string{true: "on", false: "off"}[b]); rc != 0 {
+					return actionResp{OK: false, Error: "apply failed", Detail: lastLine(strings.TrimSpace(out))}
+				}
+			}
 		}
 	}
 	cur = normalizeRMACPolicy(cur)
 	if err := saveRMACPolicy(s.hncDir, cur); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
-	go s.rmacReconcile(time.Now())
+	s.triggerRMACReconcileAsync()
 	return actionResp{OK: true, Detail: "rmac policy saved"}
 }
 

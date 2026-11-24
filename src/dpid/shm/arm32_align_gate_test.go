@@ -305,6 +305,27 @@ func typeContainsAtomic64(t types.Type, seen map[types.Type]bool) bool {
 	return false
 }
 
+func typeContainsAtomic64Slice(t types.Type, seen map[types.Type]bool) bool {
+	t = types.Unalias(t)
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *types.Slice:
+		return typeContainsAtomic64(u.Elem(), map[types.Type]bool{}) || typeContainsAtomic64Slice(u.Elem(), seen)
+	case *types.Array:
+		return u.Len() > 0 && typeContainsAtomic64Slice(u.Elem(), seen)
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			if typeContainsAtomic64Slice(u.Field(i).Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func typeContains64BitScalar(t types.Type, seen map[types.Type]bool) bool {
 	t = types.Unalias(t)
 	if isAtomic64Named(t) {
@@ -386,23 +407,30 @@ func checkStructAtomic64Layout(
 	var violations []string
 	for i, f := range fields {
 		ft := f.Type()
-		if !typeContainsAtomic64(ft, map[types.Type]bool{}) {
-			continue
-		}
 		fieldPath := prefix + "." + f.Name()
 		fPos := f.Pos()
 		if !fPos.IsValid() {
 			fPos = pos
 		}
+		hasInlineAtomic := typeContainsAtomic64(ft, map[types.Type]bool{})
+		hasSliceAtomic := typeContainsAtomic64Slice(ft, map[types.Type]bool{})
+		if !hasInlineAtomic && !hasSliceAtomic {
+			continue
+		}
 		totalArm := baseArmOff + armOffs[i]
 		totalPure := basePureOff + pureOffs[i]
-		if totalArm%8 != 0 || totalPure%8 != 0 {
-			violations = append(violations, fmt.Sprintf(
-				"%s: %s contains 64-bit atomic at 32-bit ARM offset=%d (rawOrderOffset=%d), want offset%%8==0",
-				fset.Position(fPos), fieldPath, totalArm, totalPure,
-			))
+		if hasInlineAtomic {
+			if totalArm%8 != 0 || totalPure%8 != 0 {
+				violations = append(violations, fmt.Sprintf(
+					"%s: %s contains 64-bit atomic at 32-bit ARM offset=%d (rawOrderOffset=%d), want offset%%8==0",
+					fset.Position(fPos), fieldPath, totalArm, totalPure,
+				))
+			}
+			violations = append(violations, checkNestedAtomic64Type(fset, fPos, fieldPath, ft, armSizes, pureSizes, totalArm, totalPure, visited)...)
+		} else {
+			// Slice header itself is a 12-byte descriptor; check backing array element stride & layout from offset 0.
+			violations = append(violations, checkNestedAtomic64Type(fset, fPos, fieldPath, ft, armSizes, pureSizes, 0, 0, visited)...)
 		}
-		violations = append(violations, checkNestedAtomic64Type(fset, fPos, fieldPath, ft, armSizes, pureSizes, totalArm, totalPure, visited)...)
 	}
 	return violations
 }
@@ -436,6 +464,22 @@ func checkNestedAtomic64Type(
 				fset, pos, prefix+"[0]", u.Elem(), armSizes, pureSizes, baseArmOff, basePureOff, visited,
 			)...)
 		}
+	case *types.Slice:
+		if typeContainsAtomic64(u.Elem(), map[types.Type]bool{}) {
+			elemArmSz := armSizes.Sizeof(u.Elem())
+			elemPureSz := pureSizes.Sizeof(u.Elem())
+			if elemArmSz%8 != 0 || elemPureSz%8 != 0 {
+				violations = append(violations, fmt.Sprintf(
+					"%s: %s slice element sizeof=%d (rawSize=%d) with 64-bit atomic violates sizeof%%8==0 on 32-bit ARM",
+					fset.Position(pos), prefix, elemArmSz, elemPureSz,
+				))
+			}
+		}
+		if typeContainsAtomic64(u.Elem(), map[types.Type]bool{}) || typeContainsAtomic64Slice(u.Elem(), map[types.Type]bool{}) {
+			violations = append(violations, checkNestedAtomic64Type(
+				fset, pos, prefix+"[0]", u.Elem(), armSizes, pureSizes, 0, 0, visited,
+			)...)
+		}
 	case *types.Struct:
 		if !isAtomic64Named(t) {
 			violations = append(violations, checkStructAtomic64Layout(
@@ -446,7 +490,7 @@ func checkNestedAtomic64Type(
 	return violations
 }
 
-// selectorChainOffsetFromHeapOrRoot 计算 &x.a.b 在 32 位 ARM 下相对于根结构体(或最内层指针解引用结构体)的累计偏移。
+// selectorChainOffsetFromHeapOrRoot 计算 &x.a.b 或 &slice[i].field 在 32 位 ARM 下相对于根结构体(或切片底层数组/指针解引用结构体)的累计偏移与步长。
 func selectorChainOffsetFromHeapOrRoot(
 	fset *token.FileSet,
 	expr ast.Expr,
@@ -457,9 +501,11 @@ func selectorChainOffsetFromHeapOrRoot(
 		sel      *types.Selection
 		fieldStr string
 		arrElem  types.Type
+		isSlice  bool
 		pos      token.Pos
 	}
 	var steps []step
+	var pureSizes pureArm32Sizes
 	cur := stripParens(expr)
 	for {
 		switch n := cur.(type) {
@@ -486,15 +532,34 @@ func selectorChainOffsetFromHeapOrRoot(
 				cur = nil
 				continue
 			}
-			if arr, isArr := tv.Type.Underlying().(*types.Array); isArr {
+			switch seqT := tv.Type.Underlying().(type) {
+			case *types.Array:
 				steps = append(steps, step{
-					arrElem:  arr.Elem(),
+					arrElem:  seqT.Elem(),
 					fieldStr: "[i]",
 					pos:      n.Lbrack,
 				})
 				cur = stripParens(n.X)
-			} else {
-				// Slice indexing starts from slice backing array pointer.
+			case *types.Pointer:
+				if arr, isArr := seqT.Elem().Underlying().(*types.Array); isArr {
+					steps = append(steps, step{
+						arrElem:  arr.Elem(),
+						fieldStr: "[i]",
+						pos:      n.Lbrack,
+					})
+				}
+				cur = nil
+			case *types.Slice:
+				// Slice indexing starts from slice backing array pointer (resets outer struct offset to 0),
+				// and its element stride MUST satisfy sizeof(S)%8 == 0.
+				steps = append(steps, step{
+					arrElem:  seqT.Elem(),
+					isSlice:  true,
+					fieldStr: "[i]",
+					pos:      n.Lbrack,
+				})
+				cur = nil
+			default:
 				cur = nil
 			}
 		default:
@@ -515,10 +580,15 @@ func selectorChainOffsetFromHeapOrRoot(
 		names = append(names, st.fieldStr)
 		if st.arrElem != nil {
 			esz := armSizes.Sizeof(st.arrElem)
-			if esz%8 != 0 {
+			psz := pureSizes.Sizeof(st.arrElem)
+			if esz%8 != 0 || psz%8 != 0 {
+				kind := "array"
+				if st.isSlice {
+					kind = "slice"
+				}
 				strideViolations = append(strideViolations, fmt.Sprintf(
-					"%s: indexed array element %s sizeof=%d violates sizeof%%8==0 for 64-bit address-taken field on 32-bit ARM",
-					fset.Position(st.pos), st.arrElem.String(), esz,
+					"%s: indexed %s element %s sizeof=%d (rawSize=%d) violates sizeof%%8==0 for 64-bit address-taken field on 32-bit ARM",
+					fset.Position(st.pos), kind, st.arrElem.String(), esz, psz,
 				))
 			}
 			continue
@@ -567,7 +637,7 @@ func auditTypedPackageArm32(fset *token.FileSet, files []*ast.File, info *types.
 			case *ast.TypeSpec:
 				if obj, ok := info.Defs[node.Name]; ok && obj != nil {
 					t := obj.Type()
-					if typeContainsAtomic64(t, map[types.Type]bool{}) {
+					if typeContainsAtomic64(t, map[types.Type]bool{}) || typeContainsAtomic64Slice(t, map[types.Type]bool{}) {
 						if st, ok := t.Underlying().(*types.Struct); ok {
 							checkedStructs[st] = true
 						}
@@ -580,7 +650,7 @@ func auditTypedPackageArm32(fset *token.FileSet, files []*ast.File, info *types.
 				if tv, ok := info.Types[node]; ok {
 					if st, ok := tv.Type.Underlying().(*types.Struct); ok && !checkedStructs[st] {
 						checkedStructs[st] = true
-						if typeContainsAtomic64(st, map[types.Type]bool{}) {
+						if typeContainsAtomic64(st, map[types.Type]bool{}) || typeContainsAtomic64Slice(st, map[types.Type]bool{}) {
 							violations = append(violations, checkStructAtomic64Layout(
 								fset, node.Pos(), "<anonymous_struct>", st, armSizes, pureSizes, 0, 0, map[*types.Struct]bool{},
 							)...)
@@ -589,9 +659,14 @@ func auditTypedPackageArm32(fset *token.FileSet, files []*ast.File, info *types.
 				}
 			case *ast.ArrayType:
 				if tv, ok := info.Types[node]; ok {
-					if arr, ok := tv.Type.Underlying().(*types.Array); ok {
+					switch seqT := tv.Type.Underlying().(type) {
+					case *types.Array:
 						violations = append(violations, checkNestedAtomic64Type(
-							fset, node.Pos(), "<array>", arr, armSizes, pureSizes, 0, 0, map[*types.Struct]bool{},
+							fset, node.Pos(), "<array>", seqT, armSizes, pureSizes, 0, 0, map[*types.Struct]bool{},
+						)...)
+					case *types.Slice:
+						violations = append(violations, checkNestedAtomic64Type(
+							fset, node.Pos(), "<slice>", seqT, armSizes, pureSizes, 0, 0, map[*types.Struct]bool{},
 						)...)
 					}
 				}
@@ -599,7 +674,7 @@ func auditTypedPackageArm32(fset *token.FileSet, files []*ast.File, info *types.
 				if len(node.Args) == 0 {
 					return true
 				}
-				// Check 1: sync/atomic 64-bit functions taking &x.field.
+				// Check 1: sync/atomic 64-bit functions taking &x.field or &slice[i].field.
 				if sel, ok := stripParens(node.Fun).(*ast.SelectorExpr); ok {
 					if obj := info.Uses[sel.Sel]; obj != nil && obj.Pkg() != nil &&
 						obj.Pkg().Path() == "sync/atomic" && atomic64FuncSet[obj.Name()] {
@@ -617,14 +692,16 @@ func auditTypedPackageArm32(fset *token.FileSet, files []*ast.File, info *types.
 					}
 				}
 
-				// Check 2: unsafe.Pointer(&x.field) where field contains 64-bit integers/counters.
+				// Check 2: unsafe.Pointer(&x.field) or unsafe.Pointer(&slice[i].field) where target contains 64-bit integers/counters.
 				if len(node.Args) == 1 {
 					if tv, ok := info.Types[node.Fun]; ok && tv.IsType() {
 						if basic, ok := tv.Type.Underlying().(*types.Basic); ok && basic.Kind() == types.UnsafePointer {
 							arg0 := stripParens(node.Args[0])
 							if unary, ok := arg0.(*ast.UnaryExpr); ok && unary.Op == token.AND {
 								target := stripParens(unary.X)
-								if _, isSel := target.(*ast.SelectorExpr); isSel {
+								_, isSel := target.(*ast.SelectorExpr)
+								_, isIdx := target.(*ast.IndexExpr)
+								if isSel || isIdx {
 									if targetTV, ok := info.Types[target]; ok && typeContains64BitScalar(targetTV.Type, map[types.Type]bool{}) {
 										off, chainDesc, isField, strideErrs := selectorChainOffsetFromHeapOrRoot(fset, target, info, armSizes)
 										violations = append(violations, strideErrs...)
@@ -821,6 +898,25 @@ type badArrayHolder struct {
 	arr [2]badArrayElem
 }
 
+type badSliceHolder struct {
+	flag  uint32
+	items []badArrayElem
+}
+
+type safeAlignedElem struct {
+	cnt atomic.Uint64
+}
+
+type safeSliceHolder struct {
+	flag  uint32
+	items []safeAlignedElem
+}
+
+type badRawSliceElem struct {
+	raw  int64
+	tail uint32
+}
+
 type badRaw64Target struct {
 	fd  int
 	raw int64
@@ -829,9 +925,11 @@ type badRaw64Target struct {
 	}
 }
 
-func trigger(p *badRaw64Target) {
+func trigger(p *badRaw64Target, sl []badRawSliceElem, i int) {
 	atomic.AddInt64(&p.raw, 1)
 	_ = unsafe.Pointer(&p.bpf)
+	atomic.AddInt64(&sl[i].raw, 1)
+	_ = unsafe.Pointer(&sl[i].raw)
 }
 `
 	fset := token.NewFileSet()
@@ -859,6 +957,9 @@ func trigger(p *badRaw64Target) {
 		"badAtomicStruct.cnt",
 		"badNestedOuter.sub",
 		"badArrayHolder.arr",
+		"badSliceHolder.items slice element",
+		"(rawSize=12) with 64-bit atomic violates sizeof%8==0",
+		"indexed slice element synthetic.badRawSliceElem sizeof=12",
 		"atomic.AddInt64(&raw)",
 		"unsafe.Pointer(&bpf)",
 	} {
@@ -866,4 +967,8 @@ func trigger(p *badRaw64Target) {
 			t.Fatalf("expected synthetic gate to catch %q, got:\n%s", wantSub, joined)
 		}
 	}
+	if strings.Contains(joined, "safeSliceHolder") || strings.Contains(joined, "safeAlignedElem") {
+		t.Fatalf("expected safeSliceHolder to pass without false positive, got:\n%s", joined)
+	}
 }
+

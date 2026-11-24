@@ -156,6 +156,9 @@ type thermoCruiseEngine struct {
 	summaryReading       ThermoBatteryReading
 	lastSnap             map[string]any
 	lastPersistedKey     string
+	cfgSaveMu            sync.Mutex
+	cfgSaveSeq           uint64
+	lastSavedCfgSeq      uint64
 
 	pollInterval      time.Duration
 	coolHoldDur       time.Duration
@@ -302,15 +305,20 @@ func validThermoConfig(c ThermoCruiseConfig) string {
 	return ""
 }
 
-func (e *thermoCruiseEngine) saveConfigLocked() error {
-	if e.srv == nil || e.srv.hncDir == "" {
+func (e *thermoCruiseEngine) persistConfigBytesUnlocked(seq uint64, b []byte) error {
+	if e.srv == nil || e.srv.hncDir == "" || len(b) == 0 {
 		return nil
 	}
-	b, err := json.MarshalIndent(e.cfg, "", "  ")
-	if err != nil {
+	e.cfgSaveMu.Lock()
+	defer e.cfgSaveMu.Unlock()
+	if seq < e.lastSavedCfgSeq {
+		return nil
+	}
+	if err := discoverWriteAtomic(e.configPath(), b); err != nil {
 		return err
 	}
-	return discoverWriteAtomic(e.configPath(), b)
+	e.lastSavedCfgSeq = seq
+	return nil
 }
 
 // ── 零子进程 sysfs 多量纲自适应温度解析与坏传感器熔断 (<50µs) ─────────────────
@@ -331,7 +339,7 @@ func isBrokenTempSentinel(v float64, isThermalZone bool) bool {
 	}
 }
 
-// parseSysfsTempAdaptive 按是否热区节点执行三量纲自适应换算、哨兵拦截与物理合理区间校验。
+// parseSysfsTempAdaptive 按是否热区节点执行量纲换算、哨兵拦截与物理合理区间校验。
 func parseSysfsTempAdaptive(raw string, isThermalZone, powerSupplyTenthsABI bool) (celsius float64, reasonCode string, ok bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -355,6 +363,13 @@ func parseSysfsTempAdaptive(raw string, isThermalZone, powerSupplyTenthsABI bool
 			c = v
 		default:
 			c = v / 10.0
+		}
+	} else if isThermalZone {
+		if strings.Contains(s, ".") {
+			c = v
+		} else {
+			// Linux thermal_zone ABI 固定采用整数毫摄氏度 (millidegrees, 如 500 -> 0.5℃, 42000 -> 42.0℃)
+			c = v / 1000.0
 		}
 	} else {
 		switch {
@@ -380,7 +395,7 @@ func parseSysfsTempAdaptive(raw string, isThermalZone, powerSupplyTenthsABI bool
 
 // parseSysfsTempCelsiusDetail 结合 sysfs 路径语义做多量纲自适应换算与坏传感器熔断判定:
 //   - power_supply 电芯节点: 过滤哨兵值; |v|>=1000 按毫摄氏度 /1000.0, 显式小数按原值, 其余按 Linux ABI 0.1℃ /10.0, 合法区间 [-20.0, 85.0]℃;
-//   - thermal_zone 热区节点: 过滤哨兵值及未初始化 0; |v|>=1000 按 /1000.0, 100<=|v|<1000 按 /10.0, |v|<100 按原值, 合法区间 [-20.0, 100.0]℃。
+//   - thermal_zone 热区节点: 过滤哨兵值及未初始化 0; 显式小数按原值, 整数统一按标准毫摄氏度 /1000.0 (如 500 -> 0.5℃), 合法区间 [-20.0, 100.0]℃。
 func parseSysfsTempCelsiusDetail(path, raw string) (celsius float64, reasonCode string, ok bool) {
 	slash := strings.ToLower(filepath.ToSlash(strings.TrimSpace(path)))
 	isThermalZone := strings.Contains(slash, "thermal_zone") || strings.Contains(slash, "/thermal/")
@@ -640,11 +655,21 @@ func (e *thermoCruiseEngine) readShellTempFromSysfs(thRoot string) (shellTempC f
 
 	if !scanned {
 		discovered := discoverShellThermalZones(thRoot)
-		e.mu.Lock()
-		e.cachedShellThRoot = thRoot
-		e.shellZonesScanned = true
-		e.cachedShellZones = append([]cachedShellZoneNode(nil), discovered...)
-		e.mu.Unlock()
+		if len(discovered) > 0 {
+			e.mu.Lock()
+			e.cachedShellThRoot = thRoot
+			e.shellZonesScanned = true
+			e.cachedShellZones = append([]cachedShellZoneNode(nil), discovered...)
+			e.mu.Unlock()
+		} else {
+			e.mu.Lock()
+			if e.cachedShellThRoot != thRoot {
+				e.cachedShellThRoot = thRoot
+				e.shellZonesScanned = false
+				e.cachedShellZones = nil
+			}
+			e.mu.Unlock()
+		}
 		zones = discovered
 	}
 	if len(zones) == 0 {
@@ -1228,6 +1253,9 @@ func (e *thermoCruiseEngine) needsHotspotOffCleanup() bool {
 	if e.effectiveStage.Load() != 0 || e.stage1RelaxFlag.Load() {
 		return true
 	}
+	if e.srv != nil && e.srv.shaperArbiter().IsThermoRecovering() {
+		return true
+	}
 	e.mu.Lock()
 	dirty := e.rawThermalStage != 0 || !e.coolBelowStage1Since.IsZero() || !e.coolBelowStage2Since.IsZero() || e.lastStage2Shaper
 	e.mu.Unlock()
@@ -1308,10 +1336,15 @@ func (e *thermoCruiseEngine) summary() map[string]any {
 	loopActive := e.LoopMode() == v6EngineModeActive
 	now := time.Now()
 	minGap := e.effectiveIdleSummaryGap()
+	holdDur := e.effectiveCoolHoldDuration()
 
 	e.mu.Lock()
 	cfg := e.cfg
 	rawStage := e.rawThermalStage
+	lastS2Shaper := e.lastStage2Shaper
+	lastS2Exempt := e.lastStage2Exempt
+	c2 := e.coolBelowStage2Since
+	c1 := e.coolBelowStage1Since
 	rd := e.lastReading
 	needReadOnlySample := false
 	if !loopActive {
@@ -1339,20 +1372,51 @@ func (e *thermoCruiseEngine) summary() map[string]any {
 		e.summaryReading = sampled
 		cfg = e.cfg
 		rawStage = e.rawThermalStage
+		lastS2Shaper = e.lastStage2Shaper
+		lastS2Exempt = e.lastStage2Exempt
+		c2 = e.coolBelowStage2Since
+		c1 = e.coolBelowStage1Since
 		e.mu.Unlock()
 		rd = sampled
 	} else {
 		rd = calibrateThermoDualReading(rd)
 	}
 
+	coolHoldRemSec := 0
+	if rawStage == 2 && !c2.IsZero() {
+		rem := holdDur - now.Sub(c2)
+		if rem > 0 {
+			coolHoldRemSec = int((rem + time.Second - 1) / time.Second)
+		}
+	} else if rawStage == 1 && !c1.IsZero() {
+		rem := holdDur - now.Sub(c1)
+		if rem > 0 {
+			coolHoldRemSec = int((rem + time.Second - 1) / time.Second)
+		}
+	}
+	externalPower := rd.IsCharging || rd.ChargerOnline || rd.IsBypassSupply ||
+		strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full")
+	lowBatCruise := loopActive && cfg.Enabled && rd.Available && !externalPower &&
+		rd.CapacityPct > 0 && rd.CapacityPct <= cfg.LowBatPct
+
 	faultCnt := e.sensorFaultCount.Load()
 	out := map[string]any{
 		"enabled":                 cfg.Enabled,
 		"available":               rd.Available,
+		"bat_available":           rd.Available,
 		"reason_code":             rd.ReasonCode,
 		"sensor_fault_count":      faultCnt,
+		"stage2_shaper_enabled":   cfg.Stage2ShaperEnabled,
+		"stage1_temp_c":           cfg.Stage1TempC,
+		"stage2_temp_c":           cfg.Stage2TempC,
+		"low_bat_pct":             cfg.LowBatPct,
 		"effective_stage":         int(e.effectiveStage.Load()),
 		"raw_thermal_stage":       rawStage,
+		"stage2_shaper_active":    lastS2Shaper,
+		"stage2_exempt":           lastS2Exempt,
+		"low_battery_cruise":      lowBatCruise,
+		"vector_express_active":   e.srv != nil && e.srv.isVectorExpressActive(),
+		"cool_hold_remaining_sec": coolHoldRemSec,
 		"temp_c":                  rd.TempC,
 		"battery_temp_c":          rd.BatteryTempC,
 		"shell_temp_c":            rd.ShellTempC,
@@ -1360,7 +1424,10 @@ func (e *thermoCruiseEngine) summary() map[string]any {
 		"battery_spoof_suspected": rd.BatterySpoofSuspected,
 		"capacity_pct":            rd.CapacityPct,
 		"status":                  rd.Status,
+		"is_charging":             rd.IsCharging,
+		"charger_online":          rd.ChargerOnline,
 		"bypass_supply":           rd.IsBypassSupply,
+		"bypass_supply_active":    rd.IsBypassSupply,
 	}
 	if rd.ShellZone != "" {
 		out["shell_zone"] = rd.ShellZone
@@ -1395,25 +1462,37 @@ func (e *thermoCruiseEngine) evalNoClientsRelease(now time.Time, probedOnce *boo
 	rawStage := e.rawThermalStage
 	e.mu.Unlock()
 
-	// rawThermalStage == 0 (含纯低电态 low_battery_cruise) 直接停表 0 唤醒!
-	if rawStage <= 0 {
+	arbRecovering := e.srv != nil && e.srv.shaperArbiter().IsThermoRecovering()
+	// rawThermalStage == 0 且仲裁器无残余渐进爬坡限速时直接停表 0 唤醒!
+	if rawStage <= 0 && !arbRecovering {
 		return 0, false
 	}
 
-	if probedOnce != nil && !*probedOnce {
-		*probedOnce = true
+	if (probedOnce != nil && !*probedOnce) || (rawStage <= 0 && arbRecovering) {
+		if probedOnce != nil {
+			*probedOnce = true
+		}
 		rd := e.sampleBattery()
-		e.Evaluate(now, rd, e.srv.isVectorExpressActive())
+		e.Evaluate(now, rd, e.srv != nil && e.srv.isVectorExpressActive())
 	}
 
 	holdDur := e.effectiveCoolHoldDuration()
 	e.mu.Lock()
 	rawStage = e.rawThermalStage
+	lastS2 := e.lastStage2Shaper
 	c2 := e.coolBelowStage2Since
 	c1 := e.coolBelowStage1Since
 	e.mu.Unlock()
 
+	// 若二阶温控已解除但仲裁器仍处于渐进爬坡恢复期, 0 客户端下立即一步解限恢复 100% 满速后再进入休眠!
+	if !lastS2 && e.srv != nil && e.srv.shaperArbiter().IsThermoRecovering() {
+		e.srv.shaperArbiter().UpdateThermoStage2(now, false, 0, true)
+	}
+
 	if rawStage <= 0 {
+		if e.srv != nil && e.srv.shaperArbiter().IsThermoRecovering() {
+			return e.effectivePollInterval(), true
+		}
 		return 0, false
 	}
 	var rem time.Duration
@@ -1587,6 +1666,7 @@ func (s *server) apiThermoCruise(w http.ResponseWriter, r *http.Request) {
 		}
 
 		eng.mu.Lock()
+		prevCfg := eng.cfg
 		next := eng.cfg
 		if req.Enabled != nil {
 			next.Enabled = *req.Enabled
@@ -1609,10 +1689,26 @@ func (s *server) apiThermoCruise(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		eng.cfg = next
-		err := eng.saveConfigLocked()
+		eng.cfgSaveSeq++
+		saveSeq := eng.cfgSaveSeq
+		cfgBytes, mErr := json.MarshalIndent(eng.cfg, "", "  ")
 		eng.mu.Unlock()
 
-		if err != nil {
+		if mErr != nil {
+			eng.mu.Lock()
+			if eng.cfgSaveSeq == saveSeq {
+				eng.cfg = prevCfg
+			}
+			eng.mu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write failed", "detail": mErr.Error()})
+			return
+		}
+		if err := eng.persistConfigBytesUnlocked(saveSeq, cfgBytes); err != nil {
+			eng.mu.Lock()
+			if eng.cfgSaveSeq == saveSeq {
+				eng.cfg = prevCfg
+			}
+			eng.mu.Unlock()
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write failed", "detail": err.Error()})
 			return
 		}

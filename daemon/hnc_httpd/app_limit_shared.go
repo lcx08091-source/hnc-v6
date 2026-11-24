@@ -21,15 +21,143 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+
+	"hnc.io/dpid/output"
 )
 
 const (
-	appLimitIncludeSharedKey = "app_limit_include_shared_ips"
-	ipAppMapFlatRelPath      = "run/ip_app_map.flat"
+	appLimitIncludeSharedKey    = "app_limit_include_shared_ips"
+	ipAppMapFlatRelPath         = "run/ip_app_map.flat"
+	appLimitSharedInfraSentinel = "__shared_infra__"
 )
+
+var (
+	appCtlSharedOnce    sync.Once
+	appCtlBuiltinShared *output.SharedInfra
+	appLimitSharedOnce  sync.Once
+	appLimitExtraShared *output.SharedInfra
+	appLimitHintMu      sync.Mutex
+	appLimitHintDir     string
+)
+
+// builtinAppCtlSharedInfra 内置多租户托管后缀与核心跨应用共享基础设施兜底名单(即使运行目录未同步 shared_infra.txt 仍生效)。
+func builtinAppCtlSharedInfra() *output.SharedInfra {
+	appCtlSharedOnce.Do(func() {
+		const builtin = `
+github.io
+githubusercontent.com
+githubassets.com
+gitlab.io
+bitbucket.io
+gitee.io
+pages.dev
+workers.dev
+vercel.app
+netlify.app
+herokuapp.com
+appspot.com
+azurewebsites.net
+firebaseapp.com
+web.app
+cloudfunctions.net
+run.app
+pstatp.com
+alicdn.com
+aliyuncs.com
+wechatpay.cn
+mdap.alipay.com
+mobilegw.alipay.com
+akamaized.net
+cloudfront.net
+fastly.net
+cloudflare-dns.com
+alibabadns.com
+dnspod.cn
+myqcloud.com
+tencentcos.cn
+bytecdn.com
+byteimg.com
+`
+		appCtlBuiltinShared = output.ParseSharedInfra([]byte(builtin))
+	})
+	return appCtlBuiltinShared
+}
+
+func builtinAppLimitOnlySharedInfra() *output.SharedInfra {
+	appLimitSharedOnce.Do(func() {
+		appLimitExtraShared = output.ParseSharedInfra([]byte("snssdk.com\n"))
+	})
+	return appLimitExtraShared
+}
+
+func noteAppLimitDir(hncDir string) {
+	if hncDir == "" {
+		return
+	}
+	for _, p := range sharedInfraPaths(hncDir) {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
+			appLimitHintMu.Lock()
+			appLimitHintDir = hncDir
+			appLimitHintMu.Unlock()
+			return
+		}
+	}
+}
+
+func resolveAppLimitInfraDir(hncDir string) string {
+	if hncDir != "" {
+		return hncDir
+	}
+	if env := strings.TrimSpace(os.Getenv("HNC_DIR")); env != "" {
+		return env
+	}
+	appLimitHintMu.Lock()
+	hint := appLimitHintDir
+	appLimitHintMu.Unlock()
+	return hint
+}
+
+// isAppCtlSharedOrMultiTenantDomain 判定域名是否命中 shared_infra.txt 或 github.io 等多租户共享后缀。
+func isAppCtlSharedOrMultiTenantDomain(hncDir, host string) bool {
+	h := strings.Trim(strings.ToLower(strings.TrimSpace(host)), ".")
+	if h == "" {
+		return false
+	}
+	if builtinAppCtlSharedInfra().Match(h) {
+		return true
+	}
+	if si := loadGuardSharedInfra(resolveAppLimitInfraDir(hncDir)); si != nil && si.Match(h) {
+		return true
+	}
+	return false
+}
+
+// appCtlForeignPaymentOwner 识别独立支付根域所属应用(如 alipay.com -> "alipay")。
+// 限制 taobao 等异源应用或异源类别时, 绝不连坐封杀或限速独立支付根域。
+func appCtlForeignPaymentOwner(host string) string {
+	h := strings.Trim(strings.ToLower(strings.TrimSpace(host)), ".")
+	if h == "" {
+		return ""
+	}
+	switch {
+	case h == "alipay.com" || strings.HasSuffix(h, ".alipay.com") ||
+		h == "alipayobjects.com" || strings.HasSuffix(h, ".alipayobjects.com") ||
+		h == "alipaydns.com" || strings.HasSuffix(h, ".alipaydns.com"):
+		return "alipay"
+	case h == "unionpay.com" || strings.HasSuffix(h, ".unionpay.com") ||
+		h == "95516.com" || strings.HasSuffix(h, ".95516.com"):
+		return "unionpay"
+	case h == "paypal.com" || strings.HasSuffix(h, ".paypal.com") ||
+		h == "paypalobjects.com" || strings.HasSuffix(h, ".paypalobjects.com"):
+		return "paypal"
+	}
+	return ""
+}
 
 // appLimitIncludeShared 读 rules.json 顶层逃生口(缺省 false = 跳过共享 IP)。
 func appLimitIncludeShared(hncDir string) bool {
+	noteAppLimitDir(hncDir)
 	b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
 	if err != nil {
 		return false
@@ -55,6 +183,7 @@ func appLimitIncludeShared(hncDir string) bool {
 // loadIPAppFlat 读 dpid 写的 run/ip_app_map.flat("<ip> <app_id>" 每行一条),
 // 返回 app_id → IP 列表(去重, 保持文件顺序)。与 shell 读的是同一个文件。
 func loadIPAppFlat(hncDir string) map[string][]string {
+	noteAppLimitDir(hncDir)
 	out := map[string][]string{}
 	f, err := os.Open(filepath.Join(hncDir, ipAppMapFlatRelPath))
 	if err != nil {
@@ -78,10 +207,24 @@ func loadIPAppFlat(hncDir string) map[string][]string {
 	return out
 }
 
-// ipNameAppMap 把反查表压成 ip → app(只保留归到应用的条目)。
+// ipNameAppMap 把反查表压成 ip → app(与 apply_app_limits.sh 同步过滤 shared_infra.txt、多租户后缀及异源支付根域)。
 func ipNameAppMap(names map[string]ipName) map[string]string {
+	return ipNameAppMapForDir("", names)
+}
+
+func ipNameAppMapForDir(hncDir string, names map[string]ipName) map[string]string {
 	out := make(map[string]string, len(names))
 	for ip, n := range names {
+		if n.Name != "" {
+			if isAppCtlSharedOrMultiTenantDomain(hncDir, n.Name) || builtinAppLimitOnlySharedInfra().Match(n.Name) {
+				out[ip] = appLimitSharedInfraSentinel
+				continue
+			}
+			if payOwner := appCtlForeignPaymentOwner(n.Name); payOwner != "" && n.App != payOwner {
+				out[ip] = payOwner
+				continue
+			}
+		}
 		if n.App != "" {
 			out[ip] = n.App
 		}
@@ -94,7 +237,7 @@ func ipNameAppMap(names map[string]ipName) map[string]string {
 func appLimitSplitShared(appID string, ips []string, nameApp map[string]string, includeShared bool) (kept, shared []string) {
 	for _, ip := range ips {
 		if !includeShared {
-			if other := nameApp[ip]; other != "" && other != appID {
+			if other := nameApp[ip]; other == appLimitSharedInfraSentinel || (other != "" && other != appID) {
 				shared = append(shared, ip)
 				continue
 			}

@@ -281,14 +281,15 @@ function placeSegs(root) {
 var MORPH_KEEP_CLS = ['busy', 'pending', 'jelly', 'run'];
 function mkey(n) {
   if (n.nodeType !== 1) return '';
-  var k = n.getAttribute('data-dev') || n.getAttribute('data-side') || n.getAttribute('data-foldkey') || n.id || n.getAttribute('data-app') || n.getAttribute('data-mkey');
+  var k = n.getAttribute('data-dev') || n.getAttribute('data-side') || n.getAttribute('data-foldkey') || n.id || n.getAttribute('data-app') || n.getAttribute('data-mkey') || n.getAttribute('data-cnk');
   return k ? n.nodeName + ':' + k : '';
 }
 function morphAttrs(a, b) {
   var i, at, frozen = a.classList.contains('pending') || a.classList.contains('busy') || !!(a.parentNode && a.parentNode.classList && (a.parentNode.classList.contains('pending') || a.parentNode.classList.contains('busy')));
+  var segDir = a.classList.contains('seg') ? a.style.getPropertyValue('--seg-dir') : '';
   for (i = a.attributes.length - 1; i >= 0; i--) {
     at = a.attributes[i].name;
-    if (b.hasAttribute(at) || (at === 'style' && a.classList.contains('thumb'))) continue;
+    if (b.hasAttribute(at) || (at === 'style' && (a.classList.contains('thumb') || !!segDir))) continue;
     if (frozen && (at === 'class' || at === 'aria-checked' || at === 'disabled' || at === 'aria-busy')) continue;
     a.removeAttribute(at);
   }
@@ -306,16 +307,26 @@ function morphAttrs(a, b) {
     a.setAttribute(at.name, at.value);
     if (a.nodeName === 'INPUT' && at.name === 'value' && a !== document.activeElement) a.value = at.value;
   }
+  if (segDir && a.style.getPropertyValue('--seg-dir') !== segDir) {
+    a.style.setProperty('--seg-dir', segDir);
+  }
   if (a.nodeName === 'INPUT' && (a.type === 'checkbox' || a.type === 'radio')) {
     var ck = b.hasAttribute('checked');
     if (a.defaultChecked !== ck) { if (a !== document.activeElement) a.checked = ck; a.defaultChecked = ck; }
+  }
+  if (a.nodeName === 'OPTION') {
+    var sel = b.hasAttribute('selected');
+    if (a.defaultSelected !== sel) a.defaultSelected = sel;
   }
 }
 function morphNode(a, b) {
   if (a.nodeType !== 1) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return a; }
   if (a.hasAttribute('data-keep')) return a;
+  var hasSelVal = a.nodeName === 'SELECT' && b.options && b.options.length > 0;
+  var wantSel = hasSelVal ? b.value : '';
   morphAttrs(a, b);
   if (a.nodeName !== 'TEXTAREA') morphKids(a, b);
+  if (hasSelVal && a !== document.activeElement && a.value !== wantSel) a.value = wantSel;
   return a;
 }
 function morphKids(a, b) {
@@ -361,7 +372,34 @@ var rawCb = 0;
 function execRaw(cmd, timeoutMs) {
   return new Promise(function (resolve) {
     if (!KSU) { resolve({ code: -1, out: '', err: 'no ksu bridge' }); return; }
-    var name = '__hnc6_cb_' + (++rawCb), done = false;
+    var done = false;
+    if (window.ksu.exec.length <= 1) {
+      var tm1 = setTimeout(function () { if (done) return; done = true; resolve({ code: -1, out: '', err: 'timeout' }); }, timeoutMs || 30000);
+      try {
+        Promise.resolve(window.ksu.exec(cmd)).then(function (r) {
+          if (done) return; done = true; clearTimeout(tm1);
+          if (typeof r === 'string') { resolve({ code: 0, out: r, err: '' }); return; }
+          if (r && typeof r === 'object') {
+            var cRaw = r.errno !== undefined ? r.errno : (r.code !== undefined ? r.code : (r.exitCode !== undefined ? r.exitCode : 0));
+            var cNum = parseInt(String(cRaw), 10);
+            resolve({
+              code: isNaN(cNum) ? 0 : cNum,
+              out: typeof r.stdout === 'string' ? r.stdout : (typeof r.out === 'string' ? r.out : String(r.stdout != null ? r.stdout : '')),
+              err: typeof r.stderr === 'string' ? r.stderr : (typeof r.err === 'string' ? r.err : String(r.stderr != null ? r.stderr : ''))
+            });
+            return;
+          }
+          resolve({ code: 0, out: r == null ? '' : String(r), err: '' });
+        }, function (e) {
+          if (done) return; done = true; clearTimeout(tm1);
+          resolve({ code: -1, out: '', err: String((e && e.message) || e) });
+        });
+      } catch (e1) {
+        if (!done) { done = true; clearTimeout(tm1); resolve({ code: -1, out: '', err: String(e1) }); }
+      }
+      return;
+    }
+    var name = '__hnc6_cb_' + (++rawCb);
     var tm = setTimeout(function () { if (done) return; done = true; try { delete window[name]; } catch (_) {} resolve({ code: -1, out: '', err: 'timeout' }); }, timeoutMs || 30000);
     window[name] = function (code, out, err) {
       if (done) return; done = true; clearTimeout(tm);
@@ -406,7 +444,7 @@ function splitUtf16Safe(str, chunkSize) {
   return chunks;
 }
 function curlCmd(method, path, bodyStr, sec, maxTime, bodyFile) {
-  var c = 'curl -sS --connect-timeout 1 --max-time ' + (maxTime || 6) + " -w '\\n__HNC_HTTP__%{http_code}'";
+  var c = 'curl -g -sS --connect-timeout 1 --max-time ' + (maxTime || 6) + " -w '\\n__HNC_HTTP__%{http_code}'";
   if (method === 'POST') {
     c += ' -X POST -H ' + sq('Content-Type: application/json') + ' -H ' + sq('X-HNC-CSRF: 1');
     if (bodyFile) c += ' --data-binary @' + sq(bodyFile);
@@ -464,7 +502,10 @@ function bridgeReq(method, path, body, opt, retried) {
       throw HttpError('桥接失败 exit=' + r.code + (raw ? ' ' + raw.slice(0, 80) : ''), 0);
     }
     var out = r.out, k = out.lastIndexOf('\n__HNC_HTTP__'), status = 200;
-    if (k >= 0) { status = parseInt(out.slice(k + 13), 10) || 0; out = out.slice(0, k); }
+    if (k >= 0) {
+      status = parseInt(out.slice(k + 13), 10) || 0; out = out.slice(0, k);
+      if (status === 0) throw HttpError('后端未就绪 · hnc_httpd 没有在运行', 0);
+    }
     if (status === 401 && !retried) { secret = ''; return loadSecret(true).then(function () { return bridgeReq(method, path, body, opt, true); }); }
     var obj = parseJSON(out, status);
     if (status >= 400) throw HttpError(status === 401 ? '本地密钥校验失败 (401) · 可在设置里重启服务' : (obj.error || ('HTTP ' + status)) + (obj.detail ? ' · ' + obj.detail : ''), status, obj);
@@ -703,7 +744,7 @@ if (['realtime', 'balanced', 'powersave'].indexOf(S.refreshMode) < 0) S.refreshM
 function cap(k) { return S.caps ? S.caps[k] : undefined; }
 function htbOk() { return cap('tc_htb') !== false; }
 function netemOk() { return htbOk() && cap('tc_netem') !== false; }
-function upOk() { return htbOk() && cap('uplink_supported') !== false; }
+function upOk() { return htbOk() && (cap('uplink_supported') !== false || cap('uplink_police_supported') === true); }
 function qosFallback() { return cap('qos_fallback_required') === true || /root_htb|htb_root/.test(String(cap('downlink_mode') || '')) || S.cfg.qos_fallback === true; }
 var QD_T = { cake: 'CAKE', fq_codel: 'fq_codel', fq: 'fq', sfq: 'sfq', pfifo: 'pfifo' };
 function qdChosen() { return S.qcaps && S.qcaps.chosen ? String(S.qcaps.chosen) : ''; }
@@ -887,7 +928,15 @@ function applyLive(l) {
   S.live = l; S.lastOk = Date.now(); S.connected = true;
   var act = l.hotspot_active; S.hotspot.active = typeof act === 'boolean' ? act : S.hotspot.active;
   S.hotspot.iface = l.hotspot_iface || l.iface || S.hotspot.iface; S.hotspot.ip = l.hotspot_ip || S.hotspot.ip;
-  if (l && l.autorate && typeof l.autorate === 'object') { S.autorate = l.autorate; if (S.cfg) S.cfg.autorate = l.autorate; }
+  if (l && l.autorate && typeof l.autorate === 'object' && l.autorate.enabled !== false) {
+    S.autorate = l.autorate;
+    if (S.cfg) S.cfg.autorate = l.autorate;
+  } else {
+    S.autorate = null;
+    if (S.cfg && S.cfg.autorate) {
+      S.cfg.autorate = Object.assign({}, S.cfg.autorate, (l && l.autorate && typeof l.autorate === 'object') ? l.autorate : {}, { enabled: false, state: 'disabled', rtt_ms: 0, base_rtt_ms: 0, delta_rtt_ms: 0, cur_down_mbps: 0, cur_up_mbps: 0 });
+    }
+  }
   if (l && l.signal && typeof l.signal === 'object') {
     S.signal = l.signal;
     if (typeof ingestSignalSample === 'function') { try { ingestSignalSample(l.signal); } catch (_) {} }
@@ -933,7 +982,16 @@ function loadLiveAndDevices(guardGen) {
     return l;
   });
 }
-function loadConfig() { return api.get('/api/config').then(function (c) { S.cfg = c || {}; return S.cfg; }); }
+function loadConfig(guardGen) {
+  var reqGen = typeof guardGen === 'number' ? guardGen : api.writeGen;
+  return api.get('/api/config').then(function (c) {
+    if (reqGen != null && (reqGen !== api.writeGen || api.writeInFlight > 0)) return S.cfg;
+    S.cfg = c || {};
+    if (S.cfg.autorate && S.cfg.autorate.enabled === true) S.autorate = S.cfg.autorate;
+    else S.autorate = null;
+    return S.cfg;
+  });
+}
 function loadCaps() {
   return api.get('/api/capabilities').then(function (r) {
     S.caps = r.capabilities || (r.available === false ? {} : r) || {}; S.capsLoaded = true;
@@ -949,11 +1007,15 @@ function loadAlerts() {
     if ($('#sheet').dataset.kind === 'alerts') renderAlertsSheet(true);
   });
 }
-function loadAppLimits() {
+function loadAppLimits(guardGen) {
+  var reqGen = typeof guardGen === 'number' ? guardGen : api.writeGen;
   return api.getSafe('/api/app_limits', null, { items: [] }).then(function (r) {
-    S.appLimits = r.items || [];
+    if (reqGen != null && (reqGen !== api.writeGen || api.writeInFlight > 0)) return S.appLimits;
+    S.appLimits = (r && r.items) || [];
     // 逃生口「包含共享 CDN IP」; 旧后端没有这个字段 → 设置里不显示开关
-    S.appLimitSharedKnown = typeof r.include_shared_ips === 'boolean'; S.appLimitShared = r.include_shared_ips === true;
+    S.appLimitSharedKnown = !!(r && typeof r.include_shared_ips === 'boolean');
+    S.appLimitShared = !!(r && r.include_shared_ips === true);
+    return S.appLimits;
   });
 }
 /* v5.30 T1a: 在线时长按分钟(online_min); 旧后端只有 hours(一行算 1 小时)→ 换算成分钟兜底 */
@@ -1095,6 +1157,8 @@ function applyVectorSyncPayload(r) {
   var cfgObj = r.config || r.cfg;
   if (cfgObj && typeof cfgObj === 'object') {
     S.cfg = cfgObj;
+    if (S.cfg.autorate && S.cfg.autorate.enabled === true) S.autorate = S.cfg.autorate;
+    else if (!got.live) S.autorate = null;
     got.cfg = true;
   }
   var capObj = r.capabilities || r.caps;

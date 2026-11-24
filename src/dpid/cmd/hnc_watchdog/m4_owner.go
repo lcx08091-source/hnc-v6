@@ -112,26 +112,45 @@ type m4WriterMgr struct {
 }
 
 var (
-	m4Writer      = &m4WriterMgr{}
-	newM4RunnerFn = newM4GoRunner
+	m4Writer          = &m4WriterMgr{}
+	newM4RunnerFn     = newM4GoRunner
+	m4WriteMu         sync.Mutex
+	m4CurrentWriteGen uint64
+	errM4StaleGen     = errors.New("m4_owner: stale runner generation")
 )
 
-// tick 主循环每轮调用(热点 ACTIVE 时 iface 非空): 起 / 换网卡重起 / 停写者。
+func isWatchdogStopping() bool {
+	select {
+	case <-stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// tick 主循环每轮调用(热点 ACTIVE 时 iface 非空): 起 / 换网卡重起 / 停写者并幂等归零在线态。
 func (m *m4WriterMgr) tick(iface string, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if iface == "" {
-		m.stopGoRunnerLocked("热点未激活")
+		m.stopGoRunnerWithModeLocked("热点未激活", true)
+		clearOnlineDevicesIfNonEmpty()
 		return
 	}
 	m.ensureGoRunnerLocked(iface)
 }
 
-// hotspotDown 热点没开(主循环探测失败 / PENDING / 退出)时调: 停写者。
+// hotspotDown 热点没开(主循环探测失败 / PENDING / 退出)时调: 停写者并幂等归零非空在线态(待机已空则零写盘)。
 func (m *m4WriterMgr) hotspotDown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.stopGoRunnerLocked("热点未激活")
+	// 若看门狗自身收到信号退出(onExit)且热点仍处于 ACTIVE, 保留最后一次脏数据补写而不抹空在线态;
+	// 其余所有关热点 / PENDING 路径均幂等归零非空在线态。
+	clearOnline := !(isWatchdogStopping() && readState().kind == stateActive)
+	m.stopGoRunnerWithModeLocked("热点未激活", clearOnline)
+	if clearOnline {
+		clearOnlineDevicesIfNonEmpty()
+	}
 }
 
 // ─── Go 写者运行器 ────────────────────────────────────────────────
@@ -174,6 +193,12 @@ type m4GoRunner struct {
 	arpFallbackMu    sync.Mutex
 	netlinkDenyUntil time.Time
 	lastArpFallback  string
+
+	// 新增字段一律置于结构体尾部(无 64 位原子字段, 严守 32 位 ARMv7 8 字节原子对齐铁律)
+	atomicIfIdx atomic.Int32
+	clearOnStop atomic.Bool
+	stopMu      sync.Mutex
+	writeGen    uint64
 }
 
 func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
@@ -186,12 +211,17 @@ func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
 // newM4GoRunner 生产构造: 真订阅 / 真 dump(含 /proc/net/arp 兜底) / 纯 Go 流量统计。
 func newM4GoRunner(iface string) *m4GoRunner {
 	stopCtx, stopCancel := context.WithCancel(context.Background())
+	m4WriteMu.Lock()
+	m4CurrentWriteGen++
+	gen := m4CurrentWriteGen
+	m4WriteMu.Unlock()
 	r := &m4GoRunner{
 		iface:      iface,
 		stopCh:     make(chan struct{}),
 		doneCh:     make(chan struct{}),
 		stopCtx:    stopCtx,
 		stopCancel: stopCancel,
+		writeGen:   gen,
 	}
 	r.subscribeFn = func() (m4NeighSource, error) { return neigh.Subscribe() }
 	r.dumpIfFn = r.defaultDumpIf
@@ -246,6 +276,12 @@ func (r *m4GoRunner) applyHooks() {
 	}
 	r.table.Fast = fast
 	r.table.Full = full
+	if r.table.Quiet == nil {
+		r.table.Quiet = func() bool {
+			s := actSnapshotFn()
+			return s.OK && s.Quiet
+		}
+	}
 }
 
 func (r *m4GoRunner) start() {
@@ -254,8 +290,28 @@ func (r *m4GoRunner) start() {
 			r.ifIdx = idx
 		}
 	}
+	r.atomicIfIdx.Store(int32(r.ifIdx))
 	r.table.SetIface(r.iface, r.ifIdx)
 	go r.run()
+}
+
+// Stop 幂等停止运行器: 先调 stopCancel() 立即中断在途子进程与阻塞解析, 再关闭 stopCh。
+func (r *m4GoRunner) Stop() {
+	if r == nil {
+		return
+	}
+	if r.stopCancel != nil {
+		r.stopCancel()
+	}
+	r.stopMu.Lock()
+	defer r.stopMu.Unlock()
+	if r.stopCh != nil {
+		select {
+		case <-r.stopCh:
+		default:
+			close(r.stopCh)
+		}
+	}
 }
 
 func (m *m4WriterMgr) ensureGoRunnerLocked(iface string) {
@@ -268,26 +324,38 @@ func (m *m4WriterMgr) ensureGoRunnerLocked(iface string) {
 			return
 		}
 	}
-	m.stopGoRunnerLocked("网卡变了")
+	m.stopGoRunnerWithModeLocked("网卡变了", false)
 	r := newM4RunnerFn(iface)
 	m.runner = r
 	r.start()
 }
 
 func (m *m4WriterMgr) stopGoRunnerLocked(reason string) {
+	m.stopGoRunnerWithModeLocked(reason, false)
+}
+
+func (m *m4WriterMgr) stopGoRunnerWithModeLocked(reason string, clearOnline bool) {
 	if m.runner == nil {
 		return
 	}
 	r := m.runner
+	if clearOnline {
+		r.clearOnStop.Store(true)
+	}
 	logf("m4_owner: 停 Go 写者(%s)", reason)
-	close(r.stopCh)
+	r.Stop()
 	tmr := time.NewTimer(m4StopWaitMax)
 	defer tmr.Stop()
 	select {
 	case <-r.doneCh: // 等它当前这次写完
 	case <-tmr.C:
-		logf("m4_owner: 停 Go 写者等待超时(%v), 放行后续退出流程", m4StopWaitMax)
+		logf("m4_owner: 停 Go 写者等待超时(%v), 推进写代际锁拦截旧运行器残留写盘", m4StopWaitMax)
 	}
+	m4WriteMu.Lock()
+	if m4CurrentWriteGen <= r.writeGen {
+		m4CurrentWriteGen = r.writeGen + 1
+	}
+	m4WriteMu.Unlock()
 	m.runner = nil
 }
 
@@ -468,6 +536,7 @@ func (r *m4GoRunner) run() {
 				continue
 			}
 			backoff = m4ReconnectBaseBackoff
+			es = filterHotspotNeighEvents(es, int(r.atomicIfIdx.Load()))
 			if len(es) == 0 {
 				continue
 			}
@@ -573,7 +642,7 @@ func (r *m4GoRunner) run() {
 				dirty = true
 			default:
 			}
-			if dirty {
+			if dirty && !r.clearOnStop.Load() {
 				lastWritten, _ = r.writeOutErr(lastWritten, &lastStatsAt, &lastStatsMap, false)
 			}
 			return
@@ -731,6 +800,22 @@ func (r *m4GoRunner) run() {
 	}
 }
 
+// filterHotspotNeighEvents 在订阅读协程按动态原子热点 ifIdx(>0)预筛非热点口蜂窝/上游 NDP 事件,
+// 空闲时零唤醒主循环, 同时避免内核固定 BPF 在同名热点口重建换 ifindex 后失明。
+func filterHotspotNeighEvents(es []neigh.Entry, hotIfIdx int) []neigh.Entry {
+	if hotIfIdx <= 0 || len(es) == 0 {
+		return es
+	}
+	n := 0
+	for _, e := range es {
+		if e.IfIndex == 0 || e.IfIndex == hotIfIdx {
+			es[n] = e
+			n++
+		}
+	}
+	return es[:n]
+}
+
 func (r *m4GoRunner) refreshIface() {
 	if r.ifIndexFn == nil {
 		return
@@ -740,6 +825,7 @@ func (r *m4GoRunner) refreshIface() {
 		return
 	}
 	r.ifIdx = idx
+	r.atomicIfIdx.Store(int32(idx))
 	r.table.SetIface(r.iface, idx)
 	logf("m4_owner: 热点网卡重建 %s ifindex=%d", r.iface, idx)
 }
@@ -778,8 +864,21 @@ func (r *m4GoRunner) writeOutErr(lastWritten []byte, lastStatsAt *time.Time, las
 	return b, nil
 }
 
-// writeDevicesAtomic 原子写出唯一权威设备表 data/devices.json, 随后同步原子写出 run/devices.flat。
+// writeDevicesAtomic 在代际写锁保护下原子写出唯一权威设备表 data/devices.json, 随后同步原子写出 run/devices.flat。
 func (r *m4GoRunner) writeDevicesAtomic(b []byte) error {
+	m4WriteMu.Lock()
+	defer m4WriteMu.Unlock()
+	if r != nil && r.writeGen != 0 && r.writeGen < m4CurrentWriteGen {
+		return errM4StaleGen
+	}
+	var flat []byte
+	if m4DevicesFlat != "" && r != nil && r.table != nil {
+		flat = r.table.RenderFlat()
+	}
+	return writeDevicesPayloadLocked(b, flat)
+}
+
+func writeDevicesPayloadLocked(b, flat []byte) error {
 	out := m4DevicesJSON
 	tmp := fmt.Sprintf("%s.%d.%d", m4DevicesTmpGo, os.Getpid(), wdAtomicSeq.Add(1))
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
@@ -816,17 +915,73 @@ func (r *m4GoRunner) writeDevicesAtomic(b []byte) error {
 		return err
 	}
 	m4GoWrites.Add(1)
-	r.writeDevicesFlatAtomic()
+	if m4DevicesFlat != "" {
+		if err := wdWriteAtomic(m4DevicesFlat, flat, 0o644); err != nil {
+			logf("m4_owner: 写 %s 失败: %v", m4DevicesFlat, err)
+		}
+	}
 	return nil
 }
 
 func (r *m4GoRunner) writeDevicesFlatAtomic() {
-	if m4DevicesFlat == "" || r.table == nil {
+	if m4DevicesFlat == "" || r == nil || r.table == nil {
+		return
+	}
+	m4WriteMu.Lock()
+	defer m4WriteMu.Unlock()
+	if r.writeGen != 0 && r.writeGen < m4CurrentWriteGen {
 		return
 	}
 	flat := r.table.RenderFlat()
 	if err := wdWriteAtomic(m4DevicesFlat, flat, 0o644); err != nil {
 		logf("m4_owner: 写 %s 失败: %v", m4DevicesFlat, err)
+	}
+}
+
+func isDevicesJSONAlreadyEmpty(b []byte) bool {
+	s := bytes.TrimSpace(b)
+	if string(s) == "{}" {
+		return true
+	}
+	if len(s) < 2 || s[0] != '{' {
+		return false
+	}
+	var m map[string]json.RawMessage
+	return json.Unmarshal(s, &m) == nil && len(m) == 0
+}
+
+// clearOnlineDevicesIfNonEmpty 关热点时由 m4_owner 唯一写者幂等归零非空在线态;
+// 若待机已空(文件不存在或已为 "{}" 且 devices.flat 已空)则零写盘。
+func clearOnlineDevicesIfNonEmpty() {
+	m4WriteMu.Lock()
+	defer m4WriteMu.Unlock()
+	m4CurrentWriteGen++
+
+	needWriteJSON := false
+	if m4DevicesJSON != "" {
+		if b, err := os.ReadFile(m4DevicesJSON); err == nil {
+			if !isDevicesJSONAlreadyEmpty(b) {
+				needWriteJSON = true
+			}
+		}
+	}
+	needClearFlat := false
+	if m4DevicesFlat != "" {
+		if fi, err := os.Stat(m4DevicesFlat); err == nil && fi.Size() > 0 {
+			needClearFlat = true
+		}
+	}
+	if !needWriteJSON && !needClearFlat {
+		return
+	}
+	if needWriteJSON {
+		_ = writeDevicesPayloadLocked([]byte("{}"), nil)
+		return
+	}
+	if needClearFlat {
+		if err := wdWriteAtomic(m4DevicesFlat, nil, 0o644); err != nil {
+			logf("m4_owner: 归零 %s 失败: %v", m4DevicesFlat, err)
+		}
 	}
 }
 

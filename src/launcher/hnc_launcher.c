@@ -44,6 +44,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <signal.h>
 #include <time.h>
 #include <sys/wait.h>
@@ -433,6 +434,34 @@ static int dup2_nocloexec(int fd, int target)
 	return dup2(fd, target);
 }
 
+static void close_inherited_fds(void)
+{
+	DIR *dir = opendir("/proc/self/fd");
+	if (dir != NULL) {
+		int dfd = dirfd(dir);
+		struct dirent *de;
+		while ((de = readdir(dir)) != NULL) {
+			char *endp = NULL;
+			long fd;
+			if (de->d_name[0] < '0' || de->d_name[0] > '9')
+				continue;
+			errno = 0;
+			fd = strtol(de->d_name, &endp, 10);
+			if (errno != 0 || endp == de->d_name || *endp != '\0')
+				continue;
+			if (fd > STDERR_FILENO && fd != (long)dfd && fd <= 1048576L)
+				(void)close((int)fd);
+		}
+		closedir(dir);
+		return;
+	}
+	long max_fd = sysconf(_SC_OPEN_MAX);
+	if (max_fd < 0 || max_fd > 4096)
+		max_fd = 1024;
+	for (long fd = STDERR_FILENO + 1; fd < max_fd; fd++)
+		(void)close((int)fd);
+}
+
 /*
  * 启动 dpid. 返回 pid (子进程), 失败返回 -1.
  * 标准输出和标准错误重定向到 dpid.log.
@@ -477,6 +506,8 @@ static pid_t spawn_dpid(void)
 			if (fd != STDOUT_FILENO && fd != STDERR_FILENO)
 				close(fd);
 		}
+
+		close_inherited_fds();
 
 		char *const dpid_argv[] = {
 			(char *)"hnc_dpid",

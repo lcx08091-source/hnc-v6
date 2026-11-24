@@ -84,12 +84,15 @@ const (
 	// autoExpandOutFile is the rule file we write. Underscore prefix
 	// puts it last in alphabetical glob order so curated rules load first.
 	autoExpandOutFile = "_auto_expanded.json"
+)
 
-	// blocklistFile is the human-maintained list of apex domains to
-	// NOT auto-expand under. Looked up at $externalRulesDir/../auto_expand_blocklist.json
-	// i.e. /data/local/hnc/etc/auto_expand_blocklist.json (one level up
-	// from rules dir, so it doesn't accidentally get loaded as a rule).
+var (
+	// blocklistFile is the user/runtime list of apex domains to NOT auto-expand
+	// under (/data/local/hnc/etc/auto_expand_blocklist.json).
 	blocklistFile = "/data/local/hnc/etc/auto_expand_blocklist.json"
+	// dataBlocklistFile is the shipped baseline list (/data/local/hnc/data/auto_expand_blocklist.json).
+	// Both are loaded and merged so user candidate rejections in etc/ never shadow shipped CDN entries in data/.
+	dataBlocklistFile = "/data/local/hnc/data/auto_expand_blocklist.json"
 )
 
 // compoundTLDs is a hardcoded list of two-label TLDs we know about.
@@ -153,30 +156,90 @@ type blocklistData struct {
 	Comment     string   `json:"_comment,omitempty"`
 }
 
-// loadBlocklist reads + parses blocklistFile. Missing file is treated as
-// empty (not an error) so deployment is just "drop in the file or don't".
-// Lookups are case-insensitive.
-var blocklistCache = NewCachedFile(blocklistFile, func(data []byte) (map[string]struct{}, error) {
-	var bd blocklistData
-	if err := json.Unmarshal(data, &bd); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", blocklistFile, err)
-	}
-	out := make(map[string]struct{}, len(bd.BlockedApex))
-	for _, a := range bd.BlockedApex {
-		out[strings.ToLower(strings.TrimSpace(a))] = struct{}{}
-	}
-	return out, nil
-})
+var (
+	blocklistCacheMu sync.Mutex
+	blocklistCaches  = map[string]*CachedFile[map[string]struct{}]{}
+)
 
-func loadBlocklist() (map[string]struct{}, error) {
-	m, err := blocklistCache.Get()
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]struct{}{}, nil
-		}
-		return map[string]struct{}{}, err
+func getBlocklistCachedFile(path string) *CachedFile[map[string]struct{}] {
+	blocklistCacheMu.Lock()
+	defer blocklistCacheMu.Unlock()
+	if cf, ok := blocklistCaches[path]; ok {
+		return cf
 	}
-	return m, nil
+	p := path
+	cf := NewCachedFile(p, func(data []byte) (map[string]struct{}, error) {
+		var bd blocklistData
+		if err := json.Unmarshal(data, &bd); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", p, err)
+		}
+		out := make(map[string]struct{}, len(bd.BlockedApex))
+		for _, a := range bd.BlockedApex {
+			a = strings.ToLower(strings.TrimSpace(a))
+			if a != "" {
+				out[a] = struct{}{}
+			}
+		}
+		return out, nil
+	})
+	blocklistCaches[path] = cf
+	return cf
+}
+
+func blocklistCandidatePaths() []string {
+	var paths []string
+	addUnique := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		p = filepath.Clean(p)
+		for _, ex := range paths {
+			if ex == p {
+				return
+			}
+		}
+		paths = append(paths, p)
+	}
+
+	etcClean := filepath.Clean(blocklistFile)
+	hncRoot := filepath.Dir(filepath.Dir(etcClean))
+	if hncRoot != "" && hncRoot != "." && hncRoot != "/" {
+		addUnique(filepath.Join(hncRoot, "data", "auto_expand_blocklist.json"))
+		if b, err := os.ReadFile(filepath.Join(hncRoot, "run", "service.path")); err == nil {
+			if modDir := strings.TrimSpace(string(b)); modDir != "" {
+				addUnique(filepath.Join(modDir, "data", "auto_expand_blocklist.json"))
+			}
+		}
+	}
+	if etcClean == "/data/local/hnc/etc/auto_expand_blocklist.json" {
+		addUnique("/data/adb/modules/hotspot_net_ctl/data/auto_expand_blocklist.json")
+		addUnique("/data/adb/modules/hotspot_network_control/data/auto_expand_blocklist.json")
+	}
+	addUnique(dataBlocklistFile)
+	addUnique(etcClean)
+	return paths
+}
+
+// loadBlocklist loads and merges both shipped data/auto_expand_blocklist.json
+// and runtime/user etc/auto_expand_blocklist.json so user candidate rejections
+// in etc/ never shadow the shipped 55+ shared CDN entries in data/.
+func loadBlocklist() (map[string]struct{}, error) {
+	merged := make(map[string]struct{}, 64)
+	var firstErr error
+	for _, p := range blocklistCandidatePaths() {
+		m, err := getBlocklistCachedFile(p).Get()
+		if err != nil {
+			if !os.IsNotExist(err) && firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		for k := range m {
+			merged[k] = struct{}{}
+		}
+	}
+	return merged, firstErr
 }
 
 // autoExpandedRule is one entry in _auto_expanded.json. Embeds the same

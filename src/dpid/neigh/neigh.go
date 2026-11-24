@@ -227,7 +227,7 @@ func Dump(family int) ([]Entry, error) {
 	var out []Entry
 	buf := make([]byte, 1<<16)
 	for {
-		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		n, _, err := syscall.Recvfrom(fd, buf, syscall.MSG_TRUNC)
 		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
@@ -236,6 +236,9 @@ func Dump(family int) ([]Entry, error) {
 		}
 		if n <= 0 {
 			return nil, errors.New("neigh: empty recv")
+		}
+		if n > len(buf) {
+			return nil, fmt.Errorf("neigh: recv truncated (%d > %d): %w", n, len(buf), syscall.ENOBUFS)
 		}
 		es, done, err := ParseMsgs(buf[:n])
 		if err != nil {
@@ -322,7 +325,7 @@ func (s *Sub) Read() ([]Entry, error) {
 		recvErr error
 	)
 	rerr := s.raw.Read(func(fd uintptr) bool {
-		n, _, recvErr = syscall.Recvfrom(int(fd), s.buf, 0)
+		n, _, recvErr = syscall.Recvfrom(int(fd), s.buf, syscall.MSG_TRUNC)
 		if errors.Is(recvErr, syscall.EAGAIN) || errors.Is(recvErr, syscall.EWOULDBLOCK) {
 			recvErr = nil
 			return false
@@ -331,6 +334,10 @@ func (s *Sub) Read() ([]Entry, error) {
 			recvErr = nil
 			n = 0
 			return true
+		}
+		if recvErr == nil && n > len(s.buf) {
+			recvErr = syscall.ENOBUFS
+			n = 0
 		}
 		return true
 	})
@@ -345,6 +352,9 @@ func (s *Sub) Read() ([]Entry, error) {
 	}
 	if n <= 0 {
 		return nil, nil
+	}
+	if n > len(s.buf) {
+		return nil, fmt.Errorf("neigh: recv truncated (%d > %d): %w", n, len(s.buf), syscall.ENOBUFS)
 	}
 	es, _, err := ParseMsgs(s.buf[:n])
 	return es, err

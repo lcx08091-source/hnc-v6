@@ -248,8 +248,8 @@ function appsSub() {
 
     var exclHtml = '<div class="glass' + (S.open.fwexcl ? ' open' : '') + '" data-foldkey="fwexcl"><button class="card-h" data-act="fold" data-key="fwexcl">' + gi('cyan', 'shield') + '<span class="tx"><div class="t">VPN / 代理导管排除名单</div><div class="s">不参与自动规则与原型学习的包名 · 已自定义 ' + fx.length + ' 个</div></span>' + ico('chev', 'chev') + '</button>' +
       '<div class="fold"><div><div class="fold-in set-body">' +
-        '<div class="chips">' + (fx.length ? fx.map(function (p) { return '<span class="chip">' + esc(p) + '<button class="linkish danger" data-fw-del="' + esc(p) + '" aria-label="移除">×</button></span>'; }).join('') : '<span class="note">内置已自动排除 Clash / Sing-box / V2Ray / WireGuard 等 30 款常见代理工具</span>') + '</div>' +
-        '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="fw-pkg-apps" data-fw-inp="1" maxlength="128" placeholder="输入代理包名，如 com.github.metacubex.clash.meta" style="font-family:var(--mono)"></span><button class="btn pri press" data-act="fw-add">添加</button></div>' +
+        '<div class="chips" data-mkey="fw-excl-chips">' + (fx.length ? fx.map(function (p) { return '<span class="chip" data-mkey="fwc:' + esc(p) + '">' + esc(p) + '<button type="button" class="linkish danger" data-fw-del="' + esc(p) + '" aria-label="移除">×</button></span>'; }).join('') : '<span class="note">内置已自动排除 Clash / Sing-box / V2Ray / WireGuard 等 30 款常见代理工具</span>') + '</div>' +
+        '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="fw-pkg-apps" data-fw-inp="1" maxlength="128" value="" placeholder="输入代理包名，如 com.github.metacubex.clash.meta" style="font-family:var(--mono)"></span><button type="button" class="btn pri press" data-act="fw-add">添加</button></div>' +
       '</div></div></div></div>';
 
     return ifaceChips() + appsSearchBarHtml('搜索活跃应用名称 · 包名 · UID') + hsHtml + hostHtml + exclHtml;
@@ -298,18 +298,19 @@ function appsSub() {
 
 function appRow(r, mx) {
   var a = r.a, key = 'app' + r.uid, nm = r.name, c = appColor(a.pkg || nm);
+  var isExcl = !!(a.flywheel_excluded || (a.pkg && S.cfg && Array.isArray(S.cfg.flywheel_exclude_user) && S.cfg.flywheel_exclude_user.indexOf(a.pkg) >= 0));
   var snis = (a.top_snis || []).slice(0, 6), rules = (a.top_rules || []).slice(0, 4), hits = a.rule_hit_counts || {};
   var val = r.bytes ? bytes(r.bytes) : num(a.total_conns) + ' 次';
   return '<div class="row-wrap' + (S.open[key] ? ' open' : '') + '" data-foldkey="' + esc(key) + '"><button class="row-h" data-act="fold" data-key="' + esc(key) + '">' +
     '<span class="appi" style="background:' + c + ';background:linear-gradient(145deg,' + c + ',color-mix(in srgb,' + c + ' 60%,#000))">' + esc(nm.charAt(0).toUpperCase()) + '</span>' +
-    '<span class="tx"><div class="dev-name" style="font-size:14.5px"><span class="nm">' + esc(nm) + '</span>' + (a.flywheel_excluded ? '<span class="badge b-gray">已排除代理</span>' : '') + '</div>' +
+    '<span class="tx"><div class="dev-name" style="font-size:14.5px"><span class="nm">' + esc(nm) + '</span>' + (isExcl ? '<span class="badge b-gray">已排除代理</span>' : '') + '</div>' +
       (r.bytes ? '<div class="bar1"><i style="width:' + Math.max(2, r.bytes / mx * 100).toFixed(1) + '%"></i></div>' : '<div class="s">' + (a.last_seen ? '最近 ' + ago(a.last_seen) : '') + '</div>') + '</span>' +
     '<span style="text-align:right"><div class="num" style="font-size:13px;font-weight:700">' + val + '</div><div style="font-size:11px;color:var(--text-3)">' + num(a.active_conns) + ' 连接</div></span>' + ico('chev', 'chev') + '</button>' +
     '<div class="fold"><div><div class="fold-in set-body">' +
       '<div class="note mono">' + esc(a.pkg || '(包名未解析)') + ' · uid ' + esc(r.uid) + '</div>' +
       (snis.length ? '<div class="dev-apps">' + snis.map(function (s) { return '<span class="a mono">' + esc(s) + '</span>'; }).join('') + '</div>' : '') +
       (rules.length ? '<div class="dev-apps"><span class="lb">命中规则</span>' + rules.map(function (x) { var n = num(hits[x]); return '<span class="badge ' + (n >= 10 ? 'b-ok' : 'b-gray') + '">' + esc(x) + (n ? ' · ' + n : '') + '</span>'; }).join('') + '</div>' : '') +
-      (a.flywheel_excluded ? '<div class="note">VPN / 代理导管类应用：已自动隔离，不参与本机域名与指纹蒸馏</div>'
+      (isExcl ? '<div class="note">VPN / 代理导管类应用：已自动隔离，不参与本机域名与指纹蒸馏</div>'
         : a.pkg ? '<button class="btn sec press" data-excl="' + esc(a.pkg) + '" data-name="' + esc(nm) + '">排除 · 标记为代理不学习规则</button>' : '') +
     '</div></div></div></div>';
 }
@@ -397,11 +398,11 @@ function excludeApp(pkg, name) {
           return loadConfig();
         }).then(function () {
           if (S.page === 'apps') renderApps(false);
-          else if (S.page === 'settings') renderSettings(false);
+          if (S.page === 'settings') renderSettings(false);
         });
       });
       return loadConfig();
-    }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e) { toast(errText(e), 'err'); });
+    }).then(function () { if (S.page === 'apps') renderApps(false); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); });
   });
 }
 

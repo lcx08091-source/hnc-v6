@@ -135,6 +135,24 @@ if [ ! -f "$RAW_FILE" ]; then
     SKIP_STATS=1
 fi
 
+MAC_NAMES_TMP=""
+AGG_TMP=""
+FILTER_TMP=""
+RAW_PRUNE_TMP=""
+DAILY_PRUNE_TMP=""
+TAR_TMP=""
+_rollup_cleanup() {
+    rm -f ${MAC_NAMES_TMP:+"$MAC_NAMES_TMP"} \
+          ${AGG_TMP:+"$AGG_TMP"} \
+          ${FILTER_TMP:+"$FILTER_TMP"} \
+          ${RAW_PRUNE_TMP:+"$RAW_PRUNE_TMP"} \
+          ${DAILY_PRUNE_TMP:+"$DAILY_PRUNE_TMP"} \
+          ${TAR_TMP:+"$TAR_TMP"} 2>/dev/null || true
+}
+trap '_rollup_cleanup' EXIT
+trap '_rollup_cleanup; trap - EXIT; exit 130' INT
+trap '_rollup_cleanup; trap - EXIT; exit 143' TERM
+
 if [ -z "$SKIP_STATS" ]; then
 log "rollup for $TARGET_DATE"
 _raw_bytes=$(wc -c < "$RAW_FILE" 2>/dev/null | tr -dc '0-9')
@@ -143,34 +161,170 @@ if uint_gt "${_raw_bytes:-0}" "2147483647"; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 1. 先构建 MAC → name 映射(给输出的 daily 行加可读名)
+# 1. 先构建 MAC → name 映射(给输出的 daily 行加可读名, 识别 \" 与 \\ 转义)
 # ═══════════════════════════════════════════════════════════════
 MAC_NAMES_TMP="$HNC_DIR/run/rollup_names.$$"
 mkdir -p "$HNC_DIR/run" 2>/dev/null
 : > "$MAC_NAMES_TMP"
 
-# device_names.json (扁平 {"mac":"name",...})
+# device_names.json (扁平 {"mac":"name",...}) — 识别 \" 等转义序列
 if [ -f "$NAMES_FILE" ]; then
-    grep -oE '"[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}"[[:space:]]*:[[:space:]]*"[^"]*"' "$NAMES_FILE" 2>/dev/null | \
-    while IFS= read -r pair; do
-        m=$(echo "$pair" | sed -nE 's/^"([0-9a-f:]+)".*/\1/p')
-        n=$(echo "$pair" | sed -nE 's/.*:[[:space:]]*"([^"]*)".*/\1/p')
-        [ -n "$m" ] && [ -n "$n" ] && echo "$m	$n" >> "$MAC_NAMES_TMP"
-    done
+    awk '
+    function ch(i){ return substr(s, i, 1) }
+    function skip_ws(i){ while (i <= n && ch(i) ~ /[ \t\r\n]/) i++; return i }
+    function parse_string(i,   j, c, out, esc) {
+        out = ""; esc = 0
+        if (ch(i) != "\"") return 0
+        for (j = i + 1; j <= n; j++) {
+            c = ch(j)
+            if (esc) {
+                if (c == "n" || c == "r" || c == "t" || c == "b" || c == "f") out = out " "
+                else out = out c
+                esc = 0
+                continue
+            }
+            if (c == "\\") { esc = 1; continue }
+            if (c == "\"") { str_val = out; return j + 1 }
+            if (c == "\t" || c == "\r" || c == "\n") out = out " "
+            else if (c >= " " && c != sprintf("%c", 127)) out = out c
+        }
+        return 0
+    }
+    function skip_val(i,   j, c, dep, ins, esc, ni) {
+        i = skip_ws(i); c = ch(i)
+        if (c == "\"") { ni = parse_string(i); return ni ? ni : n + 1 }
+        if (c == "{" || c == "[") {
+            dep = 0; ins = 0; esc = 0
+            for (j = i; j <= n; j++) {
+                c = ch(j)
+                if (ins) { if (esc) esc = 0; else if (c == "\\") esc = 1; else if (c == "\"") ins = 0; continue }
+                if (c == "\"") { ins = 1; continue }
+                if (c == "{" || c == "[") dep++
+                else if (c == "}" || c == "]") { dep--; if (dep <= 0) return j + 1 }
+            }
+            return n + 1
+        }
+        for (j = i; j <= n; j++) { c = ch(j); if (c == "," || c == "}" || c == "]" || c ~ /[ \t\r\n]/) return j }
+        return n + 1
+    }
+    BEGIN { s = "" }
+    { s = s $0 "\n" }
+    END {
+        n = length(s); i = skip_ws(1)
+        if (ch(i) != "{") exit 0
+        i++
+        while (i <= n) {
+            i = skip_ws(i); c = ch(i)
+            if (c == "}" || c == "") break
+            if (c == ",") { i++; continue }
+            if (c != "\"") break
+            ni = parse_string(i); if (!ni) break
+            k = tolower(str_val); i = skip_ws(ni)
+            if (ch(i) != ":") break
+            i = skip_ws(i + 1)
+            if (ch(i) == "\"") {
+                ni = parse_string(i); if (!ni) break
+                v = str_val; i = ni
+                if (k ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && v != "") print k "\t" v
+            } else {
+                i = skip_val(i)
+            }
+        }
+    }' "$NAMES_FILE" >> "$MAC_NAMES_TMP" 2>/dev/null
 fi
 
-# devices.json hostname 兜底(不覆盖已有的 manual)
+# devices.json hostname 兜底(不覆盖已有的 manual, 识别字符串转义与花括号嵌套)
 if [ -f "$DEVICES_FILE" ]; then
-    grep -oE '"([0-9a-f]{2}:){5}[0-9a-f]{2}"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$DEVICES_FILE" 2>/dev/null | \
-    while IFS= read -r block; do
-        m=$(echo "$block" | sed -nE 's/^"([0-9a-f:]+)".*/\1/p')
-        h=$(echo "$block" | sed -nE 's/.*"hostname"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p')
-        [ -z "$m" ] && continue
-        [ -z "$h" ] && continue
-        if ! grep -qE "^${m}	" "$MAC_NAMES_TMP" 2>/dev/null; then
-            echo "$m	$h" >> "$MAC_NAMES_TMP"
-        fi
-    done
+    awk -v existing="$MAC_NAMES_TMP" '
+    function ch(i){ return substr(s, i, 1) }
+    function skip_ws(i){ while (i <= n && ch(i) ~ /[ \t\r\n]/) i++; return i }
+    function parse_string(i,   j, c, out, esc) {
+        out = ""; esc = 0
+        if (ch(i) != "\"") return 0
+        for (j = i + 1; j <= n; j++) {
+            c = ch(j)
+            if (esc) {
+                if (c == "n" || c == "r" || c == "t" || c == "b" || c == "f") out = out " "
+                else out = out c
+                esc = 0
+                continue
+            }
+            if (c == "\\") { esc = 1; continue }
+            if (c == "\"") { str_val = out; return j + 1 }
+            if (c == "\t" || c == "\r" || c == "\n") out = out " "
+            else if (c >= " " && c != sprintf("%c", 127)) out = out c
+        }
+        return 0
+    }
+    function skip_val(i,   j, c, dep, ins, esc, ni) {
+        i = skip_ws(i); c = ch(i)
+        if (c == "\"") { ni = parse_string(i); return ni ? ni : n + 1 }
+        if (c == "{" || c == "[") {
+            dep = 0; ins = 0; esc = 0
+            for (j = i; j <= n; j++) {
+                c = ch(j)
+                if (ins) { if (esc) esc = 0; else if (c == "\\") esc = 1; else if (c == "\"") ins = 0; continue }
+                if (c == "\"") { ins = 1; continue }
+                if (c == "{" || c == "[") dep++
+                else if (c == "}" || c == "]") { dep--; if (dep <= 0) return j + 1 }
+            }
+            return n + 1
+        }
+        for (j = i; j <= n; j++) { c = ch(j); if (c == "," || c == "}" || c == "]" || c ~ /[ \t\r\n]/) return j }
+        return n + 1
+    }
+    function extract_hostname(os, oe,   p, c, ni, fk) {
+        p = skip_ws(os + 1)
+        while (p < oe) {
+            p = skip_ws(p); c = ch(p)
+            if (c == "}" || c == "") return ""
+            if (c == ",") { p++; continue }
+            if (c != "\"") return ""
+            ni = parse_string(p); if (!ni) return ""
+            fk = str_val; p = skip_ws(ni)
+            if (ch(p) != ":") return ""
+            p = skip_ws(p + 1)
+            if (fk == "hostname" && ch(p) == "\"") {
+                ni = parse_string(p)
+                return ni ? str_val : ""
+            }
+            p = skip_val(p)
+        }
+        return ""
+    }
+    BEGIN {
+        while ((getline line < existing) > 0) {
+            t = index(line, "\t")
+            if (t > 1) have[substr(line, 1, t - 1)] = 1
+        }
+        close(existing)
+        s = ""
+    }
+    { s = s $0 "\n" }
+    END {
+        n = length(s); i = skip_ws(1)
+        if (ch(i) != "{") exit 0
+        i++
+        while (i <= n) {
+            i = skip_ws(i); c = ch(i)
+            if (c == "}" || c == "") break
+            if (c == ",") { i++; continue }
+            if (c != "\"") break
+            ni = parse_string(i); if (!ni) break
+            k = tolower(str_val); i = skip_ws(ni)
+            if (ch(i) != ":") break
+            i = skip_ws(i + 1)
+            ve = skip_val(i)
+            if (k ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && ch(i) == "{" && !(k in have)) {
+                hn = extract_hostname(i, ve)
+                if (hn != "") {
+                    have[k] = 1
+                    print k "\t" hn
+                }
+            }
+            i = ve
+        }
+    }' "$DEVICES_FILE" >> "$MAC_NAMES_TMP" 2>/dev/null
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -186,7 +340,6 @@ fi
 
 if [ -z "$DATE_START" ] || [ "$DATE_START" = "0" ]; then
     log "ERROR: cannot compute date range for $TARGET_DATE"
-    rm -f "$MAC_NAMES_TMP"
     exit 1
 fi
 
@@ -197,8 +350,8 @@ BEGIN {
     ds = ds + 0
     de = de + 0
     while ((getline line < namesfile) > 0) {
-        split(line, a, "\t")
-        if (a[1] != "") names[a[1]] = a[2]
+        t = index(line, "\t")
+        if (t > 1) names[substr(line, 1, t - 1)] = substr(line, t + 1)
     }
     close(namesfile)
 }
@@ -255,37 +408,45 @@ if [ -s "$AGG_TMP" ]; then
         FILTER_TMP="${DAILY_FILE}.filter.$$"
         grep -Fv "\"date\":\"$TARGET_DATE\"" "$DAILY_FILE" > "$FILTER_TMP" 2>/dev/null
         _grc=$?
-        if [ "$_grc" -le 1 ] && cat "$AGG_TMP" >> "$FILTER_TMP" 2>/dev/null; then
-            mv -f "$FILTER_TMP" "$DAILY_FILE"
+        if [ "$_grc" -le 1 ] && cat "$AGG_TMP" >> "$FILTER_TMP" 2>/dev/null && mv -f "$FILTER_TMP" "$DAILY_FILE"; then
+            FILTER_TMP=""
         else
             log "ERROR: failed to update $DAILY_FILE (grep_rc=$_grc), keeping existing file"
             rm -f "$FILTER_TMP" 2>/dev/null || true
+            FILTER_TMP=""
+            exit 1
         fi
     else
         FILTER_TMP="${DAILY_FILE}.new.$$"
-        if cp "$AGG_TMP" "$FILTER_TMP" 2>/dev/null; then
-            mv -f "$FILTER_TMP" "$DAILY_FILE"
+        if cp "$AGG_TMP" "$FILTER_TMP" 2>/dev/null && mv -f "$FILTER_TMP" "$DAILY_FILE"; then
+            FILTER_TMP=""
         else
+            log "ERROR: failed to create $DAILY_FILE"
             rm -f "$FILTER_TMP" 2>/dev/null || true
+            FILTER_TMP=""
+            exit 1
         fi
     fi
 fi
 rm -f "$AGG_TMP" "$MAC_NAMES_TMP"
+AGG_TMP=""; MAC_NAMES_TMP=""
 
 # ═══════════════════════════════════════════════════════════════
 # 4. 清理 raw: 只保留最近 RAW_RETAIN_HOURS 小时
 # ═══════════════════════════════════════════════════════════════
 NOW_TS=$(date +%s 2>/dev/null || echo 0)
 CUTOFF=$(awk -v now="$NOW_TS" -v h="$RAW_RETAIN_HOURS" 'BEGIN { printf "%.0f\n", (now + 0) - (h + 0) * 3600 }')
-PRUNE_TMP="${RAW_FILE}.prune.$$"
-awk -v cutoff="$CUTOFF" '
+RAW_PRUNE_TMP="${RAW_FILE}.prune.$$"
+if awk -v cutoff="$CUTOFF" '
 BEGIN { cutoff = cutoff + 0 }
 {
     if (match($0, /"ts"[[:space:]]*:[[:space:]]*[0-9]+/)) {
         s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s)
         if ((s + 0) >= cutoff) print
     }
-}' "$RAW_FILE" > "$PRUNE_TMP" && mv "$PRUNE_TMP" "$RAW_FILE"
+}' "$RAW_FILE" > "$RAW_PRUNE_TMP" && mv "$RAW_PRUNE_TMP" "$RAW_FILE"; then
+    RAW_PRUNE_TMP=""
+fi
 
 raw_after=$(wc -l < "$RAW_FILE" 2>/dev/null | tr -d ' ')
 log "raw pruned: $raw_after lines remain (> $RAW_RETAIN_HOURS h)"
@@ -298,15 +459,17 @@ if [ -f "$DAILY_FILE" ]; then
     CUTOFF_DATE=$(date -d "@$DAILY_CUTOFF_TS" +%Y-%m-%d 2>/dev/null)
     [ -n "$CUTOFF_DATE" ] || CUTOFF_DATE=$(epoch_to_ymd_posix "$DAILY_CUTOFF_TS" 2>/dev/null)
     if [ -n "$CUTOFF_DATE" ]; then
-        PRUNE_TMP="${DAILY_FILE}.prune.$$"
-        awk -v cutoff="$CUTOFF_DATE" '
+        DAILY_PRUNE_TMP="${DAILY_FILE}.prune.$$"
+        if awk -v cutoff="$CUTOFF_DATE" '
         {
             if (match($0, /"date"[[:space:]]*:[[:space:]]*"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"/)) {
                 s = substr($0, RSTART, RLENGTH)
                 sub(/.*:[[:space:]]*"/, "", s); sub(/"$/, "", s)
                 if (s >= cutoff) print
             }
-        }' "$DAILY_FILE" > "$PRUNE_TMP" && mv "$PRUNE_TMP" "$DAILY_FILE"
+        }' "$DAILY_FILE" > "$DAILY_PRUNE_TMP" && mv "$DAILY_PRUNE_TMP" "$DAILY_FILE"; then
+            DAILY_PRUNE_TMP=""
+        fi
     fi
 fi
 
@@ -327,9 +490,11 @@ if [ -d "$LOGS_DIR" ]; then
     mkdir -p "$BACKUP_DIR" 2>/dev/null
     # 每天覆盖写同一个 tarball(允许日内多次 rollup 不爆数量)
     TARBALL="$BACKUP_DIR/logs.tar.gz"
-    tar czf "$TARBALL.tmp" -C "$HNC_DIR" logs 2>/dev/null && \
-        mv "$TARBALL.tmp" "$TARBALL" && \
+    TAR_TMP="$TARBALL.tmp.$$"
+    if tar czf "$TAR_TMP" -C "$HNC_DIR" logs 2>/dev/null && mv "$TAR_TMP" "$TARBALL"; then
+        TAR_TMP=""
         log "logs backup created: $TARBALL ($(stat -c %s "$TARBALL" 2>/dev/null) bytes)"
+    fi
     # rc3.1.14 修 P2-D (review): 备份策略统一 post-fs-data 的"按名字排序保留最新 N 个".
     # 之前 find -mtime +N 在用户调系统时间 (出国旅游 / NTP 异常) 时, 时间跳变可能误删今天的
     # 或误留 1 年前的. 按名字排序 (.backup-YYYYMMDD 字典序 ≈ 时间序) 不受时钟影响.

@@ -32,14 +32,15 @@ type selfStudioPolicy struct {
 }
 
 var (
-	studioMu          sync.Mutex
-	studioLoadedDir   string
-	studioPolicy      selfStudioPolicy
-	studioLeaseGen    uint64
-	studioStopTimer   *time.Timer
-	studioQuietTimer  *time.Timer
-	studioDistilling  bool
-	lastStudioDistill *studioDistillSummary
+	studioMu           sync.Mutex
+	studioDistillRunMu sync.Mutex
+	studioLoadedDir    string
+	studioPolicy       selfStudioPolicy
+	studioLeaseGen     uint64
+	studioStopTimer    *time.Timer
+	studioQuietTimer   *time.Timer
+	studioDistilling   bool
+	lastStudioDistill  *studioDistillSummary
 )
 
 type studioDistillSummary struct {
@@ -59,8 +60,23 @@ func selfPolicyPath(hncDir string) string {
 	return filepath.Join(hncDir, "data", "self_policy.json")
 }
 
+func selfOptInPath(hncDir string) string {
+	return filepath.Join(hncDir, "data", "self_capture.optin")
+}
+
 func selfRuntimePath(hncDir string) string {
 	return filepath.Join(hncDir, "run", "self_runtime.json")
+}
+
+func notifySelfCaptureWake(s *server) {
+	if s != nil {
+		if v, ok := v6Registry.Load(s); ok && v != nil {
+			if st, ok2 := v.(*v6ServerState); ok2 && st != nil && st.leakGuard != nil {
+				st.leakGuard.notifySSEChanged()
+			}
+		}
+	}
+	activityNotifySubscribers()
 }
 
 func ensureStudioPolicyLocked(s *server) {
@@ -76,17 +92,24 @@ func ensureStudioPolicyLocked(s *server) {
 		}
 	}
 	_, selfErr := os.Stat(s.selfFlagPath())
+	_, optErr := os.Stat(selfOptInPath(s.hncDir))
 	_, expErr := os.Stat(s.autoExpandFlagPath())
 	_, proErr := os.Stat(s.autoPromoteFlagPath())
 	mode := "off"
-	if selfErr == nil {
+	autoExp := true
+	autoPro := true
+	if selfErr == nil || optErr == nil {
 		mode = "smart_screen"
+		if selfErr == nil {
+			autoExp = expErr == nil
+			autoPro = proErr == nil
+		}
 	}
 	studioPolicy = selfStudioPolicy{
 		Mode:        mode,
 		PrevMode:    mode,
-		AutoExpand:  expErr == nil || mode == "smart_screen",
-		AutoPromote: proErr == nil || mode == "smart_screen",
+		AutoExpand:  autoExp,
+		AutoPromote: autoPro,
 		UpdatedUnix: time.Now().Unix(),
 	}
 }
@@ -133,6 +156,10 @@ func reconcileStudioFlagsLocked(s *server, now time.Time) (captureActive bool, s
 		captureActive = false
 	}
 
+	_, prevSelfErr := os.Stat(s.selfFlagPath())
+	prevCap := prevSelfErr == nil
+
+	_ = setStudioFlagFile(selfOptInPath(s.hncDir), studioPolicy.Mode != "off")
 	_ = setStudioFlagFile(s.selfFlagPath(), captureActive)
 	_ = setStudioFlagFile(s.autoExpandFlagPath(), captureActive && studioPolicy.AutoExpand)
 	_ = setStudioFlagFile(s.autoPromoteFlagPath(), captureActive && studioPolicy.AutoPromote)
@@ -147,6 +174,10 @@ func reconcileStudioFlagsLocked(s *server, now time.Time) (captureActive bool, s
 		"updated_unix":  nowU,
 	})
 	_ = discoverWriteAtomic(selfRuntimePath(s.hncDir), rt)
+
+	if prevCap != captureActive {
+		notifySelfCaptureWake(s)
+	}
 	return captureActive, screenOn, remSec
 }
 
@@ -160,6 +191,16 @@ func (s *server) SelfResidentLoop(stopCh <-chan struct{}) {
 		actCh := activityChanged()
 		select {
 		case <-stopCh:
+			studioMu.Lock()
+			if studioStopTimer != nil {
+				studioStopTimer.Stop()
+				studioStopTimer = nil
+			}
+			if studioQuietTimer != nil {
+				studioQuietTimer.Stop()
+				studioQuietTimer = nil
+			}
+			studioMu.Unlock()
 			return
 		case <-actCh:
 			now := time.Now()
@@ -171,14 +212,10 @@ func (s *server) SelfResidentLoop(stopCh <-chan struct{}) {
 				now.Unix()-studioPolicy.LastDistillUnix >= 900 && hasNewLabelSamplesLocked(s.hncDir)
 			if needQuietDistill && studioQuietTimer == nil {
 				studioQuietTimer = time.AfterFunc(25*time.Second, func() {
-					if screenCurrentlyOn() {
-						studioMu.Lock()
-						studioQuietTimer = nil
-						studioMu.Unlock()
-						return
-					}
 					studioMu.Lock()
-					if studioDistilling {
+					ensureStudioPolicyLocked(s)
+					if studioDistilling || studioPolicy.Mode == "off" || screenCurrentlyOn() {
+						studioQuietTimer = nil
 						studioMu.Unlock()
 						return
 					}
@@ -195,7 +232,7 @@ func (s *server) SelfResidentLoop(stopCh <-chan struct{}) {
 					saveStudioPolicyLocked(s.hncDir)
 					studioMu.Unlock()
 				})
-			} else if screenOn && studioQuietTimer != nil {
+			} else if (screenOn || studioPolicy.Mode == "off") && studioQuietTimer != nil {
 				studioQuietTimer.Stop()
 				studioQuietTimer = nil
 			}
@@ -474,8 +511,22 @@ func actionSelfStudioStart(s *server, p map[string]string) actionResp {
 		studioStopTimer.Stop()
 		studioStopTimer = nil
 	}
+	if v := strings.TrimSpace(p["auto_expand"]); v != "" {
+		if b, ok := parseBoolStr(v); ok {
+			studioPolicy.AutoExpand = b
+		}
+	}
+	if v := strings.TrimSpace(p["auto_promote"]); v != "" {
+		if b, ok := parseBoolStr(v); ok {
+			studioPolicy.AutoPromote = b
+		}
+	}
 
 	if normMode == "off" {
+		if studioQuietTimer != nil {
+			studioQuietTimer.Stop()
+			studioQuietTimer = nil
+		}
 		studioPolicy.Mode = "off"
 		studioPolicy.PrevMode = "off"
 		studioPolicy.LeaseEndUnix = 0
@@ -499,8 +550,6 @@ func actionSelfStudioStart(s *server, p map[string]string) actionResp {
 	if normMode == "smart_screen" {
 		studioPolicy.Mode = "smart_screen"
 		studioPolicy.PrevMode = "smart_screen"
-		studioPolicy.AutoExpand = true
-		studioPolicy.AutoPromote = true
 		studioPolicy.LeaseEndUnix = 0
 		studioPolicy.UpdatedUnix = now.Unix()
 		saveStudioPolicyLocked(s.hncDir)
@@ -524,8 +573,10 @@ func actionSelfStudioStart(s *server, p map[string]string) actionResp {
 		}
 	}
 	studioPolicy.Mode = "lease_15m"
-	studioPolicy.AutoExpand = !observeOnly
-	studioPolicy.AutoPromote = !observeOnly
+	if observeOnly {
+		studioPolicy.AutoExpand = false
+		studioPolicy.AutoPromote = false
+	}
 	autoMin := 15
 	if m, err := strconv.Atoi(strings.TrimSpace(p["auto_stop_min"])); err == nil && m >= 1 && m <= 180 {
 		autoMin = m
@@ -573,6 +624,9 @@ func actionSelfStudioStart(s *server, p map[string]string) actionResp {
 }
 
 func runStudioDistillPipeline(s *server) (studioDistillSummary, error) {
+	studioDistillRunMu.Lock()
+	defer studioDistillRunMu.Unlock()
+
 	t0 := time.Now()
 	synced := pokeDPIDStudio(s.hncDir, 1200*time.Millisecond)
 	now := time.Now()

@@ -134,13 +134,22 @@ func (r *tlsReassembler) handleSegment(ev *Event, seq uint32, data []byte, now t
 	if len(data) == 0 {
 		return TLSInfo{}, false
 	}
-	if data[0] == 0x16 {
+	if len(data) >= 6 && data[0] == 0x16 && data[1] == 0x03 && data[2] <= 0x04 && data[5] == 0x01 {
 		return r.handleFirst(ev, seq, data, now)
+	}
+	if data[0] == 0x16 && (len(data) < 3 || data[1] != 0x03 || data[2] > 0x04) {
+		return r.handleCont(ev, seq, data, now)
+	}
+	if data[0] == 0x16 {
+		return TLSInfo{}, false
 	}
 	return r.handleCont(ev, seq, data, now)
 }
 
 func (r *tlsReassembler) handleFirst(ev *Event, seq uint32, data []byte, now time.Time) (TLSInfo, bool) {
+	if len(data) < 9 || data[0] != 0x16 || data[1] != 0x03 || data[2] > 0x04 {
+		return TLSInfo{}, false
+	}
 	// 1) 完整 ClientHello: 原路径。
 	if info, ok := parseTLSClientHelloFull(data); ok {
 		r.drop(ev)

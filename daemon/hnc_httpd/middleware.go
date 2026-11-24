@@ -38,6 +38,7 @@ type ctxKey int
 const (
 	ctxKeyTokenID ctxKey = iota
 	ctxKeyToken
+	ctxKeySkipActivityTouch
 )
 
 // CookieName hnc token cookie 名字
@@ -195,7 +196,8 @@ func issuedCookieForReq(r *http.Request, value string) *http.Cookie {
 func (s *server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublicPath(r.URL.Path) {
-			next.ServeHTTP(w, r)
+			ctx := context.WithValue(r.Context(), ctxKeySkipActivityTouch, true)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
@@ -228,7 +230,8 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 				// 它判断服务存活。
 				if !s.localAdminSecretExists() {
 					if r.URL.Path == "/api/health" {
-						next.ServeHTTP(w, r)
+						ctx := context.WithValue(r.Context(), ctxKeySkipActivityTouch, true)
+						next.ServeHTTP(w, r.WithContext(ctx))
 						return
 					}
 					log.Printf("loopback without local_admin.secret → fail-closed (path=%s)", r.URL.Path)

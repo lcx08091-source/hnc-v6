@@ -51,6 +51,7 @@ command -v hnc_act_load >/dev/null 2>&1 || {
 }
 GUARD_LAST_MODE=""
 GUARD_LAST_FB=0
+GUARD_LAST_STATE=""
 MTK_TETHER_SUPPRESSED=0
 
 guard_soc() {
@@ -430,7 +431,7 @@ tick() {
     if [ "$mode" = on ]; then
         [ -n "$ifc" ] && want=1
     else
-        if [ "$state" = ACTIVE ]; then
+        if [ "$policy_on" = 1 ] && [ "$state" = ACTIVE ]; then
             want=1
             calm=0
         elif [ "$policy_on" = 1 ] && [ "$state" = CAPABLE ]; then
@@ -445,6 +446,13 @@ tick() {
         elif [ "$fb" = 1 ]; then
             case "$state" in
                 NOHOTSPOT|NOMAP) calm=$((calm + 1)) ;;
+                CAPABLE|IDLE|ACTIVE)
+                    if [ "$policy_on" = 0 ]; then
+                        calm=$((calm + 1))
+                    else
+                        calm=0
+                    fi
+                    ;;
                 *) calm=0 ;;
             esac
             if [ "$calm" -ge "$RESTORE_AFTER" ]; then
@@ -482,6 +490,7 @@ tick() {
         esac
     else
         if [ "$fb" = 1 ]; then
+            st_save 0 0 0
             if [ "$mtk_plat" = "1" ]; then
                 slowpath_restore_ipc_only
                 clsact_remove "$ifc"
@@ -511,6 +520,7 @@ tick() {
                 ;;
             IDLE)      detail="offload 未在转发, 无需兜底" ;;
             CAPABLE)   detail="本机具备 offload, 当前无激活策略, 持续监测" ;;
+            ACTIVE)    detail="硬件加速正常运行中(当前无激活策略, 无需慢路径压制)" ;;
             *)         detail="状态未知, 持续监测" ;;
         esac
         st_save "$fb" "$since" "$calm"
@@ -525,7 +535,7 @@ tick() {
         rcode="$SYS_NET_ERR"
     elif [ "$_co_rc" = "permission_denied" ] || [ "$HWNAT_ST" = "failed" ] || { [ "$HWNAT_ST" = "detected_no_knob" ] && [ "$_hw_rc" = "permission_denied" ]; }; then
         rcode="permission_denied"
-    elif [ "$state" = "ACTIVE" ]; then
+    elif [ "$state" = "ACTIVE" ] && [ "$want" = "1" ]; then
         rcode="qcom_tether_bpf_active"
     elif [ "$HWNAT_ST" = "skipped_not_mtk" ] && [ "$state" = "NOMAP" ]; then
         rcode="unsupported_soc"
@@ -538,13 +548,14 @@ tick() {
     fi
 
     write_status "$mode" "$state" "$fb" "$since" "$detail" "$sp" "$cl" "$ifc" "$rcode"
-    GUARD_LAST_MODE=$mode; GUARD_LAST_FB=$fb
+    GUARD_LAST_MODE=$mode; GUARD_LAST_FB=$fb; GUARD_LAST_STATE=$state
 }
 
 guard_plan_sleep() {
     GUARD_PLAN_TOTAL=$INTERVAL
     GUARD_PLAN_WAKE=""
     [ "$GUARD_LAST_FB" = 1 ] && return 0
+    [ "$GUARD_LAST_STATE" = ACTIVE ] && return 0
     hnc_act_load "$(now_s)" || return 0
     [ "$ACT_OK" = 1 ] || return 0
     case "$ACT_LEVEL" in
@@ -580,7 +591,7 @@ og_lock() {
     fi
     mkdir -p "$RUN" 2>/dev/null
     rm -rf "$OG_LOCK".stale.* 2>/dev/null || true
-    local _n=0 _lp _ts _now _mtime _grave
+    local _n=0 _max_ticks="${1:-150}" _lp _ts _now _mtime _grave
     while ! mkdir "$OG_LOCK" 2>/dev/null; do
         _lp=$(cat "$OG_LOCK/pid" 2>/dev/null)
         _ts=$(cat "$OG_LOCK/ts" 2>/dev/null)
@@ -613,9 +624,13 @@ og_lock() {
                 fi
                 ;;
         esac
-        _n=$((_n + 1))
-        [ "$_n" -ge 50 ] && return 1
-        usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
+        if usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null; then
+            _n=$((_n + 1))
+        else
+            sleep 1
+            _n=$((_n + 10))
+        fi
+        [ "$_n" -ge "$_max_ticks" ] && return 1
     done
     echo "$$" > "$OG_LOCK/pid" 2>/dev/null
     now_s > "$OG_LOCK/ts" 2>/dev/null
@@ -661,11 +676,15 @@ case "${1:-}" in
         cat "$STATUS" 2>/dev/null
         ;;
     restore)
-        og_lock || true
+        if ! og_lock 200; then
+            log "ERROR: offload_guard.lock busy on restore"
+            exit 1
+        fi
         trap 'og_unlock' EXIT
         trap 'og_unlock; trap - EXIT; exit 143' TERM
         trap 'og_unlock; trap - EXIT; exit 130' INT
         _rifc=$(hotspot_iface) || _rifc=$(head -n 1 "$RUN/iface.cache" 2>/dev/null | tr -d ' \r\n')
+        st_save 0 0 0
         do_restore "$_rifc"
         st_save 0 0 0
         rm -f "$STATUS" 2>/dev/null

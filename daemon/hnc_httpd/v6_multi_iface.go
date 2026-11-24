@@ -112,8 +112,13 @@ type v6MultiIfaceEngine struct {
 	fastlaneInstalls atomic.Uint64
 	tun0GuardChecks  atomic.Uint64
 
-	mu       sync.RWMutex
-	lastSnap V6MultiIfaceSnapshot
+	mu                   sync.RWMutex
+	lastSnap             V6MultiIfaceSnapshot
+	tun0ApplyMu          sync.Mutex
+	appliedTun0Subnets   map[string]int
+	lastTun0MangleDigest string
+	tun0MangleActive     bool
+	tun0BootCleaned      bool
 }
 
 var globalV6MultiIface = &v6MultiIfaceEngine{}
@@ -180,6 +185,10 @@ func buildGetRouteDumpMsg(seq uint32, family uint8) []byte {
 // parseDefaultRouteIfindexesMsgs 纯字节流解析 RTM_NEWROUTE dump 报文,
 // 精确提取全路由表中 rtm_dst_len == 0 且 rtm_type == RTN_UNICAST 的默认路由出接口 ifindex。
 func parseDefaultRouteIfindexesMsgs(b []byte) (map[int]bool, bool, error) {
+	return parseDefaultRouteIfindexesMsgsWithSeq(b, 0)
+}
+
+func parseDefaultRouteIfindexesMsgsWithSeq(b []byte, wantSeq uint32) (map[int]bool, bool, error) {
 	out := make(map[int]bool)
 	for off := 0; off < len(b); {
 		rem := len(b) - off
@@ -188,6 +197,7 @@ func parseDefaultRouteIfindexesMsgs(b []byte) (map[int]bool, bool, error) {
 		}
 		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
 		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
+		msgSeq := binary.LittleEndian.Uint32(b[off+8 : off+12])
 		if msgLen < rtnlMsgHdrLen || msgLen > rem {
 			return out, false, fmt.Errorf("rtnl route dump: bad nlmsg_len %d", msgLen)
 		}
@@ -197,6 +207,9 @@ func parseDefaultRouteIfindexesMsgs(b []byte) (map[int]bool, bool, error) {
 			off = len(b)
 		} else {
 			off += adv
+		}
+		if wantSeq != 0 && msgSeq != wantSeq {
+			continue
 		}
 
 		switch msgType {
@@ -784,6 +797,11 @@ func readLiveIPRulesOS() (rules []string, reasonCode string, ok bool) {
 }
 
 func analyzeMultiInterfacesWithLiveRules(inputs []V6IfaceProbeInput, preferredPrimary string) V6MultiIfaceSnapshot {
+	snap, _ := analyzeMultiInterfacesWithLiveRulesDetail(inputs, preferredPrimary)
+	return snap
+}
+
+func analyzeMultiInterfacesWithLiveRulesDetail(inputs []V6IfaceProbeInput, preferredPrimary string) (V6MultiIfaceSnapshot, []string) {
 	var (
 		rules       []string
 		rulesKnown  bool
@@ -808,7 +826,7 @@ func analyzeMultiInterfacesWithLiveRules(inputs []V6IfaceProbeInput, preferredPr
 	globalV6MultiIface.mu.Lock()
 	globalV6MultiIface.lastSnap = snap
 	globalV6MultiIface.mu.Unlock()
-	return snap
+	return snap, rules
 }
 
 // ── 1:fffe 局域网互传 2.5Gbps 免限速直通类 Netlink 报文编码器 ──────────────
@@ -960,10 +978,279 @@ func EnsureLANFastlaneOnIface(ifindex int, lanSubnets []string) error {
 	return nil
 }
 
-var v6CollectProbeInputsFn = CollectLiveIfaceProbeInputs
+const (
+	v6Tun0BypassRulePrefMax = v6Tun0BypassRulePrefBase + 15 // [8960..8975] 专属 HNC tun0 私网直连绕行槽位
+	v6Tun0GuardChainName    = "HNC_TUN_GUARD"
+)
+
+var (
+	v6CollectProbeInputsFn = CollectLiveIfaceProbeInputs
+	v6ExecTun0IPCmdFn      = execTun0IPCmdOS
+	v6ExecTun0IptRestoreFn = execTun0IptRestoreOS
+	v6ExecTun0IptCmdFn     = execTun0IptCmdOS
+	v6Tun0ForceDataplane   bool
+)
+
+func execTun0IPCmdOS(args ...string) (string, error) {
+	ipBin := resolveDataplaneSystemBin("ip")
+	if ipBin == "" {
+		return "", errors.New("ip binary not found")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := hardenCmd(exec.CommandContext(ctx, ipBin, args...))
+	cmd.Env = subprocEnvWithFallbackPath()
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func execTun0IptRestoreOS(payload []byte) error {
+	restoreBin := v6ResolveRestoreBinFn("iptables-restore")
+	if restoreBin == "" {
+		return errors.New("iptables-restore binary not found")
+	}
+	return pipeIptablesRestoreWithTimeout(restoreBin, payload, iptRestoreTimeout)
+}
+
+func execTun0IptCmdOS(args ...string) (string, error) {
+	iptBin := v6ResolveRestoreBinFn("iptables")
+	if iptBin == "" {
+		return "", errors.New("iptables binary not found")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := hardenCmd(exec.CommandContext(ctx, iptBin, args...))
+	cmd.Env = subprocEnvWithFallbackPath()
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+type tun0ManagedRuleEntry struct {
+	pref   int
+	subnet string
+}
+
+// parseManagedTun0BypassRules 仅提取落在 [8960..8975] 优先级区间、不触碰 fwmark/uidrange、
+// 且指向热点私有 IPv4 网段 lookup main 的 HNC 托管绕行规则。
+func parseManagedTun0BypassRules(lines []string) []tun0ManagedRuleEntry {
+	var out []tun0ManagedRuleEntry
+	for _, raw := range lines {
+		ln := strings.TrimSpace(raw)
+		if ln == "" || strings.Contains(ln, "fwmark") || strings.Contains(ln, "uidrange") {
+			continue
+		}
+		colon := strings.IndexByte(ln, ':')
+		if colon <= 0 {
+			continue
+		}
+		pref, err := strconv.Atoi(strings.TrimSpace(ln[:colon]))
+		if err != nil || pref < v6Tun0BypassRulePrefBase || pref > v6Tun0BypassRulePrefMax {
+			continue
+		}
+		rest := strings.Fields(ln[colon+1:])
+		var toSpec string
+		hasLookupMain := false
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == "to" && i+1 < len(rest) {
+				toSpec = rest[i+1]
+				i++
+			} else if (rest[i] == "lookup" || rest[i] == "table") && i+1 < len(rest) && rest[i+1] == "main" {
+				hasLookupMain = true
+				i++
+			}
+		}
+		if !hasLookupMain || toSpec == "" {
+			continue
+		}
+		if normSub, _, _, ok := v6NormalizeSubnetV4(toSpec); ok {
+			out = append(out, tun0ManagedRuleEntry{pref: pref, subnet: normSub})
+		}
+	}
+	return out
+}
+
+func liveIPRulesContainTun0Bypass(lines []string, pref int, subnet string) bool {
+	prefPrefix := strconv.Itoa(pref) + ":"
+	wantMain := "to " + subnet + " lookup main"
+	wantTableMain := "to " + subnet + " table main"
+	wantLocalNet := "to " + subnet + " lookup local_network"
+	for _, raw := range lines {
+		ln := strings.TrimSpace(raw)
+		if strings.Contains(ln, wantLocalNet) {
+			return true
+		}
+		if strings.HasPrefix(ln, prefPrefix) && (strings.Contains(ln, wantMain) || strings.Contains(ln, wantTableMain)) {
+			return true
+		}
+	}
+	return false
+}
+
+// syncTun0GuardDataplane 在 globalV6MultiIface.mu 锁外幂等同步/清理本机 tun0 防环路策略路由与 HNC_TUN_GUARD 钳制链。
+// 严格保护低 16 位 skb->mark (0x0000ffff) 零触碰，且所有子进程通过 subprocEnvWithFallbackPath 继承完整 Android BOOTCLASSPATH。
+func syncTun0GuardDataplane(plan *V6Tun0GuardPlan, existingRules []string) error {
+	globalV6MultiIface.tun0ApplyMu.Lock()
+	defer globalV6MultiIface.tun0ApplyMu.Unlock()
+
+	if globalV6MultiIface.appliedTun0Subnets == nil {
+		globalV6MultiIface.appliedTun0Subnets = make(map[string]int)
+	}
+	if plan != nil {
+		plan.Low16MarkSafe = true
+	}
+
+	liveManaged := parseManagedTun0BypassRules(existingRules)
+	wantActive := plan != nil && plan.VPNActive && len(plan.ProtectedSubnets) > 0 &&
+		(len(plan.IPRuleSpecs) > 0 || len(plan.MangleGuardRules) > 0)
+
+	if !wantActive {
+		delSeen := make(map[string]bool)
+		delRule := func(pref int, sub string) {
+			if pref < v6Tun0BypassRulePrefBase || pref > v6Tun0BypassRulePrefMax || sub == "" {
+				return
+			}
+			k := strconv.Itoa(pref) + "|" + sub
+			if delSeen[k] {
+				return
+			}
+			delSeen[k] = true
+			if v6ExecTun0IPCmdFn != nil {
+				_, _ = v6ExecTun0IPCmdFn("-4", "rule", "del", "pref", strconv.Itoa(pref), "to", sub, "lookup", "main")
+			}
+		}
+		for sub, pref := range globalV6MultiIface.appliedTun0Subnets {
+			delRule(pref, sub)
+		}
+		for _, lm := range liveManaged {
+			delRule(lm.pref, lm.subnet)
+		}
+		clear(globalV6MultiIface.appliedTun0Subnets)
+
+		if (globalV6MultiIface.tun0MangleActive || !globalV6MultiIface.tun0BootCleaned) && v6ExecTun0IptCmdFn != nil {
+			if _, lErr := v6ExecTun0IptCmdFn("-t", "mangle", "-L", v6Tun0GuardChainName, "-n"); lErr == nil {
+				for range 4 {
+					if _, dErr := v6ExecTun0IptCmdFn("-t", "mangle", "-D", "FORWARD", "-j", v6Tun0GuardChainName); dErr != nil {
+						break
+					}
+				}
+				for range 4 {
+					if _, dErr := v6ExecTun0IptCmdFn("-t", "mangle", "-D", "PREROUTING", "-j", v6Tun0GuardChainName); dErr != nil {
+						break
+					}
+				}
+				_, _ = v6ExecTun0IptCmdFn("-t", "mangle", "-F", v6Tun0GuardChainName)
+				_, _ = v6ExecTun0IptCmdFn("-t", "mangle", "-X", v6Tun0GuardChainName)
+			}
+			globalV6MultiIface.tun0MangleActive = false
+			globalV6MultiIface.lastTun0MangleDigest = ""
+			globalV6MultiIface.tun0BootCleaned = true
+		}
+		return nil
+	}
+
+	// 1. 构建当前活跃下游私有网段的目标 pref 映射 [8960..8975]
+	wantPrefBySub := make(map[string]int, len(plan.ProtectedSubnets))
+	orderedSubs := make([]string, 0, len(plan.ProtectedSubnets))
+	for i, rawSub := range plan.ProtectedSubnets {
+		normSub, _, _, ok := v6NormalizeSubnetV4(rawSub)
+		if !ok {
+			continue
+		}
+		pref := v6Tun0BypassRulePrefBase + i
+		if pref > v6Tun0BypassRulePrefMax {
+			break
+		}
+		if _, exists := wantPrefBySub[normSub]; !exists {
+			wantPrefBySub[normSub] = pref
+			orderedSubs = append(orderedSubs, normSub)
+		}
+	}
+
+	// 2. 先清理已下线网段或槽位漂移的旧 ip rule
+	delStaleSeen := make(map[string]bool)
+	delStale := func(pref int, sub string) {
+		k := strconv.Itoa(pref) + "|" + sub
+		if delStaleSeen[k] {
+			return
+		}
+		delStaleSeen[k] = true
+		if v6ExecTun0IPCmdFn != nil {
+			_, _ = v6ExecTun0IPCmdFn("-4", "rule", "del", "pref", strconv.Itoa(pref), "to", sub, "lookup", "main")
+		}
+	}
+	for sub, oldPref := range globalV6MultiIface.appliedTun0Subnets {
+		if wantPref, ok := wantPrefBySub[sub]; !ok || wantPref != oldPref {
+			delStale(oldPref, sub)
+			delete(globalV6MultiIface.appliedTun0Subnets, sub)
+		}
+	}
+	for _, lm := range liveManaged {
+		if wantPref, ok := wantPrefBySub[lm.subnet]; !ok || wantPref != lm.pref {
+			delStale(lm.pref, lm.subnet)
+		}
+	}
+
+	// 3. 幂等补齐缺失的热点私有网段前置直连绕行规则
+	var applyErrs []string
+	allRulesReady := true
+	for _, sub := range orderedSubs {
+		pref := wantPrefBySub[sub]
+		if liveIPRulesContainTun0Bypass(existingRules, pref, sub) {
+			globalV6MultiIface.appliedTun0Subnets[sub] = pref
+			continue
+		}
+		if v6ExecTun0IPCmdFn != nil {
+			out, err := v6ExecTun0IPCmdFn("-4", "rule", "add", "pref", strconv.Itoa(pref), "to", sub, "lookup", "main")
+			if err != nil && !strings.Contains(strings.ToLower(out), "file exists") {
+				allRulesReady = false
+				applyErrs = append(applyErrs, fmt.Sprintf("ip rule add %s: %v", sub, err))
+				continue
+			}
+			globalV6MultiIface.appliedTun0Subnets[sub] = pref
+		}
+	}
+	if allRulesReady && len(orderedSubs) > 0 {
+		plan.LoopRiskDetected = false
+	}
+
+	// 4. 幂等原子加载 *mangle HNC_TUN_GUARD (TCPMSS clamp + 网关自身直通保护, 绝不改写 0x0000ffff mark)
+	for _, r := range plan.MangleGuardRules {
+		if strings.Contains(strings.ToLower(r), "0x0000ffff") || strings.Contains(strings.ToLower(r), "--set-mark") {
+			return errors.New("forbidden low-16-bit mark mutation in HNC_TUN_GUARD")
+		}
+	}
+	snippet := BuildTun0GuardRestoreSnippet(*plan)
+	digest := string(snippet)
+	if (!globalV6MultiIface.tun0MangleActive || globalV6MultiIface.lastTun0MangleDigest != digest) && v6ExecTun0IptRestoreFn != nil {
+		if err := v6ExecTun0IptRestoreFn(snippet); err != nil {
+			applyErrs = append(applyErrs, fmt.Sprintf("iptables-restore HNC_TUN_GUARD: %v", err))
+		} else {
+			if v6ExecTun0IptCmdFn != nil {
+				if _, cErr := v6ExecTun0IptCmdFn("-t", "mangle", "-C", "FORWARD", "-j", v6Tun0GuardChainName); cErr != nil {
+					if _, iErr := v6ExecTun0IptCmdFn("-t", "mangle", "-I", "FORWARD", "1", "-j", v6Tun0GuardChainName); iErr != nil {
+						_, _ = v6ExecTun0IptCmdFn("-t", "mangle", "-A", "FORWARD", "-j", v6Tun0GuardChainName)
+					}
+				}
+				if _, cErr := v6ExecTun0IptCmdFn("-t", "mangle", "-C", "PREROUTING", "-j", v6Tun0GuardChainName); cErr != nil {
+					if _, iErr := v6ExecTun0IptCmdFn("-t", "mangle", "-I", "PREROUTING", "1", "-j", v6Tun0GuardChainName); iErr != nil {
+						_, _ = v6ExecTun0IptCmdFn("-t", "mangle", "-A", "PREROUTING", "-j", v6Tun0GuardChainName)
+					}
+				}
+			}
+			globalV6MultiIface.lastTun0MangleDigest = digest
+			globalV6MultiIface.tun0MangleActive = true
+			globalV6MultiIface.tun0BootCleaned = true
+		}
+	}
+
+	if len(applyErrs) > 0 {
+		return errors.New(strings.Join(applyErrs, "; "))
+	}
+	return nil
+}
 
 // ReconcileMultiDownstreamV6 自动探测全部活跃下游接口(wlan1+wlan2+ap0+rndis0/ncm0),
-// 并在每个需要整形的三层下游口上幂等确保 HTB 根树与 1:fffe 2.5Gbps 局域网互传直通类就绪。
+// 同步本机 tun0 防环路策略路由与 HNC_TUN_GUARD 链, 并在每个需要整形的三层下游口上幂等确保 HTB 根树与 1:fffe 2.5Gbps 局域网互传直通类就绪。
 func (s *server) ReconcileMultiDownstreamV6() (V6MultiIfaceSnapshot, error) {
 	globalV6MultiIface.reconcileRuns.Add(1)
 	preferred := ""
@@ -975,8 +1262,23 @@ func (s *server) ReconcileMultiDownstreamV6() (V6MultiIfaceSnapshot, error) {
 		hncDir = s.hncDir
 	}
 	inputs := v6CollectProbeInputsFn(hncDir)
-	snap := analyzeMultiInterfacesWithLiveRules(inputs, preferred)
-	if !useNativeDataplane(hncDir) || len(snap.ManagedDownstreams) == 0 {
+	snap, liveRules := analyzeMultiInterfacesWithLiveRulesDetail(inputs, preferred)
+	if !useNativeDataplane(hncDir) && !v6Tun0ForceDataplane {
+		return snap, nil
+	}
+
+	var errs []string
+	if err := syncTun0GuardDataplane(&snap.Tun0Guard, liveRules); err != nil {
+		errs = append(errs, "tun0_guard: "+err.Error())
+	}
+	globalV6MultiIface.mu.Lock()
+	globalV6MultiIface.lastSnap = snap
+	globalV6MultiIface.mu.Unlock()
+
+	if len(snap.ManagedDownstreams) == 0 {
+		if len(errs) > 0 {
+			return snap, fmt.Errorf("multi-iface reconcile partial errors: %s", strings.Join(errs, "; "))
+		}
 		return snap, nil
 	}
 
@@ -985,7 +1287,6 @@ func (s *server) ReconcileMultiDownstreamV6() (V6MultiIfaceSnapshot, error) {
 		allSubnets = append(allSubnets, ds.SubnetsV4...)
 	}
 
-	var errs []string
 	for _, ds := range snap.ManagedDownstreams {
 		if !ds.ShapeEnabled || ds.Ifindex <= 0 {
 			continue

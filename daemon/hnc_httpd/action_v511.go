@@ -62,10 +62,10 @@ func actionDeviceWhitelistSet(hncDir string, p map[string]string) actionResp {
 	if v != "true" && v != "false" {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
-	rc, out := runBin(hncDir, "json_set.sh", "device", mac, "whitelist", v)
-	if rc != 0 {
-		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
+	if err := rulesStore.SetWhitelist(hncDir, mac, v == "true"); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(err.Error())}
 	}
+	rulesStore.Invalidate(hncDir)
 	return syncWhitelist(hncDir, actionResp{OK: true})
 }
 
@@ -85,8 +85,8 @@ func actionQosSet(hncDir string, p map[string]string) actionResp {
 		if err := writeFileAtomic(filepath.Join(run, "tc_qos_mode"), []byte(mode+"\n")); err != nil {
 			return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 		}
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "tc_qos_mode", mode); rc != 0 {
-			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
+		if err := rulesStore.SetTop(hncDir, "tc_qos_mode", mode); err != nil {
+			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(err.Error())}
 		}
 	}
 	if hasScale {
@@ -97,10 +97,11 @@ func actionQosSet(hncDir string, p map[string]string) actionResp {
 		if err := writeFileAtomic(filepath.Join(run, "tc_qos_scale"), []byte(strconv.Itoa(n)+"\n")); err != nil {
 			return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 		}
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "tc_qos_scale", strconv.Itoa(n)); rc != 0 {
-			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
+		if err := rulesStore.SetTop(hncDir, "tc_qos_scale", n); err != nil {
+			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(err.Error())}
 		}
 	}
+	rulesStore.Invalidate(hncDir)
 	return actionResp{OK: true, Detail: "applies on next rule apply"}
 }
 
@@ -150,6 +151,7 @@ func actionTemplateSet(hncDir string, p map[string]string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 	}
+	invalidateJSONCaches(filepath.Join(hncDir, "data", "templates.json"))
 	return actionResp{OK: true}
 }
 
@@ -162,10 +164,13 @@ func actionTemplateDel(hncDir string, p map[string]string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 	}
+	invalidateJSONCaches(filepath.Join(hncDir, "data", "templates.json"))
 	return actionResp{OK: true}
 }
 
 // ── 维护 ──────────────────────────────────────────────────────
+
+const orphanTmpMinAge = 10 * time.Minute
 
 func isOrphanTmpFileName(name string) bool {
 	if name == "" {
@@ -195,7 +200,8 @@ func actionCacheClear(hncDir string) actionResp {
 			n++
 		}
 	}
-	// 清理 run/ 与 data/ (含子目录) 下的孤儿 *.tmp* 文件
+	// 仅清理 mtime 早于 10 分钟前的陈旧孤儿 *.tmp* 文件, 严禁误删在途原子写盘临时文件
+	cutoff := time.Now().Add(-orphanTmpMinAge)
 	tmpDirs := []string{
 		filepath.Join(hncDir, "run"),
 		filepath.Join(hncDir, "data"),
@@ -213,6 +219,10 @@ func actionCacheClear(hncDir string) actionResp {
 			}
 			name := e.Name()
 			if isOrphanTmpFileName(name) {
+				info, ierr := e.Info()
+				if ierr != nil || !info.ModTime().Before(cutoff) {
+					continue
+				}
 				if os.Remove(filepath.Join(dir, name)) == nil {
 					n++
 				}
@@ -664,10 +674,26 @@ func triggerDPIRulesRebind(hncDir string) {
 	if st, err := os.Stat(rebindScript); err != nil || st.IsDir() {
 		return
 	}
-	iface := "wlan2"
-	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "hotspot_iface")); err == nil {
-		if v := strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0]); v != "" && ifaceNameOK(v) {
-			iface = v
+	explicitIdle := false
+	if sb, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state")); err == nil {
+		for _, ln := range strings.Split(string(sb), "\n") {
+			upper := strings.ToUpper(strings.TrimSpace(ln))
+			if upper == "" {
+				continue
+			}
+			if strings.HasPrefix(upper, "ACTIVE:") {
+				explicitIdle = false
+			} else if isExplicitIdleStateLine(upper) {
+				explicitIdle = true
+			}
+		}
+	}
+	iface := "auto"
+	if !explicitIdle {
+		if b, err := os.ReadFile(filepath.Join(hncDir, "run", "hotspot_iface")); err == nil {
+			if v := strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0]); v != "" && ifaceNameOK(v) {
+				iface = v
+			}
 		}
 	}
 	_, _ = runBin(hncDir, "dpi_rebind.sh", iface)

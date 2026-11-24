@@ -491,18 +491,20 @@ type limitCtl struct {
 
 	poke chan struct{}
 	// apply 把 obs → to 的差异落到系统; 测试注入。
-	apply func(mac string, from, to limitRule) error
+	apply     func(mac string, from, to limitRule) error
+	jsonCache *jsonFileCache
 }
 
 func newLimitCtl(hncDir string, actionMu sync.Locker) *limitCtl {
 	c := &limitCtl{
-		hncDir:   hncDir,
-		actionMu: actionMu,
-		policies: map[string]*devicePolicy{},
-		st:       ctlStateFile{Version: 1, Devices: map[string]*ctlDevState{}},
-		logged:   map[string]string{},
-		view:     map[string]limitView{},
-		poke:     make(chan struct{}, 1),
+		hncDir:    hncDir,
+		actionMu:  actionMu,
+		policies:  map[string]*devicePolicy{},
+		st:        ctlStateFile{Version: 1, Devices: map[string]*ctlDevState{}},
+		logged:    map[string]string{},
+		view:      map[string]limitView{},
+		poke:      make(chan struct{}, 1),
+		jsonCache: newJSONFileCache(),
 	}
 	c.apply = c.applyViaActions
 	c.load()
@@ -766,7 +768,37 @@ func (c *limitCtl) Loop(stop <-chan struct{}) {
 
 // readDevices 读 devices.json: 在线(有 IP)+ 累计计数器。
 func (c *limitCtl) readDevices() (map[string]devObs, bool) {
-	b, err := os.ReadFile(filepath.Join(c.hncDir, "data", "devices.json"))
+	return c.readDevicesWithCache(false)
+}
+
+func (c *limitCtl) readDevicesWithCache(useCache bool) (map[string]devObs, bool) {
+	path := filepath.Join(c.hncDir, "data", "devices.json")
+	if useCache && c != nil && c.jsonCache != nil {
+		raw, err := c.jsonCache.read(path)
+		if err != nil {
+			return map[string]devObs{}, false
+		}
+		root, ok := raw.(map[string]interface{})
+		if !ok {
+			return map[string]devObs{}, false
+		}
+		out := make(map[string]devObs, len(root))
+		for mac, dv := range root {
+			d, _ := dv.(map[string]interface{})
+			if d == nil {
+				continue
+			}
+			o := devObs{online: asString(d["ip"]) != ""}
+			rx, ok1 := toInt64(d["rx_bytes"])
+			tx, ok2 := toInt64(d["tx_bytes"])
+			if ok1 && ok2 {
+				o.rx, o.tx, o.hasCnt = rx, tx, true
+			}
+			out[strings.ToLower(mac)] = o
+		}
+		return out, true
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return map[string]devObs{}, false
 	}
@@ -803,15 +835,78 @@ func numOf(v interface{}) float64 {
 	return 0
 }
 
+func readBillingDayCached(hncDir string, cache *jsonFileCache) (int, map[string]interface{}, bool) {
+	var rulesRoot map[string]interface{}
+	rulesOK := false
+	rulesPath := filepath.Join(hncDir, "data", "rules.json")
+	if cache != nil {
+		if v, err := cache.read(rulesPath); err == nil {
+			if m, ok := v.(map[string]interface{}); ok {
+				rulesRoot, rulesOK = m, true
+			}
+		}
+	} else if b, err := os.ReadFile(rulesPath); err == nil {
+		if json.Unmarshal(b, &rulesRoot) == nil {
+			rulesOK = true
+		}
+	}
+	bd := 0
+	puPath := puConfigPath(hncDir)
+	if cache != nil {
+		if v, err := cache.read(puPath); err == nil {
+			if m, ok := v.(map[string]interface{}); ok {
+				if n := int(numOf(m["billing_day"])); n >= 1 && n <= 31 {
+					bd = n
+				}
+			}
+		}
+	} else if raw, err := os.ReadFile(puPath); err == nil {
+		var cfg struct {
+			BillingDay int `json:"billing_day"`
+		}
+		if json.Unmarshal(raw, &cfg) == nil && cfg.BillingDay >= 1 && cfg.BillingDay <= 31 {
+			bd = cfg.BillingDay
+		}
+	}
+	if bd == 0 && rulesRoot != nil {
+		bd = int(numOf(rulesRoot["billing_day"]))
+	}
+	if bd < 1 || bd > 31 {
+		bd = 1
+	}
+	return bd, rulesRoot, rulesOK
+}
+
+func (c *limitCtl) readBillingDay() int {
+	var cache *jsonFileCache
+	if c != nil {
+		cache = c.jsonCache
+	}
+	bd, _, _ := readBillingDayCached(c.hncDir, cache)
+	return bd
+}
+
+func (c *limitCtl) hasActivePolicyOrOverrideLocked() bool {
+	if len(c.policies) > 0 {
+		return true
+	}
+	for _, s := range c.st.Devices {
+		if s != nil && s.Adopted && s.LastDesired != s.Base {
+			return true
+		}
+	}
+	return false
+}
+
 // readObserved 读 rules.json 当前规则 + billing_day。读/解析失败返回 ok=false
 // (调用方必须跳过 reconcile, 否则会把"读不到"误当"外部清空")。
 func readObserved(hncDir string) (map[string]limitRule, int, bool) {
-	b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
-	if err != nil {
-		return nil, 1, false
-	}
-	var root map[string]interface{}
-	if json.Unmarshal(b, &root) != nil {
+	return readObservedWithCache(hncDir, nil)
+}
+
+func readObservedWithCache(hncDir string, cache *jsonFileCache) (map[string]limitRule, int, bool) {
+	bd, root, ok := readBillingDayCached(hncDir, cache)
+	if !ok || root == nil {
 		return nil, 1, false
 	}
 	out := map[string]limitRule{}
@@ -837,23 +932,6 @@ func readObserved(hncDir string) (map[string]limitRule, int, bool) {
 				out[s] = r
 			}
 		}
-	}
-	// v5.19: 结算日与「本月流量」共用一处设置(data/phone_usage_config.json);
-	// 旧版 rules.json 顶层 billing_day 仅作兜底
-	bd := 0
-	if raw, err := os.ReadFile(puConfigPath(hncDir)); err == nil {
-		var cfg struct {
-			BillingDay int `json:"billing_day"`
-		}
-		if json.Unmarshal(raw, &cfg) == nil && cfg.BillingDay >= 1 && cfg.BillingDay <= 31 {
-			bd = cfg.BillingDay
-		}
-	}
-	if bd == 0 {
-		bd = int(numOf(root["billing_day"]))
-	}
-	if bd < 1 || bd > 31 {
-		bd = 1
 	}
 	return out, bd, true
 }
@@ -997,12 +1075,30 @@ func (c *limitCtl) tick(now time.Time) {
 		return
 	}
 
-	devs, devsOK := c.readDevices()
-	obs, billingDay, rulesOK := readObserved(c.hncDir)
-
 	ds := dayStart(now)
+	dayKey := ds.Format("2006-01-02")
+	sameDay := c.lastRollDay != "" && c.lastRollDay == dayKey
+	hasPol := c.hasActivePolicyOrOverrideLocked()
+	globalOn := c.globalQuotaOnCached(sameDay && !hasPol)
+	useIdleCache := sameDay && !hasPol && !globalOn
+
+	var (
+		devs       map[string]devObs
+		devsOK     bool
+		obs        map[string]limitRule
+		billingDay int
+		rulesOK    bool
+	)
+	if useIdleCache {
+		devs, devsOK = c.readDevicesWithCache(true)
+		billingDay, _, rulesOK = readBillingDayCached(c.hncDir, c.jsonCache)
+	} else {
+		devs, devsOK = c.readDevices()
+		obs, billingDay, rulesOK = readObserved(c.hncDir)
+	}
+
 	ms := billingPeriodStart(now, billingDay)
-	dayKey, monKey := ds.Format("2006-01-02"), ms.Format("2006-01-02")
+	monKey := ms.Format("2006-01-02")
 
 	// v5.20: 墙钟跳变 → 各设备计数器重建基线(本轮读数只当新基线), 跨跳变的
 	// 增量不记进任何一天; 之后按新时间正常 rollover / 判定分时段。
@@ -1116,13 +1212,20 @@ func (c *limitCtl) tick(now time.Time) {
 		if pol != nil {
 			q, ws = pol.Quota, pol.Schedule
 		}
-		usedDay := maxU(s.Usage.DayBytes, c.histDay[mac])
-		usedMon := maxU(s.Usage.MonthBytes, c.histMon[mac])
+		var histDayBytes, histMonBytes uint64
+		if c.histKey == hk {
+			histDayBytes = c.histDay[mac]
+		}
+		if c.histMonKey == monKey {
+			histMonBytes = c.histMon[mac]
+		}
+		usedDay := maxU(s.Usage.DayBytes, histDayBytes)
+		usedMon := maxU(s.Usage.MonthBytes, histMonBytes)
 		if s.Usage.DayKey != dayKey {
-			usedDay = c.histDay[mac]
+			usedDay = histDayBytes
 		}
 		if s.Usage.MonthKey != monKey {
-			usedMon = c.histMon[mac]
+			usedMon = histMonBytes
 		}
 		qState, exceeded, period := evalQuota(q, usedDay, usedMon)
 		eff := effectiveRule(s.Base, quotaVerdictOf(q, exceeded), ws, now)
@@ -1182,16 +1285,16 @@ func (c *limitCtl) tick(now time.Time) {
 	c.view = view
 	c.viewMu.Unlock()
 
-	// v6.0 锁解耦: 规则落地已完成, 立即释放 s.actionMu!
-	// 后续全局配额检查(checkGlobalQuotaLocked)与设备配额系统通知均在 s.actionMu 锁外执行,
-	// 绝不因 ColorOS cmd notification Binder 卡顿冻结 WebUI 控制面!
+	// v6.0/v6.1 锁解耦: 规则落地已完成, 立即释放 s.actionMu!
+	// 全局配额检查仅持 c.mu 写持久化告警状态, 所有 cmd notification 一律移出 c.mu 锁外异步投递!
 	unlockAll()
 
 	c.mu.Lock()
-	c.checkGlobalQuotaLocked(monKey, ms, now)
+	globalNotifs := c.checkGlobalQuotaCachedLocked(monKey, ms, now, useIdleCache)
 	c.saveStateLocked(now, false)
 	c.mu.Unlock()
 
+	pendingNotifs = append(pendingNotifs, globalNotifs...)
 	if len(pendingNotifs) > 0 {
 		dispatchQuotaNotificationsAsync(pendingNotifs)
 	}

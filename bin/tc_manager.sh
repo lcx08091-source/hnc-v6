@@ -603,6 +603,10 @@ rate_to_mbps_num() {
             n=$(printf '%s' "$val" | sed 's/[mM][bB][iI][tT]$//; s/[mM][bB][pP][sS]$//; s/[mM]$//')
             awk -v v="$n" 'BEGIN{printf "%.6f", v+0}'
             ;;
+        *[bB][iI][tT])
+            n=$(printf '%s' "$val" | sed 's/[bB][iI][tT]$//')
+            awk -v v="$n" 'BEGIN{printf "%.6f", (v+0)/1000000}'
+            ;;
         *)
             awk -v v="$val" 'BEGIN{printf "%.6f", v+0}'
             ;;
@@ -1231,6 +1235,38 @@ global_shaper_default_leaf() {
     local dev=$1
     lowlat_leaf_set "$dev" 1:9999 9999 "$(lowlat_chain)"
 }
+_rate_is_nonzero() {
+    local _r="${1:-}"
+    case "$_r" in ''|0|0mbit|0kbit|0bit|0gbit|0.0|0.00) return 1 ;; esac
+    gt0 "$(rate_to_mbps_num "$_r")"
+}
+
+_ve_up_shaper_active() {
+    local _ukbps="${1:-0}" _ar_up _gs_en _gs_up
+    case "$_ukbps" in ''|*[!0-9]*) _ukbps=0 ;; esac
+    if [ "$_ukbps" -gt 0 ] && [ "$_ukbps" -lt 1000000 ]; then
+        return 0
+    fi
+    if [ -f "$HNC_DIR/run/autorate.json" ]; then
+        _ar_up=$(tr -d '\r\n ' < "$HNC_DIR/run/autorate.json" 2>/dev/null | awk '
+            index($0, "\"enabled\":true") > 0 && match($0, /"cur_up_mbps":[0-9.]+/) {
+                s = substr($0, RSTART, RLENGTH); sub(/.*:/, "", s)
+                if (s + 0 > 0) print s
+            }')
+        [ -n "$_ar_up" ] && return 0
+    fi
+    if [ -f "$RULES_FILE" ]; then
+        _gs_en=$(tr -d '\r\n' < "$RULES_FILE" 2>/dev/null | sed -nE 's/.*"global_shaper_enabled"[[:space:]]*:[[:space:]]*(true|false).*/\1/p' | head -1)
+        if [ "$_gs_en" = "true" ]; then
+            _gs_up=$(json_top_string global_shaper_up "$RULES_FILE" 2>/dev/null)
+            if _rate_is_nonzero "$_gs_up"; then
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
 set_global_shaper() {
     local iface=$1 want=$2 down_rate=${3:-0} up_rate=${4:-0}
     log "set_global_shaper: want=$want down=$down_rate up=$up_rate iface=$iface"
@@ -1241,17 +1277,25 @@ set_global_shaper() {
             return 66
         fi
         ensure_egress_htb_ready "$iface" "set_global_shaper" || return 1
-        # 下行(egress on AP iface): 1:1 ceil = WAN down
-        if [ -n "$down_rate" ] && [ "$down_rate" != "0" ]; then
+        # 下行(egress on AP iface): 1:1 ceil = WAN down; 单向设为 0(另一向 >0)时将已建树口 1:1 复位回 DEFAULT_RATE(1000mbit)
+        if _rate_is_nonzero "$down_rate"; then
             local b; b=$(burst_for_rate "$down_rate")
             tc_class_set "$iface" 1: 1:1 rate "$down_rate" ceil "$down_rate" burst "$b" cburst "$b" \
                 || { log_error "set_global_shaper: egress 1:1 set failed on $iface"; echo "GLOBAL_SHAPER=down_fail"; return 1; }
             global_shaper_default_leaf "$iface" || log "set_global_shaper: no AQM leaf on $iface default class"
+        else
+            if tc qdisc show dev "$iface" 2>/dev/null | grep -q "htb 1:"; then
+                tc_class_set "$iface" 1: 1:1 rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k || true
+                if class_exists "$iface" 8010; then
+                    tc class change dev "$iface" parent 1:1 classid 1:9999 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k prio 7 2>/dev/null || true
+                fi
+            fi
         fi
-        # 上行(ifb0 egress): 1:1 ceil = WAN up
-        if [ -n "$up_rate" ] && [ "$up_rate" != "0" ]; then
+        # 上行(ifb0 egress): 1:1 ceil = WAN up; 单向设为 0(另一向 >0)时将已建树 ifb0 1:1 复位回 DEFAULT_RATE(1000mbit)
+        if _rate_is_nonzero "$up_rate"; then
             if uplink_supported_runtime; then
                 ensure_ifb_root_v1 || true
+                [ -z "${HNC_TEST_MODE:-}" ] && ensure_ingress_mirred_v1 "$iface" || true
                 local bu; bu=$(burst_for_rate "$up_rate")
                 tc_class_set "$IFB_IFACE" 1: 1:1 rate "$up_rate" ceil "$up_rate" burst "$bu" cburst "$bu" \
                     || log_error "set_global_shaper: ifb0 1:1 set failed (上行整形未生效)"
@@ -1260,6 +1304,13 @@ set_global_shaper() {
                 log_uplink_unsupported_once "set_global_shaper"
                 log "set_global_shaper: uplink unsupported; skip ifb0 shaping"
             fi
+        else
+            if tc qdisc show dev "$IFB_IFACE" 2>/dev/null | grep -q "htb 1:"; then
+                tc class change dev "$IFB_IFACE" parent 1: classid 1:1 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null || true
+                if class_exists "$IFB_IFACE" 8010; then
+                    tc class change dev "$IFB_IFACE" parent 1:1 classid 1:9999 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k prio 7 2>/dev/null || true
+                fi
+            fi
         fi
         echo "GLOBAL_SHAPER=on down=${down_rate} up=${up_rate}"
         return 0
@@ -1267,6 +1318,9 @@ set_global_shaper() {
         # off: 复位 1:1 回 DEFAULT_RATE(egress + ifb0),叶子留 AQM(本就是 fq_codel/sfq,无害)
         tc_class_set "$iface" 1: 1:1 rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k || true
         tc class change dev "$IFB_IFACE" parent 1: classid 1:1 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null || true
+        if class_exists "$IFB_IFACE" 8010; then
+            tc class change dev "$IFB_IFACE" parent 1:1 classid 1:9999 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k prio 7 2>/dev/null || true
+        fi
         echo "GLOBAL_SHAPER=off"
         return 0
     fi
@@ -1398,10 +1452,16 @@ set_vector_express() {
             tc class replace dev "$IFB_IFACE" parent 1:1 classid 1:8010 htb rate "${_urate}kbit" ceil "${_ukbps}kbit" burst 32k cburst 200k prio 0 quantum 1514 2>/dev/null || true
             tc qdisc replace dev "$IFB_IFACE" parent 1:8010 handle 8110: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
             _ve_install_filters "$IFB_IFACE"
-            _ubgk=$(( (_ukbps / 100) * bg_pct + ((_ukbps % 100) * bg_pct) / 100 ))
-            [ "$_ubgk" -lt 1000 ] && _ubgk=1000
-            _uburst=$(burst_for_rate "${_ubgk}kbit")
-            tc_class_set "$IFB_IFACE" 1:1 1:9999 rate "${_ubgk}kbit" ceil "${_ubgk}kbit" burst "$_uburst" cburst "$_uburst" prio 7 || true
+            # C026: 未设上行限速时绝不把 ifb0 1:9999 误压到 bg_pct(85%), 保持根速率全放行!
+            if _ve_up_shaper_active "$_ukbps"; then
+                _ubgk=$(( (_ukbps / 100) * bg_pct + ((_ukbps % 100) * bg_pct) / 100 ))
+                [ "$_ubgk" -lt 1000 ] && _ubgk=1000
+                _uburst=$(burst_for_rate "${_ubgk}kbit")
+                tc_class_set "$IFB_IFACE" 1:1 1:9999 rate "${_ubgk}kbit" ceil "${_ubgk}kbit" burst "$_uburst" cburst "$_uburst" prio 7 || true
+            else
+                _uburst=$(burst_for_rate "${_ukbps}kbit")
+                tc_class_set "$IFB_IFACE" 1:1 1:9999 rate "${_ukbps}kbit" ceil "${_ukbps}kbit" burst "$_uburst" cburst "$_uburst" prio 7 || true
+            fi
         fi
     else
         _ve_clean_legacy "$iface" "$_clean_1_10"
@@ -1429,16 +1489,27 @@ set_vector_express() {
 set_global_shaper_tune() {
     local iface=$1 down_rate=${2:-0} up_rate=${3:-0}
     [ -n "$iface" ] || return 1
-    if [ -n "$down_rate" ] && [ "$down_rate" != "0" ]; then
+    if _rate_is_nonzero "$down_rate"; then
         if tc qdisc show dev "$iface" 2>/dev/null | grep -q "htb 1:"; then
             local b; b=$(burst_for_rate "$down_rate")
             tc class change dev "$iface" parent 1: classid 1:1 htb rate "$down_rate" ceil "$down_rate" burst "$b" cburst "$b" 2>/dev/null || true
         fi
+    else
+        if tc qdisc show dev "$iface" 2>/dev/null | grep -q "htb 1:"; then
+            tc class change dev "$iface" parent 1: classid 1:1 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null || true
+        fi
     fi
-    if [ -n "$up_rate" ] && [ "$up_rate" != "0" ]; then
+    if _rate_is_nonzero "$up_rate"; then
         if tc qdisc show dev "$IFB_IFACE" 2>/dev/null | grep -q "htb 1:"; then
             local bu; bu=$(burst_for_rate "$up_rate")
             tc class change dev "$IFB_IFACE" parent 1: classid 1:1 htb rate "$up_rate" ceil "$up_rate" burst "$bu" cburst "$bu" 2>/dev/null || true
+        fi
+    else
+        if tc qdisc show dev "$IFB_IFACE" 2>/dev/null | grep -q "htb 1:"; then
+            tc class change dev "$IFB_IFACE" parent 1: classid 1:1 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null || true
+            if class_exists "$IFB_IFACE" 8010; then
+                tc class change dev "$IFB_IFACE" parent 1:1 classid 1:9999 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k prio 7 2>/dev/null || true
+            fi
         fi
     fi
     return 0
@@ -1945,7 +2016,7 @@ init_tc() {
         "")
             ;;
         *"qdisc mq "*root*)
-            log "init_tc: detected mq root on $iface; preserving ROM mq root and trying child HTB fallback"
+            log "init_tc: detected mq root on $iface; trying root HTB replace first (mq child fallback if locked)"
             ;;
         *)
             log "init_tc: replacing incompatible root qdisc on $iface: $_existing_root_line"
@@ -1965,14 +2036,16 @@ init_tc() {
         _htb_add_ok=0
         _htb_retry=0
 
-        # hotfix17.3: mq root devices first get one child-leaf attempt; if that
-        # is unsupported, use verified root replace fallback.
+        # C031: mq 根队列下优先尝试 root_htb_replace_verified 用根 htb 1: 替换 mq 统管全部 TX 队列,
+        # 仅在锁根 ROM 失败时降级 try_mq_child_htb!
         if echo "$_existing_root_line" | grep -q "qdisc mq"; then
-            if try_mq_child_htb "$iface"; then
-                _htb_add_ok=1
-            elif root_htb_replace_verified "$iface"; then
+            if root_htb_replace_verified "$iface"; then
+                rm -f "$HNC_DIR/run/tc_mq_child_$iface" 2>/dev/null || true
                 _htb_add_ok=1
                 _htb_added_by_hnc=1
+            elif try_mq_child_htb "$iface"; then
+                rm -f "$HNC_DIR/run/tc_root_owned_$iface" 2>/dev/null || true
+                _htb_add_ok=1
             fi
         fi
 
@@ -2400,10 +2473,20 @@ set_delay() {
         fi
 
         if [ "$ifb_ok" = "1" ]; then
-            set_netem_only "$IFB_IFACE" "$class_id" "$ig_apply" "$jitter_ms" "$loss" \
-                || { log_error "set_delay: ingress netem set failed dev=$IFB_IFACE class=1:$class_id"; return 1; }
-            echo "DELAY_APPLY_MODE=full"
-            log "  Netem applied (full duplex): RTT=${delay_ms}ms (eg=${eg_apply}ms + ig=${ig_apply}ms) jitter=${jitter_ms}ms loss=${loss}%"
+            if set_netem_only "$IFB_IFACE" "$class_id" "$ig_apply" "$jitter_ms" "$loss"; then
+                echo "DELAY_APPLY_MODE=full"
+                log "  Netem applied (full duplex): RTT=${delay_ms}ms (eg=${eg_apply}ms + ig=${ig_apply}ms) jitter=${jitter_ms}ms loss=${loss}%"
+                return 0
+            fi
+            log_error "set_delay: ingress netem set failed dev=$IFB_IFACE class=1:$class_id; falling back to full delay_ms on $iface (egress_only)"
+            if set_netem_only "$iface" "$class_id" "$delay_ms" "$jitter_ms" "$loss"; then
+                echo "DELAY_APPLY_MODE=egress_only"
+                log "  Netem applied EGRESS-ONLY (ifb0 netem fallback): ${delay_ms}ms on $iface (jitter=${jitter_ms}ms loss=${loss}%)"
+                return 0
+            fi
+            log_error "set_delay: egress_only fallback also failed dev=$iface class=1:$class_id; clearing egress netem"
+            set_netem_only "$iface" "$class_id" 0 0 0 || true
+            return 1
         else
             echo "DELAY_APPLY_MODE=egress_only"
             log "  Netem applied EGRESS-ONLY: ${eg_apply}ms on $iface (IFB unavailable, jitter=${jitter_ms}ms loss=${loss}%)"

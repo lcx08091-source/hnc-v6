@@ -538,18 +538,19 @@ func TestVectorExpressAsymmetric5GUplinkScalingAndZeroUpGuard(t *testing.T) {
 	if err := applyVectorExpressOnActor(actor, dir, true, 0x01000000, 255000, 25500); err != nil {
 		t.Fatalf("applyVectorExpressOnActor upKbps=0 guard failed: %v", err)
 	}
-	if upCeilZero := extractClassCeil(captured, 12, rtnlDefMinor); upCeilZero != -1 {
-		t.Fatalf("when upKbps==0, Tier 2 must NOT emit 1:9999 ceiling lock on ifb0 (upBgCeil=0), got %d kbit", upCeilZero)
+	if upCeilReset := extractClassCeil(captured, 12, rtnlDefMinor); upCeilReset != dpDefaultRootRateKbp {
+		t.Fatalf("when upKbps transitions to 0 after prior cap, Tier 2 must reset ifb0 1:9999 to %d kbit, got %d kbit", dpDefaultRootRateKbp, upCeilReset)
 	}
 
-	// 3. 验证 Tier 3 批处理管道与 resolveActiveVectorExpressParamsFull 同样遵循非对称上行收紧与 upKbps==0 守卫
+	// 3. 验证 Tier 3 批处理管道与 resolveActiveVectorExpressParamsFull 同样遵循非对称上行收紧与 upKbps==0 复位 1000mbit 守卫
 	linesAsym := strings.Join(buildTier3VectorExpressBatchLines("wlan2", true, true, false, false, 0x01000000, 0x03000000, 255000, 300000, 30000, 25500), "\n")
 	if !strings.Contains(linesAsym, "class replace dev ifb0 parent 1:1 classid 1:9999 htb rate 25500kbit ceil 25500kbit prio 7") {
 		t.Fatalf("expected Tier 3 ifb0 1:9999 ceil 25500kbit, got:\n%s", linesAsym)
 	}
 	linesUpOff := strings.Join(buildTier3VectorExpressBatchLines("wlan2", true, true, false, false, 0x01000000, 0x03000000, 255000, 300000, 0, 25500), "\n")
-	if strings.Contains(linesUpOff, "class replace dev ifb0 parent 1:1 classid 1:9999") {
-		t.Fatalf("when configuredUpKbps==0, Tier 3 must NOT lock ifb0 1:9999, got:\n%s", linesUpOff)
+	if strings.Contains(linesUpOff, "class replace dev ifb0 parent 1:1 classid 1:9999 htb rate 25500kbit") ||
+		!strings.Contains(linesUpOff, "class replace dev ifb0 parent 1:1 classid 1:9999 htb rate 1000000kbit ceil 1000000kbit prio 7") {
+		t.Fatalf("when configuredUpKbps==0, Tier 3 must reset ifb0 1:9999 to 1000000kbit and NOT lock at 25500kbit, got:\n%s", linesUpOff)
 	}
 
 	_ = os.WriteFile(filepath.Join(dir, "data", "rules.json"), []byte(`{

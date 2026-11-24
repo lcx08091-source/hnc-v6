@@ -36,7 +36,33 @@
 # 环境: HNC_CONNBLK_REPROBE=1 强制重新探测 xt_string
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
-[ -f "$HNC_DIR/bin/hnc_env.sh" ] && . "$HNC_DIR/bin/hnc_env.sh"
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
+command -v hnc_fwd_insert_pos >/dev/null 2>&1 || {
+    hnc_fwd_insert_pos() {
+        local _c="$1" _t="$2" _p
+        [ -n "$_c" ] && [ -n "$_t" ] || { echo 1; return 0; }
+        _p=$($_c -t filter -S FORWARD 2>/dev/null | awk -v target="$_t" '
+            BEGIN {
+                ord["HNC_SCALPEL"]=1; ord["HNC_ISOLATE"]=2; ord["HNC_CTRL"]=3
+                ord["HNC_WHITELIST"]=4; ord["HNC_QUIC"]=5; ord["HNC_QUIC_APPLIM"]=6
+                ord["HNC_ENCDNS"]=7; ord["HNC_CONNBLK_DNS"]=8; ord["HNC_CONNBLK"]=9
+                t_ord = ord[target] + 0; idx = 0; last_pred = 0
+            }
+            $1 == "-A" && $2 == "FORWARD" {
+                idx++; ch = ""
+                for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") { ch = $(i+1); break }
+                if (ch != "" && (ch in ord) && ord[ch] < t_ord) last_pred = idx
+            }
+            END { printf "%d\n", last_pred + 1 }
+        ' 2>/dev/null)
+        case "$_p" in ''|*[!0-9]*|0) _p=1 ;; esac
+        printf '%s\n' "$_p"
+    }
+}
 FLAT="$HNC_DIR/run/conn_blocks.flat"
 DNSLIST="$HNC_DIR/run/conn_blocks.dns"
 CAPS="$HNC_DIR/run/connblock_caps.json"
@@ -51,18 +77,99 @@ IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
 if [ "$_CB_CUSTOM_IPT" = "0" ] && [ "$DRY" != "1" ]; then
     if command -v iptables >/dev/null 2>&1; then
-        iptables -w 2 -t filter -L -n >/dev/null 2>&1 || IPT="iptables"
+        iptables -w 2 -t filter -L -n >/dev/null 2>&1
+        if [ $? -eq 2 ]; then
+            iptables -w -t filter -L -n >/dev/null 2>&1
+            [ $? -eq 2 ] && IPT="iptables" || IPT="iptables -w"
+        fi
     fi
     if command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || IP6T="ip6tables"
+        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1
+        if [ $? -eq 2 ]; then
+            ip6tables -w -t filter -L -n >/dev/null 2>&1
+            [ $? -eq 2 ] && IP6T="ip6tables" || IP6T="ip6tables -w"
+        fi
     fi
 fi
 MAX_RULES=2000
+
+# C041: 解析当前热点接口供全零全局 MAC (00:00:00:00:00:00 -> -i $IFACE) 使用
+IFACE=${HNC_CONNBLK_IFACE:-${HNC_WL_IFACE:-}}
+if [ -z "$IFACE" ] && [ -e "$HNC_DIR/run/hnc_state" ]; then
+    case "$(cat "$HNC_DIR/run/hnc_state" 2>/dev/null)" in
+        ACTIVE:*)
+            IFACE=$(cat "$HNC_DIR/run/hnc_state" 2>/dev/null)
+            IFACE=${IFACE#ACTIVE:}
+            IFACE=$(printf '%s' "$IFACE" | tr -d ' \t\r\n')
+            ;;
+    esac
+elif [ -z "$IFACE" ]; then
+    for _cbf in "$HNC_DIR/run/active_iface" "$HNC_DIR/run/hotspot_iface" "$HNC_DIR/run/iface.cache"; do
+        [ -f "$_cbf" ] || continue
+        _cbc=$(head -n 1 "$_cbf" 2>/dev/null | tr -d ' \t\r\n')
+        if [ -n "$_cbc" ]; then IFACE="$_cbc"; break; fi
+    done
+    if [ -z "$IFACE" ] && [ -f "$HNC_DIR/run/iface_detect.json" ]; then
+        IFACE=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null \
+            | grep -oE '"iface"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    fi
+    if [ -z "$IFACE" ] && [ -f "$HNC_DIR/data/rules.json" ]; then
+        _cbc=$(tr -d '\r\n' < "$HNC_DIR/data/rules.json" 2>/dev/null \
+            | grep -oE '"hotspot_iface"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        case "$_cbc" in auto|null|"") ;; *) IFACE="$_cbc" ;; esac
+    fi
+fi
+case "$IFACE" in *[!a-zA-Z0-9_.-]*) IFACE="" ;; esac
 
 log() { { echo "$(date '+%Y-%m-%d %H:%M:%S') [connblock] $*" >> "$LOG"; } 2>/dev/null; }
 run() {
     if [ "$DRY" = "1" ]; then echo "DRY: $*"; return 0; fi
     "$@" 2>/dev/null
+}
+
+_cb_link_fwd_ordered() {
+    local _cmd="$1" _ch="$2" _st _pos _k
+    [ -n "$_cmd" ] && [ -n "$_ch" ] || return 1
+    if [ "$DRY" = "1" ]; then
+        run $_cmd -t filter -I FORWARD 1 -j "$_ch"
+        return $?
+    fi
+    _st=$($_cmd -t filter -S FORWARD 2>/dev/null | awk -v target="$_ch" '
+        BEGIN {
+            ord["HNC_SCALPEL"]=1; ord["HNC_ISOLATE"]=2; ord["HNC_CTRL"]=3
+            ord["HNC_WHITELIST"]=4; ord["HNC_QUIC"]=5; ord["HNC_QUIC_APPLIM"]=6
+            ord["HNC_ENCDNS"]=7; ord["HNC_CONNBLK_DNS"]=8; ord["HNC_CONNBLK"]=9
+            t_ord = ord[target] + 0; idx = 0; cnt = 0; t_idx = 0; max_pred = 0; min_succ = 0
+        }
+        $1 == "-A" && $2 == "FORWARD" {
+            idx++; ch = ""
+            for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") { ch = $(i+1); break }
+            if (ch == target) { cnt++; t_idx = idx }
+            else if (ch != "" && (ch in ord)) {
+                if (ord[ch] < t_ord) max_pred = idx
+                else if (ord[ch] > t_ord && min_succ == 0) min_succ = idx
+            }
+        }
+        END {
+            if (idx == 0) { print "empty"; exit }
+            if (cnt == 0) { print "missing"; exit }
+            if (cnt > 1 || (max_pred > 0 && t_idx < max_pred) || (min_succ > 0 && t_idx > min_succ)) {
+                print "misordered"; exit
+            }
+            print "ok"
+        }
+    ' 2>/dev/null)
+    case "$_st" in
+        ok) return 0 ;;
+        misordered)
+            _k=0
+            while $_cmd -t filter -D FORWARD -j "$_ch" 2>/dev/null; do
+                _k=$((_k + 1)); [ "$_k" -ge 20 ] && break
+            done
+            ;;
+    esac
+    _pos=$(hnc_fwd_insert_pos "$_cmd" "$_ch")
+    $_cmd -t filter -I FORWARD "$_pos" -j "$_ch" 2>/dev/null
 }
 
 # 互斥锁: 防止 hnc_httpd 与 watchdog full_restore 并发拆建 HNC_CONNBLK* 链
@@ -167,14 +274,26 @@ if [ -s "$DNSLIST" ]; then
     fi
 fi
 
+_cb_restore_try() {
+    local _bin="$1" _file="$2" _rc
+    "$_bin" -w 2 --noflush < "$_file" 2>/dev/null
+    _rc=$?
+    [ "$_rc" -eq 0 ] && return 0
+    if [ "$_rc" -eq 2 ]; then
+        "$_bin" -w --noflush < "$_file" 2>/dev/null
+        _rc=$?
+        [ "$_rc" -eq 0 ] && return 0
+        [ "$_rc" -eq 2 ] && { "$_bin" --noflush < "$_file" 2>/dev/null && return 0; }
+    fi
+    return 1
+}
+
 _cb_restore_commit() {
     local _bin="$1" _f="$2" _fdrop="${2}.drop"
-    "$_bin" -w 2 --noflush < "$_f" 2>/dev/null && return 0
-    "$_bin" --noflush < "$_f" 2>/dev/null && return 0
+    _cb_restore_try "$_bin" "$_f" && return 0
     # REJECT -> DROP 原子回退(部分裁剪内核无 ipt_REJECT / ip6t_REJECT 模块)
     sed -e 's/-j REJECT --reject-with [^ ]*/-j DROP/g' -e 's/-j REJECT$/-j DROP/g' "$_f" > "$_fdrop" 2>/dev/null || return 1
-    "$_bin" -w 2 --noflush < "$_fdrop" 2>/dev/null && return 0
-    "$_bin" --noflush < "$_fdrop" 2>/dev/null && return 0
+    _cb_restore_try "$_bin" "$_fdrop" && return 0
     return 1
 }
 
@@ -192,9 +311,17 @@ if [ "$_USE_FAST" = "1" ]; then
     _META="$HNC_DIR/run/.cb_rmeta.$$"
     _DNS_IN="$DNSLIST"
     [ -s "$_DNS_IN" ] || _DNS_IN=/dev/null
-    if awk -v f4="$_R4" -v f6="$_R6" -v v6="$v6" -v d4="$DNS4" -v d6="$DNS6" -v cap="$MAX_RULES" '
+    if awk -v f4="$_R4" -v f6="$_R6" -v v6="$v6" -v d4="$DNS4" -v d6="$DNS6" -v cap="$MAX_RULES" -v iface="$IFACE" '
         function valid_mac(m) {
             return (m ~ /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/)
+        }
+        function sel_for(m,    lm) {
+            lm = tolower(m)
+            if (lm == "00:00:00:00:00:00") {
+                if (iface == "") return ""
+                return "-i " iface
+            }
+            return "-m mac --mac-source " m
         }
         function build_hex(dom,    nb, labs, i, L, out) {
             if (dom == "" || length(dom) > 253) return ""
@@ -225,12 +352,14 @@ if [ "$_USE_FAST" = "1" ]; then
             if (n >= cap) next
             mac = $1; ip = $2
             if (!valid_mac(mac) || ip == "" || ip ~ /[^0-9a-fA-F:.]/) next
+            sel = sel_for(mac)
+            if (sel == "") next
             if (index(ip, ":") > 0) {
                 if (v6 != 1) next
-                printf "-A HNC_CONNBLK -m mac --mac-source %s -d %s -j REJECT\n", mac, ip >> f6
+                printf "-A HNC_CONNBLK %s -d %s -j REJECT\n", sel, ip >> f6
                 n++
             } else {
-                printf "-A HNC_CONNBLK -m mac --mac-source %s -d %s -j REJECT\n", mac, ip >> f4
+                printf "-A HNC_CONNBLK %s -d %s -j REJECT\n", sel, ip >> f4
                 n++
             }
             next
@@ -240,26 +369,28 @@ if [ "$_USE_FAST" = "1" ]; then
             if (dn >= cap) next
             mac = tolower($1); dom = tolower($2)
             if (!valid_mac(mac)) next
+            sel = sel_for(mac)
+            if (sel == "") next
             hex = build_hex(dom)
             if (hex == "") next
             if (d4 == 1) {
-                printf "-A HNC_CONNBLK_DNS -m mac --mac-source %s -p udp --dport 53 -m string --algo bm --icase --hex-string \"%s\" -j DROP\n", mac, hex >> f4
-                printf "-A HNC_CONNBLK_DNS -m mac --mac-source %s -p tcp --dport 53 -m string --algo bm --icase --hex-string \"%s\" -j DROP\n", mac, hex >> f4
+                printf "-A HNC_CONNBLK_DNS %s -p udp --dport 53 -m string --algo bm --icase --hex-string \"%s\" -j DROP\n", sel, hex >> f4
+                printf "-A HNC_CONNBLK_DNS %s -p tcp --dport 53 -m string --algo bm --icase --hex-string \"%s\" -j DROP\n", sel, hex >> f4
             }
             if (d6 == 1 && v6 == 1) {
-                printf "-A HNC_CONNBLK_DNS -m mac --mac-source %s -p udp --dport 53 -m string --algo bm --icase --hex-string \"%s\" -j DROP\n", mac, hex >> f6
-                printf "-A HNC_CONNBLK_DNS -m mac --mac-source %s -p tcp --dport 53 -m string --algo bm --icase --hex-string \"%s\" -j DROP\n", mac, hex >> f6
+                printf "-A HNC_CONNBLK_DNS %s -p udp --dport 53 -m string --algo bm --icase --hex-string \"%s\" -j DROP\n", sel, hex >> f6
+                printf "-A HNC_CONNBLK_DNS %s -p tcp --dport 53 -m string --algo bm --icase --hex-string \"%s\" -j DROP\n", sel, hex >> f6
             }
             dn++
             if (!(mac in dot_seen)) {
                 dot_seen[mac] = 1
                 if (d4 == 1) {
-                    printf "-A HNC_CONNBLK_DNS -m mac --mac-source %s -p tcp --dport 853 -j REJECT --reject-with tcp-reset\n", mac >> f4
-                    printf "-A HNC_CONNBLK_DNS -m mac --mac-source %s -p udp --dport 853 -j REJECT --reject-with icmp-port-unreachable\n", mac >> f4
+                    printf "-A HNC_CONNBLK_DNS %s -p tcp --dport 853 -j REJECT --reject-with tcp-reset\n", sel >> f4
+                    printf "-A HNC_CONNBLK_DNS %s -p udp --dport 853 -j REJECT --reject-with icmp-port-unreachable\n", sel >> f4
                 }
                 if (d6 == 1 && v6 == 1) {
-                    printf "-A HNC_CONNBLK_DNS -m mac --mac-source %s -p tcp --dport 853 -j REJECT --reject-with tcp-reset\n", mac >> f6
-                    printf "-A HNC_CONNBLK_DNS -m mac --mac-source %s -p udp --dport 853 -j REJECT --reject-with icmp6-port-unreachable\n", mac >> f6
+                    printf "-A HNC_CONNBLK_DNS %s -p tcp --dport 853 -j REJECT --reject-with tcp-reset\n", sel >> f6
+                    printf "-A HNC_CONNBLK_DNS %s -p udp --dport 853 -j REJECT --reject-with icmp6-port-unreachable\n", sel >> f6
                 }
             }
         }
@@ -281,19 +412,19 @@ if [ "$_USE_FAST" = "1" ]; then
         if [ "$_fast_ok" = "1" ]; then
             read -r n dn < "$_META" 2>/dev/null
             rm -f "$HNC_DIR/run"/.cb_r*.$$ 2>/dev/null
-            $IPT -t filter -C FORWARD -j HNC_CONNBLK 2>/dev/null || $IPT -t filter -I FORWARD 1 -j HNC_CONNBLK 2>/dev/null || log "WARN: v4 link failed"
+            _cb_link_fwd_ordered "$IPT" HNC_CONNBLK || log "WARN: v4 link failed"
             if [ "$v6" = "1" ]; then
-                $IP6T -t filter -C FORWARD -j HNC_CONNBLK 2>/dev/null || $IP6T -t filter -I FORWARD 1 -j HNC_CONNBLK 2>/dev/null || log "WARN: v6 link failed"
+                _cb_link_fwd_ordered "$IP6T" HNC_CONNBLK || log "WARN: v6 link failed"
             fi
             if [ "${dn:-0}" -gt 0 ]; then
-                for C in INPUT FORWARD; do
-                    if [ "$DNS4" = "1" ]; then
-                        $IPT -t filter -C "$C" -j HNC_CONNBLK_DNS 2>/dev/null || $IPT -t filter -I "$C" 1 -j HNC_CONNBLK_DNS 2>/dev/null || log "WARN: v4 dns link $C failed"
-                    fi
-                    if [ "$DNS6" = "1" ] && [ "$v6" = "1" ]; then
-                        $IP6T -t filter -C "$C" -j HNC_CONNBLK_DNS 2>/dev/null || $IP6T -t filter -I "$C" 1 -j HNC_CONNBLK_DNS 2>/dev/null || log "WARN: v6 dns link $C failed"
-                    fi
-                done
+                if [ "$DNS4" = "1" ]; then
+                    $IPT -t filter -C INPUT -j HNC_CONNBLK_DNS 2>/dev/null || $IPT -t filter -I INPUT 1 -j HNC_CONNBLK_DNS 2>/dev/null || log "WARN: v4 dns link INPUT failed"
+                    _cb_link_fwd_ordered "$IPT" HNC_CONNBLK_DNS || log "WARN: v4 dns link FORWARD failed"
+                fi
+                if [ "$DNS6" = "1" ] && [ "$v6" = "1" ]; then
+                    $IP6T -t filter -C INPUT -j HNC_CONNBLK_DNS 2>/dev/null || $IP6T -t filter -I INPUT 1 -j HNC_CONNBLK_DNS 2>/dev/null || log "WARN: v6 dns link INPUT failed"
+                    _cb_link_fwd_ordered "$IP6T" HNC_CONNBLK_DNS || log "WARN: v6 dns link FORWARD failed"
+                fi
             else
                 for T in "$IPT" "$([ "$v6" = 1 ] && echo "$IP6T")"; do
                     [ -n "$T" ] || continue
@@ -348,15 +479,26 @@ while read -r mac ip _; do
         *:*) [ "$v6" = 1 ] || continue; T=$IP6T ;;
         *) T=$IPT ;;
     esac
-    if run $T -t filter -A HNC_CONNBLK -m mac --mac-source "$mac" -d "$ip" -j REJECT; then
+    _lmac=$(echo "$mac" | tr 'A-F' 'a-f')
+    if [ "$_lmac" = "00:00:00:00:00:00" ]; then
+        [ -n "$IFACE" ] || continue
+        set -- -i "$IFACE"
+    else
+        set -- -m mac --mac-source "$mac"
+    fi
+    if run $T -t filter -A HNC_CONNBLK "$@" -d "$ip" -j REJECT; then
         n=$((n + 1))
-    elif run $T -t filter -A HNC_CONNBLK -m mac --mac-source "$mac" -d "$ip" -j DROP; then
+    elif run $T -t filter -A HNC_CONNBLK "$@" -d "$ip" -j DROP; then
         n=$((n + 1))
     fi
     [ "$n" -ge "$MAX_RULES" ] && { log "WARN: rule cap $MAX_RULES reached"; break; }
 done < "$FLAT"
-run $IPT -t filter -I FORWARD 1 -j HNC_CONNBLK || log "WARN: v4 link failed"
-[ "$v6" = 1 ] && { run $IP6T -t filter -I FORWARD 1 -j HNC_CONNBLK || log "WARN: v6 link failed"; }
+if [ "$DRY" = "1" ]; then _cbp4=1; else _cbp4=$(hnc_fwd_insert_pos "$IPT" HNC_CONNBLK); fi
+run $IPT -t filter -I FORWARD "$_cbp4" -j HNC_CONNBLK || log "WARN: v4 link failed"
+if [ "$v6" = 1 ]; then
+    if [ "$DRY" = "1" ]; then _cbp6=1; else _cbp6=$(hnc_fwd_insert_pos "$IP6T" HNC_CONNBLK); fi
+    run $IP6T -t filter -I FORWARD "$_cbp6" -j HNC_CONNBLK || log "WARN: v6 link failed"
+fi
 
 # ── DNS 层 ───────────────────────────────────────────────────────────
 dn=0
@@ -370,12 +512,18 @@ if [ -s "$DNSLIST" ] && { [ "$DNS4" = 1 ] || [ "$DNS6" = 1 ]; }; then
             *) continue ;;
         esac
         mac=$(echo "$mac" | tr 'A-F' 'a-f')
+        if [ "$mac" = "00:00:00:00:00:00" ]; then
+            [ -n "$IFACE" ] || continue
+            set -- -i "$IFACE"
+        else
+            set -- -m mac --mac-source "$mac"
+        fi
         dom=$(echo "$dom" | tr 'A-Z' 'a-z')
         hex=$(dns_hex "$dom") || continue
         for T in "$([ "$DNS4" = 1 ] && echo "$IPT")" "$([ "$DNS6" = 1 ] && echo "$IP6T")"; do
             [ -n "$T" ] || continue
             for P in udp tcp; do
-                run $T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p "$P" --dport 53 \
+                run $T -t filter -A HNC_CONNBLK_DNS "$@" -p "$P" --dport 53 \
                     -m string --algo bm --icase --hex-string "$hex" -j DROP
             done
         done
@@ -385,27 +533,33 @@ if [ -s "$DNSLIST" ] && { [ "$DNS4" = 1 ] || [ "$DNS6" = 1 ]; }; then
             *)
                 dot_macs="$dot_macs$mac "
                 if [ "$DNS4" = 1 ]; then
-                    run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j REJECT --reject-with tcp-reset \
-                        || run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j DROP
-                    run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p udp --dport 853 -j REJECT --reject-with icmp-port-unreachable \
-                        || run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p udp --dport 853 -j DROP
+                    run $IPT -t filter -A HNC_CONNBLK_DNS "$@" -p tcp --dport 853 -j REJECT --reject-with tcp-reset \
+                        || run $IPT -t filter -A HNC_CONNBLK_DNS "$@" -p tcp --dport 853 -j DROP
+                    run $IPT -t filter -A HNC_CONNBLK_DNS "$@" -p udp --dport 853 -j REJECT --reject-with icmp-port-unreachable \
+                        || run $IPT -t filter -A HNC_CONNBLK_DNS "$@" -p udp --dport 853 -j DROP
                 fi
                 if [ "$DNS6" = 1 ]; then
-                    run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j REJECT --reject-with tcp-reset \
-                        || run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j DROP
-                    run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p udp --dport 853 -j REJECT --reject-with icmp6-port-unreachable \
-                        || run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p udp --dport 853 -j DROP
+                    run $IP6T -t filter -A HNC_CONNBLK_DNS "$@" -p tcp --dport 853 -j REJECT --reject-with tcp-reset \
+                        || run $IP6T -t filter -A HNC_CONNBLK_DNS "$@" -p tcp --dport 853 -j DROP
+                    run $IP6T -t filter -A HNC_CONNBLK_DNS "$@" -p udp --dport 853 -j REJECT --reject-with icmp6-port-unreachable \
+                        || run $IP6T -t filter -A HNC_CONNBLK_DNS "$@" -p udp --dport 853 -j DROP
                 fi
                 ;;
         esac
         [ "$dn" -ge "$MAX_RULES" ] && { log "WARN: dns rule cap $MAX_RULES reached"; break; }
     done < "$DNSLIST"
-    for C in INPUT FORWARD; do
-        [ "$DNS4" = 1 ] && { run $IPT -t filter -I "$C" 1 -j HNC_CONNBLK_DNS || log "WARN: v4 dns link $C failed"; }
-        [ "$DNS6" = 1 ] && { run $IP6T -t filter -I "$C" 1 -j HNC_CONNBLK_DNS || log "WARN: v6 dns link $C failed"; }
-    done
+    if [ "$DNS4" = 1 ]; then
+        run $IPT -t filter -I INPUT 1 -j HNC_CONNBLK_DNS || log "WARN: v4 dns link INPUT failed"
+        if [ "$DRY" = "1" ]; then _cbdp4=1; else _cbdp4=$(hnc_fwd_insert_pos "$IPT" HNC_CONNBLK_DNS); fi
+        run $IPT -t filter -I FORWARD "$_cbdp4" -j HNC_CONNBLK_DNS || log "WARN: v4 dns link FORWARD failed"
+    fi
+    if [ "$DNS6" = 1 ]; then
+        run $IP6T -t filter -I INPUT 1 -j HNC_CONNBLK_DNS || log "WARN: v6 dns link INPUT failed"
+        if [ "$DRY" = "1" ]; then _cbdp6=1; else _cbdp6=$(hnc_fwd_insert_pos "$IP6T" HNC_CONNBLK_DNS); fi
+        run $IP6T -t filter -I FORWARD "$_cbdp6" -j HNC_CONNBLK_DNS || log "WARN: v6 dns link FORWARD failed"
+    fi
 fi
-log "rules=$n dns=$dn dns_layer=$DNS4/$DNS6 v6=$v6"
+log "rules=$n dns=$dn dns_layer=$DNS4/$DNS6 v6=$v6 iface=${IFACE:-none}"
 if [ -s "$DNSLIST" ]; then
     echo "CONN_BLOCK=on rules=$n dns=$dn dns_layer=$DNS4"
 else

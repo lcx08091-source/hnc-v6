@@ -108,6 +108,7 @@ type macMergeFile struct {
 }
 
 // macMergeMu 串行化 mac_merge_suggestions.json 的读改写(后台 tick 与动作)。
+// 严格锁序: rmacReconcileMu -> s.actionMu -> 子模块锁 -> macArchiveMu -> rmacMu -> macMergeMu -> macAliasMu。
 var macMergeMu sync.Mutex
 
 type macTrafficSample struct {
@@ -1004,7 +1005,6 @@ func (s *server) macMergeStep(now time.Time, obs map[string]*macObs) {
 	activePairs := sampleConcurrentTrafficPairs(s.hncDir, nowU, obs)
 
 	macMergeMu.Lock()
-	defer macMergeMu.Unlock()
 	f := loadMacMergeFile(s.hncDir)
 	before, _ := json.Marshal(f)
 
@@ -1090,13 +1090,39 @@ func (s *server) macMergeStep(now time.Time, obs map[string]*macObs) {
 	s.macMergePruneLocked(f, nowU, aliases)
 
 	after, _ := json.Marshal(f)
+	saveErr := error(nil)
 	if string(before) != string(after) {
-		if err := saveMacMergeFile(s.hncDir, f); err != nil {
-			return
+		saveErr = saveMacMergeFile(s.hncDir, f)
+	}
+	var alertSnap *macMergeFile
+	if saveErr == nil && len(toAlert) > 0 {
+		alertSnap = &macMergeFile{
+			Profiles:    make(map[string]*macProfile, len(toAlert)*2),
+			Suggestions: make(map[string][]macMergeCand, len(toAlert)),
+		}
+		for _, mac := range toAlert {
+			if cs := f.Suggestions[mac]; len(cs) > 0 {
+				cp := cs[0]
+				cp.Reasons = append([]string(nil), cs[0].Reasons...)
+				alertSnap.Suggestions[mac] = []macMergeCand{cp}
+				if p := f.Profiles[mac]; p != nil {
+					pCopy := *p
+					alertSnap.Profiles[mac] = &pCopy
+				}
+				if op := f.Profiles[cp.OldMAC]; op != nil {
+					opCopy := *op
+					alertSnap.Profiles[cp.OldMAC] = &opCopy
+				}
+			}
 		}
 	}
-	if len(toAlert) > 0 {
-		s.macMergeAlert(f, toAlert, now)
+	macMergeMu.Unlock()
+
+	if saveErr != nil {
+		return
+	}
+	if alertSnap != nil {
+		s.macMergeAlert(alertSnap, toAlert, now)
 	}
 }
 
@@ -1209,15 +1235,14 @@ func (s *server) macMergeAlert(f *macMergeFile, macs []string, now time.Time) {
 
 func (s *server) apiMacMerge(w http.ResponseWriter, r *http.Request) {
 	nowU := time.Now().Unix()
-	aliases := loadMACAliases(s.hncDir)
-	_, aliasTs := readMACAliasesWithTs(macAliasesPath(s.hncDir))
-	macMergeMu.Lock()
-	f := loadMacMergeFile(s.hncDir)
-	macMergeMu.Unlock()
 	archFile := loadMacMergeArchives(s.hncDir)
 	rmacMu.Lock()
 	rmacSt := loadRMACState(s.hncDir)
 	rmacMu.Unlock()
+	macMergeMu.Lock()
+	f := loadMacMergeFile(s.hncDir)
+	macMergeMu.Unlock()
+	aliases, aliasTs := loadMACAliasesWithTsSnapshot(s.hncDir)
 
 	names, _ := loadDeviceNames(filepath.Join(s.hncDir, deviceNamesRelPath))
 	online := map[string]bool{}

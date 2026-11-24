@@ -424,6 +424,7 @@ type webuiBoundaryEntry struct {
 	ifaces            []webuiIfaceInfo
 	downV4            []*net.IPNet
 	downV6            []*net.IPNet
+	explicitIdle      bool
 }
 
 const webuiIfaceDetectMaxAge = 3 * time.Minute
@@ -609,6 +610,7 @@ func loadWebUIBoundary(hncDir string) webuiBoundaryEntry {
 		ifaces:            ifaces,
 		downV4:            downV4,
 		downV6:            downV6,
+		explicitIdle:      explicitIdle,
 	}
 	webuiBoundaryMu.Lock()
 	if len(webuiBoundarySnap) > 16 {
@@ -629,18 +631,18 @@ func isUpstreamWANIface(name string, b webuiBoundaryEntry) bool {
 	if b.upSet[name] {
 		return true
 	}
-	// Android 上 wlan0 默认是连接上游公共/家庭路由器的 Wi-Fi STA 口;
-	// 仅当当前确实处于活跃热点态(已在上方命中 b.downSet["wlan0"])时才放行, 绝不凭持久化的 configuredHotspot 永久豁免。
-	if name == "wlan0" {
+	// 非热点下游集合内的 wlan0、有线 eth* 及副无线 wlan[1-9]* 一律按外部 WAN/STA 接口严防越权访问。
+	if name == "wlan0" || strings.HasPrefix(name, "eth") || hncAPMaybeIfaceRE.MatchString(name) {
 		return true
 	}
 	return false
 }
 
 // webuiRemoteBoundaryAllowed 纵深边界检查:
-//  1. 若请求到达的本地目标 IP(http.LocalAddrContextKey)明确属于上游 WAN 接口(如公共 Wi-Fi wlan0、rmnet*、tun*) → 拒绝;
-//  2. 若当前存在活跃热点下游子网, 而非回环客户端源 IP 不属于任何活跃热点下游子网 → 拒绝;
-//  3. 无活跃热点接口的单测环境(downV4/downV6 均为空且无 WAN localIP)继续放行, 交由后续 mode/allowlist 判定。
+//  1. 若请求到达的本地目标 IP(http.LocalAddrContextKey)明确属于上游 WAN 接口(如公共 Wi-Fi wlan0/wlan1、eth0、rmnet*、tun*) → 拒绝;
+//  2. 若 hnc_state 显式处于 IDLE/PENDING/OFF 等热点未激活状态(explicitIdle) → 拒绝一切非回环远程访问;
+//  3. 若当前存在活跃热点下游子网, 而非回环客户端源 IP 不属于任何活跃热点下游子网 → 拒绝;
+//  4. 无 hnc_state 且无活跃热点接口的空目录单测环境继续放行, 交由后续 mode/allowlist 判定。
 func webuiRemoteBoundaryAllowed(hncDir string, client net.IP, dstLocal net.IP) bool {
 	if client == nil {
 		return false
@@ -673,6 +675,10 @@ func webuiRemoteBoundaryAllowed(hncDir string, client net.IP, dstLocal net.IP) b
 		if hitUp && !hitDown {
 			return false
 		}
+	}
+
+	if b.explicitIdle {
+		return false
 	}
 
 	hasActiveDown := len(b.downV4) > 0 || len(b.downV6) > 0

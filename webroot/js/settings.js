@@ -604,7 +604,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-rc.5', HNC_UI_VC = '6009305', HNC_UI_DATE = '2026-11-24';
+  var HNC_UI_VER = 'v6.1.0-rc.6', HNC_UI_VC = '6009306', HNC_UI_DATE = '2026-11-24';
   var bVer = cleanVer(l.backend_version, HNC_UI_VER);
   var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -1232,7 +1232,7 @@ function exportRulesJson() {
     $('#rj-copy').onclick = function () { copyText(txt).then(function (ok) { toast(ok ? '已复制 rules.json' : '复制失败', ok ? 'ok' : 'err'); }); };
     var fn = 'hnc-rules-' + today() + '.json';
     if ($('#rj-dl')) $('#rj-dl').onclick = function () { var u = URL.createObjectURL(new Blob([txt], { type: 'application/json' })), a = document.createElement('a'); a.href = u; a.download = fn; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function () { URL.revokeObjectURL(u); }, 3000); };
-    if ($('#rj-save')) $('#rj-save').onclick = function () { shell('mkdir -p /sdcard/Download && cp ' + HNC_DIR + '/data/rules.json /sdcard/Download/' + fn + ' && echo ok').then(function () { toast('已存到 /sdcard/Download/' + fn); }, function (e) { toast(errText(e), 'err'); }); };
+    if ($('#rj-save')) $('#rj-save').onclick = function () { shell('mkdir -p /sdcard/Download && cp ' + sq(HNC_DIR + '/data/rules.json') + ' ' + sq('/sdcard/Download/' + fn) + ' && echo ok').then(function () { toast('已存到 /sdcard/Download/' + fn); }, function (e) { toast(errText(e), 'err'); }); };
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
 function debugBundle(btn) {
@@ -1383,7 +1383,7 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.5';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.6';
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
@@ -2816,7 +2816,7 @@ function setVaultExport(btn) {
     if (!res || typeof res !== 'object' || res.ok === false || !res.files) {
       throw new Error((res && res.error) || '备份导出载荷无效');
     }
-    var verTag = String(res.module_version || 'v6.1.0-rc.5').replace(/[^a-zA-Z0-9._-]+/g, '-');
+    var verTag = String(res.module_version || 'v6.1.0-rc.6').replace(/[^a-zA-Z0-9._-]+/g, '-');
     var tsTag = Math.floor(Date.now() / 1000);
     var fn = 'hnc-backup-' + verTag + '-' + tsTag + '.json';
     var raw = JSON.stringify(res, null, 2);
@@ -2825,8 +2825,16 @@ function setVaultExport(btn) {
     setVaultSyncMeta(sha, cnt, null);
     if (S.page === 'settings') renderSettings(false);
     if (KSU && !window.__HNC_MOCK_META) {
-      var base = (typeof API_BASE === 'string' && API_BASE) ? API_BASE : 'http://127.0.0.1:8765';
-      return shell('mkdir -p /sdcard/Download && curl -fsSL ' + sq(base + '/api/backup?download=1') + ' -o ' + sq('/sdcard/Download/' + fn) + ' && echo ok').then(function () {
+      var base = (typeof API_BASE === 'string' && API_BASE) ? API_BASE : 'http://127.0.0.1:8444';
+      var runSave = function (forceSec) {
+        return loadSecret(!!forceSec).then(function (sec) {
+          var authHdr = sec ? (' -H ' + sq('X-HNC-Local-Admin: ' + sec)) : '';
+          return shell('mkdir -p /sdcard/Download && curl -g -fsSL' + authHdr + ' -H ' + sq('Cache-Control: no-cache') + ' ' + sq(base + '/api/backup?download=1') + ' -o ' + sq('/sdcard/Download/' + fn) + ' && echo ok');
+        });
+      };
+      return runSave(false).catch(function () {
+        return runSave(true);
+      }).then(function () {
         toast('配置快照已存到 /sdcard/Download/' + fn + (sha ? ' · SHA256 ' + sha.slice(0, 8) + '…' : ''));
       }, function () {
         sheet('<h3>配置保险箱快照</h3><div class="sub">' + esc(fn) + (sha ? ' · SHA256 ' + esc(sha.slice(0, 12)) + '…' : '') + '</div>' +

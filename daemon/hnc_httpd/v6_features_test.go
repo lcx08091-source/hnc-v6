@@ -351,11 +351,19 @@ func TestV6VectorExpressEscortAndP2PGuard(t *testing.T) {
 		t.Fatalf("expected full recovery after 60s, got %+v", snapRecover)
 	}
 
-	// 5) HTTP POST /api/v6/express 手动护航列表校验
+	// 5) HTTP POST /api/v6/express 手动护航列表校验: 离线时不误压后台池, 在线时立即激活 active_escort
+	postOffline := doV6JSONReq(t, mux, http.MethodPost, "/api/v6/express",
+		`{"enabled":true,"auto_detect":true,"forced_macs":["AA:BB:CC:DD:EE:02"]}`)
+	if postOffline.Code != http.StatusOK || !strings.Contains(postOffline.Body.String(), `"idle_fullspeed"`) {
+		t.Fatalf("offline forced_macs must remain idle_fullspeed: %d %s", postOffline.Code, postOffline.Body.String())
+	}
+	devPath := filepath.Join(s.hncDir, "data", "devices.json")
+	_ = os.WriteFile(devPath, []byte(`{"aa:bb:cc:dd:ee:02":{"online":true,"ip":"192.168.43.22"}}`), 0o600)
+	invalidateJSONCaches(devPath)
 	postRec := doV6JSONReq(t, mux, http.MethodPost, "/api/v6/express",
 		`{"enabled":true,"auto_detect":true,"forced_macs":["AA:BB:CC:DD:EE:02"]}`)
 	if postRec.Code != http.StatusOK || !strings.Contains(postRec.Body.String(), `"active_escort"`) {
-		t.Fatalf("POST /api/v6/express failed: %d %s", postRec.Code, postRec.Body.String())
+		t.Fatalf("POST /api/v6/express failed for online forced_macs: %d %s", postRec.Code, postRec.Body.String())
 	}
 }
 
@@ -1086,14 +1094,23 @@ func TestV6SelfStudioMigrationAndTmpfsRescue(t *testing.T) {
 	if _, err := os.Stat(rescuedAttrib); !os.IsNotExist(err) {
 		t.Fatalf("self_attrib_purge did not delete data/self_studio/self_attrib.*")
 	}
-	_ = os.WriteFile(filepath.Join(dir, "data", "dangling.json.tmp.12"), []byte("x"), 0o644)
+	staleTmp := filepath.Join(dir, "data", "dangling.json.tmp.12")
+	freshTmp := filepath.Join(dir, "data", "inflight.json.tmp.99")
+	_ = os.WriteFile(staleTmp, []byte("x"), 0o644)
+	staleAt := time.Now().Add(-15 * time.Minute)
+	_ = os.Chtimes(staleTmp, staleAt, staleAt)
+	_ = os.WriteFile(freshTmp, []byte("y"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "run", "label_samples.20260101.jsonl"), []byte("{}\n"), 0o644)
 	if r := actionCacheClear(dir); !r.OK {
 		t.Fatalf("actionCacheClear failed: %+v", r)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "data", "dangling.json.tmp.12")); !os.IsNotExist(err) {
-		t.Fatal("actionCacheClear did not remove data/*.tmp.*")
+	if _, err := os.Stat(staleTmp); !os.IsNotExist(err) {
+		t.Fatal("actionCacheClear did not remove stale data/*.tmp.*")
 	}
+	if _, err := os.Stat(freshTmp); err != nil {
+		t.Fatalf("actionCacheClear must preserve fresh in-flight data/*.tmp.*: %v", err)
+	}
+	_ = os.Remove(freshTmp)
 	if _, err := os.Stat(filepath.Join(dir, "run", "label_samples.20260101.jsonl")); !os.IsNotExist(err) {
 		t.Fatal("actionCacheClear did not remove legacy run/label_samples.*")
 	}

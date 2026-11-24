@@ -18,6 +18,7 @@
 #endif
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -311,6 +312,116 @@ static int bpf_filter_attach_dir(int nlfd, unsigned ifindex, uint32_t parent,
     return rc;
 }
 
+static int rtnl_query_hnc_filter(int fd, struct nlmsghdr *req)
+{
+    uint8_t buf[8192] __attribute__((aligned(NLMSG_ALIGNTO)));
+    struct sockaddr_nl sa = { .nl_family = AF_NETLINK };
+    struct iovec iov = { .iov_base = req, .iov_len = req->nlmsg_len };
+    struct msghdr msg = { .msg_name = &sa, .msg_namelen = sizeof(sa),
+                          .msg_iov = &iov, .msg_iovlen = 1 };
+    ssize_t sent;
+    do {
+        sent = sendmsg(fd, &msg, MSG_NOSIGNAL);
+    } while (sent < 0 && errno == EINTR);
+    if (sent < 0)
+        return 0;
+
+    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    int saw_tfilter = 0;
+    int saw_bpf_name = 0;
+    int name_matched = 0;
+
+    for (int tries = 0; tries < 16; tries++) {
+        ssize_t n;
+        do {
+            n = recv(fd, buf, sizeof(buf), 0);
+        } while (n < 0 && errno == EINTR);
+        if (n <= 0)
+            return 0;
+
+        size_t rem = (size_t)n;
+        for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
+            struct nlmsghdr h;
+            memcpy(&h, buf + off, sizeof(h));
+            if (h.nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h.nlmsg_len > rem)
+                break;
+            size_t msg_off = off;
+            size_t step = NLMSG_ALIGN(h.nlmsg_len);
+            if (step > rem)
+                step = rem;
+            off += step;
+            rem -= step;
+            if (h.nlmsg_seq != g_seq)
+                continue;
+
+            if (h.nlmsg_type == RTM_NEWTFILTER &&
+                (size_t)h.nlmsg_len >= NLMSG_LENGTH(sizeof(struct tcmsg))) {
+                saw_tfilter = 1;
+                size_t attr_off = NLMSG_SPACE(sizeof(struct tcmsg));
+                if ((size_t)h.nlmsg_len > attr_off) {
+                    size_t attr_rem = (size_t)h.nlmsg_len - attr_off;
+                    const uint8_t *ap = buf + msg_off + attr_off;
+                    while (attr_rem >= sizeof(struct rtattr)) {
+                        struct rtattr rta;
+                        memcpy(&rta, ap, sizeof(rta));
+                        if (rta.rta_len < sizeof(struct rtattr) || (size_t)rta.rta_len > attr_rem)
+                            break;
+                        if ((rta.rta_type & 0x3fffU) == TCA_OPTIONS &&
+                            (size_t)rta.rta_len > RTA_LENGTH(0)) {
+                            size_t sub_rem = (size_t)rta.rta_len - RTA_LENGTH(0);
+                            const uint8_t *sp = ap + RTA_LENGTH(0);
+                            while (sub_rem >= sizeof(struct rtattr)) {
+                                struct rtattr srta;
+                                memcpy(&srta, sp, sizeof(srta));
+                                if (srta.rta_len < sizeof(struct rtattr) || (size_t)srta.rta_len > sub_rem)
+                                    break;
+                                if ((srta.rta_type & 0x3fffU) == TCA_BPF_NAME &&
+                                    (size_t)srta.rta_len > RTA_LENGTH(0)) {
+                                    size_t pay_len = (size_t)srta.rta_len - RTA_LENGTH(0);
+                                    char pname[64];
+                                    size_t cp = pay_len < (sizeof(pname) - 1U) ? pay_len : (sizeof(pname) - 1U);
+                                    memcpy(pname, sp + RTA_LENGTH(0), cp);
+                                    pname[cp] = '\0';
+                                    saw_bpf_name = 1;
+                                    if (strncmp(pname, HNC_PROG_NAME, strlen(HNC_PROG_NAME)) == 0)
+                                        name_matched = 1;
+                                }
+                                size_t sstep = RTA_ALIGN(srta.rta_len);
+                                if (sstep > sub_rem)
+                                    break;
+                                sp += sstep;
+                                sub_rem -= sstep;
+                            }
+                        }
+                        size_t astep = RTA_ALIGN(rta.rta_len);
+                        if (astep > attr_rem)
+                            break;
+                        ap += astep;
+                        attr_rem -= astep;
+                    }
+                }
+            } else if (h.nlmsg_type == NLMSG_ERROR) {
+                if (h.nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr)))
+                    return 0;
+                struct nlmsgerr e;
+                memcpy(&e, buf + msg_off + NLMSG_LENGTH(0), sizeof(e));
+                if (e.error != 0)
+                    return 0;
+                if (saw_bpf_name)
+                    return name_matched;
+                return saw_tfilter ? 1 : 1;
+            } else if (h.nlmsg_type == NLMSG_DONE) {
+                if (saw_bpf_name)
+                    return name_matched;
+                return saw_tfilter;
+            }
+        }
+    }
+    return 0;
+}
+
 static int bpf_filter_exists_dir(int nlfd, unsigned ifindex, uint32_t parent)
 {
     struct nl_tc_req req;
@@ -327,7 +438,7 @@ static int bpf_filter_exists_dir(int nlfd, unsigned ifindex, uint32_t parent)
     if (addattr_l(&req.n, sizeof(req), TCA_KIND, HNC_FILTER_KIND,
                   strlen(HNC_FILTER_KIND) + 1) < 0)
         return 0;
-    return rtnl_talk(nlfd, &req.n) == 0;
+    return rtnl_query_hnc_filter(nlfd, &req.n);
 }
 
 static int bpf_filter_detach_dir(int nlfd, unsigned ifindex, uint32_t parent)
@@ -1151,6 +1262,80 @@ static int verify_ether_iface(const char *iface)
     return 0;
 }
 
+static int egress_state_path(const char *iface, char *out, size_t cap)
+{
+    if (!iface || iface[0] == '\0' || iface[0] == '.' ||
+        strchr(iface, '/') != NULL || strstr(iface, "..") != NULL)
+        return -1;
+    for (const char *p = iface; *p; p++) {
+        unsigned char ch = (unsigned char)*p;
+        if (ch < 0x20U || isspace(ch))
+            return -1;
+    }
+    const char *hnc_dir = getenv("HNC_DIR");
+    if (!hnc_dir || hnc_dir[0] == '\0' || strstr(hnc_dir, "..") != NULL)
+        hnc_dir = "/data/local/hnc";
+
+    char run_dir[512];
+    int rn = snprintf(run_dir, sizeof(run_dir), "%s/run", hnc_dir);
+    if (rn <= 0 || (size_t)rn >= sizeof(run_dir))
+        return -1;
+    (void)mkdir(run_dir, 0755);
+
+    int n = snprintf(out, cap, "%s/clsact_egress.%s", run_dir, iface);
+    if (n <= 0 || (size_t)n >= cap)
+        return -1;
+    return 0;
+}
+
+static void write_egress_state(const char *iface, int expected, int degraded, int err_code)
+{
+    char path[576];
+    char tmp[600];
+    if (egress_state_path(iface, path, sizeof(path)) < 0)
+        return;
+    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
+    if (tn <= 0 || (size_t)tn >= sizeof(tmp))
+        return;
+    FILE *f = fopen(tmp, "we");
+    if (!f)
+        return;
+    fprintf(f, "expected=%d\ndegraded=%d\nerr=%d\n", expected, degraded, err_code);
+    if (fclose(f) == 0) {
+        if (rename(tmp, path) != 0)
+            unlink(tmp);
+    } else {
+        unlink(tmp);
+    }
+}
+
+static void read_egress_state(const char *iface, int *expected_out, int *degraded_out)
+{
+    *expected_out = 0;
+    *degraded_out = 0;
+    char path[576];
+    if (egress_state_path(iface, path, sizeof(path)) < 0)
+        return;
+    FILE *f = fopen(path, "re");
+    if (!f)
+        return;
+    char line[64];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "expected=1", 10) == 0)
+            *expected_out = 1;
+        else if (strncmp(line, "degraded=1", 10) == 0)
+            *degraded_out = 1;
+    }
+    fclose(f);
+}
+
+static void remove_egress_state(const char *iface)
+{
+    char path[576];
+    if (egress_state_path(iface, path, sizeof(path)) == 0)
+        unlink(path);
+}
+
 static int cmd_install(const char *iface, const char *obj)
 {
     unsigned ifindex = if_nametoindex(iface);
@@ -1223,8 +1408,10 @@ static int cmd_install(const char *iface, const char *obj)
         }
     }
 
+    int has_eg_sec = (mac_map_fd >= 0 && sec_index(&c, "tc_egress") >= 0) ? 1 : 0;
     int prog_in = load_prog_sec(&c, "tc", ip_map_fd, mac_map_fd, stats_map_fd, 0);
-    int prog_eg = (mac_map_fd >= 0) ? load_prog_sec(&c, "tc_egress", ip_map_fd, mac_map_fd, stats_map_fd, 1) : -1;
+    int prog_eg = has_eg_sec ? load_prog_sec(&c, "tc_egress", ip_map_fd, mac_map_fd, stats_map_fd, 1) : -1;
+    int eg_load_err = (has_eg_sec && prog_eg < 0) ? errno : 0;
     elf_free(&c);
 
     if (prog_in < 0) {
@@ -1253,10 +1440,23 @@ static int cmd_install(const char *iface, const char *obj)
     int rc = clsact_qdisc_ensure(nlfd, ifindex);
     if (rc == 0) {
         int in_rc = bpf_filter_attach_dir(nlfd, ifindex, TC_H_INGRESS_PARENT, prog_in, HNC_PROG_NAME);
-        /* Attach optional egress filter only when ingress filter attached cleanly. */
-        if (in_rc == 0 && prog_eg >= 0) {
-            int eg_rc = bpf_filter_attach_dir(nlfd, ifindex, TC_H_EGRESS_PARENT, prog_eg, HNC_EGRESS_NAME);
-            (void)eg_rc;
+        if (in_rc == 0) {
+            if (prog_eg >= 0) {
+                int eg_rc = bpf_filter_attach_dir(nlfd, ifindex, TC_H_EGRESS_PARENT, prog_eg, HNC_EGRESS_NAME);
+                if (eg_rc == 0) {
+                    write_egress_state(iface, 1, 0, 0);
+                } else {
+                    LOGI("WARN: tc_egress attach degraded on %s (%s); ingress active, downlink clsact accounting unavailable",
+                         iface, strerror(-eg_rc));
+                    write_egress_state(iface, 0, 1, -eg_rc);
+                }
+            } else if (has_eg_sec) {
+                LOGI("WARN: tc_egress BPF load degraded on %s (%s); ingress active, downlink clsact accounting unavailable",
+                     iface, strerror(eg_load_err ? eg_load_err : EINVAL));
+                write_egress_state(iface, 0, 1, eg_load_err ? eg_load_err : EINVAL);
+            } else {
+                remove_egress_state(iface);
+            }
         }
         rc = in_rc;
     }
@@ -1306,13 +1506,26 @@ static int cmd_check(const char *iface)
     if (nlfd >= 0)
         close(nlfd);
 
-    int mp = 0, mmp = 0, app_present = 0;
+    int mp = 0, mmp = 0, sp = 0, app_present = 0;
     int ip_cnt  = count_pinned_map_entries(MAP_PIN, 4U, &mp);
     int mac_cnt = count_pinned_map_entries(MAC_MAP_PIN, (uint32_t)sizeof(struct mac_key), &mmp);
+    {
+        int sfd = open_pinned_path(STATS_MAP_PIN, 1);
+        if (sfd >= 0) {
+            sp = 1;
+            close(sfd);
+        }
+    }
     int app_cnt = count_first_readable_map(kAppPolicyPaths,
                                            sizeof(kAppPolicyPaths) / sizeof(kAppPolicyPaths[0]),
                                            4U, &app_present);
     int bpf_readable = (ip_cnt >= 0 || mac_cnt >= 0 || app_cnt >= 0) ? 1 : 0;
+
+    int eg_expected = 0, eg_degraded_saved = 0;
+    read_egress_state(iface, &eg_expected, &eg_degraded_saved);
+    int is_ok = (qd && fl && mp && (!eg_expected || eg)) ? 1 : 0;
+    int eg_degraded = (eg_degraded_saved || ((mmp || sp) && fl && !eg)) ? 1 : 0;
+    int downlink_stats_ok = (qd && eg && sp) ? 1 : 0;
 
     int tether_present = 0, tether_lim_readable = 0;
     int tether_lim_entries = 0, tether_lim_nonzero = 0;
@@ -1337,14 +1550,17 @@ static int cmd_check(const char *iface)
 
     char safe_iface[IFNAMSIZ * 2];
     json_escape_str(iface, safe_iface, sizeof(safe_iface));
-    printf("{\"iface\":\"%s\",\"ok\":%s,\"qdisc\":%s,\"bpf_filter\":%s,\"map\":%s,\"mac_map\":%s,\"egress_filter\":%s,\"bpf_map_readable\":%s",
+    printf("{\"iface\":\"%s\",\"ok\":%s,\"qdisc\":%s,\"bpf_filter\":%s,\"map\":%s,\"mac_map\":%s,\"stats_map\":%s,\"egress_filter\":%s,\"egress_degraded\":%s,\"downlink_stats_ok\":%s,\"bpf_map_readable\":%s",
            safe_iface,
-           (qd && fl && mp) ? "true" : "false",
+           is_ok ? "true" : "false",
            qd ? "true" : "false",
            fl ? "true" : "false",
            mp ? "true" : "false",
            mmp ? "true" : "false",
+           sp ? "true" : "false",
            eg ? "true" : "false",
+           eg_degraded ? "true" : "false",
+           downlink_stats_ok ? "true" : "false",
            bpf_readable ? "true" : "false");
     if (ip_cnt >= 0)
         printf(",\"ip_entries\":%d", ip_cnt);
@@ -1512,24 +1728,137 @@ static int cmd_sync(void)
     return RC_OK;
 }
 
-static int cmd_uninstall(const char *iface)
+static void detach_hnc_filters_on_ifindex(int nlfd, unsigned ifindex)
 {
-    unsigned ifindex = if_nametoindex(iface);
-    int rc = RC_OK;
-    if (ifindex != 0) {
-        int nlfd = rtnl_open();
+    if (ifindex == 0U || !clsact_qdisc_exists(nlfd, ifindex))
+        return;
+    if (bpf_filter_exists_dir(nlfd, ifindex, TC_H_INGRESS_PARENT))
+        (void)bpf_filter_detach_dir(nlfd, ifindex, TC_H_INGRESS_PARENT);
+    if (bpf_filter_exists_dir(nlfd, ifindex, TC_H_EGRESS_PARENT))
+        (void)bpf_filter_detach_dir(nlfd, ifindex, TC_H_EGRESS_PARENT);
+}
+
+static int any_other_iface_has_hnc_clsact(int nlfd, unsigned skip_ifindex,
+                                          const char *skip_iface,
+                                          char *active_out, size_t active_cap)
+{
+    if (active_out && active_cap > 0U)
+        active_out[0] = '\0';
+
+    const char *sys_net = getenv("HNC_SYS_NET");
+    if (!sys_net || sys_net[0] == '\0')
+        sys_net = "/sys/class/net";
+
+    DIR *dir = opendir(sys_net);
+    if (!dir)
+        return -1;
+
+    struct dirent *de = NULL;
+    while ((de = readdir(dir)) != NULL) {
+        const char *name = de->d_name;
+        if (name[0] == '\0' || name[0] == '.')
+            continue;
+        if (strcmp(name, "lo") == 0)
+            continue;
+        if (skip_iface && skip_iface[0] != '\0' && strcmp(name, skip_iface) == 0)
+            continue;
+        unsigned idx = if_nametoindex(name);
+        if (idx == 0U || (skip_ifindex != 0U && idx == skip_ifindex))
+            continue;
+        if (!clsact_qdisc_exists(nlfd, idx))
+            continue;
+        if (bpf_filter_exists_dir(nlfd, idx, TC_H_INGRESS_PARENT) ||
+            bpf_filter_exists_dir(nlfd, idx, TC_H_EGRESS_PARENT)) {
+            if (active_out && active_cap > 0U)
+                snprintf(active_out, active_cap, "%.*s", (int)(active_cap - 1U), name);
+            closedir(dir);
+            return 1;
+        }
+    }
+    closedir(dir);
+    return 0;
+}
+
+static void detach_all_ifaces_hnc_clsact(int nlfd)
+{
+    const char *sys_net = getenv("HNC_SYS_NET");
+    if (!sys_net || sys_net[0] == '\0')
+        sys_net = "/sys/class/net";
+
+    DIR *dir = opendir(sys_net);
+    if (!dir)
+        return;
+
+    struct dirent *de = NULL;
+    while ((de = readdir(dir)) != NULL) {
+        const char *name = de->d_name;
+        if (name[0] == '\0' || name[0] == '.' || strcmp(name, "lo") == 0)
+            continue;
+        unsigned idx = if_nametoindex(name);
+        if (idx != 0U)
+            detach_hnc_filters_on_ifindex(nlfd, idx);
+        remove_egress_state(name);
+    }
+    closedir(dir);
+}
+
+static int cmd_uninstall(const char *iface, int force_all)
+{
+    if (iface && strcmp(iface, "--all") == 0) {
+        force_all = 1;
+        iface = NULL;
+    }
+
+    int nlfd = rtnl_open();
+    if (force_all) {
+        int rc = RC_OK;
         if (nlfd >= 0) {
-            (void)bpf_filter_detach_dir(nlfd, ifindex, TC_H_INGRESS_PARENT);
-            (void)bpf_filter_detach_dir(nlfd, ifindex, TC_H_EGRESS_PARENT);
+            if (iface && iface[0] != '\0') {
+                unsigned ifindex = if_nametoindex(iface);
+                if (ifindex != 0U)
+                    detach_hnc_filters_on_ifindex(nlfd, ifindex);
+                remove_egress_state(iface);
+            } else {
+                detach_all_ifaces_hnc_clsact(nlfd);
+            }
             close(nlfd);
         } else {
             rc = RC_NETLINK;
         }
+        unlink(MAP_PIN);
+        unlink(MAC_MAP_PIN);
+        unlink(STATS_MAP_PIN);
+        return rc;
     }
-    unlink(MAP_PIN);
-    unlink(MAC_MAP_PIN);
-    unlink(STATS_MAP_PIN);
-    return rc;
+
+    if (!iface || iface[0] == '\0')
+        return RC_USAGE;
+
+    if (nlfd < 0)
+        return RC_NETLINK;
+
+    unsigned ifindex = if_nametoindex(iface);
+    if (ifindex != 0U)
+        detach_hnc_filters_on_ifindex(nlfd, ifindex);
+    remove_egress_state(iface);
+
+    char active_other[IFNAMSIZ];
+    int others = any_other_iface_has_hnc_clsact(nlfd, ifindex, iface,
+                                                active_other, sizeof(active_other));
+    close(nlfd);
+
+    if (others == 0) {
+        unlink(MAP_PIN);
+        unlink(MAC_MAP_PIN);
+        unlink(STATS_MAP_PIN);
+    } else if (others > 0) {
+        LOGI("uninstall %s: keeping global BPF pins (still active on %s)",
+             iface, active_other);
+    } else {
+        LOGI("uninstall %s: keeping global BPF pins (unable to scan /sys/class/net)",
+             iface);
+    }
+    return RC_OK;
 }
 
 static void usage(const char *prog)
@@ -1541,7 +1870,7 @@ static void usage(const char *prog)
         "  %s check     <iface>\n"
         "  %s update    <ip|mac> <mark>\n"
         "  %s sync                     (reads '<ip|mac> <mark>' lines from stdin)\n"
-        "  %s uninstall <iface>\n"
+        "  %s uninstall <iface|--all> [--all]\n"
         "  %s --version\n",
         prog, prog, prog, prog, prog, prog, prog);
 }
@@ -1580,7 +1909,8 @@ int main(int argc, char **argv)
         return cmd_sync();
     if (strcmp(cmd, "uninstall") == 0) {
         if (argc < 3) { usage(argv[0]); return RC_USAGE; }
-        return cmd_uninstall(argv[2]);
+        int force_all = (argc >= 4 && strcmp(argv[3], "--all") == 0) ? 1 : 0;
+        return cmd_uninstall(argv[2], force_all);
     }
     usage(argv[0]);
     return RC_USAGE;

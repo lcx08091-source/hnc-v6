@@ -697,8 +697,20 @@ func buildPfifoScaledLeafMsg(seq uint32, ifindex int, parent, leafHandle uint32,
 }
 
 // nlAttachAdaptiveLeafQdisc 按五级兼容链尝试挂载低延迟叶子队列:
-// fq_codel(5ms/100ms) -> fq_codel(默认) -> fq -> sfq -> 按速率缩放 pfifo(16..256)。
+// fq_codel(5ms/100ms) -> fq_codel(默认) -> fq -> sfq -> 按速率缩放 pfifo(16..256);
+// 当 tc_leaf_aqm=off 时直接挂载按速率缩放 pfifo(16..256)。
 func nlAttachAdaptiveLeafQdisc(fd, ifindex int, parent, leafHandle uint32, rateBps uint64) string {
+	return nlAttachAdaptiveLeafQdiscWithMode(fd, ifindex, parent, leafHandle, rateBps, readTCLeafAQMMode(""))
+}
+
+func nlAttachAdaptiveLeafQdiscWithMode(fd, ifindex int, parent, leafHandle uint32, rateBps uint64, aqmMode string) string {
+	if aqmMode == "off" {
+		seqP := rtnlNextSeq()
+		if rtnlSendAndWaitAck(fd, buildPfifoScaledLeafMsg(seqP, ifindex, parent, leafHandle, rateBps), seqP) == nil {
+			return "pfifo_scaled"
+		}
+		return "kernel_default"
+	}
 	seq1 := rtnlNextSeq()
 	if rtnlSendAndWaitAck(fd, buildFqCodelLeafMsg(seq1, ifindex, parent, leafHandle, true), seq1) == nil {
 		return "fq_codel"
@@ -906,12 +918,12 @@ type rtnlQdiscBrief struct {
 func rtnlDumpQdiscsOnSocket(fd int, wantIfIndex int) ([]rtnlQdiscBrief, error) {
 	seq := rtnlNextSeq()
 	req := rtnlBuildTCMsg(rtnlGetQdisc, rtnlFRequest|rtnlFDump, seq, wantIfIndex, 0, 0, 0, nil)
-	if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+	if err := rtnlSendtoRetry(fd, req); err != nil {
 		return nil, fmt.Errorf("rtnl dump qdisc send: %w", err)
 	}
 	var out []rtnlQdiscBrief
 	buf := make([]byte, 65536)
-	for {
+	for chunks := 0; chunks < 512; {
 		n, _, err := syscall.Recvfrom(fd, buf, 0)
 		if errors.Is(err, syscall.EINTR) {
 			continue
@@ -922,7 +934,8 @@ func rtnlDumpQdiscsOnSocket(fd int, wantIfIndex int) ([]rtnlQdiscBrief, error) {
 		if n <= 0 {
 			return nil, errors.New("rtnl dump qdisc: empty recv")
 		}
-		done, err := parseQdiscBriefChunk(buf[:n], wantIfIndex, &out)
+		chunks++
+		done, err := parseQdiscBriefChunkWithSeq(buf[:n], seq, wantIfIndex, &out)
 		if err != nil {
 			return nil, err
 		}
@@ -930,9 +943,14 @@ func rtnlDumpQdiscsOnSocket(fd int, wantIfIndex int) ([]rtnlQdiscBrief, error) {
 			return out, nil
 		}
 	}
+	return nil, fmt.Errorf("rtnl dump qdisc: exceeded max chunks without matching NLMSG_DONE (seq %d)", seq)
 }
 
 func parseQdiscBriefChunk(b []byte, wantIfIndex int, dst *[]rtnlQdiscBrief) (bool, error) {
+	return parseQdiscBriefChunkWithSeq(b, 0, wantIfIndex, dst)
+}
+
+func parseQdiscBriefChunkWithSeq(b []byte, wantSeq uint32, wantIfIndex int, dst *[]rtnlQdiscBrief) (bool, error) {
 	for off := 0; off < len(b); {
 		rem := len(b) - off
 		if rem < rtnlMsgHdrLen {
@@ -940,6 +958,7 @@ func parseQdiscBriefChunk(b []byte, wantIfIndex int, dst *[]rtnlQdiscBrief) (boo
 		}
 		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
 		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
+		msgSeq := binary.LittleEndian.Uint32(b[off+8 : off+12])
 		if msgLen < rtnlMsgHdrLen || msgLen > rem {
 			return false, fmt.Errorf("rtnl: invalid qdisc nlmsg_len %d (rem %d)", msgLen, rem)
 		}
@@ -949,6 +968,9 @@ func parseQdiscBriefChunk(b []byte, wantIfIndex int, dst *[]rtnlQdiscBrief) (boo
 			off = len(b)
 		} else {
 			off += adv
+		}
+		if wantSeq != 0 && msgSeq != wantSeq {
+			continue
 		}
 
 		switch msgType {
@@ -1128,6 +1150,19 @@ func nlUpsertDeviceHTB(
 	ipv4 string,
 	isUplink bool,
 ) error {
+	return nlUpsertDeviceHTBWithDir("", ifindex, classMinor, rateBps, ceilBps, burstBytes, cburstBytes, quantum, markVal, markMask, ipv4, isUplink)
+}
+
+func nlUpsertDeviceHTBWithDir(
+	hncDir string,
+	ifindex int,
+	classMinor uint16,
+	rateBps, ceilBps uint64,
+	burstBytes, cburstBytes, quantum uint32,
+	markVal, markMask uint32,
+	ipv4 string,
+	isUplink bool,
+) error {
 	dpStats.nlUpsertCalls.Add(1)
 	if ifindex <= 0 {
 		dpStats.nlErrors.Add(1)
@@ -1176,12 +1211,14 @@ func nlUpsertDeviceHTB(
 	}
 	hasRoot := false
 	hasLeaf := false
+	var leafKind string
 	for _, q := range qdiscs {
 		if q.handle == rtnlHtbRootMaj && q.kind == "htb" {
 			hasRoot = true
 		}
 		if q.parent == classHandle {
 			hasLeaf = true
+			leafKind = q.kind
 		}
 	}
 	if !hasRoot {
@@ -1224,13 +1261,17 @@ func nlUpsertDeviceHTB(
 		return fmt.Errorf("nlUpsertDeviceHTB: upsert class %s failed: %w", formatTCHandle(classHandle), err)
 	}
 
-	// 2. 当该类无子类且尚未挂叶子 qdisc(如 netem/cake/fq_codel)时, 按五级兼容链挂载低延迟叶子
-	if !hasChildren && !hasLeaf {
+	// 2. 当该类无子类且非 netem 延迟队列时, 按 tc_leaf_aqm 配置挂载缩放 pfifo 或自适应低延迟叶子
+	aqmMode := readTCLeafAQMMode(hncDir)
+	needLeafUpdate := !hasLeaf ||
+		(leafKind != "netem" && leafKind != "cake" && aqmMode == "off" && leafKind != "pfifo") ||
+		(leafKind != "netem" && aqmMode != "off" && (leafKind == "pfifo" || leafKind == "pfifo_fast"))
+	if !hasChildren && needLeafUpdate {
 		leafMajor := uint32(0x2000+(uint32(classMinor)&0x0fff)) << 16
 		if isUplink {
 			leafMajor = uint32(0x3000+(uint32(classMinor)&0x0fff)) << 16
 		}
-		_ = nlAttachAdaptiveLeafQdisc(fd, ifindex, classHandle, leafMajor, ceilBps)
+		_ = nlAttachAdaptiveLeafQdiscWithMode(fd, ifindex, classHandle, leafMajor, ceilBps, aqmMode)
 	}
 
 	// 3. 下发带正交掩码 fw 过滤器 (TCA_FW_CLASSID + TCA_FW_MASK = 0x00ff0000)
@@ -1391,13 +1432,13 @@ func nlDumpHTBClassStats(ifindex int) (map[string]HTBClassStat, error) {
 func nlDumpHTBClassStatsOnSocket(fd int, ifindex int) (map[string]HTBClassStat, error) {
 	seq := rtnlNextSeq()
 	req := rtnlBuildTCMsg(rtnlGetTClass, rtnlFRequest|rtnlFDump, seq, ifindex, 0, 0, 0, nil)
-	if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+	if err := rtnlSendtoRetry(fd, req); err != nil {
 		return nil, fmt.Errorf("nlDumpHTBClassStats send: %w", err)
 	}
 
 	out := make(map[string]HTBClassStat, 16)
 	buf := make([]byte, 65536)
-	for {
+	for chunks := 0; chunks < 1024; {
 		n, _, err := syscall.Recvfrom(fd, buf, 0)
 		if errors.Is(err, syscall.EINTR) {
 			continue
@@ -1408,7 +1449,8 @@ func nlDumpHTBClassStatsOnSocket(fd int, ifindex int) (map[string]HTBClassStat, 
 		if n <= 0 {
 			return nil, errors.New("nlDumpHTBClassStats: empty recv")
 		}
-		done, err := parseTCClassDumpChunk(buf[:n], ifindex, out)
+		chunks++
+		done, err := parseTCClassDumpChunkWithSeq(buf[:n], seq, ifindex, out)
 		if err != nil {
 			return nil, err
 		}
@@ -1416,6 +1458,7 @@ func nlDumpHTBClassStatsOnSocket(fd int, ifindex int) (map[string]HTBClassStat, 
 			return out, nil
 		}
 	}
+	return nil, fmt.Errorf("nlDumpHTBClassStats: exceeded max chunks without matching NLMSG_DONE (seq %d)", seq)
 }
 
 // parseTCClassDumpMsgs 纯字节流解析 RTM_GETTCLASS dump 响应报文 (零 syscall, 供单元测试直接喂字节流验证)。
@@ -1434,6 +1477,10 @@ func parseTCClassDumpMsgs(b []byte, wantIfIndex int) (map[string]HTBClassStat, e
 }
 
 func parseTCClassDumpChunk(b []byte, wantIfIndex int, dst map[string]HTBClassStat) (bool, error) {
+	return parseTCClassDumpChunkWithSeq(b, 0, wantIfIndex, dst)
+}
+
+func parseTCClassDumpChunkWithSeq(b []byte, wantSeq uint32, wantIfIndex int, dst map[string]HTBClassStat) (bool, error) {
 	for off := 0; off < len(b); {
 		rem := len(b) - off
 		if rem < rtnlMsgHdrLen {
@@ -1441,6 +1488,7 @@ func parseTCClassDumpChunk(b []byte, wantIfIndex int, dst map[string]HTBClassSta
 		}
 		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
 		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
+		msgSeq := binary.LittleEndian.Uint32(b[off+8 : off+12])
 		if msgLen < rtnlMsgHdrLen || msgLen > rem {
 			return false, fmt.Errorf("rtnl class dump: bad nlmsg_len %d (rem %d)", msgLen, rem)
 		}
@@ -1450,6 +1498,9 @@ func parseTCClassDumpChunk(b []byte, wantIfIndex int, dst map[string]HTBClassSta
 			off = len(b)
 		} else {
 			off += adv
+		}
+		if wantSeq != 0 && msgSeq != wantSeq {
+			continue
 		}
 
 		switch msgType {
@@ -1826,13 +1877,26 @@ func readLiveDeviceIPv4Map(hncDir string) map[string]string {
 	if json.Unmarshal(b, &raw) != nil {
 		return out
 	}
+	onlineOwnerByIP := make(map[string]string)
 	for k, d := range raw {
 		m := strings.ToLower(strings.TrimSpace(k))
 		if !macRE.MatchString(m) {
 			continue
 		}
-		if ip, ok := d["ip"].(string); ok && validStrictIPv4(ip) {
-			out[m] = strings.TrimSpace(ip)
+		ip, ok := d["ip"].(string)
+		if !ok || !validStrictIPv4(ip) {
+			continue
+		}
+		ip = strings.TrimSpace(ip)
+		if onl, hasOnl := d["online"].(bool); hasOnl && onl {
+			onlineOwnerByIP[ip] = m
+		}
+		out[m] = ip
+	}
+	// 若某 IPv4 已由当前在线设备持有, 剔除离线旧设备残留的同名旧 IP 防止孤儿 IP 黑洞连坐
+	for m, ip := range out {
+		if owner, hasOnlineOwner := onlineOwnerByIP[ip]; hasOnlineOwner && owner != m {
+			delete(out, m)
 		}
 	}
 	return out
@@ -1915,7 +1979,7 @@ func buildDeviceFirewallRestorePayloads(
 		fmt.Fprintf(&v4, "-A HNC_CTRL -m mac --mac-source %s -p udp --dport 443 -j DROP\n", b.mac)
 		fmt.Fprintf(&v4, "-A HNC_CTRL -m mac --mac-source %s -j DROP\n", b.mac)
 		if b.ipv4 != "" {
-			fmt.Fprintf(&v4, "-A HNC_CTRL -s %s/32 -j DROP\n", b.ipv4)
+			fmt.Fprintf(&v4, "-A HNC_CTRL -s %s/32 -m mac --mac-source %s -j DROP\n", b.ipv4, b.mac)
 			fmt.Fprintf(&v4, "-A HNC_CTRL -d %s/32 -j DROP\n", b.ipv4)
 		}
 		fmt.Fprintf(&v6, "-A HNC_CTRL -m mac --mac-source %s -p udp --dport 443 -j DROP\n", b.mac)
@@ -2765,8 +2829,8 @@ func tryNativeResetDeviceRateToDefault(hncDir, iface, mac, ip string, mid int) b
 	defer unlock()
 
 	markVal, markMask := readDeviceMarkSpec(hncDir, mid)
-	if err := nlUpsertDeviceHTB(
-		ifidx, minor,
+	if err := nlUpsertDeviceHTBWithDir(
+		hncDir, ifidx, minor,
 		DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 		DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 		markVal, markMask, ip, false,
@@ -2904,7 +2968,7 @@ func tryNativeRuleSet(hncDir, mac, dnMbps, upMbps string) (string, bool) {
 	}
 
 	if dnBps > 0 {
-		if err := nlUpsertDeviceHTB(ifidx, minor, dnBps, dnBps, 0, 0, 0, markVal, markMask, ip, false); err != nil {
+		if err := nlUpsertDeviceHTBWithDir(hncDir, ifidx, minor, dnBps, dnBps, 0, 0, 0, markVal, markMask, ip, false); err != nil {
 			return "", false
 		}
 	} else {
@@ -2912,8 +2976,8 @@ func tryNativeRuleSet(hncDir, mac, dnMbps, upMbps string) (string, bool) {
 		if deviceHasSecondaryQdiscOwner(hncDir, iface, mac, mid, dm) {
 			// 存在 delay / sqm / app_qos / app_limits 二级子树持有者:
 			// 保留 HNC_MARK 与根 fw/u32 过滤器, 仅将 1:<cid> 自身速率恢复为默认 1000mbit!
-			if err := nlUpsertDeviceHTB(
-				ifidx, minor,
+			if err := nlUpsertDeviceHTBWithDir(
+				hncDir, ifidx, minor,
 				DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 				DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 				markVal, markMask, ip, false,
@@ -2926,7 +2990,7 @@ func tryNativeRuleSet(hncDir, mac, dnMbps, upMbps string) (string, bool) {
 	}
 
 	if upBps > 0 && ifbIdx > 0 {
-		if err := nlUpsertDeviceHTB(ifbIdx, minor, upBps, upBps, 0, 0, 0, markVal, markMask, ip, true); err != nil {
+		if err := nlUpsertDeviceHTBWithDir(hncDir, ifbIdx, minor, upBps, upBps, 0, 0, 0, markVal, markMask, ip, true); err != nil {
 			return "", false
 		}
 	} else if upBps > 0 && usePoliceUplink {
@@ -2937,8 +3001,8 @@ func tryNativeRuleSet(hncDir, mac, dnMbps, upMbps string) (string, bool) {
 		dm, _, _ := rulesStore.GetDeviceMap(hncDir, mac)
 		if idx, uErr := nlIfaceIndexByName("ifb0"); uErr == nil && idx > 0 {
 			if deviceHasDelayOwner(dm) {
-				_ = nlUpsertDeviceHTB(
-					idx, minor,
+				_ = nlUpsertDeviceHTBWithDir(
+					hncDir, idx, minor,
 					DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 					DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 					markVal, markMask, ip, true,
@@ -3009,8 +3073,8 @@ func tryNativeRuleClear(hncDir, mac string) bool {
 			markVal, markMask := readDeviceMarkSpec(hncDir, mid)
 			if keepSecondary {
 				// 保留根 fw/u32 过滤器与二级子树, 仅将 1:<cid> 自身速率恢复为默认 1000mbit(禁发 RTM_DELTCLASS)
-				if err := nlUpsertDeviceHTB(
-					ifidx, minor,
+				if err := nlUpsertDeviceHTBWithDir(
+					hncDir, ifidx, minor,
 					DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 					DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 					markVal, markMask, ip, false,
@@ -3019,8 +3083,8 @@ func tryNativeRuleClear(hncDir, mac string) bool {
 				}
 				if ifbIdx, uErr := nlIfaceIndexByName("ifb0"); uErr == nil && ifbIdx > 0 {
 					if deviceHasDelayOwner(curDM) {
-						_ = nlUpsertDeviceHTB(
-							ifbIdx, minor,
+						_ = nlUpsertDeviceHTBWithDir(
+							hncDir, ifbIdx, minor,
 							DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 							DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 							markVal, markMask, ip, true,
@@ -3072,6 +3136,11 @@ func tryNativeBlacklistSet(hncDir, mac string, blocked bool) bool {
 	ip := lookupCurrentDeviceIP(hncDir, mac)
 	if ip == "" {
 		ip, _ = rulesStore.GetDeviceField(hncDir, mac, "ip")
+	}
+	if blocked && validStrictIPv4(ip) {
+		_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", ip)
+	} else if !blocked {
+		_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", "")
 	}
 	if err := pipeNativeFirewallOnly(hncDir, readHotspotIfaceName(hncDir), mac, ip, mid, keepMark, blocked); err != nil {
 		return false
@@ -3445,34 +3514,60 @@ var (
 	nlShaperEnsureHTBRootFn  = nlEnsureHTBRootOnSocket
 )
 
-// nlTuneGlobalShaperOnSocket 在长连接 fd 上直接通过 RTM_NEWTCLASS 热更新根类 1:1 带宽 (< 0.2ms, 零 dump)。
-// v6.1.0-beta.1: 上行 ifb0 与下行对称检查 Netlink ACK 回执, 报错时自动补建根树一次, 仍失败则累加 nlErrors 并透传错误。
+// nlTuneGlobalShaperOnSocket 在长连接 fd 上直接通过 RTM_NEWTCLASS 热更新根类 1:1 带宽 (< 0.2ms, 零 dump):
+//   - 当单向或双向速率为 0 时, 将已建树的对应接口 1:1 复位回默认 1000mbit (DefaultHTBRootRateBps);
+//   - 当请求上行限速但 ifb0 缺失且无下行可应用时, 返回 errGlobalShaperNeedIFBInit 触发建 ifb0。
 func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfindex int, upBps uint64) (int, error) {
+	if downBps == 0 && upBps > 0 && ifbIfindex <= 0 {
+		return 0, errGlobalShaperNeedIFBInit
+	}
 	tick := readPschedTickInUsec()
 	sent := 0
-	if downIfindex > 0 && downBps > 0 {
-		burst := hncBurstBytesForRate(downBps, false)
-		seq := rtnlNextSeq()
-		msg := buildHTBClassUpsertMsg(seq, downIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, downBps, downBps, burst, burst, hncQuantumForRate(downBps), 0, tick)
-		if err := nlShaperSendAndWaitAckFn(fd, msg, seq); err != nil {
-			if eErr := nlShaperEnsureHTBRootFn(fd, downIfindex, rtnlDefMinor, downBps); eErr != nil {
-				dpStats.nlErrors.Add(1)
-				return sent, fmt.Errorf("tune global shaper 1:1 failed (%w); ensure root failed: %v", err, eErr)
-			}
+	if downIfindex > 0 {
+		effDown := downBps
+		if effDown == 0 {
+			effDown = DefaultHTBRootRateBps
 		}
-		sent++
+		burst := hncBurstBytesForRate(effDown, false)
+		seq := rtnlNextSeq()
+		msg := buildHTBClassUpsertMsg(seq, downIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, effDown, effDown, burst, burst, hncQuantumForRate(effDown), 0, tick)
+		if err := nlShaperSendAndWaitAckFn(fd, msg, seq); err != nil {
+			if downBps > 0 {
+				if eErr := nlShaperEnsureHTBRootFn(fd, downIfindex, rtnlDefMinor, effDown); eErr != nil {
+					dpStats.nlErrors.Add(1)
+					return sent, fmt.Errorf("tune global shaper 1:1 failed (%w); ensure root failed: %v", err, eErr)
+				}
+				sent++
+			} else if !isIgnorableDelErr(err) {
+				dpStats.nlErrors.Add(1)
+				return sent, fmt.Errorf("reset global shaper down 1:1 failed: %w", err)
+			}
+		} else {
+			sent++
+		}
 	}
-	if ifbIfindex > 0 && upBps > 0 {
-		burst := hncBurstBytesForRate(upBps, false)
-		seq := rtnlNextSeq()
-		msg := buildHTBClassUpsertMsg(seq, ifbIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, upBps, upBps, burst, burst, hncQuantumForRate(upBps), 0, tick)
-		if err := nlShaperSendAndWaitAckFn(fd, msg, seq); err != nil {
-			if eErr := nlShaperEnsureHTBRootFn(fd, ifbIfindex, rtnlDefMinor, upBps); eErr != nil {
-				dpStats.nlErrors.Add(1)
-				return sent, fmt.Errorf("tune global shaper 1:1 failed (%w); ensure root failed: %v", err, eErr)
-			}
+	if ifbIfindex > 0 {
+		effUp := upBps
+		if effUp == 0 {
+			effUp = DefaultHTBRootRateBps
 		}
-		sent++
+		burst := hncBurstBytesForRate(effUp, false)
+		seq := rtnlNextSeq()
+		msg := buildHTBClassUpsertMsg(seq, ifbIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, effUp, effUp, burst, burst, hncQuantumForRate(effUp), 0, tick)
+		if err := nlShaperSendAndWaitAckFn(fd, msg, seq); err != nil {
+			if upBps > 0 {
+				if eErr := nlShaperEnsureHTBRootFn(fd, ifbIfindex, rtnlDefMinor, effUp); eErr != nil {
+					dpStats.nlErrors.Add(1)
+					return sent, fmt.Errorf("tune global shaper 1:1 failed (%w); ensure root failed: %v", err, eErr)
+				}
+				sent++
+			} else if !isIgnorableDelErr(err) {
+				dpStats.nlErrors.Add(1)
+				return sent, fmt.Errorf("reset global shaper up 1:1 failed: %w", err)
+			}
+		} else {
+			sent++
+		}
 	}
 	return sent, nil
 }
@@ -3951,7 +4046,7 @@ func dumpDefaultRouteIfindexesOS() (map[int]bool, error) {
 				break
 			}
 			chunks++
-			chunkIfs, done, pErr := parseDefaultRouteIfindexesMsgs(buf[:n])
+			chunkIfs, done, pErr := parseDefaultRouteIfindexesMsgsWithSeq(buf[:n], seq)
 			for idx := range chunkIfs {
 				out[idx] = true
 			}
@@ -4081,7 +4176,7 @@ func dumpNativeIPv6NeighborsOS(allowedIfindexes map[int]bool) (map[string][]net.
 			return nil, errors.New("rtnl neigh dump: empty recv")
 		}
 		chunks++
-		done, pErr := parseIPv6NeighDumpChunkCandidates(buf[:n], allowedIfindexes, allCands, &orderCounter)
+		done, pErr := parseIPv6NeighDumpChunkCandidatesWithSeq(buf[:n], seq, allowedIfindexes, allCands, &orderCounter)
 		if pErr != nil {
 			return nil, pErr
 		}
@@ -4455,4 +4550,12 @@ func clearNativeIngressPolice(iface string, mid int) {
 	}
 	hookArgs, _ := nativeIngressFilterHookArgs(tcBin, iface)
 	clearNativeIngressPoliceWithHook(tcBin, iface, cid, hookArgs)
+}
+
+func init() {
+	v6UpsertDeviceHTBWithDirFn = nlUpsertDeviceHTBWithDir
+	v6DumpHTBClassStatsOnSockFn = func(fd, ifindex int) (map[string]HTBClassStat, error) {
+		return nlBatchDumpClassesFn(fd, ifindex)
+	}
+	v6ClearIngressPoliceFn = clearNativeIngressPolice
 }

@@ -102,15 +102,71 @@ EOF_STATE
     fi
 }
 
-kill_pidfile(){
-    f="$1"
-    kw="${2:-hnc_dpid}"
-    p=$(cat "$f" 2>/dev/null | tr -dc '0-9')
-    if [ -n "$p" ] && pid_matches "$p" "$kw" && kill -0 "$p" 2>/dev/null; then
-        log "TERM pidfile $f pid=$p"
-        kill "$p" 2>/dev/null || true
+stop_dpid_graceful(){
+    _proot="${HNC_PROC_ROOT:-/proc}"
+    _pids=""
+    p=$(cat "$RUN/dpid.pid" 2>/dev/null | tr -dc '0-9')
+    if [ -n "$p" ] && pid_matches "$p" hnc_dpid && kill -0 "$p" 2>/dev/null; then
+        _pids="$p"
     fi
-    rm -f "$f" 2>/dev/null || true
+    rm -f "$RUN/dpid.pid" 2>/dev/null || true
+    if [ "$_proot" != "/proc" ] || { [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+        for _d in "$_proot"/[0-9]*; do
+            [ -r "$_d/cmdline" ] || continue
+            _p=${_d##*/}
+            if pid_matches "$_p" hnc_dpid && kill -0 "$_p" 2>/dev/null; then
+                case " $_pids " in *" $_p "*) ;; *) _pids="${_pids:+$_pids }$_p" ;; esac
+            fi
+        done
+        if [ "$_proot" = "/proc" ] && command -v pidof >/dev/null 2>&1; then
+            for _p in $(pidof hnc_dpid 2>/dev/null); do
+                if pid_matches "$_p" hnc_dpid && kill -0 "$_p" 2>/dev/null; then
+                    case " $_pids " in *" $_p "*) ;; *) _pids="${_pids:+$_pids }$_p" ;; esac
+                fi
+            done
+        fi
+    fi
+    [ -n "$_pids" ] || return 0
+    for _p in $_pids; do
+        log "TERM hnc_dpid pid=$_p"
+        kill -TERM "$_p" 2>/dev/null || kill "$_p" 2>/dev/null || true
+    done
+    # 轮询等待最多 2s 优雅退出, 避免直接 SIGKILL 导致 hnc_launcher 误增崩溃计数
+    _use_subsec=0
+    if usleep 100000 2>/dev/null; then
+        _use_subsec=1
+    elif sleep 0.1 2>/dev/null; then
+        _use_subsec=2
+    fi
+    _max_ticks=20
+    [ "$_use_subsec" = "0" ] && _max_ticks=2
+    _tick=0
+    while [ "$_tick" -lt "$_max_ticks" ]; do
+        _still_alive=0
+        for _p in $_pids; do
+            if pid_matches "$_p" hnc_dpid && kill -0 "$_p" 2>/dev/null; then
+                _still_alive=1
+                break
+            fi
+        done
+        [ "$_still_alive" = "0" ] && break
+        if [ "$_tick" -gt 0 ] || [ "$_use_subsec" = "0" ]; then
+            if [ "$_use_subsec" = "1" ]; then
+                usleep 100000 2>/dev/null || sleep 1
+            elif [ "$_use_subsec" = "2" ]; then
+                sleep 0.1 2>/dev/null || sleep 1
+            else
+                sleep 1
+            fi
+        fi
+        _tick=$((_tick + 1))
+    done
+    for _p in $_pids; do
+        if pid_matches "$_p" hnc_dpid && kill -0 "$_p" 2>/dev/null; then
+            log "KILL hnc_dpid pid=$_p (after 2s TERM timeout)"
+            kill -9 "$_p" 2>/dev/null || true
+        fi
+    done
 }
 
 launcher_alive(){
@@ -133,6 +189,11 @@ launcher_alive(){
     return 1
 }
 
+KEEP_CONFIG="${HNC_DPI_REBIND_KEEP_CONFIG:-0}"
+if [ "${1:-}" = "--keep-config" ] || [ "${1:-}" = "--rules-reload" ]; then
+    KEEP_CONFIG=1
+    shift
+fi
 EXPLICIT_ARG="${1:-}"
 if [ -n "$EXPLICIT_ARG" ] && [ "$EXPLICIT_ARG" != "auto" ]; then
     case "$EXPLICIT_ARG" in
@@ -149,15 +210,15 @@ fi
 LIVE_IFACE=$(detect_current_iface "$EXPLICIT_ARG")
 if [ -n "$LIVE_IFACE" ]; then
     case "$LIVE_IFACE" in
-        -*|.*|*..*|*[!A-Za-z0-9_.:-]*) LIVE_IFACE="" ;;
+        auto|-*|.*|*..*|*[!A-Za-z0-9_.:-]*) LIVE_IFACE="" ;;
     esac
 fi
 STATE_IFACE="${LIVE_IFACE:-auto}"
 
-log "manual rebind requested arg='${EXPLICIT_ARG:-auto}' resolved='$STATE_IFACE'"
+log "manual rebind requested arg='${EXPLICIT_ARG:-auto}' keep_cfg=$KEEP_CONFIG resolved='$STATE_IFACE'"
 write_state "${LIVE_IFACE:-}" "manual DPI rebind requested; restarting capture (${STATE_IFACE})"
 
-if [ -n "$LIVE_IFACE" ]; then
+if [ -n "$LIVE_IFACE" ] && { [ -d "/sys/class/net/$LIVE_IFACE" ] || [ -n "${HNC_TEST_MODE:-}" ]; }; then
     _if_tmp="$RUN/hotspot_iface.tmp.$$"
     if echo "$LIVE_IFACE" > "$_if_tmp" 2>/dev/null && [ -s "$_if_tmp" ]; then
         mv -f "$_if_tmp" "$RUN/hotspot_iface" 2>/dev/null || rm -f "$_if_tmp" 2>/dev/null || true
@@ -166,41 +227,41 @@ if [ -n "$LIVE_IFACE" ]; then
     fi
 fi
 
-# 无显式固定口需求时不把瞬态网卡名写死进 etc/dpi_config.json, 让 dpid 动态跟随 iface_detect.json / hotspot_iface
+# 规则刷新重绑(KEEP_CONFIG=1)或 auto 重绑时不覆盖 etc/dpi_config.json 已有的固定口配置
 PINNED_IFACE=""
-if [ -n "$EXPLICIT_ARG" ] && [ "$EXPLICIT_ARG" != "auto" ]; then
-    PINNED_IFACE="$EXPLICIT_ARG"
-else
-    PINNED_IFACE=$(read_pinned_override)
-fi
-
-if [ -n "$PINNED_IFACE" ]; then
-    if [ -s "$CONFIG" ] && grep -q '"iface"[[:space:]]*:' "$CONFIG" 2>/dev/null; then
+if [ "$KEEP_CONFIG" = "1" ]; then
+    if [ ! -s "$CONFIG" ]; then
         _cfg_tmp="$CONFIG.tmp.$$"
-        if sed 's/"iface"[[:space:]]*:[[:space:]]*"[^"]*"/"iface":"'"$PINNED_IFACE"'"/' "$CONFIG" > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
-            mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
-        else
-            rm -f "$_cfg_tmp" 2>/dev/null || true
-        fi
-    else
-        _cfg_tmp="$CONFIG.tmp.$$"
-        if printf '{"iface":"%s","log_level":"info"}\n' "$PINNED_IFACE" > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
+        if printf '{"log_level":"info"}\n' > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
             mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
         else
             rm -f "$_cfg_tmp" 2>/dev/null || true
         fi
     fi
 else
-    if [ -s "$CONFIG" ]; then
-        if grep -q '"iface"[[:space:]]*:[[:space:]]*"[^"]\+"' "$CONFIG" 2>/dev/null; then
+    if [ -n "$EXPLICIT_ARG" ] && [ "$EXPLICIT_ARG" != "auto" ]; then
+        PINNED_IFACE="$EXPLICIT_ARG"
+    else
+        PINNED_IFACE=$(read_pinned_override)
+    fi
+
+    if [ -n "$PINNED_IFACE" ]; then
+        if [ -s "$CONFIG" ] && grep -q '"iface"[[:space:]]*:' "$CONFIG" 2>/dev/null; then
             _cfg_tmp="$CONFIG.tmp.$$"
-            if sed 's/"iface"[[:space:]]*:[[:space:]]*"[^"]*"/"iface":""/' "$CONFIG" > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
+            if sed 's/"iface"[[:space:]]*:[[:space:]]*"[^"]*"/"iface":"'"$PINNED_IFACE"'"/' "$CONFIG" > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
+                mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
+            else
+                rm -f "$_cfg_tmp" 2>/dev/null || true
+            fi
+        else
+            _cfg_tmp="$CONFIG.tmp.$$"
+            if printf '{"iface":"%s","log_level":"info"}\n' "$PINNED_IFACE" > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
                 mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
             else
                 rm -f "$_cfg_tmp" 2>/dev/null || true
             fi
         fi
-    else
+    elif [ ! -s "$CONFIG" ]; then
         _cfg_tmp="$CONFIG.tmp.$$"
         if printf '{"log_level":"info"}\n' > "$_cfg_tmp" 2>/dev/null && [ -s "$_cfg_tmp" ]; then
             mv -f "$_cfg_tmp" "$CONFIG" 2>/dev/null || rm -f "$_cfg_tmp" 2>/dev/null || true
@@ -214,27 +275,9 @@ chmod 644 "$CONFIG" 2>/dev/null || true
 # Clear crash flags so the launcher/dpid actually (re)start.
 rm -f "$RUN/dpid_crashflag" "$RUN/dpid.crashflag" 2>/dev/null || true
 
-# Restart only the dpid child via /proc scan + pidof fallback; the launcher respawns it.
-kill_pidfile "$RUN/dpid.pid" hnc_dpid
-_proot="${HNC_PROC_ROOT:-/proc}"
-if [ "$_proot" != "/proc" ] || { [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
-    for _d in "$_proot"/[0-9]*; do
-        [ -r "$_d/cmdline" ] || continue
-        _p=${_d##*/}
-        if pid_matches "$_p" hnc_dpid; then
-            log "KILL hnc_dpid pid=$_p (proc)"
-            kill -9 "$_p" 2>/dev/null || true
-        fi
-    done
-    if [ "$_proot" = "/proc" ] && command -v pidof >/dev/null 2>&1; then
-        for p in $(pidof hnc_dpid 2>/dev/null); do
-            pid_matches "$p" hnc_dpid || continue
-            log "KILL hnc_dpid pid=$p"
-            kill -9 "$p" 2>/dev/null || true
-        done
-    fi
-fi
-sleep 1
+# Stop old dpid via SIGTERM + up to 2s wait before SIGKILL fallback; launcher respawns it.
+stop_dpid_graceful
+rm -f "$RUN/dpid_crashflag" "$RUN/dpid.crashflag" 2>/dev/null || true
 
 # Ensure a launcher is alive via /proc cmdline scan.
 if launcher_alive; then

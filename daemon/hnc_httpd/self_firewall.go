@@ -4,12 +4,12 @@
 //   1. 持久化落盘 data/self_firewall.json: 0600 临时文件 + fsync + rename 原子提交, 零 run/ tmpfs 膨胀。
 //   2. 64 位原子字段严格置于结构体 offset 0, 100% 兼容 32 位 armeabi-v7a (GOARCH=arm)。
 //   3. 六道防自锁安全红线:
-//      (a) 硬性拒绝 uid < 10000 (系统/root/radio/netd/wifi 守护进程永不可封);
-//      (b) 硬性保护 Root 管理器、系统 WebView 与宿主包名 (含 /data/system/packages.list + apk_domains 双向 UID 反查);
-//      (c) HNC_SELF_UID 子链第 1~3 条铁定放行 lo 与本地 WebUI 端口 8443,8444,8080 双向流量;
+//      (a) 硬性拒绝 appId = uid % 100000 < 10000 (系统/root/radio/netd/wifi 及多用户/双开系统守护进程永不可封);
+//      (b) 硬性保护 Root 管理器、系统 WebView 与宿主包名 (含 /data/system/packages.list 多用户 + SDK 沙盒双向 UID 反查);
+//      (c) HNC_SELF_UID 子链第 1 条铁定放行 -o lo (本机访问 127.0.0.1 或本机局域网 IP 均经 table local 走 lo 放行, 杜绝公网 8080/8443 穿透);
 //      (d) IPv4/IPv6 双栈一律在锁外通过内存管道调用 iptables-restore / ip6tables-restore -w 2 --noflush
 //          (携带 hubSanitizedAndroidEnv()), 无规则时清空子链并摘除 OUTPUT 跳转钩子实现待机零规则开销;
-//      (e) Android 13+ SDK Sandbox 协同封禁: 10000 <= uid <= 19999 自动同步为 uid + 10000 生成同等规则;
+//      (e) Android 13+ SDK Sandbox 协同封禁: appId 在 10000..19999 (含多用户/双开) 自动同步为 userId*100000 + appId + 10000 生成同等规则;
 //      (f) HNC_SELF_DNS 仅在 filter/OUTPUT 匹配 UDP/TCP :53 标签长度前缀 hex (--algo bm --icase) 执行 -j DROP,
 //          严禁使用 REJECT 污染 netd DNS 评分, 严禁拦截 :853 DoT, 严禁触碰 mangle 表或 0x0000ffff fwmark。
 
@@ -41,6 +41,7 @@ import (
 const (
 	selfFirewallUIDChain       = "HNC_SELF_UID"
 	selfFirewallDNSChain       = "HNC_SELF_DNS"
+	selfFirewallPerUserRange   = 100000
 	selfFirewallMinAppUID      = 10000
 	selfFirewallMaxAppUID      = 99999999
 	selfFirewallSandboxMinUID  = 10000
@@ -62,7 +63,6 @@ const (
 var selfFirewallCleartextPorts = []int{80, 8080, 8000, 8008, 8888}
 
 const selfFirewallCleartextPortCSV = "80,8080,8000,8008,8888"
-const selfFirewallWebUIPortCSV = "8443,8444,8080"
 
 var selfFirewallCellularIfaces = []string{
 	"rmnet+",
@@ -146,10 +146,13 @@ type selfFirewallEngine struct {
 	applyCommits atomic.Uint64
 	guardRejects atomic.Uint64
 
+	syncDirty        atomic.Bool
 	srv              *server
 	applyMu          sync.Mutex
 	mu               sync.Mutex
 	updatedAt        int64
+	lastSyncErr      string
+	lastSyncFailMono int64
 	uidRules         map[int]SelfFirewallUIDRule
 	blockedDomains   map[string]bool
 	packagesListPath string
@@ -207,6 +210,7 @@ func newSelfFirewallEngine(s *server) *selfFirewallEngine {
 	hasActive := eng.loadFromDisk()
 
 	if hasActive && s != nil && useNativeDataplane(s.hncDir) {
+		eng.syncDirty.Store(true)
 		_ = eng.syncDataplane()
 	}
 	return eng
@@ -219,9 +223,31 @@ func (e *selfFirewallEngine) persistPath() string {
 	return filepath.Join(e.srv.hncDir, "data", "self_firewall.json")
 }
 
+func splitSelfFirewallUID(uid int) (userID, appID int) {
+	if uid < 0 {
+		return -1, -1
+	}
+	return uid / selfFirewallPerUserRange, uid % selfFirewallPerUserRange
+}
+
+func isProtectedSelfFirewallSystemUID(uid int) bool {
+	if uid < selfFirewallMinAppUID {
+		return true
+	}
+	_, appID := splitSelfFirewallUID(uid)
+	return appID < selfFirewallMinAppUID
+}
+
 func sdkSandboxUIDForApp(uid int) int {
-	if uid >= selfFirewallSandboxMinUID && uid <= selfFirewallSandboxMaxUID {
-		return uid + selfFirewallSandboxOffset
+	if uid < selfFirewallMinAppUID || uid > selfFirewallMaxAppUID {
+		return 0
+	}
+	userID, appID := splitSelfFirewallUID(uid)
+	if appID >= selfFirewallSandboxMinUID && appID <= selfFirewallSandboxMaxUID {
+		sbUID := userID*selfFirewallPerUserRange + appID + selfFirewallSandboxOffset
+		if sbUID <= selfFirewallMaxAppUID {
+			return sbUID
+		}
 	}
 	return 0
 }
@@ -278,8 +304,11 @@ func isValidAndroidPkgName(pkg string) bool {
 	return hasDot
 }
 
-// lookupPackagesByUIDFromPath 在无锁状态下扫描指定 packages.list 文件中与 UID（及沙盒对应宿主 UID）绑定的全部包名。
+// lookupPackagesByUIDFromPath 在无锁状态下扫描指定 packages.list 文件中与 UID（含多用户/分身及 SDK 沙盒对应宿主 appId）绑定的全部包名。
 func lookupPackagesByUIDFromPath(pPath string, uid int) []string {
+	if isProtectedSelfFirewallSystemUID(uid) {
+		return nil
+	}
 	if pPath == "" {
 		pPath = defaultAndroidPackagesListPath
 	}
@@ -289,9 +318,10 @@ func lookupPackagesByUIDFromPath(pPath string, uid int) []string {
 	}
 	defer f.Close()
 
-	hostUID := 0
-	if uid >= selfFirewallSandboxMinUID+selfFirewallSandboxOffset && uid <= selfFirewallSandboxMaxUID+selfFirewallSandboxOffset {
-		hostUID = uid - selfFirewallSandboxOffset
+	_, appID := splitSelfFirewallUID(uid)
+	hostAppID := appID
+	if appID >= selfFirewallSandboxMinUID+selfFirewallSandboxOffset && appID <= selfFirewallSandboxMaxUID+selfFirewallSandboxOffset {
+		hostAppID = appID - selfFirewallSandboxOffset
 	}
 
 	seen := make(map[string]bool)
@@ -304,10 +334,11 @@ func lookupPackagesByUIDFromPath(pPath string, uid int) []string {
 		}
 		pkg := strings.ToLower(strings.TrimSpace(fields[0]))
 		parsedUID, err := strconv.Atoi(fields[1])
-		if err != nil {
+		if err != nil || parsedUID < 0 {
 			continue
 		}
-		if parsedUID == uid || (hostUID >= selfFirewallMinAppUID && parsedUID == hostUID) {
+		_, parsedAppID := splitSelfFirewallUID(parsedUID)
+		if parsedUID == uid || parsedAppID == appID || parsedAppID == hostAppID {
 			if pkg != "" && !seen[pkg] {
 				seen[pkg] = true
 				pkgs = append(pkgs, pkg)
@@ -318,7 +349,7 @@ func lookupPackagesByUIDFromPath(pPath string, uid int) []string {
 	return pkgs
 }
 
-// lookupPackagesByUIDFromSystem 反查 /data/system/packages.list 中与指定 UID（及沙盒对应宿主 UID）绑定的全部包名。
+// lookupPackagesByUIDFromSystem 反查 /data/system/packages.list 中与指定 UID（及多用户/沙盒对应宿主 appId）绑定的全部包名。
 func (e *selfFirewallEngine) lookupPackagesByUIDFromSystem(uid int) []string {
 	var pPath string
 	if e != nil {
@@ -359,7 +390,14 @@ func (e *selfFirewallEngine) resolveLocalAppMetadata(uid int, hintPkg, hintAppNa
 				} `json:"self"`
 			}
 			if json.Unmarshal(raw, &doc) == nil && doc.Self != nil {
-				for _, k := range []string{strconv.Itoa(uid), strconv.Itoa(uid - selfFirewallSandboxOffset)} {
+				_, appID := splitSelfFirewallUID(uid)
+				lookupKeys := []string{strconv.Itoa(uid)}
+				if appID >= selfFirewallSandboxMinUID+selfFirewallSandboxOffset && appID <= selfFirewallSandboxMaxUID+selfFirewallSandboxOffset {
+					lookupKeys = append(lookupKeys, strconv.Itoa(uid-selfFirewallSandboxOffset), strconv.Itoa(appID-selfFirewallSandboxOffset))
+				} else if appID != uid && appID >= selfFirewallMinAppUID {
+					lookupKeys = append(lookupKeys, strconv.Itoa(appID))
+				}
+				for _, k := range lookupKeys {
 					if ap, ok := doc.Self.AppsByUID[k]; ok {
 						if p := strings.ToLower(strings.TrimSpace(ap.Pkg)); p != "" && !seen[p] {
 							seen[p] = true
@@ -618,7 +656,7 @@ func (e *selfFirewallEngine) loadFromDisk() bool {
 			if json.Unmarshal(b, &rawDoc) == nil {
 				newUpdatedAt = rawDoc.UpdatedAt
 				for _, r := range rawDoc.UIDRules {
-					if r.UID < selfFirewallMinAppUID || r.UID > selfFirewallMaxAppUID {
+					if isProtectedSelfFirewallSystemUID(r.UID) || r.UID > selfFirewallMaxAppUID {
 						continue
 					}
 					mode := strings.ToLower(strings.TrimSpace(r.Mode))
@@ -759,13 +797,46 @@ func (e *selfFirewallEngine) ReloadFromDisk() {
 		return
 	}
 	_ = e.loadFromDisk()
+	e.syncDirty.Store(true)
 	_ = e.syncDataplane()
+}
+
+// IsSyncDirty 返回数据面是否存在尚未成功同步至内核双栈链的脏状态。
+func (e *selfFirewallEngine) IsSyncDirty() bool {
+	if e == nil {
+		return false
+	}
+	return e.syncDirty.Load()
+}
+
+// SyncIfDirty 当存在脏标记时执行一次内核双栈对账补偿同步。
+func (e *selfFirewallEngine) SyncIfDirty() error {
+	if e == nil || !e.syncDirty.Load() {
+		return nil
+	}
+	return e.syncDataplane()
+}
+
+// SyncIfDirtyAfterCooldown 在存在脏标记且距上次失败已满 minCooldown 时执行后台补偿重试。
+func (e *selfFirewallEngine) SyncIfDirtyAfterCooldown(minCooldown time.Duration) error {
+	if e == nil || !e.syncDirty.Load() {
+		return nil
+	}
+	if minCooldown > 0 {
+		e.mu.Lock()
+		lastFail := e.lastSyncFailMono
+		e.mu.Unlock()
+		if lastFail > 0 && monoNowNs()-lastFail < int64(minCooldown) {
+			return nil
+		}
+	}
+	return e.syncDataplane()
 }
 
 // ── 双栈 iptables-restore / ip6tables-restore 规则载荷纯函数构造器 ────────────
 
 // buildSelfUIDRestorePayload 生成 *filter 表 HNC_SELF_UID 子链的 --noflush 载荷。
-// 当 rules 非空时, 第 1~3 条规则铁定为 lo 与本地 WebUI 端口 (8443,8444,8080) 双向 RETURN 防自锁规则。
+// 当 rules 非空时, 链首第 1 条铁定且仅放行 -o lo (本机 127.0.0.1 及本机局域网 IP 均经内核 table local 走 lo, 严禁无目的 IP 豁免 8080/8443)。
 func buildSelfUIDRestorePayload(isIPv6 bool, rules []SelfFirewallUIDRule) (payload string, ruleCount int) {
 	var b strings.Builder
 	b.WriteString("*filter\n")
@@ -775,11 +846,9 @@ func buildSelfUIDRestorePayload(isIPv6 bool, rules []SelfFirewallUIDRule) (paylo
 		return b.String(), 0
 	}
 
-	// 防自锁铁律第 3 道红线: 链首第 1~3 条恒定放行 loopback 与本地 WebUI 管理端口
+	// 防自锁铁律第 3 道红线: 链首恒定放行 loopback, 严禁无地址限制放行 8443/8444/8080 导致公网明文/HTTPS 穿透
 	fmt.Fprintf(&b, "-A %s -o lo -j RETURN\n", selfFirewallUIDChain)
-	fmt.Fprintf(&b, "-A %s -p tcp -m multiport --sports %s -j RETURN\n", selfFirewallUIDChain, selfFirewallWebUIPortCSV)
-	fmt.Fprintf(&b, "-A %s -p tcp -m multiport --dports %s -j RETURN\n", selfFirewallUIDChain, selfFirewallWebUIPortCSV)
-	ruleCount += 3
+	ruleCount++
 
 	explicitUIDSet := make(map[int]bool, len(rules))
 	for _, r := range rules {
@@ -825,11 +894,11 @@ func buildSelfUIDRestorePayload(isIPv6 bool, rules []SelfFirewallUIDRule) (paylo
 	}
 
 	for _, r := range rules {
-		if r.UID < selfFirewallMinAppUID {
+		if isProtectedSelfFirewallSystemUID(r.UID) || r.UID > selfFirewallMaxAppUID {
 			continue
 		}
 		emitForUID(r.UID, r)
-		// Android 13+ SDK Sandbox 协同封禁: 10000 <= uid <= 19999 自动为 uid + 10000 生成同等规则
+		// Android 13+ SDK Sandbox 协同封禁: appId 在 10000..19999 (含双开 userId*100000) 自动为 +10000 生成同等规则
 		if sbUID := sdkSandboxUIDForApp(r.UID); sbUID > 0 && !explicitUIDSet[sbUID] {
 			emitForUID(sbUID, r)
 		}
@@ -1015,7 +1084,43 @@ func (e *selfFirewallEngine) detachAndRemoveChainOutsideLock(iptFn selfFirewallI
 	}
 }
 
-// syncDataplane 在锁外串行执行 IPv4 / IPv6 双栈内存管道原子提交与空规则拆链。
+func isSelfDNSXtStringUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "string") ||
+		strings.Contains(msg, "xt_string") ||
+		strings.Contains(msg, "ipt_string") ||
+		strings.Contains(msg, "ip6t_string")
+}
+
+func isSelfFirewallIPv6Unsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "ip6tables not found") || strings.Contains(msg, "ip6tables-restore not found") {
+		return true
+	}
+	if strings.Contains(msg, "address family not supported") || strings.Contains(msg, "eafnosupport") {
+		return true
+	}
+	if strings.Contains(msg, "can't initialize ip6tables table") ||
+		strings.Contains(msg, "table 'filter' does not exist") ||
+		strings.Contains(msg, "table `filter' does not exist") ||
+		strings.Contains(msg, "ip6table_filter") {
+		return true
+	}
+	if strings.Contains(msg, "ip6_tables") && (strings.Contains(msg, "does not exist") || strings.Contains(msg, "no such file") || strings.Contains(msg, "not found")) {
+		return true
+	}
+	return false
+}
+
+// syncDataplane 在锁外串行执行 IPv4 / IPv6 双栈内存管道原子提交与空规则拆链,
+// 严格核验 HNC_SELF_UID 与 HNC_SELF_DNS 双栈挂载结果并维护 syncDirty 重试标志
+// (保留裁剪内核缺 xt_string 或无 IPv6 filter 表的降级容错, 且绝不回滚已成功的 IPv4 规则)。
 func (e *selfFirewallEngine) syncDataplane() error {
 	if e == nil {
 		return nil
@@ -1024,6 +1129,10 @@ func (e *selfFirewallEngine) syncDataplane() error {
 	defer e.applyMu.Unlock()
 
 	if !e.shouldRunDataplane() {
+		e.syncDirty.Store(false)
+		e.mu.Lock()
+		e.lastSyncErr = ""
+		e.mu.Unlock()
 		return nil
 	}
 
@@ -1036,7 +1145,26 @@ func (e *selfFirewallEngine) syncDataplane() error {
 	hasUID := len(rules) > 0
 	hasDNS := len(domains) > 0
 
-	var v4Err error
+	var syncErr error
+	recordErr := func(isV6 bool, stage string, err error) {
+		if err == nil {
+			return
+		}
+		if isV6 && isSelfFirewallIPv6Unsupported(err) {
+			return
+		}
+		fam := "ipv4"
+		if isV6 {
+			fam = "ipv6"
+		}
+		wrapped := fmt.Errorf("%s %s: %w", fam, stage, err)
+		if syncErr == nil {
+			syncErr = wrapped
+		} else {
+			syncErr = fmt.Errorf("%v; %w", syncErr, wrapped)
+		}
+	}
+
 	for _, isV6 := range []bool{false, true} {
 		// 1) HNC_SELF_UID 子链同步或零开销拆链
 		if hasUID {
@@ -1046,13 +1174,11 @@ func (e *selfFirewallEngine) syncDataplane() error {
 				rerr = restoreFn(isV6, uidPayload)
 			}
 			if rerr != nil {
-				if !isV6 && v4Err == nil {
-					v4Err = rerr
-				}
+				recordErr(isV6, "restore HNC_SELF_UID", rerr)
 			} else {
 				herr := e.ensureOutputHookOutsideLock(iptFn, isV6, selfFirewallUIDChain)
-				if herr != nil && !isV6 && v4Err == nil {
-					v4Err = herr
+				if herr != nil {
+					recordErr(isV6, "hook HNC_SELF_UID", herr)
 				}
 			}
 		} else {
@@ -1067,18 +1193,37 @@ func (e *selfFirewallEngine) syncDataplane() error {
 				derr = restoreFn(isV6, dnsPayload)
 			}
 			if derr == nil {
-				_ = e.ensureOutputHookOutsideLock(iptFn, isV6, selfFirewallDNSChain)
-			} else if !isV6 && v4Err == nil && !strings.Contains(strings.ToLower(derr.Error()), "string") {
-				// 若非 xt_string 缺失的常规错误则透传告警; 若裁剪内核无 xt_string 则优雅保留配置并保护 UID 链
-				v4Err = derr
+				herr := e.ensureOutputHookOutsideLock(iptFn, isV6, selfFirewallDNSChain)
+				if herr != nil {
+					recordErr(isV6, "hook HNC_SELF_DNS", herr)
+				}
+			} else if isSelfDNSXtStringUnsupported(derr) || (isV6 && isSelfFirewallIPv6Unsupported(derr)) {
+				// 裁剪内核无 xt_string 或无 IPv6 filter 表时优雅降级保留配置并保护已成功的 UID/IPv4 链
+				e.detachAndRemoveChainOutsideLock(iptFn, nil, isV6, selfFirewallDNSChain)
+			} else {
+				recordErr(isV6, "restore HNC_SELF_DNS", derr)
 			}
 		} else {
 			e.detachAndRemoveChainOutsideLock(iptFn, restoreFn, isV6, selfFirewallDNSChain)
 		}
 	}
 
+	if syncErr != nil {
+		e.syncDirty.Store(true)
+		e.mu.Lock()
+		e.lastSyncErr = syncErr.Error()
+		e.lastSyncFailMono = monoNowNs()
+		e.mu.Unlock()
+		return syncErr
+	}
+
+	e.syncDirty.Store(false)
+	e.mu.Lock()
+	e.lastSyncErr = ""
+	e.lastSyncFailMono = 0
+	e.mu.Unlock()
 	e.applyCommits.Add(1)
-	return v4Err
+	return nil
 }
 
 // ── 核心读写操作与防自锁守卫校验 ────────────────────────────────────────────
@@ -1088,17 +1233,17 @@ func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string
 	if e == nil {
 		return nil, false, errors.New("selfFirewall engine unavailable")
 	}
-	if uid < selfFirewallMinAppUID {
-		e.guardRejects.Add(1)
-		return nil, false, &selfFirewallValidationError{
-			Code:   "protected_uid",
-			Detail: fmt.Sprintf("拒绝操作 UID %d：系统核心守护进程与特权服务 (uid < 10000) 永不可封禁", uid),
-		}
-	}
 	if uid > selfFirewallMaxAppUID {
 		return nil, false, &selfFirewallValidationError{
 			Code:   "bad params",
 			Detail: "uid out of valid Android range",
+		}
+	}
+	if isProtectedSelfFirewallSystemUID(uid) {
+		e.guardRejects.Add(1)
+		return nil, false, &selfFirewallValidationError{
+			Code:   "protected_uid",
+			Detail: fmt.Sprintf("拒绝操作 UID %d：系统核心守护进程与特权服务 (appId < 10000) 永不可封禁", uid),
 		}
 	}
 
@@ -1118,7 +1263,7 @@ func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string
 		}
 	}
 
-	// mode == "allow": 移除该 UID 的全部防火墙限制（允许为任意 >=10000 的 UID 解除限制）
+	// mode == "allow": 移除该 UID 的全部防火墙限制（允许为任意 appId >= 10000 的 UID 解除限制）
 	if normMode == SelfFirewallModeAllow {
 		removed, err := e.RemoveUIDRule(uid)
 		return nil, removed, err
@@ -1177,10 +1322,12 @@ func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string
 		return nil, false, saveErr
 	}
 
-	if dpErr := e.syncDataplane(); dpErr != nil {
+	e.syncDirty.Store(true)
+	dpErr := e.syncDataplane()
+	e.notifyLeakGuardChanged()
+	if dpErr != nil {
 		return &rule, true, dpErr
 	}
-	e.notifyLeakGuardChanged()
 	return &rule, true, nil
 }
 
@@ -1189,10 +1336,16 @@ func (e *selfFirewallEngine) RemoveUIDRule(uid int) (bool, error) {
 	if e == nil {
 		return false, errors.New("selfFirewall engine unavailable")
 	}
-	if uid < selfFirewallMinAppUID || uid > selfFirewallMaxAppUID {
+	if uid > selfFirewallMaxAppUID {
+		return false, &selfFirewallValidationError{
+			Code:   "bad params",
+			Detail: "uid out of valid Android range",
+		}
+	}
+	if isProtectedSelfFirewallSystemUID(uid) {
 		return false, &selfFirewallValidationError{
 			Code:   "protected_uid",
-			Detail: "uid must be >= 10000",
+			Detail: "uid appId must be >= 10000",
 		}
 	}
 	now := time.Now().Unix()
@@ -1207,11 +1360,15 @@ func (e *selfFirewallEngine) RemoveUIDRule(uid int) (bool, error) {
 	if saveErr != nil {
 		return false, saveErr
 	}
-	if dpErr := e.syncDataplane(); dpErr != nil {
-		return existed, dpErr
+	if existed {
+		e.syncDirty.Store(true)
 	}
+	dpErr := e.syncDataplane()
 	if existed {
 		e.notifyLeakGuardChanged()
+	}
+	if dpErr != nil {
+		return existed, dpErr
 	}
 	return existed, nil
 }
@@ -1246,10 +1403,12 @@ func (e *selfFirewallEngine) ClearAll(scope string) (removedUIDs, removedDomains
 	if saveErr != nil {
 		return removedUIDs, removedDomains, saveErr
 	}
-	if dpErr := e.syncDataplane(); dpErr != nil {
+	e.syncDirty.Store(true)
+	dpErr := e.syncDataplane()
+	e.notifyLeakGuardChanged()
+	if dpErr != nil {
 		return removedUIDs, removedDomains, dpErr
 	}
-	e.notifyLeakGuardChanged()
 	return removedUIDs, removedDomains, nil
 }
 
@@ -1292,10 +1451,12 @@ func (e *selfFirewallEngine) BlockDomain(rawDomain string, force bool) (normDoma
 	if saveErr != nil {
 		return nd, guardDec, false, saveErr
 	}
-	if dpErr := e.syncDataplane(); dpErr != nil {
+	e.syncDirty.Store(true)
+	dpErr := e.syncDataplane()
+	e.notifyLeakGuardChanged()
+	if dpErr != nil {
 		return nd, guardDec, !already, dpErr
 	}
-	e.notifyLeakGuardChanged()
 	return nd, guardDec, !already, nil
 }
 
@@ -1323,11 +1484,15 @@ func (e *selfFirewallEngine) UnblockDomain(rawDomain string) (normDomain string,
 	if saveErr != nil {
 		return nd, false, saveErr
 	}
-	if dpErr := e.syncDataplane(); dpErr != nil {
-		return nd, removed, dpErr
+	if removed {
+		e.syncDirty.Store(true)
 	}
+	dpErr := e.syncDataplane()
 	if removed {
 		e.notifyLeakGuardChanged()
+	}
+	if dpErr != nil {
+		return nd, removed, dpErr
 	}
 	return nd, removed, nil
 }
@@ -1388,11 +1553,11 @@ func (e *selfFirewallEngine) IsHostEventBlocked(uid int, dstHost, dstIP string, 
 	if dstHost != "" && e.IsDomainBlocked(dstHost) {
 		return true
 	}
-	if uid < selfFirewallMinAppUID {
+	if isProtectedSelfFirewallSystemUID(uid) || uid > selfFirewallMaxAppUID {
 		return false
 	}
 	lookupUID := uid
-	if uid >= selfFirewallSandboxMinUID+selfFirewallSandboxOffset && uid <= selfFirewallSandboxMaxUID+selfFirewallSandboxOffset {
+	if _, appID := splitSelfFirewallUID(uid); appID >= selfFirewallSandboxMinUID+selfFirewallSandboxOffset && appID <= selfFirewallSandboxMaxUID+selfFirewallSandboxOffset {
 		lookupUID = uid - selfFirewallSandboxOffset
 	}
 
@@ -1464,6 +1629,7 @@ func (e *selfFirewallEngine) snapshotPayload() map[string]any {
 			"uid_rules":          []SelfFirewallUIDRule{},
 			"blocked_domains":    []string{},
 			"protected_packages": append([]string(nil), selfFirewallProtectedPackages...),
+			"sync_dirty":         false,
 		}
 	}
 	e.mu.Lock()
@@ -1477,6 +1643,7 @@ func (e *selfFirewallEngine) snapshotPayload() map[string]any {
 		"protected_packages":   append([]string(nil), selfFirewallProtectedPackages...),
 		"uid_rule_count":       len(rules),
 		"blocked_domain_count": len(domains),
+		"sync_dirty":           e.syncDirty.Load(),
 	}
 }
 
@@ -1488,6 +1655,7 @@ func (e *selfFirewallEngine) summary() map[string]any {
 	uidCnt := len(e.uidRules)
 	domCnt := len(e.blockedDomains)
 	updatedAt := e.updatedAt
+	lastErr := e.lastSyncErr
 	var cleartextCnt, cellularCnt, blockAllCnt int
 	for _, r := range e.uidRules {
 		switch r.Mode {
@@ -1500,7 +1668,7 @@ func (e *selfFirewallEngine) summary() map[string]any {
 		}
 	}
 	e.mu.Unlock()
-	return map[string]any{
+	out := map[string]any{
 		"active":               uidCnt > 0 || domCnt > 0,
 		"uid_rule_count":       uidCnt,
 		"blocked_domain_count": domCnt,
@@ -1509,8 +1677,13 @@ func (e *selfFirewallEngine) summary() map[string]any {
 		"block_all_apps":       blockAllCnt,
 		"apply_commits":        e.applyCommits.Load(),
 		"guard_rejects":        e.guardRejects.Load(),
+		"sync_dirty":           e.syncDirty.Load(),
 		"updated_at":           updatedAt,
 	}
+	if lastErr != "" {
+		out["last_sync_error"] = lastErr
+	}
+	return out
 }
 
 // ── HTTP API (/api/local_apps/firewall, /api/v6/local_apps/firewall) 与 /api/action 分发 ──

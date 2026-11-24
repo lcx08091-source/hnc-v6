@@ -83,7 +83,7 @@ rm -f "$HNC_DIR/data/m4_owner" "$HNC_DIR/run/m4_owner.current" "$HNC_DIR/run/wd_
       "$HNC_DIR/run/offload_guard.pid" "$HNC_DIR/run/clsact_wd.pid" \
       "$HNC_DIR/run/wd_native.disabled" "$HNC_DIR/run/httpd_bind_ip" "$HNC_DIR/run/httpd.wanted" \
       "$HNC_DIR/run/json_legacy_fallback.log" "$HNC_DIR/run/json_legacy_fallback.count" \
-      "$HNC_DIR/run/.ahnc_migration_done" "$HNC_DIR/run/dpid_crashflag" \
+      "$HNC_DIR/run/.ahnc_migration_done" "$HNC_DIR/run/dpid_crashflag" "$HNC_DIR/run/dpid.crashflag" \
       "$HNC_DIR/etc/dpi_rules.json" 2>/dev/null
 # 运行目录里从没用过的 api/(模块里就没有)和 test/(测试不进安装包): 空的就删
 rmdir "$HNC_DIR/api" "$HNC_DIR/test" 2>/dev/null
@@ -116,14 +116,34 @@ fi
 _HNC_PFD_VER=$(sed -n '/^version=/{s/^version=//p;q;}' "$MODDIR/module.prop" 2>/dev/null | tr -d ' \t\r\n"')
 echo "[HNC] === post-fs-data (${_HNC_PFD_VER:-unknown}) starting ===" >> "$HNC_DIR/logs/boot.log"
 
-# v5.29 T3: 升级快照 + 钉住检查, 必须在下面的 cp 之前 —— 本脚本每次开机都
-# 比 service.sh 先把模块文件拷进运行目录, 快照放在 service.sh 里打包到的已经
-# 是新版, 钉住也挡不住这里把坏版本拷回来。rc=3 = 坏版本已钉住且模块没换新包
-# → 跳过 bin/webroot/httpd 的同步, 用 .prev 恢复过的旧文件开机。
+# v5.29 T3 + C005: 升级快照 + 钉住检查, 必须在下面的 runtime sync 之前 —— 本脚本每次开机都
+# 比 service.sh 先把模块文件拷进运行目录, 快照放在 service.sh 里打包到的已经是新版;
+# post-fs-data 早于 NITZ/NTP 对时, snapshot 将 <epoch> <uptime_sec> <boot_id> 一并写入
+# rollback.observing, 防止随后 NTP 跳变提前击穿 10 分钟观察窗。
+# rc=3 = 坏版本已钉住且模块没换新包 → 跳过同步, 用 .prev 恢复过的旧文件开机。
 _HNC_RB=0
 if [ -f "$MODDIR/bin/hnc_rollback.sh" ]; then
     HNC_RB_LOG="$HNC_DIR/logs/rollback.log" sh "$MODDIR/bin/hnc_rollback.sh" snapshot "$MODDIR" "$HNC_DIR"
     _HNC_RB=$?
+    # 兜底确保升级开启的观察窗携带单调秒与 boot_id
+    if [ -f "$HNC_DIR/data/rollback.observing" ] && [ -r /proc/uptime ] && [ -r /proc/sys/kernel/random/boot_id ]; then
+        _pfd_obs=$(sed -n '1p' "$HNC_DIR/data/rollback.observing" 2>/dev/null | tr -d '\r')
+        case "$_pfd_obs" in
+            *[!0-9]*) ;;
+            ?*)
+                read -r _pfd_up _pfd_rest < /proc/uptime 2>/dev/null || _pfd_up=""
+                _pfd_up=${_pfd_up%%.*}
+                _pfd_bid=$(tr -d ' \t\r\n' < /proc/sys/kernel/random/boot_id 2>/dev/null)
+                if [ -n "$_pfd_up" ] && [ -n "$_pfd_bid" ]; then
+                    printf '%s %s %s\n' "$_pfd_obs" "$_pfd_up" "$_pfd_bid" > "$HNC_DIR/data/rollback.observing.tmp" 2>/dev/null \
+                        && mv -f "$HNC_DIR/data/rollback.observing.tmp" "$HNC_DIR/data/rollback.observing" 2>/dev/null \
+                        || rm -f "$HNC_DIR/data/rollback.observing.tmp" 2>/dev/null || true
+                fi
+                unset _pfd_up _pfd_rest _pfd_bid
+                ;;
+        esac
+        unset _pfd_obs
+    fi
 fi
 [ "$_HNC_RB" = 3 ] && echo "[HNC] rollback: version pinned, skip runtime sync (staying on .prev)" >> "$HNC_DIR/logs/boot.log"
 

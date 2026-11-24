@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "32-alibaba",
-  "rules_version": "hnc-curated-v6.1.0-rc.5#32-alibaba",
+  "rules_version": "hnc-curated-v6.1.0-rc.6#32-alibaba",
   "rules": [
     {
       "id": "alibaba_doh",
@@ -39,6 +39,15 @@
         "alibabausercontent.com",
         "aliyun.com",
         "alipayobjects.com"
+      ]
+    },
+    {
+      "id": "alipay",
+      "app": "支付宝",
+      "category": "finance",
+      "confidence": "high",
+      "suffixes": [
+        "alipay.com"
       ]
     },
     {
@@ -106,7 +115,6 @@
         "taobaocdn.com",
         "tbcache.com",
         "mmstat.com",
-        "alipay.com",
         "tmall-cdn.com",
         "fliggy.com"
       ]

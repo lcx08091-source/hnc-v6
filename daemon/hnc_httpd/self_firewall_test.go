@@ -117,21 +117,21 @@ func TestSelfFirewallGuardrailsModesSDKSandboxAndZeroIdle(t *testing.T) {
 	}
 	sf.mu.Unlock()
 
-	// 红线 1: 硬性拒绝 uid < 10000
-	for _, sysUID := range []int{0, 1000, 1001, 1051, 2000, 9999} {
+	// 红线 1: 硬性拒绝 appId < 10000 (含多用户/双开系统 UID 如 99901000)
+	for _, sysUID := range []int{0, 1000, 1001, 1051, 2000, 9999, 1001051, 99900000, 99901000} {
 		if _, _, err := sf.SetUIDRule(sysUID, SelfFirewallModeBlockAll, "com.some.app", "", nil); err == nil {
-			t.Fatalf("expected uid=%d (<10000) to be rejected by guardrail 1", sysUID)
+			t.Fatalf("expected uid=%d (appId < 10000) to be rejected by guardrail 1", sysUID)
 		}
 	}
 
-	// 红线 2: 硬性保护 9 个 Root 管理器、WebView 与宿主包名 (直接传包名 + 仅传 UID 借 packages.list 绕过 + 传 SDK Sandbox UID 20205)
+	// 红线 2: 硬性保护 9 个 Root 管理器、WebView 与宿主包名 (直接传包名 + 仅传 UID 借 packages.list 绕过 + SDK Sandbox / 双开 UID)
 	for _, protPkg := range selfFirewallProtectedPackages {
 		if _, _, err := sf.SetUIDRule(10300, SelfFirewallModeBlockCleartext, protPkg, "", nil); err == nil {
 			t.Fatalf("expected protected package %q to be rejected by guardrail 2", protPkg)
 		}
 	}
-	// 仅传 UID=10205 (com.agy) 或其 SDK Sandbox UID=20205, 不传 pkg 企图绕过 -> 必须被 packages.list 反查拦截!
-	for _, disguisedUID := range []int{10205, 20205, 10206} {
+	// 仅传 UID=10205 (com.agy)、SDK Sandbox UID=20205 或双开 UID=99910205/99920205, 不传 pkg 企图绕过 -> 必须被 packages.list 反查拦截!
+	for _, disguisedUID := range []int{10205, 20205, 10206, 99910205, 99920205} {
 		if _, _, err := sf.SetUIDRule(disguisedUID, SelfFirewallModeBlockAll, "", "", nil); err == nil {
 			t.Fatalf("expected UID %d belonging to protected package to be rejected via packages.list reverse lookup", disguisedUID)
 		}
@@ -166,7 +166,7 @@ func TestSelfFirewallGuardrailsModesSDKSandboxAndZeroIdle(t *testing.T) {
 	lastV6 := v6Payloads[len(v6Payloads)-1]
 	dpMu.Unlock()
 
-	// 红线 3: 验证 HNC_SELF_UID 子链第 1~3 条铁定为 lo 与 8443,8444,8080 双向 RETURN
+	// 红线 3: 验证 HNC_SELF_UID 子链首条仅放行 -o lo, 严禁无目的地址豁免 8443,8444,8080 导致公网端口穿透
 	for fam, pl := range map[string]string{"v4": lastV4, "v6": lastV6} {
 		var ruleLines []string
 		for _, ln := range strings.Split(pl, "\n") {
@@ -174,18 +174,14 @@ func TestSelfFirewallGuardrailsModesSDKSandboxAndZeroIdle(t *testing.T) {
 				ruleLines = append(ruleLines, ln)
 			}
 		}
-		if len(ruleLines) < 3 {
-			t.Fatalf("[%s] expected >= 3 anti-lockout rules in HNC_SELF_UID, got:\n%s", fam, pl)
+		if len(ruleLines) < 1 {
+			t.Fatalf("[%s] expected >= 1 anti-lockout rule in HNC_SELF_UID, got:\n%s", fam, pl)
 		}
-		wantHead := []string{
-			"-A HNC_SELF_UID -o lo -j RETURN",
-			"-A HNC_SELF_UID -p tcp -m multiport --sports 8443,8444,8080 -j RETURN",
-			"-A HNC_SELF_UID -p tcp -m multiport --dports 8443,8444,8080 -j RETURN",
+		if ruleLines[0] != "-A HNC_SELF_UID -o lo -j RETURN" {
+			t.Fatalf("[%s] HNC_SELF_UID rule #1 = %q, want %q", fam, ruleLines[0], "-A HNC_SELF_UID -o lo -j RETURN")
 		}
-		for idx, want := range wantHead {
-			if ruleLines[idx] != want {
-				t.Fatalf("[%s] HNC_SELF_UID rule #%d = %q, want %q", fam, idx+1, ruleLines[idx], want)
-			}
+		if strings.Contains(pl, "--sports 8443,8444,8080") || strings.Contains(pl, "--dports 8443,8444,8080") {
+			t.Fatalf("[%s] HNC_SELF_UID must NOT contain blanket 8443,8444,8080 RETURN bypass:\n%s", fam, pl)
 		}
 		// 验证明文拦截严格仅含 80,8080,8000,8008,8888, 绝不误杀 443, 且同时覆盖宿主 10150 与沙盒 20150
 		if !strings.Contains(pl, "--dports 80,8080,8000,8008,8888 -m owner --uid-owner 10150 -j REJECT --reject-with tcp-reset") ||
@@ -342,8 +338,6 @@ func TestSelfFirewallActionDispatchHTTPAPIAndShellSync(t *testing.T) {
 	}
 	for _, wantFrag := range []string{
 		"-A HNC_SELF_UID -o lo -j RETURN",
-		"-A HNC_SELF_UID -p tcp -m multiport --sports 8443,8444,8080 -j RETURN",
-		"-A HNC_SELF_UID -p tcp -m multiport --dports 8443,8444,8080 -j RETURN",
 		"--dports 80,8080,8000,8008,8888 -m owner --uid-owner 10234 -j REJECT --reject-with tcp-reset",
 		"--dports 80,8080,8000,8008,8888 -m owner --uid-owner 20234 -j REJECT --reject-with tcp-reset",
 		"-A HNC_SELF_DNS -p udp --dport 53 -m string --algo bm --icase --hex-string \"|06|beacon|06|ad-sdk|07|example|00|\" -j DROP",

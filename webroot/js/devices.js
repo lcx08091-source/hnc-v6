@@ -583,7 +583,7 @@ function cssEscMac(m) {
 }
 function paintConnMini(mac) {
   var sel = cssEscMac(mac);
-  $$('[data-dev="' + sel + '"] [data-conn-mini], [data-side="' + sel + '"] [data-conn-mini]').forEach(function (el) { el.innerHTML = connMiniHtml(mac); });
+  $$('[data-dev="' + sel + '"] [data-conn-mini], [data-side="' + sel + '"] [data-conn-mini]').forEach(function (el) { morph(el, connMiniHtml(mac)); });
 }
 function refreshConnMini(mac) { return loadConns(mac).then(function () { paintConnMini(mac); }); }
 var connT = null, connVisFn = null;
@@ -613,25 +613,26 @@ function connSheet(d) {
   if (!document.hidden) { startConnTimer(); tick(); }
 }
 function paintConnSheet() {
-  var el = $('#cn-body'); if (!el || !S.connMac) return;
+  var sh = $('#sheet'), el = $('#cn-body'); if (!el || !S.connMac) return;
+  if (sh && sh.classList.contains('is-dragging')) return;
   var c = S.conn[S.connMac]; if (!c) return;
-  if (c.err) { el.innerHTML = '<div class="note err">' + esc(c.err) + '</div>'; return; }
+  if (c.err) { morph(el, '<div class="note err">' + esc(c.err) + '</div>'); return; }
   var r = c.r || {}, list = r.conns || [];
   var bl = r.blocks || [];
   // 应用时长用完 / 类别封锁 自动生成的封锁(source=app_time|category)不能在这里单独解除
-  var blocks = bl.length ? '<div class="dbox" style="margin-bottom:8px">' + bl.map(function (b) {
+  var blocks = bl.length ? '<div class="dbox" style="margin-bottom:8px" data-mkey="cn-blocks">' + bl.map(function (b) {
     var auto = { app_time: '时长用完', category: '类别封锁' }[b.source];
     var right = auto ? '<span class="badge ' + (b.source === 'category' ? 'b-red' : 'b-warn') + '" title="' + esc(b.source === 'category' ? '在设备卡「按类别封锁」里解除' : '次日 0 点自动恢复，或在「应用使用时长」里修改限时') + '">' + auto + (b.source === 'category' && b.ref ? ' · ' + esc(catLabel(b.ref)) : '') + (num(b.until) ? ' · 至 ' + pad2(new Date(num(b.until) * 1000).getHours()) + ':' + pad2(new Date(num(b.until) * 1000).getMinutes()) : '') + '</span>'
       : '<button class="linkish" data-cbdel="' + esc(b.kind + '|' + b.value) + '">解除</button>';
-    return '<div class="row2"><span class="k" style="color:var(--text-1)">' + uiSvg('ban') + ' ' + esc(b.label ? b.label + ' · ' : '') + '<span class="mono">' + esc(b.value) + '</span>' + (b.kind === 'domain' ? '<span class="note"> 及子域名</span>' : '') + '</span>' + right + '</div>'; }).join('') + '</div>' : '';
-  var head = blocks + '<div class="cn-sum"><span>共 <b>' + num(r.total) + '</b> 条' + (num(r.total) > list.length ? '（显示前 ' + list.length + '）' : '') + '</span><span>↓↑ <b>' + bpsTxt(r.bps) + '</b></span><span>累计 <b>' + bytes(num(r.down_bytes) + num(r.up_bytes)) + '</b></span></div>' + connNotes(r);
+    return '<div class="row2" data-mkey="cb:' + esc(b.kind + '|' + b.value) + '"><span class="k" style="color:var(--text-1)">' + uiSvg('ban') + ' ' + esc(b.label ? b.label + ' · ' : '') + '<span class="mono">' + esc(b.value) + '</span>' + (b.kind === 'domain' ? '<span class="note"> 及子域名</span>' : '') + '</span>' + right + '</div>'; }).join('') + '</div>' : '';
+  var head = blocks + '<div class="cn-sum" data-mkey="cn-sum"><span>共 <b>' + num(r.total) + '</b> 条' + (num(r.total) > list.length ? '（显示前 ' + list.length + '）' : '') + '</span><span>↓↑ <b>' + bpsTxt(r.bps) + '</b></span><span>累计 <b>' + bytes(num(r.down_bytes) + num(r.up_bytes)) + '</b></span></div>' + connNotes(r);
   if (S.connView === 'group') {
     var gs = r.groups || [], mx = Math.max.apply(null, gs.map(function (g) { return num(g.bps) || num(g.bytes) / 1e6; }).concat([1]));
-    el.innerHTML = head + (gs.length ? gs.map(function (g, i) { var v = num(g.bps) || num(g.bytes) / 1e6; return '<div class="hbar"><span class="n">' + esc(g.label) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, v / mx * 100).toFixed(1) + '%;background:' + HIST_COLORS[i % 8] + ';animation:none"></i></span><span class="v">' + num(g.n) + ' 条 · ' + (num(g.bps) ? bpsTxt(g.bps) : bytes(g.bytes)) + '</span></div>'; }).join('') : '<div class="note">当前没有连接</div>');
+    morph(el, head + (gs.length ? gs.map(function (g, i) { var v = num(g.bps) || num(g.bytes) / 1e6; return '<div class="hbar" data-mkey="cg:' + esc(g.label || i) + '"><span class="n">' + esc(g.label) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, v / mx * 100).toFixed(1) + '%;background:' + HIST_COLORS[i % 8] + ';animation:none"></i></span><span class="v">' + num(g.n) + ' 条 · ' + (num(g.bps) ? bpsTxt(g.bps) : bytes(g.bytes)) + '</span></div>'; }).join('') : '<div class="note">当前没有连接</div>'));
     return;
   }
   if (S.connView === 'active') list = list.filter(function (x) { return num(x.down_bps) + num(x.up_bps) > 0; });
-  el.innerHTML = head + (list.length ? list.map(connRow).join('') : '<div class="note">' + (S.connView === 'active' ? '这 2 秒内没有收发数据的连接' : '当前没有连接') + '</div>');
+  morph(el, head + (list.length ? list.map(connRow).join('') : '<div class="note">' + (S.connView === 'active' ? '这 2 秒内没有收发数据的连接' : '当前没有连接') + '</div>'));
 }
 function appLimitRows(d) {
   var items = S.appLimits.filter(function (x) { return String(x.mac || '').toLowerCase() === d.mac; });
@@ -976,8 +977,8 @@ function limitParams(d, downMbps, upMbps) {
   return p;
 }
 function doLimit(d, downMbps, upMbps) {
-  if (!htbOk()) return Promise.reject(new Error('当前内核 / tc 不支持 HTB，限速不可用'));
   if (!(downMbps > 0) && !(upMbps > 0 && upOk())) return api.action('rule_clear', { mac: d.mac });
+  if (!htbOk()) return Promise.reject(new Error('当前内核 / tc 不支持 HTB，限速不可用'));
   return api.action('rule_set', limitParams(d, downMbps, upMbps));
 }
 function doDelay(d, delay, jitter, loss) {
@@ -992,11 +993,13 @@ function looksLikeGateway(d) {
   if (!d) return false;
   if (d.iface && d.iface === 'wlan0') return true;
   var ip = String(d.ip || '').trim();
-  var gw = String((S.ifaceInfo && (S.ifaceInfo.gateway || S.ifaceInfo.ip)) || (S.hotspot && S.hotspot.ip) || '').trim();
-  if (gw && ip) {
-    if (ip === gw) return true;
-    var gp = gw.split('.').slice(0, 3).join('.'), ipP = ip.split('.').slice(0, 3).join('.');
-    if (gp && gp === ipP) return false;
+  if (!ip) return false;
+  var defGw = String((S.ifaceInfo && (S.ifaceInfo.gateway || S.ifaceInfo.default_gateway || S.ifaceInfo.upstream_gw)) || (S.live && (S.live.gateway_ip || S.live.upstream_gw)) || '').trim();
+  var selfIp = String((S.hotspot && S.hotspot.ip) || (S.ifaceInfo && S.ifaceInfo.ip) || '').trim();
+  if ((defGw && ip === defGw) || (selfIp && ip === selfIp)) return true;
+  if (selfIp && /\.1$/.test(selfIp)) {
+    var sp = selfIp.split('.').slice(0, 3).join('.'), ipP = ip.split('.').slice(0, 3).join('.');
+    if (sp && sp === ipP && ip !== defGw) return false;
   }
   return /\.(1|254)$/.test(ip);
 }
@@ -1052,8 +1055,7 @@ function applyTemplate(targets, t) {
   targets.forEach(function (d) {
     chain = chain.then(function () {
       setBusy(d.mac, true);
-      var limP = (!d.sim && t.name) ? api.action('template_apply', { mac: d.mac, rate_down: t.down > 0 ? fmtRate(t.down) : '0mbit', rate_up: t.up > 0 ? fmtRate(t.up) : '0mbit' }) : doLimit(d, t.down, t.up);
-      return limP.then(function () {
+      return doLimit(d, t.down, t.up).then(function () {
         if (wantDelay) {
           if (!netemOk() || d.sqm || d.appQos) { skipped++; return; }
           return doDelay(d, t.delay, t.jitter, t.loss);

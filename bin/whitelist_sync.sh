@@ -22,11 +22,16 @@
 # 用法: whitelist_sync.sh [--dry-run]   (--dry-run 只打印将执行的动作)
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
-[ -f "$HNC_DIR/bin/hnc_env.sh" ] && . "$HNC_DIR/bin/hnc_env.sh"
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 RULES="$HNC_DIR/data/rules.json"
 DEVICES_FLAT="$HNC_DIR/run/devices.flat"
 DEVICES="$HNC_DIR/data/devices.json"
 IPTM="$HNC_DIR/bin/iptables_manager.sh"
+[ -f "$IPTM" ] || IPTM="${0%/*}/iptables_manager.sh"
 LOG="$HNC_DIR/logs/service.log"
 DRY=0
 [ "$1" = "--dry-run" ] && DRY=1
@@ -43,7 +48,7 @@ ipt() {
 
 mode=false
 if [ -f "$RULES" ]; then
-    mode=$(grep -oE '"whitelist_mode"[[:space:]]*:[[:space:]]*(true|false)' "$RULES" 2>/dev/null \
+    mode=$(tr -d '\r\n' < "$RULES" 2>/dev/null | grep -oE '"whitelist_mode"[[:space:]]*:[[:space:]]*(true|false)' \
            | head -1 | grep -oE 'true|false')
     [ -n "$mode" ] || mode=false
 fi
@@ -93,8 +98,19 @@ for mac in $macs; do
     count=$((count + 1))
 done
 
-# v5.12: 调用方可用 HNC_WL_IFACE 指定热点接口(watchdog do_full_init 时 hnc_state 还是
-# PENDING, iptables_manager 从 hnc_state 取不到接口, DROP 会退化成不带 -i 的裸 DROP)
-ipt whitelist_on ${HNC_WL_IFACE:+"$HNC_WL_IFACE"} || log "whitelist_on rc=$?"
-log "mode=on allowed=$count"
+# C038: 解析当前热点接口透传给 whitelist_on(在 iptables_manager.sh 中执行 ! -i $iface 回包放行、
+# -i $iface TCP RST/DROP 切断存量长连接及 filter/FORWARD 链序锚点挂载)
+wl_iface=${HNC_WL_IFACE:-}
+if [ -z "$wl_iface" ] && [ -e "$HNC_DIR/run/hnc_state" ]; then
+    wl_iface=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
+elif [ -z "$wl_iface" ]; then
+    for _wf in "$HNC_DIR/run/active_iface" "$HNC_DIR/run/hotspot_iface"; do
+        [ -f "$_wf" ] || continue
+        wl_iface=$(head -n 1 "$_wf" 2>/dev/null | tr -d ' \t\r\n')
+        [ -n "$wl_iface" ] && break
+    done
+fi
+case "$wl_iface" in *[!A-Za-z0-9_.-]*) wl_iface="" ;; esac
+ipt whitelist_on ${wl_iface:+"$wl_iface"} || log "whitelist_on rc=$?"
+log "mode=on allowed=$count iface=${wl_iface:-any}"
 echo "WHITELIST=on count=$count"

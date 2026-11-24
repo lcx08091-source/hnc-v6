@@ -80,12 +80,28 @@ static inline long hnc_sys_bpf(int cmd, union bpf_attr *attr, unsigned int size)
     return syscall(__NR_bpf, cmd, attr, size);
 }
 
+#ifndef BPF_F_RDONLY
+#define BPF_F_RDONLY (1U << 3)
+#endif
+
 static int hnc_bpf_obj_get(const char *pathname)
 {
     union bpf_attr attr;
     memset(&attr, 0, sizeof(attr));
     attr.pathname = hnc_ptr_to_u64(pathname);
     return (int)hnc_sys_bpf(BPF_OBJ_GET, &attr, sizeof(attr));
+}
+
+static int hnc_bpf_obj_get_rdonly_prefer(const char *pathname)
+{
+    union bpf_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.pathname   = hnc_ptr_to_u64(pathname);
+    attr.file_flags = BPF_F_RDONLY;
+    int fd = (int)hnc_sys_bpf(BPF_OBJ_GET, &attr, sizeof(attr));
+    if (fd >= 0)
+        return fd;
+    return hnc_bpf_obj_get(pathname);
 }
 
 static int hnc_bpf_map_lookup_elem(int fd, const void *key, void *value)
@@ -282,6 +298,22 @@ static int reopen_fd(int *fd, const char *path)
     return 0;
 }
 
+static int reopen_fd_rdonly(int *fd, const char *path)
+{
+    if (*fd >= 0) {
+        close(*fd);
+        *fd = -1;
+    }
+    int new_fd = hnc_bpf_obj_get_rdonly_prefer(path);
+    if (new_fd < 0) {
+        fprintf(stderr, "[bpf] obj_get(rdonly) failed: %s (errno=%d %s)\n",
+                path, errno, strerror(errno));
+        return -1;
+    }
+    *fd = new_fd;
+    return 0;
+}
+
 static int ensure_limit_fd(void)
 {
     if (s.fd_limit >= 0) return 0;
@@ -291,7 +323,7 @@ static int ensure_limit_fd(void)
 static int ensure_stats_fd(void)
 {
     if (s.fd_stats >= 0) return 0;
-    return reopen_fd(&s.fd_stats, BPF_STATS_MAP);
+    return reopen_fd_rdonly(&s.fd_stats, BPF_STATS_MAP);
 }
 
 static int disabled_set_contains(int ifindex)
@@ -805,7 +837,7 @@ static offload_err_t bpf_self_check(void)
     s.fd_limit = fd_lim;
 
     if (s.fd_stats < 0)
-        s.fd_stats = hnc_bpf_obj_get(BPF_STATS_MAP);
+        s.fd_stats = hnc_bpf_obj_get_rdonly_prefer(BPF_STATS_MAP);
     if (s.fd_stats >= 0 && validate_stats_map_fd(s.fd_stats) != 0) {
         close(s.fd_stats);
         s.fd_stats = -1;

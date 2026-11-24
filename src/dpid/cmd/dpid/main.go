@@ -151,6 +151,7 @@ const (
 	shmFlowTTLSec      = 60
 	shmOnlineWindowSec = 300
 	shmMaxFlowsPerDev  = 64
+	shmMaxIPv6PerDev   = 16
 
 	// appLabelDexName is the dex helper shipped alongside the dpid binary
 	// (in the module bin/ dir). Run via app_process to read real PM labels.
@@ -162,6 +163,8 @@ const (
 )
 
 // shmDevEntry tracks per-device live telemetry for 16KB shm_vector.bin snapshots.
+// ipv6s retains multiple concurrent SLAAC / RFC 4941 privacy IPv6 addresses in memory
+// for conntrack & FlowScalpel attribution while keeping shm.DeviceSlot layout intact.
 type shmDevEntry struct {
 	mac      [6]byte
 	ipv4     [4]byte
@@ -171,6 +174,11 @@ type shmDevEntry struct {
 	lastSeen int64
 	leakHit  bool
 	flows    map[uint64]int64
+	ipv6s    map[[16]byte]int64
+}
+
+func isLinkLocalV6Bytes(v6 [16]byte) bool {
+	return v6[0] == 0xfe && (v6[1]&0xc0) == 0x80
 }
 
 // shmRuntimeTracker aggregates downstream client slots without contending on output.Writer.
@@ -279,6 +287,7 @@ func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isU
 		d = &shmDevEntry{
 			mac:   macBytes,
 			flows: make(map[uint64]int64, 16),
+			ipv6s: make(map[[16]byte]int64, 4),
 		}
 		t.devs[macBytes] = d
 	}
@@ -286,8 +295,34 @@ func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isU
 	if isV4 {
 		d.ipv4 = v4
 	}
-	if isV6 {
-		d.ipv6 = v6
+	if isV6 && v6 != ([16]byte{}) {
+		if !isLinkLocalV6Bytes(v6) || d.ipv6 == ([16]byte{}) {
+			d.ipv6 = v6
+		}
+		if d.ipv6s == nil {
+			d.ipv6s = make(map[[16]byte]int64, 4)
+		}
+		if _, exists := d.ipv6s[v6]; !exists && len(d.ipv6s) >= shmMaxIPv6PerDev {
+			for k6, ts6 := range d.ipv6s {
+				if nowUnix-ts6 > shmOnlineWindowSec*2 {
+					delete(d.ipv6s, k6)
+				}
+			}
+			if len(d.ipv6s) >= shmMaxIPv6PerDev {
+				var oldV6 [16]byte
+				var oldTs int64
+				first := true
+				for k6, ts6 := range d.ipv6s {
+					if first || ts6 < oldTs {
+						oldV6, oldTs, first = k6, ts6, false
+					}
+				}
+				if !first {
+					delete(d.ipv6s, oldV6)
+				}
+			}
+		}
+		d.ipv6s[v6] = nowUnix
 	}
 	if pktBytes > 0 {
 		if txFromClient {
@@ -337,12 +372,32 @@ func (t *shmRuntimeTracker) conntrackClients(nowUnix int64) (online []output.Con
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, d := range t.devs {
-		var ips []string
+		ips := make([]string, 0, 1+len(d.ipv6s))
+		seen := make(map[string]struct{}, 1+len(d.ipv6s))
+		addIP := func(s string) {
+			if s == "" {
+				return
+			}
+			if _, dup := seen[s]; !dup {
+				seen[s] = struct{}{}
+				ips = append(ips, s)
+			}
+		}
 		if d.ipv4 != ([4]byte{}) {
-			ips = append(ips, net.IPv4(d.ipv4[0], d.ipv4[1], d.ipv4[2], d.ipv4[3]).String())
+			addIP(net.IPv4(d.ipv4[0], d.ipv4[1], d.ipv4[2], d.ipv4[3]).String())
 		}
 		if d.ipv6 != ([16]byte{}) {
-			ips = append(ips, net.IP(d.ipv6[:]).String())
+			addIP(net.IP(d.ipv6[:]).String())
+		}
+		for v6, ts6 := range d.ipv6s {
+			if v6 == ([16]byte{}) {
+				continue
+			}
+			if nowUnix-ts6 > shmOnlineWindowSec*4 {
+				delete(d.ipv6s, v6)
+				continue
+			}
+			addIP(net.IP(v6[:]).String())
 		}
 		if len(ips) == 0 {
 			continue

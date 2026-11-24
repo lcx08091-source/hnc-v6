@@ -216,22 +216,22 @@ Android 系统 `netd` 依赖 `skb->mark` 的低 16 位执行策略路由（`ip r
 4. **本机安全防火墙四档管控、`uid+10000` 沙盒协同与本机手术刀**：
    - `filter/OUTPUT` `HNC_SELF_UID` 提供单应用四档管控：**放行**、**仅禁明文 HTTP**（精确拦截非加密 HTTP 端口，倒逼回落 HTTPS 而不影响正常加密业务）、**禁移动数据**（蜂窝上游 `rmnet+`/`ccmni+` 等阻断、Wi-Fi 放行）与**全局禁网**。
    - **Android 13+ SDK Sandbox 协同封禁**：对常规宿主应用 UID（`appId` 位于 `10000..19999`），自动推导并同步封禁其伴生沙盒进程 UID（`uid + 10000`），封堵内嵌广告 SDK 借独立沙盒 UID 绕过宿主网络限制的通道。
-   - **六道防自锁门禁**：硬豁免系统核心特权 UID（`< 10000`）、HNC 与当前 Root 管理器宿主包、WebUI 本地管理会话端口（`:8443`/`:8444`）、回环接口 `lo`、局域网/热点网关控制报文及系统连通性基础链路，配合 `HNC_SELF_DNS`（`:53` `DROP`）与 `HNC_SCALPEL_HOST`（`INET_DIAG` `SOCK_DESTROY` 瞬断存量连接 + 五元组秒断/冻结）形成完整闭环。
+   - **六道防自锁门禁**：硬豁免系统核心特权 `appId`（`uid % 100000 < 10000`，全面覆盖主用户与多用户/应用分身）、HNC 与当前 Root 管理器宿主包、仅限回环与本机局域网目标地址的 WebUI 管理会话端口（`:8443`/`:8444`，封堵外网同号端口绕过禁网）、回环接口 `lo`、局域网/热点网关控制报文及系统连通性基础链路，配合 `HNC_SELF_DNS`（`:53` `DROP`）与 `HNC_SCALPEL_HOST`（`INET_DIAG` `SOCK_DESTROY` 瞬断存量连接 + 五元组秒断/冻结）形成完整闭环。
 
 ## 五、控制面关键可靠性契约
 
 1. **双卡物理卡槽真值与防「第 3 张幽灵卡」铁律**：
    - Android `telephony.db/siminfo` 的自增主键 `_id`（`subId`）随历史换卡不断增大，严禁将其直接当作卡槽号。
-   - `daemon/hnc_httpd/sim.go` 与 `phone_usage_sim.go` 优先走原生 `dumpsys isub` + `dumpsys telephony.registry` 权威链路，按 `activeDataSubId` -> `defaultDataSubId` -> 在位物理卡槽 `simSlotIndex`（`0` 为卡 1，`1` 为卡 2）精确映射，自动剔除已拔出历史卡（`simSlotIndex < 0`）与虚拟云卡/副流量逻辑槽（`isOpportunistic=1` 或超出硬件 `Active modem count`）。
+   - `daemon/hnc_httpd/sim.go`、`phone_usage_sim.go` 与 `signal_monitor.go` 统一走原生 `dumpsys isub` + `dumpsys telephony.registry` 权威链路，严格过滤 `INVALID_SUBSCRIPTION_ID`（`2147483647`）、`pid>=2` 软 SIM 槽及 `v4-` CLAT 接口前缀，按 `activeDataSubId` -> `defaultDataSubId` -> 在位物理卡槽 `simSlotIndex`（`0` 为卡 1，`1` 为卡 2）精确映射，自动剔除已拔出历史卡（`simSlotIndex < 0`）与虚拟云卡/副流量逻辑槽（`isOpportunistic=1` 或超出硬件 `Active modem count`）。
    - 双卡硬件（`modemCount <= 2`）严格最多渲染卡 1、卡 2 两张实体卡片；开机瞬态尚未归属卡槽的零星蜂窝字节自动按唯一上网卡或系统 `NetworkStats` 校正归并，无法归属时仅作底部文字说明。
 2. **ThermoCruise 电池与机身壳温双源交叉校准及热点待机实时只读刷新**：
    - 同时直读 `/sys/class/power_supply/*/temp` 电芯温度与 `/sys/class/thermal/thermal_zone*` 机身表皮/壳温热区（匹配 `shell_*`、`skin*` 等传感器），自动识别毫摄氏度（如 `42000`）、十分之一摄氏度（如 `420`）与摄氏度（如 `42`）三种内核量纲；一旦读数越出合理物理区间 `[-20°C, 100°C]` 立即熔断剔除异常源。
    - **防低温伪装模块致盲**：当设备装有快充伪装模块（如将电池温度人为拉低 `-10°C`）导致电芯温度显著低于机身壳温时，双源交叉校准自动识别偏置并以真实机身壳温估算值接管温控判据；在热点待机或零客户端状态下，传感器看板支持无写盘、无流控副作用的实时只读刷新。
 3. **DNS 接管单锁串行与 Captive Portal 门户逃生**：
-   - `dns_takeover.go` 与 `dns_forwarder.go` 采用单一互斥锁串行控制转发规则，弱网偶发超时期间通过 `serve-stale` 保持已有解析不断网，上行切网瞬间清空陈旧缓存；对酒店/校园网 Captive Portal 联网探测域名（如 `connectivitycheck.gstatic.com`、`captive.apple.com`、`connect.rom.miui.com` 等）强制直通上游真实响应，严禁返回过期缓存阻断认证页弹出。
-4. **待机零唤醒与零假数据铁律**：
-   - 热点关闭或在线客户端数为 `0` 时，`200ms` 卡顿黑匣子、战术舱巡检定时器、流控对账、Netlink 高频轮询与 `shm_vector.bin` 刷写全部停表休眠（断流空闲期不写空白帧，完整保留断流前 `60s` 真实卡顿现场）；本机实时网速引擎亦在 8 秒租约到期后立即休眠。
-   - 生产运行态严禁任何硬编码模拟曲线或假成功状态；底层计数器或传感器不支持时明确返回 `supported: false` / `available: false` 与具体 `reason_code`；前端离线预览仿真脚本 `tools/ui_mock/fake_api.js` 排除在刷机包之外并与真机环境物理隔离。
+   - `dns_takeover.go` 与 `dns_forwarder.go` 采用单一互斥锁串行控制转发规则，弱网偶发超时期间通过 `serve-stale` 保持已有解析不断网，上行切网瞬间清空陈旧缓存并重置上游健康探测窗口；对酒店/校园网 Captive Portal 联网探测域名（如 `connectivitycheck.gstatic.com`、`captive.apple.com`、`connect.rom.miui.com` 等）强制直通上游真实响应，严禁返回过期缓存阻断认证页弹出。
+4. **待机零唤醒、看门狗身份核验与零假数据铁律**：
+   - 后台探活路由（`/api/health`）与未鉴权公开路由严格排除在 `activityTouchMiddleware` 之外，杜绝看门狗周期探活误刷新 `webuiLastHit` 锁死活跃档位；热点关闭或在线客户端数为 `0` 时，`200ms` 卡顿黑匣子、战术舱巡检定时器、流控对账、Netlink 高频轮询与 `shm_vector.bin` 刷写全部停表休眠（断流空闲期不写空白帧，完整保留断流前 `60s` 真实卡顿现场）；`hnc_watchdog` 对守护进程执行判活或超时强杀前强制核验 `/proc/<pid>/cmdline`（回退 `comm`），根除 PID 复用误杀隐患。
+   - 生产运行态严禁任何硬编码模拟曲线或假成功状态；底层计数器或传感器不支持时明确返回 `supported: false` / `available: false` 与具体 `reason_code`；前端离线预览仿真脚本 `tools/ui_mock/fake_api.js` 排除在刷机包之外并由打包门禁双重拦截。
 
 ## 六、目录结构契约
 
@@ -287,6 +287,6 @@ Android 系统 `netd` 依赖 `skb->mark` 的低 16 位执行策略路由（`ip r
 
 每次代码、规则或文档变更进入 `.github/workflows/build.yml` 时，均须通过全套自动化门禁：
 
-1. **静态语法与老坑门禁**：全仓 Shell 脚本 `sh -n`、前端独立脚本与 HTML 内联 `<script>` `node --check`、`sh ./bin/version_consistency_check.sh`、`sh ./bin/pitfall_lint.sh`、`sh ./bin/ci_preflight.sh`（含全仓零 Emoji Unicode 扫描与 `arm64` ELF `16KB` 页对齐校验）。
-2. **双架构编译与对齐测试**：`daemon/hnc_httpd` 与 `src/dpid` 的 `go vet ./...`、`go test ./...`、32 位 `GOOS=android GOARCH=arm GOARM=7` 编译与 64 位原子字段 8 字节对齐测试，以及 `sh ./test/run_all.sh` 全套单元测试。
-3. **双架构全组件现编与成品包核验**：每次 CI 从源码全新编译 `arm64-v8a` 与 `armeabi-v7a` 全套 6 大核心组件及辅助二进制，打包前执行 `sh ./bin/inject_version_to_docs.sh` 注入版本占位符并用 `HNC_RELEASE_CHECK=1 sh ./bin/version_consistency_check.sh` 复核，最后对双架构刷机包分别运行 `sh ./bin/artifact_sanity_check.sh` 验证字节级路由标记、架构纯净度与直接可刷入结构。
+1. **标签强一致、静态语法与老坑门禁**：Tag 推送或手动发版强制校验标签与 `module.prop` 的 `version` 完全一致；全仓 Shell 脚本 `sh -n`、前端独立脚本与 HTML 内联 `<script>` `node --check`、`sh ./bin/version_consistency_check.sh`、`sh ./bin/pitfall_lint.sh`、`sh ./bin/ci_preflight.sh`（含全仓零 Emoji Unicode 扫描与 `arm64` ELF `16KB` 页对齐校验）。
+2. **双架构编译与结构体/数组步长对齐测试**：`daemon/hnc_httpd` 与 `src/dpid` 的 `go vet ./...`、`go test ./...`、32 位 `GOOS=android GOARCH=arm GOARM=7` 编译与 64 位原子字段（含结构体切片/数组步长 `sizeof % 8 == 0`）对齐测试，以及 `sh ./test/run_all.sh` 全套单元测试。
+3. **双架构全组件现编与成品包纯净度核验**：每次 CI 从源码全新编译 `arm64-v8a` 与 `armeabi-v7a` 全套 6 大核心组件及全部辅助二进制/DEX，打包前执行 `sh ./bin/inject_version_to_docs.sh` 注入版本占位符并用 `HNC_RELEASE_CHECK=1 sh ./bin/version_consistency_check.sh` 复核，最后对双架构刷机包分别运行 `sh ./bin/artifact_sanity_check.sh` 强制校验全套编译产物齐全、字节级路由标记、架构纯净度并拦截 `fake_api.js` / `tools/` 混入刷机包。

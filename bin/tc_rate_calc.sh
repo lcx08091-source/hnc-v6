@@ -51,7 +51,10 @@ hnc_burst_k() {
 # hnc_quantum <mbps> → 整数字节
 hnc_quantum() {
     awk -v v="${1:-0}" 'BEGIN {
-        q = int((v + 0) * 1000000 / 8 / 10)
+        v = v + 0
+        if (v >= 4.8) { print 60000; exit }
+        if (v <= 0) { print 1514; exit }
+        q = int(v * 1000000 / 8 / 10)
         if (q < 1514) q = 1514
         if (q > 60000) q = 60000
         print q

@@ -25,23 +25,35 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
-var errMarkIDExhausted = errors.New("rulesStore: mark_id pool [1..99] exhausted")
+var (
+	errMarkIDExhausted  = errors.New("rulesStore: mark_id pool [1..99] exhausted")
+	errRulesLockTimeout = errors.New("rulesStore: cross-process json lock timeout")
+)
+
+const rulesMaxGoodBackups = 5
+
+// rulesCrossLockTimeout 跨进程 flock(run/.json_fd) + mkdir(run/json.lock) 最大等待时间(单测可调)。
+var rulesCrossLockTimeout = 3 * time.Second
 
 // rulesStoreEngine 提供全局互斥锁保护的 data/rules.json 原子读写引擎。
-// 严格遵守 32 位 ARM 8 字节对齐铁律: 所有 atomic.Uint64 字段必须位于结构体起始偏移 (offset 0)。
+// 严格遵守 32 位 ARM 8 字节对齐铁律: 所有 atomic.Uint64 字段必须位于结构体起始偏移 (offset 0), 新增字段追加末尾。
 type rulesStoreEngine struct {
-	readHits       atomic.Uint64
-	readMisses     atomic.Uint64
-	atomicWrites   atomic.Uint64
-	stubDelegates  atomic.Uint64
-	mu             sync.Mutex
-	cachedPath     string
-	cachedModNano  int64
-	cachedSize     int64
-	cachedSnapshot map[string]interface{}
+	readHits        atomic.Uint64
+	readMisses      atomic.Uint64
+	atomicWrites    atomic.Uint64
+	stubDelegates   atomic.Uint64
+	mu              sync.Mutex
+	cachedPath      string
+	cachedModNano   int64
+	cachedSize      int64
+	cachedSnapshot  map[string]interface{}
+	lastBackupPath  string
+	lastBackupBytes []byte
+	backupSeq       uint64
 }
 
 // rulesStore 全局单例引擎。
@@ -50,10 +62,12 @@ var rulesStore = &rulesStoreEngine{}
 // rulesTopAlwaysString 与 bin/json_set.sh 的 json_top_field_is_string 严格同源:
 // 这些顶层字段语义上恒为字符串, 绝不能把纯数字 WiFi 密码(如 "12345678" / "01234567")误转为 JSON 数字。
 var rulesTopAlwaysString = map[string]bool{
-	"hotspot_ssid":    true,
-	"hotspot_pass":    true,
-	"hotspot_iface":   true,
-	"clsact_bpf_mode": true,
+	"hotspot_ssid":       true,
+	"hotspot_pass":       true,
+	"hotspot_iface":      true,
+	"clsact_bpf_mode":    true,
+	"hotspot_time_start": true,
+	"hotspot_time_end":   true,
 }
 
 func rulesFilePath(hncDir string) string {
@@ -144,61 +158,140 @@ func deepCloneRulesMap(m map[string]interface{}) map[string]interface{} {
 	return cp
 }
 
-// acquireCooperativeJSONLock 协同遵守 bin/hnc_json 的 run/json.lock 目录锁 (最多等待 1.5s)。
-// 判活严格通过 /proc/<pid> 文件系统检查, 绝不调用 ps 或 pidof。
-func acquireCooperativeJSONLock(hncDir string) func() {
+// acquireCrossProcJSONLock 严格遵守全局锁序:
+//   rulesStore.mu -> flock(run/.json_fd) -> mkdir(run/json.lock) -> jsonCache.mu
+// 严禁先 mkdir 后 flock(防与 bin/hnc_json 跨进程反向死锁); 锁超时必须返回错误, 严禁脱锁裸 Rename!
+func acquireCrossProcJSONLock(hncDir string) (func(), error) {
 	runDir := filepath.Join(hncDir, "run")
-	_ = os.MkdirAll(runDir, 0o700)
-	lockDir := filepath.Join(runDir, "json.lock")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		return nil, err
+	}
+	waitMax := rulesCrossLockTimeout
+	if waitMax <= 0 {
+		waitMax = 3 * time.Second
+	}
+	deadline := time.Now().Add(waitMax)
 
-	deadline := time.Now().Add(1500 * time.Millisecond)
+	fdPath := filepath.Join(runDir, ".json_fd")
+	fdFile, err := os.OpenFile(fdPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	flockHeld := false
+	releaseFlock := func() {
+		if flockHeld {
+			_ = syscall.Flock(int(fdFile.Fd()), syscall.LOCK_UN)
+			flockHeld = false
+		}
+		if fdFile != nil {
+			_ = fdFile.Close()
+			fdFile = nil
+		}
+	}
+
 	for {
-		err := os.Mkdir(lockDir, 0o700)
-		if err == nil {
-			pidStr := strconv.Itoa(os.Getpid())
+		ferr := syscall.Flock(int(fdFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if ferr == nil {
+			flockHeld = true
+			break
+		}
+		if errors.Is(ferr, syscall.ENOSYS) || errors.Is(ferr, syscall.ENOTSUP) || errors.Is(ferr, syscall.EOPNOTSUPP) {
+			releaseFlock()
+			break
+		}
+		if !errors.Is(ferr, syscall.EWOULDBLOCK) && !errors.Is(ferr, syscall.EAGAIN) && !errors.Is(ferr, syscall.EINTR) {
+			releaseFlock()
+			return nil, ferr
+		}
+		if time.Now().After(deadline) {
+			releaseFlock()
+			return nil, fmt.Errorf("%w: flock %s", errRulesLockTimeout, fdPath)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	lockDir := filepath.Join(runDir, "json.lock")
+	selfPidStr := strconv.Itoa(os.Getpid())
+	for {
+		merr := os.Mkdir(lockDir, 0o700)
+		if merr == nil {
 			tsStr := strconv.FormatInt(time.Now().Unix(), 10)
-			_ = os.WriteFile(filepath.Join(lockDir, "pid"), []byte(pidStr+"\n"), 0o600)
+			_ = os.WriteFile(filepath.Join(lockDir, "pid"), []byte(selfPidStr+"\n"), 0o600)
 			_ = os.WriteFile(filepath.Join(lockDir, "ts"), []byte(tsStr+"\n"), 0o600)
 			return func() {
-				_ = os.RemoveAll(lockDir)
-			}
+				if pb, rerr := os.ReadFile(filepath.Join(lockDir, "pid")); rerr != nil || strings.TrimSpace(string(pb)) == "" || strings.TrimSpace(string(pb)) == selfPidStr {
+					_ = os.RemoveAll(lockDir)
+				}
+				releaseFlock()
+			}, nil
 		}
-		if !os.IsExist(err) {
-			// ENOSPC / EROFS / 父目录不可写等非锁竞争错误: 立即降级返回, 避免白白空转 1.5s
-			return func() {}
+		if !os.IsExist(merr) {
+			releaseFlock()
+			return nil, merr
 		}
 		reclaimStaleJSONLockDir(lockDir)
 		if time.Now().After(deadline) {
-			// 超时降级: 进程内已有 rulesStore.mu 串行化且写盘采用 tmp+rename 原子替换, 不会产生半截 JSON
-			return func() {}
+			releaseFlock()
+			return nil, fmt.Errorf("%w: mkdir %s", errRulesLockTimeout, lockDir)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
+// acquireCooperativeJSONLock 供包内协同写者(如黑匣子备份恢复)按同一全局锁序
+// flock(run/.json_fd) -> mkdir(run/json.lock) 获取跨进程锁; 遇到非竞争路径错误时立即返回空释放函数。
+func acquireCooperativeJSONLock(hncDir string) func() {
+	unlock, err := acquireCrossProcJSONLock(hncDir)
+	if err != nil || unlock == nil {
+		return func() {}
+	}
+	return unlock
+}
+
 func reclaimStaleJSONLockDir(lockDir string) {
+	reclaimGuard := lockDir + ".reclaim"
 	pidBytes, err := os.ReadFile(filepath.Join(lockDir, "pid"))
 	if err == nil {
-		if pid, perr := strconv.Atoi(strings.TrimSpace(string(pidBytes))); perr == nil && pid > 0 {
-			// Linux/Android 上若 /proc 挂载且 /proc/<pid> 已消失, 说明持锁进程已退出
+		pidStr := strings.TrimSpace(string(pidBytes))
+		if pid, perr := strconv.Atoi(pidStr); perr == nil && pid > 0 && pid != os.Getpid() {
 			if _, procRootErr := os.Stat("/proc/self"); procRootErr == nil {
 				if _, pErr := os.Stat("/proc/" + strconv.Itoa(pid)); os.IsNotExist(pErr) {
-					_ = os.RemoveAll(lockDir)
-					return
+					if os.Mkdir(reclaimGuard, 0o700) == nil {
+						defer os.Remove(reclaimGuard)
+						if pb2, e2 := os.ReadFile(filepath.Join(lockDir, "pid")); e2 == nil && strings.TrimSpace(string(pb2)) == pidStr {
+							if _, pErr2 := os.Stat("/proc/" + strconv.Itoa(pid)); os.IsNotExist(pErr2) {
+								_ = os.RemoveAll(lockDir)
+								return
+							}
+						}
+					}
 				}
 			}
 		}
 	}
 	if tsBytes, err := os.ReadFile(filepath.Join(lockDir, "ts")); err == nil {
-		if ts, terr := strconv.ParseInt(strings.TrimSpace(string(tsBytes)), 10, 64); terr == nil && ts > 0 {
+		tsStr := strings.TrimSpace(string(tsBytes))
+		if ts, terr := strconv.ParseInt(tsStr, 10, 64); terr == nil && ts > 0 {
 			if time.Now().Unix()-ts >= 30 {
-				_ = os.RemoveAll(lockDir)
+				if os.Mkdir(reclaimGuard, 0o700) == nil {
+					defer os.Remove(reclaimGuard)
+					if tb2, e2 := os.ReadFile(filepath.Join(lockDir, "ts")); e2 == nil && strings.TrimSpace(string(tb2)) == tsStr {
+						_ = os.RemoveAll(lockDir)
+					}
+				}
 			}
 		}
 	}
 }
 
-func (rs *rulesStoreEngine) recoverCorruptRulesLocked(hncDir, path string) (map[string]interface{}, error) {
+func (rs *rulesStoreEngine) recoverCorruptRulesLocked(hncDir, path string, holdingCrossLock bool) (map[string]interface{}, error) {
+	if !holdingCrossLock {
+		unlock, err := acquireCrossProcJSONLock(hncDir)
+		if err != nil {
+			return nil, err
+		}
+		defer unlock()
+	}
 	backupDir := filepath.Join(hncDir, "data", ".json_backups")
 	type bakCand struct {
 		path    string
@@ -241,13 +334,17 @@ func (rs *rulesStoreEngine) recoverCorruptRulesLocked(hncDir, path string) (map[
 			continue
 		}
 		_ = os.Rename(path, corruptArchive)
-		_ = rs.saveLocked(hncDir, restored)
+		if serr := rs.saveHoldingCrossLock(hncDir, restored); serr != nil {
+			return nil, serr
+		}
 		return deepCloneRulesMap(restored), nil
 	}
 
 	_ = os.Rename(path, corruptArchive)
 	def := defaultRulesRoot()
-	_ = rs.saveLocked(hncDir, def)
+	if serr := rs.saveHoldingCrossLock(hncDir, def); serr != nil {
+		return nil, serr
+	}
 	return deepCloneRulesMap(def), nil
 }
 
@@ -278,7 +375,7 @@ func (rs *rulesStoreEngine) loadLocked(hncDir string) (map[string]interface{}, e
 	}
 	root, err := decodeRulesBytes(b)
 	if err != nil {
-		return rs.recoverCorruptRulesLocked(hncDir, path)
+		return rs.recoverCorruptRulesLocked(hncDir, path, false)
 	}
 	if st2, err2 := os.Stat(path); err2 == nil &&
 		st2.ModTime().UnixNano() == st.ModTime().UnixNano() &&
@@ -291,7 +388,128 @@ func (rs *rulesStoreEngine) loadLocked(hncDir string) (map[string]interface{}, e
 	return root, nil
 }
 
+// loadFreshHoldingCrossLock 在已持有跨进程排他锁的前提下直接读取磁盘最新 rules.json,
+// 彻底杜绝外部脚本同秒同长写入与进程内旧缓存碰撞回盖。
+func (rs *rulesStoreEngine) loadFreshHoldingCrossLock(hncDir string) (map[string]interface{}, error) {
+	path := rulesFilePath(hncDir)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultRulesRoot(), nil
+		}
+		return nil, err
+	}
+	root, err := decodeRulesBytes(b)
+	if err != nil {
+		return rs.recoverCorruptRulesLocked(hncDir, path, true)
+	}
+	if st, err2 := os.Stat(path); err2 == nil {
+		rs.cachedPath = path
+		rs.cachedModNano = st.ModTime().UnixNano()
+		rs.cachedSize = st.Size()
+		rs.cachedSnapshot = deepCloneRulesMap(root)
+	}
+	return root, nil
+}
+
+func (rs *rulesStoreEngine) writeGoodBackupLocked(hncDir, path string, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	backupDir := filepath.Join(hncDir, "data", ".json_backups")
+	if rs.lastBackupPath == path && bytes.Equal(rs.lastBackupBytes, payload) {
+		// 若已有至少一份 rules.json.*.bak 则有效内容未变, 跳过重复写盘
+		if ents, err := os.ReadDir(backupDir); err == nil {
+			for _, en := range ents {
+				nm := en.Name()
+				if !en.IsDir() && strings.HasPrefix(nm, "rules.json.") && strings.HasSuffix(nm, ".bak") {
+					return
+				}
+			}
+		}
+	}
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return
+	}
+	rs.backupSeq++
+	now := time.Now()
+	bakName := fmt.Sprintf("rules.json.%s.%d_%06d.bak", now.Format("20060102-150405"), os.Getpid(), rs.backupSeq)
+	bakPath := filepath.Join(backupDir, bakName)
+	stagef, err := os.CreateTemp(backupDir, ".rules_bak_stage.*")
+	if err != nil {
+		return
+	}
+	stageName := stagef.Name()
+	if _, werr := stagef.Write(payload); werr != nil {
+		_ = stagef.Close()
+		_ = os.Remove(stageName)
+		return
+	}
+	_ = stagef.Chmod(0o600)
+	if cerr := stagef.Close(); cerr != nil {
+		_ = os.Remove(stageName)
+		return
+	}
+	if rerr := os.Rename(stageName, bakPath); rerr != nil {
+		_ = os.Remove(stageName)
+		return
+	}
+	rs.lastBackupPath = path
+	rs.lastBackupBytes = append(rs.lastBackupBytes[:0], payload...)
+
+	// 裁剪 data/.json_backups 下 rules.json.*.bak, 最多保留最新 5 份好快照
+	ents, err := os.ReadDir(backupDir)
+	if err != nil {
+		return
+	}
+	type bakItem struct {
+		full    string
+		name    string
+		modNano int64
+	}
+	var items []bakItem
+	for _, en := range ents {
+		if en.IsDir() {
+			continue
+		}
+		nm := en.Name()
+		if !strings.HasPrefix(nm, "rules.json.") || !strings.HasSuffix(nm, ".bak") {
+			continue
+		}
+		info, ierr := en.Info()
+		if ierr != nil {
+			continue
+		}
+		items = append(items, bakItem{
+			full:    filepath.Join(backupDir, nm),
+			name:    nm,
+			modNano: info.ModTime().UnixNano(),
+		})
+	}
+	if len(items) <= rulesMaxGoodBackups {
+		return
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].modNano != items[j].modNano {
+			return items[i].modNano > items[j].modNano
+		}
+		return items[i].name > items[j].name
+	})
+	for _, stale := range items[rulesMaxGoodBackups:] {
+		_ = os.Remove(stale.full)
+	}
+}
+
 func (rs *rulesStoreEngine) saveLocked(hncDir string, root map[string]interface{}) error {
+	unlock, err := acquireCrossProcJSONLock(hncDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return rs.saveHoldingCrossLock(hncDir, root)
+}
+
+func (rs *rulesStoreEngine) saveHoldingCrossLock(hncDir string, root map[string]interface{}) error {
 	ensureRulesBaseContainers(root)
 	path := rulesFilePath(hncDir)
 	dataDir := filepath.Dir(path)
@@ -306,9 +524,6 @@ func (rs *rulesStoreEngine) saveLocked(hncDir string, root map[string]interface{
 		return err
 	}
 	payload := buf.Bytes()
-
-	unlock := acquireCooperativeJSONLock(hncDir)
-	defer unlock()
 
 	// 写入同目录 .tmp 文件 -> fsync -> close -> os.Rename, 100% 原子发布并触发 dpid/watchdog inotify
 	f, err := os.CreateTemp(dataDir, ".rules.json.tmp.*")
@@ -349,7 +564,29 @@ func (rs *rulesStoreEngine) saveLocked(hncDir string, root map[string]interface{
 	} else {
 		rs.cachedSnapshot = nil
 	}
+	// 全局锁序尾环: rulesStore.mu -> flock -> json.lock -> jsonCache.mu
+	invalidateJSONCaches(path)
+	rs.writeGoodBackupLocked(hncDir, path, payload)
 	return nil
+}
+
+// Invalidate 使指定 hncDir 的进程内 rulesStore 快照与 jsonFileCache 缓存立即失效(外部脚本写盘成功后调用)。
+func (rs *rulesStoreEngine) Invalidate(hncDir string) {
+	path := ""
+	if strings.TrimSpace(hncDir) != "" {
+		path = rulesFilePath(hncDir)
+	}
+	rs.mu.Lock()
+	if path == "" || rs.cachedPath == path {
+		rs.cachedSnapshot = nil
+		rs.cachedPath = ""
+		rs.cachedModNano = 0
+		rs.cachedSize = 0
+	}
+	if path != "" {
+		invalidateJSONCaches(path)
+	}
+	rs.mu.Unlock()
 }
 
 // ── 类型转换与规范化辅助函数 ─────────────────────────────────────────────────
@@ -620,18 +857,24 @@ func (rs *rulesStoreEngine) ReadAll(hncDir string) (map[string]interface{}, erro
 	return rs.loadLocked(hncDir)
 }
 
-// Mutate 在全局互斥锁保护下对 data/rules.json 执行自定义原子读-改-写事务, 保留所有未知字段。
+// Mutate 在全局互斥锁与跨进程排他锁(flock + json.lock)双重保护下对 data/rules.json 执行原子读-改-写事务,
+// 先拿锁再读磁盘最新状态, 锁超时立即返回错误严禁脱锁裸 Rename。
 func (rs *rulesStoreEngine) Mutate(hncDir string, fn func(root map[string]interface{}) error) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	root, err := rs.loadLocked(hncDir)
+	unlock, err := acquireCrossProcJSONLock(hncDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	root, err := rs.loadFreshHoldingCrossLock(hncDir)
 	if err != nil {
 		return err
 	}
 	if err := fn(root); err != nil {
 		return err
 	}
-	return rs.saveLocked(hncDir, root)
+	return rs.saveHoldingCrossLock(hncDir, root)
 }
 
 // GetTop 读取顶层配置字段(去引号字符串表示; 键不存在时返回 "", nil, 与 json_set.sh top_get 一致)。
@@ -661,7 +904,7 @@ func (rs *rulesStoreEngine) GetTop(hncDir, field string) (string, error) {
 	return anyToRuleString(v), nil
 }
 
-// SetTop 原子写入顶层字段并保留其他所有字段。单测桩环境下委托给 json_set.sh top。
+// SetTop 原子写入顶层字段并保留其他所有字段。单测桩环境下在拿 flock 前分流委托给 json_set.sh top。
 func (rs *rulesStoreEngine) SetTop(hncDir, field string, value interface{}) error {
 	field = strings.TrimSpace(field)
 	if field == "" {
@@ -673,6 +916,7 @@ func (rs *rulesStoreEngine) SetTop(hncDir, field string, value interface{}) erro
 		if rc != 0 {
 			return fmt.Errorf("json_set.sh top %s rc=%d: %s", field, rc, strings.TrimSpace(out))
 		}
+		rs.Invalidate(hncDir)
 		return nil
 	}
 	return rs.Mutate(hncDir, func(root map[string]interface{}) error {
@@ -790,6 +1034,7 @@ func (rs *rulesStoreEngine) SetDeviceField(hncDir, mac, field string, value inte
 		if rc != 0 {
 			return fmt.Errorf("json_set.sh device %s %s rc=%d: %s", mac, field, rc, strings.TrimSpace(out))
 		}
+		rs.Invalidate(hncDir)
 		return nil
 	}
 	return rs.Mutate(hncDir, func(root map[string]interface{}) error {
@@ -824,6 +1069,7 @@ func (rs *rulesStoreEngine) SetDeviceBatch(hncDir, mac string, fields map[string
 			if rc, out := runBin(hncDir, "json_set_batch.sh", args...); rc != 0 {
 				return fmt.Errorf("json_set_batch.sh device %s rc=%d: %s", mac, rc, strings.TrimSpace(out))
 			}
+			rs.Invalidate(hncDir)
 			return nil
 		}
 		for _, k := range keys {
@@ -858,6 +1104,7 @@ func (rs *rulesStoreEngine) RemoveDevice(hncDir, mac string) error {
 		if rc != 0 {
 			return fmt.Errorf("json_set.sh device_remove %s rc=%d: %s", mac, rc, strings.TrimSpace(out))
 		}
+		rs.Invalidate(hncDir)
 		return nil
 	}
 	return rs.Mutate(hncDir, func(root map[string]interface{}) error {
@@ -896,6 +1143,7 @@ func (rs *rulesStoreEngine) AllocMarkID(hncDir, mac string) (int, error) {
 			if err != nil || mid < 1 || mid > 99 {
 				return 0, fmt.Errorf("alloc_mid returned invalid mid %q", strings.TrimSpace(outA))
 			}
+			rs.Invalidate(hncDir)
 			return mid, nil
 		}
 	}
@@ -993,6 +1241,7 @@ func (rs *rulesStoreEngine) SetBlacklist(hncDir, mac string, blocked bool) error
 		if rc != 0 {
 			return fmt.Errorf("json_set.sh %s %s rc=%d: %s", cmd, mac, rc, strings.TrimSpace(out))
 		}
+		rs.Invalidate(hncDir)
 		return nil
 	}
 	return rs.Mutate(hncDir, func(root map[string]interface{}) error {

@@ -116,8 +116,8 @@ fetch_json_field() {
 rebind_dpi(){
     if [ -f "$HNC_DIR/bin/dpi_rebind.sh" ]; then
         iface=$(head -n 1 "$HNC_DIR/run/hotspot_iface" 2>/dev/null | tr -d ' \r\n')
-        [ -z "$iface" ] && iface=wlan2
-        sh "$HNC_DIR/bin/dpi_rebind.sh" "$iface" >/dev/null 2>&1 || true
+        [ -z "$iface" ] && iface=auto
+        HNC_DPI_REBIND_KEEP_CONFIG=1 sh "$HNC_DIR/bin/dpi_rebind.sh" "$iface" >/dev/null 2>&1 || true
     fi
 }
 

@@ -339,8 +339,34 @@ func actionDelayClear(hncDir string, p map[string]string) actionResp {
 
 // actionTemplateApply · 单设备应用模板
 // params: mac, rate_down, rate_up (前端已展开模板字段, 复用 rule_set 逻辑)
-// 这里直接委托 rule_set, 方便日后前端切到 template_id 不需要改 server
+// 当上下行均为零速率(如 "0"/"0mbit"/"0kbit"/"0gbit")时直接转调 actionRuleClear, 避免落入 apply_device_rule.sh 离线报错。
 func actionTemplateApply(hncDir string, p map[string]string) actionResp {
+	mac := p["mac"]
+	if !macRE.MatchString(mac) {
+		return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
+	}
+	if isProtectedMAC(hncDir, mac) {
+		return actionResp{OK: false, Error: "protected mac",
+			Detail: "cannot modify host/broadcast/null mac"}
+	}
+	rateDown := p["rate_down"]
+	rateUp := p["rate_up"]
+	if rateDown == "" && rateUp == "" {
+		return actionResp{OK: false, Error: "bad params", Detail: "at least one of rate_down/rate_up required"}
+	}
+	if rateDown != "" {
+		if err := validateRate(rateDown); err != nil {
+			return actionResp{OK: false, Error: "bad params", Detail: "rate_down: " + err.Error()}
+		}
+	}
+	if rateUp != "" {
+		if err := validateRate(rateUp); err != nil {
+			return actionResp{OK: false, Error: "bad params", Detail: "rate_up: " + err.Error()}
+		}
+	}
+	if (rateDown == "" || isZeroRateStr(rateDown)) && (rateUp == "" || isZeroRateStr(rateUp)) {
+		return actionRuleClear(hncDir, p)
+	}
 	return actionRuleSet(hncDir, p)
 }
 
@@ -464,6 +490,7 @@ func actionHotspotSave(hncDir string, p map[string]string) actionResp {
 				return actionResp{OK: false, Error: "save autostart failed", Detail: out}
 			}
 		}
+		rulesStore.Invalidate(hncDir)
 	}
 	return actionResp{OK: true, Detail: "config saved"}
 }
@@ -489,6 +516,7 @@ func actionSetTopBool(hncDir, key string, p map[string]string, onDetail, offDeta
 		if rc != 0 {
 			return actionResp{OK: false, Error: "write failed", Detail: out}
 		}
+		rulesStore.Invalidate(hncDir)
 	}
 	if v == "true" && onDetail != "" {
 		return actionResp{OK: true, Detail: onDetail}
@@ -572,6 +600,7 @@ func actionCleanupRules(hncDir string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "cleanup failed", Detail: out}
 	}
+	rulesStore.Invalidate(hncDir)
 	InvalidateDataplaneReconcileNative(hncDir, "")
 	return actionResp{OK: true}
 }
@@ -593,6 +622,8 @@ func actionCleanupOfflineDevices(hncDir string, p map[string]string) actionResp 
 	if rc != 0 {
 		return actionResp{OK: false, Error: "cleanup_offline failed", Detail: out}
 	}
+	rulesStore.Invalidate(hncDir)
+	invalidateJSONCaches(hncDir + "/data/devices.json")
 	// stdout is JSON {"ok":true,"removed":N,...}. Pass it through as Detail.
 	return actionResp{OK: true, Detail: strings.TrimSpace(out)}
 }

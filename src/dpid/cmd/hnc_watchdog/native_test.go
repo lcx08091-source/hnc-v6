@@ -743,6 +743,7 @@ func TestFrozenHttpdRemovesDNSTakeoverBeforeRestart(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(fakeProc, strconv.Itoa(fakePid)), 0o755)
 	_ = os.MkdirAll(filepath.Join(fakeCg2, "uid_10123"), 0o755)
 	_ = os.MkdirAll(fakeFreezer, 0o755)
+	_ = os.WriteFile(filepath.Join(fakeProc, strconv.Itoa(fakePid), "cmdline"), []byte("hnc_httpd\x00"), 0o644)
 	_ = os.WriteFile(filepath.Join(fakeProc, strconv.Itoa(fakePid), "cgroup"), []byte("0::/uid_10123\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(fakeCg2, "uid_10123", "cgroup.freeze"), []byte("1\n"), 0o644)
 
@@ -791,3 +792,157 @@ func TestFrozenHttpdRemovesDNSTakeoverBeforeRestart(t *testing.T) {
 		t.Fatalf("应写入 oom_score_adj=-900, err=%v data=%q", err, string(b))
 	}
 }
+
+func TestDaemonPidReusedNeverKillsSystemServerAndRespawns(t *testing.T) {
+	tmp := t.TempDir()
+	fakeProc := filepath.Join(tmp, "proc")
+	fakeCg2 := filepath.Join(tmp, "cgroup2")
+	fakeFreezer := filepath.Join(tmp, "freezer")
+	reusedPid := os.Getpid() // 借用当前测试进程 PID: 若误发 SIGTERM/SIGKILL 测试进程当场死亡!
+
+	pidDir := filepath.Join(fakeProc, strconv.Itoa(reusedPid))
+	_ = os.MkdirAll(pidDir, 0o755)
+	_ = os.MkdirAll(filepath.Join(fakeCg2, "uid_1000"), 0o755)
+	_ = os.MkdirAll(fakeFreezer, 0o755)
+	_ = os.WriteFile(filepath.Join(pidDir, "cmdline"), []byte("system_server\x00"), 0o644)
+	_ = os.WriteFile(filepath.Join(pidDir, "cgroup"), []byte("0::/uid_1000\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(fakeCg2, "uid_1000", "cgroup.freeze"), []byte("1\n"), 0o644)
+
+	oldProc, oldCg2, oldFrz := wdProcRoot, wdCgroupV2Root, wdDevFreezerRoot
+	oldDNS, oldTerm, oldSpawn := dnsTakeoverRemoveFn, terminateFrozenDaemonFn, spawnDaemonFn
+	wdProcRoot, wdCgroupV2Root, wdDevFreezerRoot = fakeProc, fakeCg2, fakeFreezer
+	t.Cleanup(func() {
+		wdProcRoot, wdCgroupV2Root, wdDevFreezerRoot = oldProc, oldCg2, oldFrz
+		dnsTakeoverRemoveFn, terminateFrozenDaemonFn, spawnDaemonFn = oldDNS, oldTerm, oldSpawn
+	})
+
+	// 1. daemonPidAlive 对 cmdline="system_server\x00" 必须返回 false, 且真实 terminateFrozenDaemon 绝不杀该进程
+	if daemonPidAlive(reusedPid, "hnc_httpd") || daemonPidAlive(reusedPid, "hotspotd") || daemonPidAlive(reusedPid, "hnc_watchdog", "watchdog.sh") {
+		t.Fatal("cmdline=system_server 的复用 PID 绝不能判为守护进程存活")
+	}
+	terminateFrozenDaemon(reusedPid) // 若未校验 cmdline 会直接 SIGTERM 当前 go test 进程!
+
+	// 2. ensureDaemonRunning(hnc_httpd): 发现 pidfile 指向 system_server 时不得调 terminateFrozenDaemonFn, 而是安全重拉
+	httpdBin := filepath.Join(tmp, "hnc_httpd")
+	httpdPidFile := filepath.Join(tmp, "httpd.pid")
+	_ = os.WriteFile(httpdBin, []byte("fake"), 0o755)
+	_ = os.WriteFile(httpdPidFile, []byte(strconv.Itoa(reusedPid)), 0o644)
+
+	var seq []string
+	dnsTakeoverRemoveFn = func() { seq = append(seq, "dns_remove") }
+	terminateFrozenDaemonFn = func(pid int) { seq = append(seq, "KILLED_WRONG_PID") }
+	spawnDaemonFn = func(bin string, args []string, logPath, pf string) error {
+		seq = append(seq, "spawn:"+filepath.Base(bin))
+		return nil
+	}
+	lastRestartMu.Lock()
+	delete(lastRestart, "hnc_httpd")
+	delete(lastRestart, "hotspotd")
+	lastRestartMu.Unlock()
+
+	ensureDaemonRunning(daemonSpec{
+		name:     "hnc_httpd",
+		binPath:  httpdBin,
+		args:     []string{"-hnc-dir", tmp},
+		logFile:  filepath.Join(tmp, "httpd.log"),
+		pidFile:  httpdPidFile,
+		cooldown: time.Millisecond,
+	})
+	if got := strings.Join(seq, ","); got != "dns_remove,spawn:hnc_httpd" {
+		t.Fatalf("PID 复用时不应强杀 system_server 且应重拉 hnc_httpd: got %q", got)
+	}
+
+	// 3. ensureDaemonRunning(hotspotd): 发现 pidfile 指向 system_server 时不漏拉已死的 hotspotd
+	seq = nil
+	hsBin := filepath.Join(tmp, "hotspotd")
+	hsPidFile := filepath.Join(tmp, "hotspotd.pid")
+	_ = os.WriteFile(hsBin, []byte("fake"), 0o755)
+	_ = os.WriteFile(hsPidFile, []byte(strconv.Itoa(reusedPid)), 0o644)
+	ensureDaemonRunning(daemonSpec{
+		name:     "hotspotd",
+		binPath:  hsBin,
+		args:     []string{"-d"},
+		logFile:  filepath.Join(tmp, "hotspotd.log"),
+		pidFile:  hsPidFile,
+		cooldown: time.Millisecond,
+	})
+	if got := strings.Join(seq, ","); got != "spawn:hotspotd" {
+		t.Fatalf("PID 复用时不应误认 hotspotd 存活而漏拉: got %q", got)
+	}
+
+	// 4. 验证空 cmdline 回退 comm 匹配与 shell watchdog.sh 兼容
+	_ = os.WriteFile(filepath.Join(pidDir, "cmdline"), []byte{}, 0o644)
+	_ = os.WriteFile(filepath.Join(pidDir, "comm"), []byte("hotspotd\n"), 0o644)
+	if !daemonPidAlive(reusedPid, "hotspotd") {
+		t.Fatal("cmdline 为空时应回退 comm 识别 hotspotd")
+	}
+	_ = os.WriteFile(filepath.Join(pidDir, "cmdline"), []byte("/system/bin/sh\x00/data/local/hnc/bin/watchdog.sh\x00"), 0o644)
+	if !daemonPidAlive(reusedPid, "hnc_watchdog", "watchdog.sh") {
+		t.Fatal("应兼容识别 sh bin/watchdog.sh")
+	}
+}
+
+func TestCleanupRulesMarkerSuppressesRestoreAndAppLimitReplay(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 11, 24, 12, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	rec.rc["check_health"] = 1 // 模拟 cleanup.sh rules 清空规则后健康检查返回失败
+	withFakeEnv(t, clk, rec)
+
+	markerPath := filepath.Join(natRunDir, "cleanup_rules.marker")
+	if err := os.WriteFile(markerPath, []byte(strconv.FormatInt(clk.now.Unix(), 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	throttle := &restoreThrottle{}
+	aux := &activeAux{}
+	// 连续 8 轮(跨越 480s < 600s)健康检查失败: 必须静默跳过, 0 次 full_restore, 绝不误入 passiveMode
+	for i := 0; i < 8; i++ {
+		iv := handleActive("wlan0", throttle, aux)
+		if iv != intervalNormal {
+			t.Fatalf("round %d: marker 有效期内应返回 intervalNormal, got %v", i, iv)
+		}
+		if throttle.passiveMode || throttle.windowCount != 0 || rec.counts["full_restore"] != 0 {
+			t.Fatalf("round %d: marker 有效期内不应累加惩罚或执行 full_restore: passive=%v win=%d restores=%d",
+				i, throttle.passiveMode, throttle.windowCount, rec.counts["full_restore"])
+		}
+		clk.now = clk.now.Add(60 * time.Second)
+	}
+
+	// 验证 appLimitStep 在 marker 有效期内(<600s)不重灌已被清空的应用限速规则
+	dataTmp := t.TempDir()
+	scriptTmp := filepath.Join(t.TempDir(), "apply_app_limits.sh")
+	dirtyTmp := filepath.Join(natRunDir, "app_limit.dirty")
+	_ = os.WriteFile(filepath.Join(dataTmp, "app_limits.flat"), []byte("02:5a:00:00:00:01 video 2000\n"), 0o644)
+	_ = os.WriteFile(scriptTmp, []byte("#!/system/bin/sh\n"), 0o755)
+	_ = os.WriteFile(dirtyTmp, []byte("1"), 0o644)
+
+	appliedCount := 0
+	oldScriptFn := runScriptFn
+	runScriptFn = func(p string, _ ...string) {
+		if p == scriptTmp {
+			appliedCount++
+		}
+	}
+	t.Cleanup(func() { runScriptFn = oldScriptFn })
+
+	var lastApply time.Time
+	appLimitStep(scriptTmp, dirtyTmp, dataTmp, natRunDir, &lastApply)
+	if appliedCount != 0 {
+		t.Fatalf("cleanup_rules.marker 有效期内不应重放 apply_app_limits.sh, applied=%d", appliedCount)
+	}
+
+	// 拨过 600s 有效期(此时距最初已 > 600s): marker 自动过期删除, 恢复 full_restore 与应用限速重放
+	clk.now = clk.now.Add(180 * time.Second)
+	iv := handleActive("wlan0", throttle, aux)
+	if iv != intervalRecovery || rec.counts["full_restore"] != 1 {
+		t.Fatalf("marker 过期后应恢复 full_restore: iv=%v restores=%d", iv, rec.counts["full_restore"])
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("过期的 cleanup_rules.marker 应被清理, stat err=%v", err)
+	}
+	appLimitStep(scriptTmp, dirtyTmp, dataTmp, natRunDir, &lastApply)
+	if appliedCount != 1 {
+		t.Fatalf("marker 过期后应恢复执行 apply_app_limits.sh, applied=%d", appliedCount)
+	}
+}
+

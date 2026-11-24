@@ -1557,8 +1557,42 @@ func backupCollectionLen(v any) (int, bool) {
 	}
 }
 
+var v6BackupSysNetRoot = "/sys/class/net"
+
+func isBackupProtectedHostMAC(hncDir, normMAC string) bool {
+	if protectedSpecialMACs[normMAC] {
+		return true
+	}
+	if strings.TrimSpace(hncDir) == "" {
+		return false
+	}
+	if isProtectedMAC(hncDir, normMAC) {
+		return true
+	}
+	if v6BackupSysNetRoot != "" && v6BackupSysNetRoot != "/sys/class/net" {
+		if sb, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state")); err == nil {
+			st := strings.TrimSpace(string(sb))
+			if strings.HasPrefix(st, "ACTIVE:") {
+				ifc := strings.TrimSpace(strings.TrimPrefix(st, "ACTIVE:"))
+				if isValidHotspotIfaceName(ifc) {
+					if mb, mErr := os.ReadFile(filepath.Join(v6BackupSysNetRoot, ifc, "address")); mErr == nil {
+						if strings.EqualFold(strings.TrimSpace(string(mb)), normMAC) {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 // validateBackupFileSemantics 对各关键配置文件执行深层结构与业务红线校验。
 func validateBackupFileSemantics(name string, canon []byte) error {
+	return validateBackupFileSemanticsWithDir("", name, canon)
+}
+
+func validateBackupFileSemanticsWithDir(hncDir, name string, canon []byte) error {
 	if mapped, ok := v6BackupLegacyKeyMap[name]; ok {
 		name = mapped
 	}
@@ -1577,7 +1611,8 @@ func validateBackupFileSemantics(name string, canon []byte) error {
 				return errors.New("rules.json: devices must be an object")
 			}
 			for mac, entry := range dm {
-				if !macRE.MatchString(strings.ToLower(strings.TrimSpace(mac))) {
+				normMAC := strings.ToLower(strings.TrimSpace(mac))
+				if !macRE.MatchString(normMAC) {
 					return fmt.Errorf("rules.json: invalid device mac %q", mac)
 				}
 				if _, ok := entry.(map[string]any); !ok {
@@ -1593,11 +1628,15 @@ func validateBackupFileSemantics(name string, canon []byte) error {
 				}
 				for _, item := range arr {
 					s, ok := item.(string)
-					if !ok || !macRE.MatchString(strings.ToLower(strings.TrimSpace(s))) {
+					normMAC := strings.ToLower(strings.TrimSpace(s))
+					if !ok || !macRE.MatchString(normMAC) {
 						return fmt.Errorf("rules.json: invalid mac in %s", listKey)
 					}
-					if protectedSpecialMACs[strings.ToLower(strings.TrimSpace(s))] {
+					if protectedSpecialMACs[normMAC] {
 						return fmt.Errorf("rules.json: protected special mac %q forbidden in %s", s, listKey)
+					}
+					if listKey == "blacklist" && isBackupProtectedHostMAC(hncDir, normMAC) {
+						return fmt.Errorf("rules.json: protected host mac %q forbidden in blacklist", s)
 					}
 				}
 			}
@@ -1689,8 +1728,8 @@ func validateBackupFileSemantics(name string, canon []byte) error {
 			return fmt.Errorf("self_firewall.json: uid_rules exceeds %d max items", selfFirewallMaxUIDRules)
 		}
 		for _, r := range sfDoc.UIDRules {
-			if r.UID < selfFirewallMinAppUID || r.UID > selfFirewallMaxAppUID {
-				return fmt.Errorf("self_firewall.json: forbidden or invalid uid %d (must be >= %d)", r.UID, selfFirewallMinAppUID)
+			if r.UID < selfFirewallMinAppUID || r.UID > selfFirewallMaxAppUID || isProtectedSelfFirewallSystemUID(r.UID) {
+				return fmt.Errorf("self_firewall.json: forbidden or protected system uid %d (must be non-system app uid >= %d)", r.UID, selfFirewallMinAppUID)
 			}
 			pkg := strings.ToLower(strings.TrimSpace(r.Pkg))
 			if pkg != "" && !isValidAndroidPkgName(pkg) {
@@ -1698,6 +1737,11 @@ func validateBackupFileSemantics(name string, canon []byte) error {
 			}
 			if isProtectedSelfFirewallPkg(pkg) {
 				return fmt.Errorf("self_firewall.json: protected package %q cannot be blocked", r.Pkg)
+			}
+			for _, resolvedPkg := range lookupPackagesByUIDFromPath("", r.UID) {
+				if isProtectedSelfFirewallPkg(resolvedPkg) {
+					return fmt.Errorf("self_firewall.json: uid %d belongs to protected package %q", r.UID, resolvedPkg)
+				}
 			}
 			mode := strings.ToLower(strings.TrimSpace(r.Mode))
 			if mode == "" || !isValidSelfFirewallMode(mode) {
@@ -1812,6 +1856,10 @@ func ExportBackupBundle(hncDir string) (V6BackupBundle, error) {
 
 // validateBackupBundle 纯内存执行整机备份载荷的白名单、语法、业务语义及常量时间 SHA256 校验。
 func validateBackupBundle(bundle V6BackupBundle) (map[string][]byte, error) {
+	return validateBackupBundleWithDir("", bundle)
+}
+
+func validateBackupBundleWithDir(hncDir string, bundle V6BackupBundle) (map[string][]byte, error) {
 	if !isSupportedBackupSchemaVersion(bundle.SchemaVersion) {
 		return nil, fmt.Errorf("unsupported schema_version %q (want %q or 6.0/6.1)", bundle.SchemaVersion, v6BackupSchemaVersion)
 	}
@@ -1831,7 +1879,7 @@ func validateBackupBundle(bundle V6BackupBundle) (map[string][]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid json in %s: %w", name, err)
 		}
-		if err := validateBackupFileSemantics(name, canon); err != nil {
+		if err := validateBackupFileSemanticsWithDir(hncDir, name, canon); err != nil {
 			return nil, err
 		}
 		canonMap[name] = canon
@@ -1857,6 +1905,9 @@ func (s *server) reloadAfterBackupRestore() {
 	if s == nil {
 		return
 	}
+	if s.hncDir != "" {
+		rulesStore.Invalidate(s.hncDir)
+	}
 	if s.limitCtl != nil {
 		s.limitCtl.ReloadPoliciesFromDisk()
 	}
@@ -1880,10 +1931,14 @@ func (s *server) reloadAfterBackupRestore() {
 			st.reloadAllFromDisk()
 		}
 	}
+	s.shaperArbiter().ReplayAfterRestore(time.Now(), s.currentHotspotIface())
 }
 
 func reloadRuntimeCachesAndV6Engines(hncDir string, optSrv ...*server) {
 	cleanDir := filepath.Clean(strings.TrimSpace(hncDir))
+	if cleanDir != "" {
+		rulesStore.Invalidate(cleanDir)
+	}
 	seen := make(map[*server]bool)
 	for _, s := range optSrv {
 		if s != nil && !seen[s] {
@@ -1908,6 +1963,7 @@ func reloadRuntimeCachesAndV6Engines(hncDir string, optSrv ...*server) {
 }
 
 // restoreValidatedBackupBundle 将已校验通过的规范化配置集合通过两阶段 .tmp + fsync + os.Rename 原子落盘。
+// 严格遵守全局锁序: rulesStore.mu -> flock(run/.json_fd) -> mkdir(run/json.lock) -> jsonCache.mu。
 func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, optSrv ...*server) ([]string, error) {
 	if strings.TrimSpace(hncDir) == "" {
 		return nil, errors.New("empty hncDir")
@@ -1929,14 +1985,22 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 		effectiveMap[k] = v
 	}
 
-	// 协同获取 JSON 目录锁
-	releaseJSONLock := acquireCooperativeJSONLock(hncDir)
-	lockHeld := true
-	defer func() {
-		if lockHeld {
-			releaseJSONLock()
+	// 按全局锁序获取 rulesStore.mu 与跨进程排他锁, 锁失败立即报错拒绝裸 Rename!
+	rulesStore.mu.Lock()
+	releaseCrossLock, lockErr := acquireCrossProcJSONLock(hncDir)
+	if lockErr != nil {
+		rulesStore.mu.Unlock()
+		return nil, fmt.Errorf("acquire json lock: %w", lockErr)
+	}
+	locksHeld := true
+	releaseAllLocks := func() {
+		if locksHeld {
+			locksHeld = false
+			releaseCrossLock()
+			rulesStore.mu.Unlock()
 		}
-	}()
+	}
+	defer releaseAllLocks()
 
 	keys := make([]string, 0, len(effectiveMap))
 	for k := range effectiveMap {
@@ -1946,9 +2010,10 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 
 	// 阶段 1: 全部预写成规范 JSON 至 .tmp 隐藏文件并 fsync, 任一失败全量清理回滚
 	type stagedPair struct {
-		name string
-		tmp  string
-		dest string
+		name      string
+		tmp       string
+		dest      string
+		formatted []byte
 	}
 	staged := make([]stagedPair, 0, len(keys))
 	cleanupTmp := func() {
@@ -1972,6 +2037,7 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 			}
 			outBuf.WriteByte('\n')
 		}
+		formattedBytes := append([]byte(nil), outBuf.Bytes()...)
 
 		destPath := filepath.Join(dataDir, name)
 		tmpPath := filepath.Join(dataDir, fmt.Sprintf(".%s.restore.%d.%d.tmp", name, pid, tsNano))
@@ -1980,7 +2046,7 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 			cleanupTmp()
 			return nil, fmt.Errorf("stage %s: %w", name, err)
 		}
-		_, wErr := f.Write(outBuf.Bytes())
+		_, wErr := f.Write(formattedBytes)
 		sErr := f.Sync()
 		cErr := f.Close()
 		if wErr != nil || sErr != nil || cErr != nil {
@@ -1988,18 +2054,28 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 			cleanupTmp()
 			return nil, fmt.Errorf("flush %s failed", name)
 		}
-		staged = append(staged, stagedPair{name: name, tmp: tmpPath, dest: destPath})
+		staged = append(staged, stagedPair{name: name, tmp: tmpPath, dest: destPath, formatted: formattedBytes})
 	}
 
-	// 阶段 2: 依次执行 POSIX 原子 os.Rename 替换目标文件
+	// 阶段 2: 依次执行 POSIX 原子 os.Rename 替换目标文件, 并同步失效进程内缓存与写入 rulesStore 好快照备份
 	restored := make([]string, 0, len(staged))
 	for _, sp := range staged {
 		if err := os.Rename(sp.tmp, sp.dest); err != nil {
 			cleanupTmp()
 			return restored, fmt.Errorf("atomic rename %s: %w", sp.name, err)
 		}
+		invalidateJSONCaches(sp.dest)
+		if sp.name == "rules.json" {
+			rulesStore.cachedSnapshot = nil
+			rulesStore.cachedPath = ""
+			rulesStore.cachedModNano = 0
+			rulesStore.cachedSize = 0
+			rulesStore.writeGoodBackupLocked(hncDir, sp.dest, sp.formatted)
+		}
 		restored = append(restored, sp.name)
 	}
+
+	releaseAllLocks()
 
 	// 同步伴生 app_limits.flat 与脏标记, 使 rulesStore / 数据面立即感知恢复后的新状态
 	if rawAL, ok := effectiveMap["app_limits.json"]; ok {
@@ -2009,9 +2085,6 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 		}
 	}
 	triggerAppLimitApply(hncDir)
-
-	lockHeld = false
-	releaseJSONLock()
 
 	// 清空服务端 JSON 缓存并触发全部活跃 v6 引擎从磁盘热重载最新配置
 	reloadRuntimeCachesAndV6Engines(hncDir, optSrv...)
@@ -2024,7 +2097,7 @@ func RestoreBackupBundle(hncDir string, bundle V6BackupBundle) ([]string, error)
 	if strings.TrimSpace(hncDir) == "" {
 		return nil, errors.New("empty hncDir")
 	}
-	canonMap, err := validateBackupBundle(bundle)
+	canonMap, err := validateBackupBundleWithDir(hncDir, bundle)
 	if err != nil {
 		return nil, err
 	}
@@ -2083,7 +2156,11 @@ func (s *server) apiBackupPost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid backup json: " + err.Error()})
 		return
 	}
-	canonMap, err := validateBackupBundle(bundle)
+	hncDir := ""
+	if s != nil {
+		hncDir = s.hncDir
+	}
+	canonMap, err := validateBackupBundleWithDir(hncDir, bundle)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return

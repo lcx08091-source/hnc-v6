@@ -189,6 +189,79 @@ type candidateSummary struct {
 	samples       []CandidateSample
 }
 
+var (
+	candSharedInfraPaths = []string{
+		filepath.Join("/data/local/hnc/data/dpi_rules.d", SharedInfraFileName),
+		filepath.Join("/data/adb/modules/hotspot_net_ctl/data/dpi_rules.d", SharedInfraFileName),
+		filepath.Join("/data/adb/modules/hotspot_network_control/data/dpi_rules.d", SharedInfraFileName),
+		filepath.Join(externalRulesDir, SharedInfraFileName),
+	}
+)
+
+func loadCandidateSharedInfra(runDir string) *SharedInfra {
+	var paths []string
+	addUnique := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		p = filepath.Clean(p)
+		for _, ex := range paths {
+			if ex == p {
+				return
+			}
+		}
+		paths = append(paths, p)
+	}
+	if cleanRun := strings.TrimSpace(runDir); cleanRun != "" {
+		hncRoot := filepath.Dir(filepath.Clean(cleanRun))
+		addUnique(filepath.Join(hncRoot, "data", "dpi_rules.d", SharedInfraFileName))
+		addUnique(filepath.Join(hncRoot, "etc", "dpi_rules.d", SharedInfraFileName))
+	}
+	for _, p := range candSharedInfraPaths {
+		addUnique(p)
+	}
+
+	var combined []byte
+	for _, p := range paths {
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() || st.Size() <= 0 || st.Size() > sharedInfraMaxBytes {
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		combined = append(combined, b...)
+		if combined[len(combined)-1] != '\n' {
+			combined = append(combined, '\n')
+		}
+	}
+	if len(combined) == 0 {
+		return nil
+	}
+	return ParseSharedInfra(combined)
+}
+
+func isCandidateSharedInfra(host, apex string, si *SharedInfra) bool {
+	if si != nil {
+		if (apex != "" && si.Match(apex)) || (host != "" && si.Match(host)) {
+			return true
+		}
+	}
+	if apex != "" {
+		if _, ok := IsAutoDetectedInfra(apex, si); ok {
+			return true
+		}
+	}
+	if host != "" && host != apex {
+		if _, ok := IsAutoDetectedInfra(host, si); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // processCandidates runs once per expander tick. It folds this tick's
 // unmatched SNIs into the per-apex accumulator, computes tiers, publishes a
 // shadow summary, and — only when auto_promote.enabled — writes HIGH-tier
@@ -197,11 +270,17 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 	rules := loadL3Rules().rules
 	blocklist, _ := loadBlocklist()
 	entityDB := loadEntityDB()
+	sharedInfra := loadCandidateSharedInfra(runDir)
 
 	touched := map[string]struct{}{}
 	for sni, uidSet := range pending {
 		apex := eTLDPlus1(sni)
 		if apex == "" {
+			continue
+		}
+		// C073: 候选入库前直接拦截 shared_infra.txt 与四维自动识别共享基建域名,
+		// 严禁 CDN / 公共 DNS / 统计推送 SDK 进入候选池或污染飞轮。
+		if isCandidateSharedInfra(sni, apex, sharedInfra) {
 			continue
 		}
 		// same-apex (known app subdomain) is auto_expand's job; here we only
@@ -238,6 +317,15 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 		}
 	}
 	acc.age(now)
+	for apex, c := range acc.byApex {
+		sampleHost := apex
+		if c != nil && c.SampleSNI != "" {
+			sampleHost = c.SampleSNI
+		}
+		if isCandidateSharedInfra(sampleHost, apex, sharedInfra) {
+			delete(acc.byApex, apex)
+		}
+	}
 
 	autoPromoteOn := false
 	if _, err := os.Stat(filepath.Join(runDir, autoPromoteFlagFile)); err == nil {
@@ -272,29 +360,35 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 	a.SetConduitUIDs(conduitSet)
 
 	changed := false
-	// v5.7.0-rc33: demote already-promoted rules whose attributed app is now a
-	// VPN/proxy (explicit list) or a detected conduit. Cleans up bad rules like
-	// "capcom.co.jp -> FlClash" that were minted before the exclusion existed.
-	// Manual promotions (user clicked) are NEVER auto-demoted by the conduit
-	// heuristic — only by the explicit list, since the user may knowingly want it.
+	// v5.7.0-rc33 + C073: demote already-promoted rules whose attributed app is now a
+	// VPN/proxy (explicit list), a detected conduit, or a shared_infra/auto-detected CDN domain.
 	for apex, r := range promoted {
 		excludedByList := a.IsFlywheelExcludedPkg(r.Evidence.UIDPkg) || a.IsFlywheelExcludedUID(r.Evidence.UID)
 		conduit := r.Source == "auto_promoted" && isConduitUID(r.Evidence.UID)
-		if excludedByList || conduit {
+		infra := isCandidateSharedInfra(r.Evidence.ObservedHostname, apex, sharedInfra)
+		if excludedByList || conduit || infra {
 			delete(promoted, apex)
 			if c := acc.byApex[apex]; c != nil {
 				c.SharedLearned = true
 			}
 			changed = true
+			reason := "conduit"
+			if excludedByList {
+				reason = "vpn/proxy"
+			} else if infra {
+				reason = "shared_infra"
+			}
 			log.Printf("flywheel-exclude: demoted %s -> %q (uid=%d pkg=%q reason=%s)",
-				apex, r.App, r.Evidence.UID, r.Evidence.UIDPkg,
-				map[bool]string{true: "vpn/proxy", false: "conduit"}[excludedByList])
+				apex, r.App, r.Evidence.UID, r.Evidence.UIDPkg, reason)
 		}
 	}
 
 	sum := candidateSummary{autoPromoteOn: autoPromoteOn, entityDBSize: len(entityDB)}
 	for apex, c := range acc.byApex {
 		tier, uid := classifyTier(c, blocklist, entityDB)
+		if tier != "shared" && isCandidateSharedInfra(c.SampleSNI, apex, sharedInfra) {
+			tier, uid = "shared", 0
+		}
 		sum.pending++
 		switch tier {
 		case "high":

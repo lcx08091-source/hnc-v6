@@ -188,12 +188,20 @@ MARKER="$HNC_DIR/run/stats_last_date"
 today=$(date +%Y-%m-%d 2>/dev/null)
 last_date=$(cat "$MARKER" 2>/dev/null)
 
+_update_marker=1
 if [ -n "$today" ] && [ -n "$last_date" ] && [ "$today" != "$last_date" ]; then
     [ -n "$CLOCK_JUMPED" ] && log "note: date change coincides with a clock jump (${CLOCK_JUMPED}s)"
     log "date changed: $last_date -> $today, triggering rollup"
-    sh "$HNC_DIR/bin/stats_rollup.sh" "$last_date" >> "$LOG" 2>&1 || \
-        log "WARN: rollup failed (rc=$?)"
+    if sh "$HNC_DIR/bin/stats_rollup.sh" "$last_date" >> "$LOG" 2>&1; then
+        _update_marker=1
+    else
+        _rrc=$?
+        _update_marker=0
+        log "WARN: rollup failed (rc=$_rrc), keeping stats_last_date=$last_date for retry"
+    fi
 fi
-echo "$today" > "$MARKER" 2>/dev/null
+if [ "$_update_marker" = "1" ] && [ -n "$today" ]; then
+    echo "$today" > "$MARKER" 2>/dev/null
+fi
 
 exit 0

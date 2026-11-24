@@ -23,10 +23,12 @@ package bytestats
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
@@ -61,7 +63,43 @@ var (
 		NetdIfaceIndexNameMapPath,
 		"/sys/fs/bpf/tethering/map_netd_iface_index_name_map",
 	}
+
+	// Cross-cycle / cross-lease cache of resolved non-empty ifindex -> name mappings.
+	// Never stores empty strings (""), so newly-registered interfaces resolve immediately
+	// while vanished VPN/CLAT tunnels (tun0, v4-*) retain their name for exclusion.
+	netdIfaceCacheMu sync.RWMutex
+	netdIfaceCache   = make(map[uint32]string, 32)
 )
+
+const netdIfaceCacheMaxEntries = 512
+
+func getCachedNetdIfaceName(ifindex uint32) (string, bool) {
+	if ifindex == 0 {
+		return "", false
+	}
+	netdIfaceCacheMu.RLock()
+	name, ok := netdIfaceCache[ifindex]
+	netdIfaceCacheMu.RUnlock()
+	if !ok || name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+func putCachedNetdIfaceName(ifindex uint32, name string) {
+	name = strings.TrimSpace(name)
+	if ifindex == 0 || name == "" {
+		return
+	}
+	netdIfaceCacheMu.Lock()
+	if len(netdIfaceCache) >= netdIfaceCacheMaxEntries {
+		if _, exists := netdIfaceCache[ifindex]; !exists {
+			clear(netdIfaceCache)
+		}
+	}
+	netdIfaceCache[ifindex] = name
+	netdIfaceCacheMu.Unlock()
+}
 
 // netdDetailStatsKey matches AOSP struct stats_key (16 bytes: 4 * uint32).
 type netdDetailStatsKey struct {
@@ -96,19 +134,26 @@ type NetdUIDDetail struct {
 	BgWiFi   ByteCounts
 	FgWiFi   ByteCounts
 
+	// UnresolvedBg / UnresolvedFg record unarchived bytes on unknown empty-name
+	// ifindexes when HasIfaceNameMap is false (so live totals keep them without
+	// permanently inflating monotonic high-water marks).
+	UnresolvedBg ByteCounts
+	UnresolvedFg ByteCounts
+
 	// Foreground reflects real-time state from map_netd_uid_counterset_map (counterSet == 1).
 	Foreground bool
 }
 
 // NetdDetailSnapshot is a point-in-time snapshot read from netd_shared BPF maps.
 type NetdDetailSnapshot struct {
-	ByUID             map[int]NetdUIDDetail
-	ForegroundUIDs    map[int]bool
-	IfaceNames        map[uint32]string
-	HasStatsAB        bool
-	HasCounterSetMap  bool
-	HasIfaceNameMap   bool
-	StatsABTotalBytes uint64
+	ByUID              map[int]NetdUIDDetail
+	ForegroundUIDs     map[int]bool
+	IfaceNames         map[uint32]string
+	HasStatsAB         bool
+	HasCounterSetMap   bool
+	HasIfaceNameMap    bool
+	HasUnresolvedIface bool
+	StatsABTotalBytes  uint64
 }
 
 // NetdDetailSampler reads netd_shared BPF maps with reusable, heap-pinned,
@@ -130,6 +175,7 @@ type NetdDetailSampler struct {
 	statsBFD     int
 	counterSetFD int
 	ifaceNameFD  int
+	ifaceCache   map[uint32]string
 }
 
 // Compile-time offset & alignment assertions (zero runtime cost).
@@ -201,6 +247,7 @@ func NewNetdDetailSampler() (*NetdDetailSampler, error) {
 		statsBFD:     -1,
 		counterSetFD: -1,
 		ifaceNameFD:  -1,
+		ifaceCache:   make(map[uint32]string, 16),
 	}
 	if fd, err := openValidatedNetdMap(altStatsMapAPaths, validDetailStatsABSchema); err == nil {
 		s.statsAFD = fd
@@ -224,7 +271,7 @@ func (s *NetdDetailSampler) Close() error {
 	}
 	var firstErr error
 	closeOne := func(fd *int) {
-		if *fd > 0 {
+		if *fd >= 0 {
 			if err := syscall.Close(*fd); err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -310,9 +357,45 @@ func addByteCounts(dst *ByteCounts, val netdDetailValueBuf) {
 	dst.TxBytes += val.TxBytes
 }
 
+func (s *NetdDetailSampler) rememberIfaceName(ifindex uint32, name string) {
+	name = strings.TrimSpace(name)
+	if ifindex == 0 || name == "" {
+		return
+	}
+	if s.ifaceCache == nil {
+		s.ifaceCache = make(map[uint32]string, 16)
+	}
+	if len(s.ifaceCache) >= netdIfaceCacheMaxEntries {
+		if _, exists := s.ifaceCache[ifindex]; !exists {
+			clear(s.ifaceCache)
+		}
+	}
+	s.ifaceCache[ifindex] = name
+	putCachedNetdIfaceName(ifindex, name)
+}
+
+func (s *NetdDetailSampler) lookupCachedIfaceName(ifindex uint32) (string, bool) {
+	if ifindex == 0 {
+		return "", false
+	}
+	if s.ifaceCache != nil {
+		if name := s.ifaceCache[ifindex]; name != "" {
+			return name, true
+		}
+	}
+	if name, ok := getCachedNetdIfaceName(ifindex); ok && name != "" {
+		if s.ifaceCache == nil {
+			s.ifaceCache = make(map[uint32]string, 16)
+		}
+		s.ifaceCache[ifindex] = name
+		return name, true
+	}
+	return "", false
+}
+
 func (s *NetdDetailSampler) readIfaceNameMap() map[uint32]string {
 	out := make(map[uint32]string, 16)
-	if s.ifaceNameFD <= 0 {
+	if s.ifaceNameFD < 0 {
 		return out
 	}
 	s.uidKey, s.uidNext = 0, 0
@@ -334,6 +417,7 @@ func (s *NetdDetailSampler) readIfaceNameMap() map[uint32]string {
 			}
 			if name := strings.TrimSpace(string(raw)); name != "" {
 				out[s.uidNext] = name
+				s.rememberIfaceName(s.uidNext, name)
 			}
 		}
 		s.uidKey = s.uidNext
@@ -344,7 +428,7 @@ func (s *NetdDetailSampler) readIfaceNameMap() map[uint32]string {
 
 func (s *NetdDetailSampler) readCounterSetMap() map[int]bool {
 	out := make(map[int]bool, 32)
-	if s.counterSetFD <= 0 {
+	if s.counterSetFD < 0 {
 		return out
 	}
 	s.uidKey, s.uidNext = 0, 0
@@ -372,11 +456,56 @@ func (s *NetdDetailSampler) readCounterSetMap() map[int]bool {
 	return out
 }
 
-func (s *NetdDetailSampler) accumulateStatsMap(fd int, ifaceNames map[uint32]string, byUID map[int]NetdUIDDetail) uint64 {
-	if fd <= 0 {
-		return 0
+func resolveIfaceNameThreeTier(
+	s *NetdDetailSampler,
+	ifindex uint32,
+	ifaceNames map[uint32]string,
+	missedThisPass map[uint32]bool,
+) string {
+	if ifindex == 0 {
+		return ""
+	}
+	// Tier 1: live BPF map_netd_iface_index_name_map snapshot.
+	if name := ifaceNames[ifindex]; name != "" {
+		return name
+	}
+	// Tier 2: cross-cycle non-empty ifindex->name cache + net.InterfaceByIndex.
+	if name, ok := s.lookupCachedIfaceName(ifindex); ok {
+		ifaceNames[ifindex] = name
+		return name
+	}
+	if missedThisPass[ifindex] {
+		return ""
+	}
+	if ifc, err := net.InterfaceByIndex(int(ifindex)); err == nil && ifc != nil {
+		if name := strings.TrimSpace(ifc.Name); name != "" {
+			ifaceNames[ifindex] = name
+			s.rememberIfaceName(ifindex, name)
+			return name
+		}
+	}
+	// Tier 3: /sys/class/net/*/ifindex scan (never cache "" across cycles).
+	if name := strings.TrimSpace(lookupSysfsIfaceNameByIndex(ifindex)); name != "" {
+		ifaceNames[ifindex] = name
+		s.rememberIfaceName(ifindex, name)
+		return name
+	}
+	missedThisPass[ifindex] = true
+	return ""
+}
+
+func (s *NetdDetailSampler) accumulateStatsMap(
+	fd int,
+	hasIfaceNameMap bool,
+	ifaceNames map[uint32]string,
+	missedThisPass map[uint32]bool,
+	byUID map[int]NetdUIDDetail,
+) (uint64, bool) {
+	if fd < 0 {
+		return 0, false
 	}
 	var totalBytes uint64
+	hasUnresolved := false
 	s.statsKey, s.statsNext = netdDetailStatsKey{}, netdDetailStatsKey{}
 	first := true
 	for {
@@ -397,10 +526,13 @@ func (s *NetdDetailSampler) accumulateStatsMap(fd int, ifaceNames map[uint32]str
 			continue
 		}
 
-		ifName, ok := ifaceNames[k.IfaceIndex]
-		if !ok && k.IfaceIndex > 0 {
-			ifName = lookupSysfsIfaceNameByIndex(k.IfaceIndex)
-			ifaceNames[k.IfaceIndex] = ifName
+		ifName := resolveIfaceNameThreeTier(s, k.IfaceIndex, ifaceNames, missedThisPass)
+		if k.IfaceIndex > 0 && ifName == "" && hasIfaceNameMap {
+			// HasIfaceNameMap is true and all 3 tiers returned empty: unregistered/destroyed
+			// virtual tunnel (e.g. vanished tun0/v4-*), skip to prevent double-counting.
+			s.statsKey = s.statsNext
+			first = false
+			continue
 		}
 		if ShouldExcludeNetdIface(ifName) {
 			s.statsKey = s.statsNext
@@ -415,13 +547,23 @@ func (s *NetdDetailSampler) accumulateStatsMap(fd int, ifaceNames map[uint32]str
 			continue
 		}
 		val := s.val
-		totalBytes += val.RxBytes + val.TxBytes
+		unresolvedEmpty := k.IfaceIndex > 0 && ifName == ""
+		if !unresolvedEmpty {
+			// Only accumulate known physical interfaces into StatsABTotalBytes so
+			// transient unknown empty interfaces never inflate persistent high-water marks.
+			totalBytes += val.RxBytes + val.TxBytes
+		} else {
+			hasUnresolved = true
+		}
 
 		uid := int(k.UID)
 		det := byUID[uid]
 		netKind := ClassifyNetdIface(ifName)
 		if k.CounterSet == 1 {
 			addByteCounts(&det.FgAll, val)
+			if unresolvedEmpty {
+				addByteCounts(&det.UnresolvedFg, val)
+			}
 			switch netKind {
 			case "mobile":
 				addByteCounts(&det.FgMobile, val)
@@ -430,6 +572,9 @@ func (s *NetdDetailSampler) accumulateStatsMap(fd int, ifaceNames map[uint32]str
 			}
 		} else {
 			addByteCounts(&det.BgAll, val)
+			if unresolvedEmpty {
+				addByteCounts(&det.UnresolvedBg, val)
+			}
 			switch netKind {
 			case "mobile":
 				addByteCounts(&det.BgMobile, val)
@@ -442,12 +587,12 @@ func (s *NetdDetailSampler) accumulateStatsMap(fd int, ifaceNames map[uint32]str
 		s.statsKey = s.statsNext
 		first = false
 	}
-	return totalBytes
+	return totalBytes, hasUnresolved
 }
 
 // SampleDetail performs a single sub-millisecond read across all open netd BPF maps.
 func (s *NetdDetailSampler) SampleDetail() (*NetdDetailSnapshot, error) {
-	if s == nil || s.appUIDFD <= 0 {
+	if s == nil || s.appUIDFD < 0 {
 		return nil, fmt.Errorf("netd detail sampler closed")
 	}
 
@@ -482,6 +627,7 @@ func (s *NetdDetailSampler) SampleDetail() (*NetdDetailSnapshot, error) {
 	}
 
 	// 2. Read interface index -> name map.
+	hasIfaceMap := s.ifaceNameFD >= 0
 	ifaceNames := s.readIfaceNameMap()
 
 	// 3. Read current foreground/background counterSet map.
@@ -489,12 +635,18 @@ func (s *NetdDetailSampler) SampleDetail() (*NetdDetailSnapshot, error) {
 
 	// 4. Read live unarchived foreground/background per-iface counters from stats_map_A/B.
 	var abTotal uint64
-	hasAB := s.statsAFD > 0 || s.statsBFD > 0
-	if s.statsAFD > 0 {
-		abTotal += s.accumulateStatsMap(s.statsAFD, ifaceNames, byUID)
+	hasAB := s.statsAFD >= 0 || s.statsBFD >= 0
+	hasUnresolved := false
+	missedThisPass := make(map[uint32]bool, 4)
+	if s.statsAFD >= 0 {
+		totA, unresA := s.accumulateStatsMap(s.statsAFD, hasIfaceMap, ifaceNames, missedThisPass, byUID)
+		abTotal += totA
+		hasUnresolved = hasUnresolved || unresA
 	}
-	if s.statsBFD > 0 {
-		abTotal += s.accumulateStatsMap(s.statsBFD, ifaceNames, byUID)
+	if s.statsBFD >= 0 {
+		totB, unresB := s.accumulateStatsMap(s.statsBFD, hasIfaceMap, ifaceNames, missedThisPass, byUID)
+		abTotal += totB
+		hasUnresolved = hasUnresolved || unresB
 	}
 
 	// 5. Stamp real-time foreground state onto all observed UIDs.
@@ -505,13 +657,14 @@ func (s *NetdDetailSampler) SampleDetail() (*NetdDetailSnapshot, error) {
 	}
 
 	return &NetdDetailSnapshot{
-		ByUID:             byUID,
-		ForegroundUIDs:    fgUIDs,
-		IfaceNames:        ifaceNames,
-		HasStatsAB:        hasAB,
-		HasCounterSetMap:  s.counterSetFD > 0,
-		HasIfaceNameMap:   s.ifaceNameFD > 0,
-		StatsABTotalBytes: abTotal,
+		ByUID:              byUID,
+		ForegroundUIDs:     fgUIDs,
+		IfaceNames:         ifaceNames,
+		HasStatsAB:         hasAB,
+		HasCounterSetMap:   s.counterSetFD >= 0,
+		HasIfaceNameMap:    hasIfaceMap,
+		HasUnresolvedIface: hasUnresolved,
+		StatsABTotalBytes:  abTotal,
 	}, nil
 }
 
@@ -520,7 +673,7 @@ func (s *NetdDetailSampler) SampleDetail() (*NetdDetailSnapshot, error) {
 // and closes the fd immediately (0 resident file descriptors).
 func ReadNetdForegroundUIDs() (map[int]bool, bool) {
 	fd, err := openValidatedNetdMap(altUIDCounterSetMapPaths, validDetailCounterSetSchema)
-	if err != nil || fd <= 0 {
+	if err != nil || fd < 0 {
 		return nil, false
 	}
 	tmp := &NetdDetailSampler{

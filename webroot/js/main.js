@@ -248,6 +248,10 @@ var _sigHistKey = '';
 var _sigPollT = 0;
 var _sigPollBusy = false;
 var _sigTechFoldOpen = false;
+var _sigPressing = false;
+var _sigPressEndAt = 0;
+var _sigDeferT = 0;
+var _sigPressGuardsBound = false;
 
 var SIG_REASON_ZH = {
   pending_first_sample: '后台信号探针正在执行首次异步采样，请稍候刷新',
@@ -321,7 +325,8 @@ function _sigNormPoint(pt, isWifiFallback, rttFallback) {
 function ingestSignalSample(sig) {
   if (sig && typeof sig === 'object') _sigSyncContext(sig);
   if (!sig || typeof sig !== 'object' || !sig.available) return _sigClientHist;
-  var ar = S.autorate || (S.cfg && S.cfg.autorate) || {};
+  var arRaw = S.autorate || (S.cfg && S.cfg.autorate);
+  var ar = (arRaw && arRaw.enabled === true) ? arRaw : {};
   var rttFb = num(ar.rtt_ms, 0);
   var isWifi = sig.mode === 'wifi_sta';
   var map = {};
@@ -711,7 +716,8 @@ function signalSheetHtml() {
       '</div>' +
       '<div class="btns" style="margin-top:12px"><button class="btn sec press" id="sig-refresh-btn">立即刷新信号</button><button class="btn pri press" data-close>完成</button></div>';
   }
-  var ar = S.autorate || (S.cfg && S.cfg.autorate) || {};
+  var arRaw = S.autorate || (S.cfg && S.cfg.autorate);
+  var ar = (arRaw && arRaw.enabled === true) ? arRaw : {};
   var isWifi = sig.mode === 'wifi_sta';
   var dbm = isWifi ? sig.wifi_rssi_dbm : sig.rsrp_dbm;
   var validDbm = _sigValidDbm(dbm);
@@ -833,11 +839,34 @@ function isSignalSheetOpen() {
   var sh = $('#sheet');
   return !!(sh && sh.classList.contains('show') && !(typeof SM !== 'undefined' && SM.closing) && sh.dataset && sh.dataset.kind === 'signal');
 }
+function _ensureSigSheetPressGuards() {
+  if (_sigPressGuardsBound) return;
+  var sh = $('#sheet');
+  if (!sh) return;
+  _sigPressGuardsBound = true;
+  var onDown = function () {
+    if (isSignalSheetOpen()) _sigPressing = true;
+  };
+  var onUp = function () {
+    if (_sigPressing) {
+      _sigPressing = false;
+      _sigPressEndAt = Date.now();
+    }
+  };
+  sh.addEventListener('pointerdown', onDown, true);
+  sh.addEventListener('touchstart', onDown, { capture: true, passive: true });
+  window.addEventListener('pointerup', onUp, true);
+  window.addEventListener('pointercancel', onUp, true);
+  window.addEventListener('touchend', onUp, true);
+  window.addEventListener('touchcancel', onUp, true);
+}
 function stopSignalSheetPoll() {
   if (_sigPollT) { clearInterval(_sigPollT); _sigPollT = 0; }
+  if (_sigDeferT) { clearTimeout(_sigDeferT); _sigDeferT = 0; }
+  _sigPressing = false;
   _sigPollBusy = false;
 }
-function _renderSignalSheetInPlace(sig) {
+function _renderSignalSheetInPlace(sig, forceImmediate) {
   if (sig && typeof sig === 'object') {
     _sigSyncContext(sig);
     S.signal = sig;
@@ -846,20 +875,30 @@ function _renderSignalSheetInPlace(sig) {
   paintSignalPill();
   if (!isSignalSheetOpen()) return;
   var sh = $('#sheet'), sb = $('#sheet-body');
-  if (sh.classList.contains('is-dragging')) return;
-  if (!sb) return;
-  var prevShTop = sh ? sh.scrollTop : 0;
+  if (!sh || !sb) return;
+  if (!forceImmediate && (sh.classList.contains('is-dragging') || _sigPressing || (Date.now() - _sigPressEndAt < 420))) {
+    if (!_sigDeferT) {
+      _sigDeferT = setTimeout(function () {
+        _sigDeferT = 0;
+        if (isSignalSheetOpen()) _renderSignalSheetInPlace(null, false);
+      }, 430);
+    }
+    return;
+  }
+  if (_sigDeferT) { clearTimeout(_sigDeferT); _sigDeferT = 0; }
+  var prevShTop = sh.scrollTop || 0;
   var prevSbTop = sb.scrollTop || 0;
   var foldEl = $('#sig-tech-fold');
   if (foldEl) _sigTechFoldOpen = !!(foldEl.open || foldEl.classList.contains('open'));
-  sb.innerHTML = signalSheetHtml();
+  if (typeof morph === 'function') morph(sb, signalSheetHtml());
+  else sb.innerHTML = signalSheetHtml();
   var nf = $('#sig-tech-fold');
-  if (nf && _sigTechFoldOpen) {
-    nf.open = true;
-    nf.classList.add('open');
+  if (nf) {
+    nf.open = !!_sigTechFoldOpen;
+    nf.classList.toggle('open', !!_sigTechFoldOpen);
   }
   bindSignalSheetBtn();
-  if (sh) sh.scrollTop = prevShTop;
+  sh.scrollTop = prevShTop;
   sb.scrollTop = prevSbTop;
 }
 var renderSignalSheet = _renderSignalSheetInPlace;
@@ -869,7 +908,7 @@ function tickSignalSheetPoll() {
   _sigPollBusy = true;
   api.get('/api/signal', { refresh: 1 }, { timeout: 4500 }).then(function (r) {
     _sigPollBusy = false;
-    if (r && typeof r === 'object') _renderSignalSheetInPlace(r);
+    if (r && typeof r === 'object') _renderSignalSheetInPlace(r, false);
   }).catch(function () {
     _sigPollBusy = false;
   });
@@ -891,7 +930,7 @@ function bindSignalSheetBtn() {
   var rb = $('#sig-refresh-btn');
   if (rb) rb.onclick = function () {
     busyWhile(rb, api.get('/api/signal', { refresh: 1 }, { timeout: 5000 }).then(function (r) {
-      _renderSignalSheetInPlace(r);
+      _renderSignalSheetInPlace(r, true);
       toast('实时信号与频段已刷新');
     }).catch(function (e) { toast(errText(e), 'err'); }));
   };
@@ -899,6 +938,7 @@ function bindSignalSheetBtn() {
 function signalSheet() {
   if (S.signal && S.signal.available) ingestSignalSample(S.signal);
   sheet(signalSheetHtml(), { kind: 'signal', tall: true, onClose: stopSignalSheetPoll });
+  _ensureSigSheetPressGuards();
   bindSignalSheetBtn();
   startSignalSheetPoll();
   tickSignalSheetPoll();
@@ -1141,11 +1181,11 @@ document.addEventListener('click', function (e) {
           return loadConfig();
         }).then(function () {
           if (S.page === 'settings') renderSettings(false);
-          else if (S.page === 'apps') renderApps(false);
+          if (S.page === 'apps') renderApps(false);
         });
       });
       return loadConfig();
-    }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); });
+    }).then(function () { if (S.page === 'settings') renderSettings(false); if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); });
     return;
   }
   if ((q = t.closest('[data-fpdel]'))) { var fid = q.getAttribute('data-fpdel'), fall = fid === '__all'; confirmSheet(fall ? '撤销全部识别纠正？' : '撤销这条识别纠正？', '之后这类连接重新按规则库和自动学习来识别。', '撤销').then(function (ok) { if (ok) busyWhile(q, api.action('dpi_correct_del', fall ? { all: 'true' } : { id: fid })).then(function () { toast('已撤销'); return loadFP(); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); return; }
@@ -1366,9 +1406,10 @@ document.addEventListener('click', function (e) {
       var bdVal = clamp(Math.round(num(bdIn && bdIn.value, (S.puCfg && S.puCfg.billing_day) || 1)), 1, 28);
       var ancStr = ancIn ? ancIn.value.trim() : '';
       if (pVal < 0) { toast('套餐容量不能为负数', 'err'); break; }
+      if (ancStr !== '' && !(isFinite(Number(ancStr)) && Number(ancStr) >= 0)) { toast('已用校准请填 0 或正数，留空则自动统计', 'err'); break; }
       var puParams = { billing_day: String(bdVal) };
       puParams[sSlot === 1 ? 'plan_sim1_gb' : 'plan_sim2_gb'] = trim0(pVal.toFixed(2));
-      puParams[sSlot === 1 ? 'anchor_sim1_gb' : 'anchor_sim2_gb'] = ancStr === '' ? '-1' : trim0(Math.max(0, num(ancStr)).toFixed(2));
+      puParams[sSlot === 1 ? 'anchor_sim1_gb' : 'anchor_sim2_gb'] = ancStr === '' ? '-1' : trim0(Number(ancStr).toFixed(2));
       busyWhile(a, api.action('phone_usage_set', puParams)).then(function () {
         S.puEditSlot = 0; S.pu = {};
         var st0 = $('#pu-set'); if (st0) st0._filled = false;
@@ -1399,17 +1440,18 @@ document.addEventListener('click', function (e) {
       busyWhile(a, api.action('stale_ttl_set', { days: String(td) })).then(function () { toast(td ? '离线 ' + td + ' 天后自动清理规则' : '已关闭离线规则自动清理'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'fw-add': var fwScope = a.closest('.set-body, .fold-in, .rows') || document, fwEl = $('input[data-fw-inp], #fw-pkg', fwScope), pkg = (fwEl ? fwEl.value : '').trim(); if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(pkg)) { toast('包名格式不对', 'err'); break; }
       busyWhile(a, api.action('flywheel_exclude_set', { op: 'add', pkg: pkg })).then(function () {
+        if (fwEl) fwEl.value = '';
         undoToast('已排除 ' + pkg + ' · 约 5 分钟内生效', function () {
           return api.action('flywheel_exclude_set', { op: 'remove', pkg: pkg }).then(function () {
             toast('已撤销排除 ' + pkg);
             return loadConfig();
           }).then(function () {
             if (S.page === 'settings') renderSettings(false);
-            else if (S.page === 'apps') renderApps(false);
+            if (S.page === 'apps') renderApps(false);
           });
         });
         return loadConfig();
-      }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+      }).then(function () { if (S.page === 'settings') renderSettings(false); if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'webacc-save': (function () {
       var mode = S.webaccMode || ((S.cfg.webui_access || {}).mode) || 'all', mi = $('#webacc-macs');
       busyWhile(a, api.action('webui_access_set', { mode: mode, macs: mi ? mi.value.replace(/[\s，]+/g, ',').replace(/,+/g, ',').replace(/^,|,$/g, '') : '' })).then(function () {

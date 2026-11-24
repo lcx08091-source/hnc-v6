@@ -726,3 +726,85 @@ func TestDevscanReResolveCooldownAndNoDowngrade(t *testing.T) {
 		t.Fatalf("有效主机名被降级: %+v", d)
 	}
 }
+
+func TestM4ReaderCoroutinePreFiltersNonHotspotNDPByDynamicIfIdx(t *testing.T) {
+	es := []neigh.Entry{
+		{IfIndex: 21, IP: net.ParseIP("fe80::1"), MAC: "02:00:00:00:00:01", State: neigh.NUDReachable},
+		{IfIndex: 7, IP: net.ParseIP("192.168.43.10"), MAC: "02:5a:00:00:00:10", State: neigh.NUDReachable},
+		{IfIndex: 22, IP: net.ParseIP("2409:8a00::99"), MAC: "02:00:00:00:00:02", State: neigh.NUDStale},
+	}
+	// ifIdx=0 未知时不误拦
+	if got := filterHotspotNeighEvents(append([]neigh.Entry(nil), es...), 0); len(got) != 3 {
+		t.Fatalf("ifIdx=0 时不应预筛丢包, got=%d", len(got))
+	}
+	// ifIdx=7 时仅放行热点口事件
+	got7 := filterHotspotNeighEvents(append([]neigh.Entry(nil), es...), 7)
+	if len(got7) != 1 || got7[0].IfIndex != 7 {
+		t.Fatalf("ifIdx=7 预筛异常: %+v", got7)
+	}
+	// 全蜂窝 NDP 批次预筛后为空切片(读协程直接 continue 零唤醒主循环)
+	cellOnly := []neigh.Entry{
+		{IfIndex: 21, IP: net.ParseIP("fe80::1"), MAC: "02:00:00:00:00:01", State: neigh.NUDReachable},
+	}
+	if gotCell := filterHotspotNeighEvents(cellOnly, 7); len(gotCell) != 0 {
+		t.Fatalf("纯蜂窝口事件应被预筛为空, got=%+v", gotCell)
+	}
+}
+
+func TestM4StopCancelsFirstGenerationLockAndIdempotentHotspotDownZeroing(t *testing.T) {
+	m4TestEnv(t)
+
+	// 1. 验证 Stop() 先调 stopCancel() 立即取消 stopCtx
+	r1 := newStubM4Runner("wlan2")
+	r1.Stop()
+	if r1.stopCtx.Err() == nil {
+		t.Fatal("r.Stop() 必须立即触发 stopCancel()")
+	}
+	r1.Stop() // 验证并发/重复调用幂等无 panic
+
+	// 2. 验证代际写锁: 旧代际 runner 尝试晚到写盘被拦截, 绝不覆盖新代际数据
+	rOld := newStubM4Runner("wlan2")
+	rOld.table.Apply(neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.88"), MAC: "02:5a:00:00:00:88", State: neigh.NUDReachable}, time.Now())
+	rNew := newStubM4Runner("wlan2")
+	rNew.table.Fast = func(string) (string, string) { return "new-dev", "manual" }
+	rNew.table.Apply(neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.99"), MAC: "02:5a:00:00:00:99", State: neigh.NUDReachable}, time.Now())
+	if err := rNew.writeDevicesAtomic(rNew.table.RenderJSON(nil, nil)); err != nil {
+		t.Fatalf("新代际写入应成功: %v", err)
+	}
+	if err := rOld.writeDevicesAtomic(rOld.table.RenderJSON(nil, nil)); !errors.Is(err, errM4StaleGen) {
+		t.Fatalf("旧代际重叠写应被拦截并返回 errM4StaleGen, got %v", err)
+	}
+	b, err := os.ReadFile(m4DevicesJSON)
+	if err != nil || !strings.Contains(string(b), "192.168.43.99") || strings.Contains(string(b), "192.168.43.88") {
+		t.Fatalf("旧代际不得污染新代际 devices.json: %s (err=%v)", b, err)
+	}
+
+	// 3. 验证关热点幂等归零非空在线态, 且待机已空时反复调 hotspotDown() 零写盘
+	mgr := &m4WriterMgr{}
+	mgr.hotspotDown()
+	afterDown, err := os.ReadFile(m4DevicesJSON)
+	if err != nil || strings.TrimSpace(string(afterDown)) != "{}" {
+		t.Fatalf("关热点后非空 devices.json 应被归零为 {}, got %q err=%v", afterDown, err)
+	}
+	flatAfter, _ := os.ReadFile(m4DevicesFlat)
+	if len(flatAfter) != 0 {
+		t.Fatalf("关热点后 devices.flat 应归零为空, got %q", flatAfter)
+	}
+
+	writesBeforeIdle := m4GoWrites.Load()
+	fiBefore, err := os.Stat(m4DevicesJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.hotspotDown()
+	mgr.tick("", time.Now())
+	writesAfterIdle := m4GoWrites.Load()
+	fiAfter, err := os.Stat(m4DevicesJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writesAfterIdle != writesBeforeIdle || !os.SameFile(fiBefore, fiAfter) {
+		t.Fatalf("待机已空时应零写盘: writes %d -> %d", writesBeforeIdle, writesAfterIdle)
+	}
+}
+

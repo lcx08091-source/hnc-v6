@@ -122,6 +122,61 @@ rb_restore_cfg_snapshot() {
     return 0
 }
 
+RB_SELF_DIR=${0%/*}
+
+rb_load_proc() {
+    _rlp_hnc="$1"
+    for _rlp_f in "$_rlp_hnc/bin/hnc_proc.sh" "$RB_SELF_DIR/hnc_proc.sh"; do
+        if [ -f "$_rlp_f" ]; then
+            . "$_rlp_f"
+            return 0
+        fi
+    done
+    return 1
+}
+
+rb_uptime_sec() {
+    if [ -n "${HNC_RB_UPTIME_OVERRIDE:-}" ]; then
+        _rbu="${HNC_RB_UPTIME_OVERRIDE%%.*}"
+    else
+        _rbuf="${HNC_RB_UPTIME_FILE:-/proc/uptime}"
+        [ -r "$_rbuf" ] || return 1
+        read -r _rbu _rb_rest < "$_rbuf" 2>/dev/null || return 1
+        _rbu="${_rbu%%.*}"
+    fi
+    case "$_rbu" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$_rbu"
+    return 0
+}
+
+rb_boot_id() {
+    if [ -n "${HNC_RB_BOOT_ID_OVERRIDE:-}" ]; then
+        _rbb=$(printf '%s' "$HNC_RB_BOOT_ID_OVERRIDE" | tr -d ' \t\r\n')
+    else
+        _rbbf="${HNC_RB_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+        [ -r "$_rbbf" ] || return 1
+        _rbb=$(tr -d ' \t\r\n' < "$_rbbf" 2>/dev/null)
+    fi
+    [ -n "$_rbb" ] || return 1
+    printf '%s' "$_rbb"
+    return 0
+}
+
+rb_write_observing() {
+    _wo_d="$1"
+    _wo_ep="${HNC_RB_NOW_OVERRIDE:-$(date +%s 2>/dev/null || echo 0)}"
+    case "$_wo_ep" in ''|*[!0-9]*) _wo_ep=0 ;; esac
+    _wo_up=$(rb_uptime_sec 2>/dev/null || true)
+    _wo_bid=$(rb_boot_id 2>/dev/null || true)
+    if [ -n "$_wo_up" ] && [ -n "$_wo_bid" ]; then
+        printf '%s %s %s\n' "$_wo_ep" "$_wo_up" "$_wo_bid" > "$_wo_d/rollback.observing.tmp" 2>/dev/null \
+            && mv -f "$_wo_d/rollback.observing.tmp" "$_wo_d/rollback.observing" 2>/dev/null \
+            || printf '%s %s %s\n' "$_wo_ep" "$_wo_up" "$_wo_bid" > "$_wo_d/rollback.observing" 2>/dev/null || true
+    else
+        printf '%s\n' "$_wo_ep" > "$_wo_d/rollback.observing" 2>/dev/null || true
+    fi
+}
+
 # ── 快照 ─────────────────────────────────────────────────────────────
 # 返回: 0 = 正常(继续 sync); 3 = pinned 且模块版本没变(跳过 sync);
 #       1 = 内部错误(照常继续 sync, 失败不影响开机)。
@@ -139,7 +194,7 @@ rb_snapshot() {
     fi
     if [ -n "$_pin" ] && [ "$_pin" != "$_new" ]; then
         rb_log "snapshot: new version $_new != pinned $_pin, unpin"
-        rm -f "$_d/rollback.pinned" 2>/dev/null || true
+        rm -f "$_d/rollback.pinned" "$_d/rollback.json" "$_d/rollback.ack" 2>/dev/null || true
     fi
 
     if [ "$_new" = "$_old" ] || [ -z "$_old" ]; then
@@ -161,13 +216,13 @@ rb_snapshot() {
            && rb_is_stable_vc "$_prev_ver" \
            && { [ -f "$_d/rollback.observing" ] || rb_is_prerelease_vc "$_old" || { [ -n "$_prev_norm" ] && [ "$_old_norm" = "$_prev_norm" ]; }; }; then
             rb_log "snapshot: preserve golden stable .prev (vc=$_prev_norm) across v$_old -> v$_new"
-            rm -f "$_d/rollback.pinned" 2>/dev/null || true
+            rm -f "$_d/rollback.pinned" "$_d/rollback.json" "$_d/rollback.ack" 2>/dev/null || true
             echo 0 > "$_d/rollback.failstreak" 2>/dev/null || true
             echo 0 > "$_d/rollback.restarts" 2>/dev/null || true
             : > "$_d/rollback.lastpid_httpd" 2>/dev/null || true
             : > "$_d/rollback.lastpid_watchdog" 2>/dev/null || true
             if [ "$_new_norm" != "$_prev_norm" ]; then
-                date +%s > "$_d/rollback.observing" 2>/dev/null || true
+                rb_write_observing "$_d"
             else
                 rm -f "$_d/rollback.observing" 2>/dev/null || true
             fi
@@ -189,9 +244,9 @@ rb_snapshot() {
                     [ -d "$_bak" ] && mv -f "$_bak" "$_prev" 2>/dev/null || true
                     rb_log "snapshot WARN: swap failed, keep old .prev"
                 fi
-                rm -f "$_d/rollback.pinned" 2>/dev/null || true
+                rm -f "$_d/rollback.pinned" "$_d/rollback.json" "$_d/rollback.ack" 2>/dev/null || true
                 # 观察期标记(10 分钟, 哨兵按 30 秒一轮调 observe)
-                date +%s > "$_d/rollback.observing" 2>/dev/null || true
+                rb_write_observing "$_d"
                 echo 0 > "$_d/rollback.failstreak" 2>/dev/null || true
                 echo 0 > "$_d/rollback.restarts" 2>/dev/null || true
                 : > "$_d/rollback.lastpid_httpd" 2>/dev/null || true
@@ -199,6 +254,7 @@ rb_snapshot() {
             else
                 rb_log "snapshot WARN: pack failed, boot continues without .prev"
                 rm -rf "$_tmp" 2>/dev/null || true
+                rm -f "$_d/rollback.json" "$_d/rollback.ack" 2>/dev/null || true
             fi
         fi
     fi
@@ -214,18 +270,35 @@ rb_observe() {
     _hnc="$1"; _d=$(rb_data "$_hnc"); _r=$(rb_run "$_hnc")
     _obs="$_d/rollback.observing"
     [ -f "$_obs" ] || return 0
-    _start=$(cat "$_obs" 2>/dev/null | tr -d ' \r\n')
+    _obs_raw=$(sed -n '1p' "$_obs" 2>/dev/null | tr -d '\r')
+    _start=""; _start_up=""; _start_bid=""
+    {
+        read -r _start _start_up _start_bid _obs_rest
+    } <<EOF
+$_obs_raw
+EOF
     case "$_start" in ''|*[!0-9]*) return 0 ;; esac
-    _now=$(date +%s 2>/dev/null || echo 0)
-    if [ $(( _now - _start )) -ge 600 ]; then
-        rb_log "observe: window over (10 min), clean"
-        rm -f "$_obs" "$_d/rollback.failstreak" "$_d/rollback.restarts" \
-              "$_d/rollback.lastpid_httpd" "$_d/rollback.lastpid_watchdog" 2>/dev/null || true
-        return 0
+    case "$_start_up" in ''|*[!0-9]*) _start_up="" ;; esac
+    _cur_up=$(rb_uptime_sec 2>/dev/null || true)
+    _cur_bid=$(rb_boot_id 2>/dev/null || true)
+    if [ -n "$_start_up" ] && [ -n "$_cur_up" ] && [ -n "$_start_bid" ] && [ -n "$_cur_bid" ] \
+       && [ "$_start_bid" = "$_cur_bid" ] && [ "$_cur_up" -ge "$_start_up" ]; then
+        if [ $(( _cur_up - _start_up )) -ge 600 ]; then
+            rb_log "observe: window over (10 min, monotonic), clean"
+            rb_observe_cleanup "$_d"
+            return 0
+        fi
+    else
+        _now="${HNC_RB_NOW_OVERRIDE:-$(date +%s 2>/dev/null || echo 0)}"
+        case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+        if [ $(( _now - _start )) -ge 600 ]; then
+            rb_log "observe: window over (10 min), clean"
+            rb_observe_cleanup "$_d"
+            return 0
+        fi
     fi
 
-    _proc="$_hnc/bin/hnc_proc.sh"
-    [ -f "$_proc" ] && . "$_proc"
+    rb_load_proc "$_hnc"
     # 测试注入: HNC_RB_STUB 指向桩脚本时可覆盖 pidfile_pid_matches /
     # rb_port_listening(沙箱里没法造 /proc 状态; 生产无此变量, 不生效)。
     if [ -n "$HNC_RB_STUB" ] && [ -f "$HNC_RB_STUB" ]; then
@@ -292,6 +365,26 @@ rb_port_listening() {
     return 1
 }
 
+rb_verify_daemon_pid() {
+    _vdp_pid="$1"
+    _vdp_kw="$2"
+    _vdp_proot="${HNC_PROC_ROOT:-/proc}"
+    case "$_vdp_pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_vdp_pid" = "$$" ] && return 1
+    [ -n "${PPID:-}" ] && [ "$_vdp_pid" = "$PPID" ] && return 1
+    if command -v pid_matches >/dev/null 2>&1 && pid_matches "$_vdp_pid" "$_vdp_kw"; then
+        return 0
+    fi
+    if [ ! -s "$_vdp_proot/$_vdp_pid/cmdline" ] && [ -r "$_vdp_proot/$_vdp_pid/comm" ]; then
+        _vdp_comm=$(tr -d '\r\n' < "$_vdp_proot/$_vdp_pid/comm" 2>/dev/null)
+        case "$_vdp_comm" in
+            sh|bash|mksh|ash|dash|zsh|toybox|busybox|toolbox) return 1 ;;
+        esac
+        [ -n "$_vdp_comm" ] && [ "$_vdp_comm" = "$_vdp_kw" ] && return 0
+    fi
+    return 1
+}
+
 # ── 回滚动作 ─────────────────────────────────────────────────────────
 rb_do_rollback() {
     _hnc="$1"; _reason="$2"; _d=$(rb_data "$_hnc"); _r=$(rb_run "$_hnc"); _prev="$_hnc/.prev"
@@ -343,13 +436,42 @@ rb_do_rollback() {
         echo "$_good" > "$_d/runtime_version.tmp" 2>/dev/null \
             && mv -f "$_d/runtime_version.tmp" "$_d/runtime_version" 2>/dev/null \
             || echo "$_good" > "$_d/runtime_version" 2>/dev/null || true
-        # 重启核心进程: 杀掉, 让外层(service / 哨兵 / 拉起链)用旧二进制重拉
-        for _pf in httpd.pid watchdog.pid; do
+        # C007: 重启全部核心守护进程 —— 重新加载真实 hnc_proc.sh(覆盖沙箱 stub),
+        # 严格核验 /proc/<pid>/cmdline(或 comm)匹配后才发信号停进程, 严禁裸 kill -9 误杀复用进程。
+        rb_load_proc "$_hnc"
+        _rb_stop_list=""
+        for _pair in "watchdog.pid:hnc_watchdog" \
+                     "dpid_guard.pid:hnc_launcher" "launcher.pid:hnc_launcher" \
+                     "dpid.child.pid:hnc_dpid" "dpid.pid:hnc_dpid" \
+                     "httpd.pid:hnc_httpd" "hotspotd.pid:hotspotd"; do
+            _pf=${_pair%%:*}
+            _kw=${_pair#*:}
             _pid=$(cat "$_r/$_pf" 2>/dev/null | tr -d ' \r\n')
-            case "$_pid" in ''|*[!0-9]*) continue ;; esac
-            kill -9 "$_pid" 2>/dev/null || true
+            if [ -n "$_pid" ]; then
+                if rb_verify_daemon_pid "$_pid" "$_kw"; then
+                    kill "$_pid" 2>/dev/null || true
+                    _rb_stop_list="$_rb_stop_list $_pid:$_kw"
+                elif [ -d "${HNC_PROC_ROOT:-/proc}/$_pid" ]; then
+                    rb_log "rollback: skip reused pid=$_pid in $_pf (expected $_kw)"
+                fi
+            fi
             rm -f "$_r/$_pf" 2>/dev/null || true
         done
+        _rb_still_alive=0
+        for _item in $_rb_stop_list; do
+            _spid=${_item%%:*}
+            kill -0 "$_spid" 2>/dev/null && { _rb_still_alive=1; break; }
+        done
+        if [ "$_rb_still_alive" -eq 1 ]; then
+            usleep 200000 2>/dev/null || sleep 1
+            for _item in $_rb_stop_list; do
+                _spid=${_item%%:*}
+                _skw=${_item#*:}
+                if rb_verify_daemon_pid "$_spid" "$_skw" && kill -0 "$_spid" 2>/dev/null; then
+                    kill -9 "$_spid" 2>/dev/null || true
+                fi
+            done
+        fi
         rb_observe_cleanup "$_d"
         return 0
     fi

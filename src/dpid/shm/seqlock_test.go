@@ -674,3 +674,85 @@ func TestClockBoottimeY2038Gettime64AndFallback(t *testing.T) {
 		t.Fatalf("expected non-ENOSYS error to skip legacy syscall: ok=%v called=%v", ok, calledLegacyOnEinval)
 	}
 }
+
+func TestSeqLockPwriteOddLatchBeforePayloadAndReaderFileInfo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultFileName)
+
+	w, err := OpenWriterPath(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	devs := sampleDevices()
+	if err := w.Write(1000, 10, 1, devs[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Write(2000, 20, 2, devs); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := OpenReaderPath(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fi, err := r.FileInfo()
+	if err != nil || fi == nil || fi.Size() != FileSize {
+		t.Fatalf("Reader.FileInfo() = %v, %v (want size %d)", fi, err, FileSize)
+	}
+	diskFi, err := os.Stat(path)
+	if err != nil || !os.SameFile(fi, diskFi) {
+		t.Fatalf("expected Reader.FileInfo() to match disk file, stat err=%v", err)
+	}
+
+	// Hook mid-pwrite right after BeginSeq and EndSeq are latched to oddLatch (before payload/header write).
+	hookCalled := false
+	nextSeq := w.Seq() + 1
+	targetSlotIdx := int(nextSeq & 1)
+	targetSlotOff := HeaderSize + targetSlotIdx*SlotSize
+	wantOdd := (nextSeq << 1) | 1
+
+	oldHook := testPwriteAfterOddLatchHook
+	testPwriteAfterOddLatchHook = func() {
+		hookCalled = true
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			t.Errorf("read mid-pwrite file: %v", rerr)
+			return
+		}
+		gotBegin := binary.LittleEndian.Uint64(raw[targetSlotOff : targetSlotOff+8])
+		gotEnd := binary.LittleEndian.Uint64(raw[targetSlotOff+slotEndSeqOff : targetSlotOff+SlotSize])
+		if gotBegin != wantOdd || gotEnd != wantOdd {
+			t.Errorf("mid-pwrite slot %d latch mismatch: begin=%d end=%d wantOdd=%d", targetSlotIdx, gotBegin, gotEnd, wantOdd)
+		}
+		// Concurrent reader must seamlessly read previous quiescent snapshot (UpdatedMonoNs=2000).
+		snap, serr := r.Read()
+		if serr != nil || snap.Header.UpdatedMonoNs != 2000 {
+			t.Errorf("mid-pwrite Reader.Read() = %+v, err=%v (want UpdatedMonoNs=2000)", snap.Header, serr)
+		}
+	}
+	t.Cleanup(func() { testPwriteAfterOddLatchHook = oldHook })
+
+	if err := w.Write(3000, 30, 3, devs[:1]); err != nil {
+		t.Fatal(err)
+	}
+	testPwriteAfterOddLatchHook = oldHook
+	if !hookCalled {
+		t.Fatal("expected testPwriteAfterOddLatchHook to run during fallback Write")
+	}
+
+	snapAfter, err := r.Read()
+	if err != nil || snapAfter.Header.UpdatedMonoNs != 3000 {
+		t.Fatalf("post-pwrite Reader.Read() = %+v, err=%v", snapAfter.Header, err)
+	}
+
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.FileInfo(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("expected ErrClosed from closed Reader.FileInfo(), got %v", err)
+	}
+}
+

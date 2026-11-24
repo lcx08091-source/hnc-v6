@@ -511,3 +511,147 @@ func TestRenderFlatAndSnapshotMACIP(t *testing.T) {
 		t.Fatal("oui 不应降级 nbns 主机名")
 	}
 }
+
+func TestDualStackIPv6ReachableRefreshesExistingIPv4Only(t *testing.T) {
+	tb := newTestTable() // ifIndex = 7
+	// 1. 尚无 IPv4 在线记录时, 可达 IPv6 邻居严禁新建空 IP 条目
+	if tb.Apply(ev(7, macA, "2409:8a00:1::10", nudReachable, false), t0) {
+		t.Fatal("纯 IPv6 事件不得新建无 IPv4 条目")
+	}
+	if tb.Count() != 0 {
+		t.Fatalf("Count = %d, want 0", tb.Count())
+	}
+
+	// 2. IPv4 上线后, 后续纯跑 IPv6 流量(同热点口 NUD_REACHABLE NDP)应刷新 LastSeen 避免 90s 误离线
+	tb.Apply(ev(7, macA, "192.168.43.101", nudReachable, false), t0)
+	// 非热点口 IPv6 或 STALE IPv6 不应刷新 LastSeen
+	if tb.Apply(ev(9, macA, "2409:8a00:1::10", nudReachable, false), t0.Add(50*time.Second)) {
+		t.Fatal("非热点口 IPv6 不应刷新")
+	}
+	if tb.Apply(ev(7, macA, "2409:8a00:1::10", nudStale, false), t0.Add(50*time.Second)) {
+		t.Fatal("STALE IPv6 不应刷新 LastSeen")
+	}
+	// 同热点口可达 IPv6 刷新 LastSeen 至 t0+60s
+	if !tb.Apply(ev(7, macA, "fe80::5a:1", nudReachable, false), t0.Add(60*time.Second)) {
+		t.Fatal("同热点口可达 IPv6 邻居应刷新已有 IPv4 在线设备的 LastSeen")
+	}
+	d := jsonRender(t, tb)[macA]
+	if d.IP != "192.168.43.101" || d.LastSeen != t0.Add(60*time.Second).Unix() {
+		t.Fatalf("IPv6 刷新后字段异常: %+v", d)
+	}
+	// t0+120s 距 IPv6 可达仅 60s (<90s), 不应被误踢离线
+	if n := tb.EvictOffline(t0.Add(120 * time.Second)); n != 0 {
+		t.Fatalf("IPv6 活跃设备在 60s 内不应离线, evicted=%d", n)
+	}
+}
+
+func TestFullSyncPrunesVanishedCandsAndRepicksMainIP(t *testing.T) {
+	tb := newTestTable()
+	// 旧 IP .101 REACHABLE 为当前主 IP; 新 IP .112 刚建 STALE(confirmed 回拨 60s 暂未抢主 IP)
+	tb.Apply(evc(macA, "192.168.43.101", nudReachable, 0), t0)
+	tb.Apply(evc(macA, "192.168.43.112", nudStale, 60*time.Second), t0.Add(time.Second))
+	if got := jsonRender(t, tb)[macA].IP; got != "192.168.43.101" {
+		t.Fatalf("初始主 IP 应为 .101, 得 %s", got)
+	}
+
+	// 内核 GC 回收了旧 IP .101(DELNEIGH 事件丢失), FullSync 快照里只剩 .112(状态仍为 STALE)
+	if !tb.FullSync([]neigh.Entry{
+		evc(macA, "192.168.43.112", nudStale, 60*time.Second),
+	}, t0.Add(31*time.Second)) {
+		t.Fatal("FullSync 剔除已消失主 IP 候选后应重挑 .112 并返回 changed=true")
+	}
+	if got := jsonRender(t, tb)[macA].IP; got != "192.168.43.112" {
+		t.Fatalf("重挑后主 IP 应切至 .112, 得 %s", got)
+	}
+
+	// 随后 .112 FAILED 时, 因旧幽灵候选已被剔除, 设备应立即干净下线
+	if !tb.Apply(evFailed("192.168.43.112"), t0.Add(35*time.Second)) || tb.Count() != 0 {
+		t.Fatalf(".112 FAILED 后应下线, Count=%d", tb.Count())
+	}
+}
+
+func TestAsyncResolveRetryCapResetAndQuietGating(t *testing.T) {
+	tb := NewTable("wlan2", 7)
+	quiet := false
+	manualName := ""
+	tb.Quiet = func() bool { return quiet }
+	tb.Fast = func(mac string) (string, string) {
+		if manualName != "" {
+			return manualName, "manual"
+		}
+		nc := strings.ReplaceAll(mac, ":", "")
+		return nc[len(nc)-8:], "mac"
+	}
+
+	// 1. 息屏静默期: 新设备首次上线仍允许完成首次解析
+	quiet = true
+	tb.Apply(ev(7, macA, "192.168.43.101", nudReachable, false), t0)
+	if _, _, ok := tb.PendingDue(t0.Add(2 * time.Second)); !ok {
+		t.Fatal("新设备首次解析在息屏期也应正常派发")
+	}
+	tb.ApplyResolution(macA, "Xiaomi", "oui", t0.Add(3*time.Second))
+
+	// 2. 息屏静默期: 已完成首次解析的 oui/mac/cache-* 非首次重查必须暂停
+	tb.Apply(ev(7, macA, "192.168.43.101", nudReachable, false), t0.Add(70*time.Second))
+	if tb.HasPending() {
+		t.Fatal("息屏静默期不应将非首次重查挂入 pending")
+	}
+	if _, _, ok := tb.PendingDue(t0.Add(72 * time.Second)); ok {
+		t.Fatal("息屏静默期不应派发非首次重查")
+	}
+
+	// 3. 亮屏期: 同 IP 异步重试上限 <= 2 次
+	quiet = false
+	cur := t0.Add(140 * time.Second)
+	for retry := 1; retry <= MaxAsyncResolveRetries; retry++ {
+		tb.Apply(ev(7, macA, "192.168.43.101", nudReachable, false), cur)
+		if _, _, ok := tb.PendingDue(cur.Add(2 * time.Second)); !ok {
+			t.Fatalf("第 %d 次同 IP 异步重试应允许派发", retry)
+		}
+		tb.ApplyResolution(macA, "Xiaomi", "oui", cur.Add(3*time.Second))
+		cur = cur.Add(65 * time.Second)
+	}
+	// 第 3 次同 IP 重试应被上限(<=2)拦截
+	tb.Apply(ev(7, macA, "192.168.43.101", nudReachable, false), cur)
+	if tb.HasPending() {
+		t.Fatal("超过同 IP 异步重试上限(2 次)后不应再进入 pending")
+	}
+	if _, _, ok := tb.PendingDue(cur.Add(2 * time.Second)); ok {
+		t.Fatal("超过同 IP 异步重试上限后不应再派发")
+	}
+
+	// 4. 换 IP 重置重试计数
+	cur = cur.Add(65 * time.Second)
+	tb.Apply(ev(7, macA, "192.168.43.155", nudReachable, false), cur)
+	if _, _, ok := tb.PendingDue(cur.Add(2 * time.Second)); !ok {
+		t.Fatal("设备换新 IP 后应重置异步重试上限并允许重新解析")
+	}
+	tb.ApplyResolution(macA, "cache-host", "cache-dhcp", cur.Add(3*time.Second))
+
+	// 耗尽新 IP 的 2 次重试
+	for retry := 1; retry <= MaxAsyncResolveRetries; retry++ {
+		cur = cur.Add(65 * time.Second)
+		tb.Apply(ev(7, macA, "192.168.43.155", nudReachable, false), cur)
+		tb.ApplyResolution(macA, "cache-host", "cache-dhcp", cur.Add(3*time.Second))
+	}
+	cur = cur.Add(65 * time.Second)
+	tb.Apply(ev(7, macA, "192.168.43.155", nudReachable, false), cur)
+	if tb.HasPending() {
+		t.Fatal("新 IP 耗尽 2 次重试后应再次封顶")
+	}
+
+	// 5. 设置手动名再清除手动名应重置重试上限
+	manualName = "临时备注"
+	cur = cur.Add(65 * time.Second)
+	tb.Apply(ev(7, macA, "192.168.43.155", nudReachable, false), cur)
+	if d := jsonRender(t, tb)[macA]; d.Hostname != "临时备注" || d.HostnameSrc != "manual" {
+		t.Fatalf("手动名未生效: %+v", d)
+	}
+	manualName = ""
+	cur = cur.Add(65 * time.Second)
+	tb.Apply(ev(7, macA, "192.168.43.155", nudReachable, false), cur)
+	if _, _, ok := tb.PendingDue(cur.Add(2 * time.Second)); !ok {
+		t.Fatal("清除手动名后应重置并触发重解析")
+	}
+}
+
