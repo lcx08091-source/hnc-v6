@@ -484,9 +484,9 @@ var LG_OPTS = {
   sheet: { bevel: 26, thickness: 42, slope: .9, shape: 'squircle', blur: 16, dispersion: 1.4, shade: .24, rim: 1.6, edge: 1, light: -30, sat: 1.1, settle: 160 },
   toast: { bevel: 16, thickness: 22, shape: 'squircle', blur: 10, dispersion: 1.2, shade: .24, rim: 1.5, edge: 1, light: -30 }
 };
-/* 自定义壁纸 120fps 快速真折射配置：保留底栏 Snell 边缘折射与菲涅尔高光，关闭昂贵的 RGB 三通道分离色散与额外平滑通道(滤镜节点从 34 降至 11) */
+/* 自定义壁纸 120fps 快速真折射配置：保留底栏 Snell 边缘弯曲折射、微色散与菲涅尔高光(滚屏期由 .is-scrolling #tabbar 自动切硬件模糊保满帧) */
 var LG_OPTS_WP = {
-  tabbar: { bevel: 15, thickness: 24, slope: .92, shape: 'squircle', blur: 12, dispersion: 0, smooth: 0, shade: .12, rim: .85, edgeW: 1, edge: .55, light: -38, sat: 1, materialize: 0, settle: 90 },
+  tabbar: { bevel: 15, thickness: 24, slope: .92, shape: 'squircle', blur: 4.0, dispersion: .42, smooth: 0, shade: .12, rim: .95, edgeW: 1, edge: .62, light: -38, sat: 1, materialize: 0, settle: 90 },
   hbtn: { bevel: 12, thickness: 16, slope: .86, shape: 'squircle', blur: 1.8, dispersion: 0, smooth: 0, shade: .08, rim: .45, edgeW: 0, edge: 0, light: -38, sat: 1, materialize: 0 },
   sheet: { bevel: 20, thickness: 28, slope: .88, shape: 'squircle', blur: 16, dispersion: 0, smooth: 0, shade: .08, rim: .55, edgeW: 0, edge: 0, light: -38, sat: 1, settle: 120 },
   toast: { bevel: 14, thickness: 18, slope: .88, shape: 'squircle', blur: 10, dispersion: 0, smooth: 0, shade: .08, rim: .45, edgeW: 0, edge: 0, light: -38, sat: 1 }
@@ -502,7 +502,7 @@ function lgOptsFor(kind, g, instant) {
   var o = Object.assign({}, LG_OPTS[kind] || {}, wp ? (LG_OPTS_WP[kind] || {}) : {});
   var gv = g || (typeof glassTintVars === 'function' ? glassTintVars(S.glassTint) : { up: 0, dn: 0 });
   if (kind === 'tabbar') {
-    o.blur = +((wp ? 12 : 2.4) + (gv.up || 0) * 4.2 - (gv.dn || 0) * 1.1).toFixed(2);
+    o.blur = +((wp ? 4.0 : 2.4) + (gv.up || 0) * 4.2 - (gv.dn || 0) * 1.1).toFixed(2);
     o.sat = 1; // Offload saturation boost to native CSS backdrop-filter GPU pass (saves 10 SVG primitives/frame)
   } else {
     o.sat = 1;

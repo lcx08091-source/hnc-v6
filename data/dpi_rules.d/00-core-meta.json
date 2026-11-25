@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "00-core-meta",
-  "rules_version": "hnc-curated-v6.1.0-rc.7-dedup#00-core-meta",
+  "rules_version": "hnc-curated-v6.1.0-rc.8-dedup#00-core-meta",
   "rules": [
     {
       "id": "p2p_unknown_attribution",

@@ -254,6 +254,17 @@
     border-color: rgba(190, 225, 255, .12);
   }
 }
+:root[data-has-wp="1"][data-glass="liquid"] .sig-wave-card,
+:root[data-has-wp="1"][data-glass="liquid"] .sig-intf-card,
+:root[data-has-wp="1"][data-glass="liquid"] .sig-4d-cell,
+:root[data-has-wp="1"][data-glass="liquid"] .sig-hero-bar {
+  background: var(--lg-sub);
+  box-shadow: var(--lg-rim-inner, inset 0 1px .5px rgba(255, 255, 255, .46));
+}
+:root[data-has-wp="1"][data-glass="liquid"] .sig-intf-row,
+:root[data-has-wp="1"][data-glass="liquid"] .sig-wave-svg {
+  background: var(--lg-sub-2, var(--lg-sub));
+}
 
 /* 老内核 WebView 不支持 backdrop-filter / color-mix 时的实底可读性兜底 */
 @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {

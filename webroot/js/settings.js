@@ -633,7 +633,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-rc.7', HNC_UI_VC = '6009307', HNC_UI_DATE = '2026-11-25';
+  var HNC_UI_VER = 'v6.1.0-rc.8', HNC_UI_VC = '6009308', HNC_UI_DATE = '2026-11-26';
   var bVer = cleanVer(l.backend_version, HNC_UI_VER);
   var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -1442,7 +1442,7 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.7';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.8';
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('check') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
@@ -2918,7 +2918,7 @@ function setVaultExport(btn) {
     if (!res || typeof res !== 'object' || res.ok === false || !res.files) {
       throw new Error((res && res.error) || '备份导出载荷无效');
     }
-    var verTag = String(res.module_version || 'v6.1.0-rc.7').replace(/[^a-zA-Z0-9._-]+/g, '-');
+    var verTag = String(res.module_version || 'v6.1.0-rc.8').replace(/[^a-zA-Z0-9._-]+/g, '-');
     var tsTag = Math.floor(Date.now() / 1000);
     var fn = 'hnc-backup-' + verTag + '-' + tsTag + '.json';
     var raw = JSON.stringify(res, null, 2);

@@ -17,7 +17,7 @@
   }
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.7', VCODE = String(META.versionCode || '6009307');
+  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.8', VCODE = String(META.versionCode || '6009308');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1', MOCK_HS_ACTIVE = true;
 
@@ -743,26 +743,26 @@
     });
     var idb = 0.89;
     var MOCK_L3_SUBS = [
-      'hnc-curated-v6.1.0-rc.7-dedup#00-core-meta',
-      'hnc-curated-v6.1.0-rc.7#01-short-video', 'hnc-curated-v6.1.0-rc.7#02-video-live', 'hnc-curated-v6.1.0-rc.7#03-social-im',
-      'hnc-curated-v6.1.0-rc.7#04-games-cn', 'hnc-curated-v6.1.0-rc.7#05-games-global', 'hnc-curated-v6.1.0-rc.7#06-shopping-life',
-      'hnc-curated-v6.1.0-rc.7#07-music-audio', 'hnc-curated-v6.1.0-rc.7#08-reading-news', 'hnc-curated-v6.1.0-rc.7#09-office-edu',
-      'hnc-curated-v6.1.0-rc.7#10-cloud-drive', 'hnc-curated-v6.1.0-rc.7#11-finance-bank', 'hnc-curated-v6.1.0-rc.7#12-travel-map',
-      'hnc-curated-v6.1.0-rc.7#13-ai-tools', 'hnc-curated-v6.1.0-rc.7#14-dev-tech', 'hnc-curated-v6.1.0-rc.7#15-app-stores',
-      'hnc-curated-v6.1.0-rc.7#16-oem-vendors', 'hnc-curated-v6.1.0-rc.7#17-iot-smart', 'hnc-curated-v6.1.0-rc.7#18-tv-ott',
-      'hnc-curated-v6.1.0-rc.7#19-carrier-isp', 'hnc-curated-v6.1.0-rc.7#20-gov-public', 'hnc-curated-v6.1.0-rc.7#21-auto-ev',
-      'hnc-curated-v6.1.0-rc.7#22-health-sport', 'hnc-curated-v6.1.0-rc.7#23-food-retail', 'hnc-curated-v6.1.0-rc.7#24-social-global',
-      'hnc-curated-v6.1.0-rc.7#25-stream-global', 'hnc-curated-v6.1.0-rc.7#26-browser-search', 'hnc-curated-v6.1.0-rc.7#27-mail-collab',
-      'hnc-curated-v6.1.0-rc.7#28-security-dns', 'hnc-curated-v6.1.0-rc.7#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.7#30-cdn-infra',
-      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.7#47-v2fly-b',
-      'hnc-curated-v6.1.0-rc.7#95-system-updates', 'hnc-curated-v6.1.0-rc.7#96-system-updates-v6'
+      'hnc-curated-v6.1.0-rc.8-dedup#00-core-meta',
+      'hnc-curated-v6.1.0-rc.8#01-short-video', 'hnc-curated-v6.1.0-rc.8#02-video-live', 'hnc-curated-v6.1.0-rc.8#03-social-im',
+      'hnc-curated-v6.1.0-rc.8#04-games-cn', 'hnc-curated-v6.1.0-rc.8#05-games-global', 'hnc-curated-v6.1.0-rc.8#06-shopping-life',
+      'hnc-curated-v6.1.0-rc.8#07-music-audio', 'hnc-curated-v6.1.0-rc.8#08-reading-news', 'hnc-curated-v6.1.0-rc.8#09-office-edu',
+      'hnc-curated-v6.1.0-rc.8#10-cloud-drive', 'hnc-curated-v6.1.0-rc.8#11-finance-bank', 'hnc-curated-v6.1.0-rc.8#12-travel-map',
+      'hnc-curated-v6.1.0-rc.8#13-ai-tools', 'hnc-curated-v6.1.0-rc.8#14-dev-tech', 'hnc-curated-v6.1.0-rc.8#15-app-stores',
+      'hnc-curated-v6.1.0-rc.8#16-oem-vendors', 'hnc-curated-v6.1.0-rc.8#17-iot-smart', 'hnc-curated-v6.1.0-rc.8#18-tv-ott',
+      'hnc-curated-v6.1.0-rc.8#19-carrier-isp', 'hnc-curated-v6.1.0-rc.8#20-gov-public', 'hnc-curated-v6.1.0-rc.8#21-auto-ev',
+      'hnc-curated-v6.1.0-rc.8#22-health-sport', 'hnc-curated-v6.1.0-rc.8#23-food-retail', 'hnc-curated-v6.1.0-rc.8#24-social-global',
+      'hnc-curated-v6.1.0-rc.8#25-stream-global', 'hnc-curated-v6.1.0-rc.8#26-browser-search', 'hnc-curated-v6.1.0-rc.8#27-mail-collab',
+      'hnc-curated-v6.1.0-rc.8#28-security-dns', 'hnc-curated-v6.1.0-rc.8#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.8#30-cdn-infra',
+      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.8#47-v2fly-b',
+      'hnc-curated-v6.1.0-rc.8#95-system-updates', 'hnc-curated-v6.1.0-rc.8#96-system-updates-v6'
     ];
     return {
       available: true,
       state: {
         schema_version: '2.0', generated_at: t - 2, version: VER, mode: 'af_packet', interface: MOCK_HS_ACTIVE ? IFACE : ((SIM && SIM.enabled) ? 'sim' : ''), tls_reassembly: true, ipv6_capture: true, offload_hint: false,
         uptime_s: round(up), stats: stats, clients: clients, client_count: Object.keys(clients).length, health: 'ok', rebind_count: 1,
-        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true, dfp_rule_version: 'hnc-dfp-v6.1.0-rc.7',
+        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true, dfp_rule_version: 'hnc-dfp-v6.1.0-rc.8',
         conntrack_available: true, conntrack_readable: true, conntrack_path: '/proc/net/nf_conntrack', conntrack_flows: 412,
         unidentified_ratio: { total_bytes: round(sumDays(1)), identified_bytes: round(sumDays(1) * idb), ratio: 1 - idb },
         evidence_summary: { total: 48211 + round(up / 10), by_source: { sni: 31022, dns: 12840, ja4: 2210, ip_owner: 2139 } },
@@ -1947,7 +1947,7 @@
   };
 
 
-  /* ═════════════ HNC v6.1.0-rc.7 · 本机+热点双栈守护、防火墙与 LeakGuard 仿真层 ═════════════ */
+  /* ═════════════ HNC v6.1.0-rc.8 · 本机+热点双栈守护、防火墙与 LeakGuard 仿真层 ═════════════ */
   function v6MockInfraGuard(host) {
     var h = String(host || '').trim().toLowerCase();
     if (!h) return null;

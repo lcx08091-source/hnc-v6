@@ -1137,7 +1137,7 @@ document.addEventListener('click', function (e) {
   if ((q = t.closest('[data-gx-tint]'))) { setGlassTint(q.getAttribute('data-gx-tint')); return; }
   if ((q = t.closest('[data-wp-blur]'))) { setWpBlur(q.getAttribute('data-wp-blur')); return; }
   if ((q = t.closest('[data-wp-dim]'))) { setWpDim(q.getAttribute('data-wp-dim')); return; }
-  if ((q = t.closest('[data-wp-step]'))) { var sp0 = String(q.getAttribute('data-wp-step') || '').split(':'); if (sp0[0] === 'blur') setWpBlur(Math.round(num(S.wpBlur, 0)) + num(sp0[1], 0)); else if (sp0[0] === 'dim') setWpDim(Math.round(num(S.wpDim, 22)) + num(sp0[1], 0)); return; }
+  if ((q = t.closest('[data-wp-step]'))) { var sp0 = String(q.getAttribute('data-wp-step') || '').split(':'); if (sp0[0] === 'blur') setWpBlur(Math.round(num(S.wpBlur, 0)) + num(sp0[1], 0)); else if (sp0[0] === 'dim') setWpDim(Math.round(num(S.wpDim, 12)) + num(sp0[1], 0)); return; }
   if ((q = t.closest('[data-qh-fix]'))) { execQuickHealthFix(q.getAttribute('data-qh-fix'), q.getAttribute('data-qh-params') || '', q); return; }
   if ((q = t.closest('[data-qh-jump]'))) { var qCard = q.closest('[data-qh-id]'); jumpQuickHealthTarget(q.getAttribute('data-qh-jump'), qCard ? qCard.getAttribute('data-qh-id') : ''); return; }
   if ((q = t.closest('[data-al]'))) { var row = q.closest('[data-alid]'); alertAction(q.getAttribute('data-al'), row.getAttribute('data-alid'), row.getAttribute('data-almac')); return; }
@@ -1576,7 +1576,7 @@ function setWpBlur(rawVal) {
   if (typeof haptic === 'function') haptic(6);
 }
 function setWpDim(rawVal) {
-  var v = clamp(Math.round(num(rawVal, 22)), 0, 75);
+  var v = clamp(Math.round(num(rawVal, 12)), 0, 75);
   S.wpDim = v;
   syncWpNumericVars();
   clearTimeout(S._wpDimT);
@@ -2427,7 +2427,7 @@ function showRollbackBanner(rb) {
   S.wpId = LS.get('hnc6.wp_id', 'none');
   S.wpCustom = LS.get('hnc6.wp_custom', '');
   S.wpBlur = num(LS.get('hnc6.wp_blur', '0'), 0);
-  S.wpDim = num(LS.get('hnc6.wp_dim', '22'), 22);
+  S.wpDim = num(LS.get('hnc6.wp_dim', '12'), 12);
   // v5.36.0: 默认启用无界原生透字排版 ('adaptive')，消除实心白底膏药胶囊；用 wp_text_v2 平滑升级旧缓存
   S.wpTextMode = LS.get('hnc6.wp_text_v2', '') === 'capsule' ? 'capsule' : 'adaptive';
   S.hideSharedUnk = LS.get('hnc6.hide_shared_unk', '0') === '1';
@@ -2508,9 +2508,21 @@ function showRollbackBanner(rb) {
     var W = 24, H = 36, cv = document.createElement('canvas');
     cv.width = W; cv.height = H;
     var ctx = cv.getContext('2d');
-    ctx.drawImage(im, 0, 0, W, H);
+    var nw = im.naturalWidth || im.width || 0, nh = im.naturalHeight || im.height || 0;
+    var vw = (typeof window !== 'undefined' && window.innerWidth) || 390;
+    var vh = (typeof window !== 'undefined' && window.innerHeight) || 844;
+    if (nw > 0 && nh > 0 && vw > 0 && vh > 0) {
+      var imgR = nw / nh, vpR = vw / vh;
+      var sx = 0, sy = 0, sw = nw, sh = nh;
+      if (imgR > vpR) { sw = Math.max(1, nh * vpR); sx = (nw - sw) * 0.5; }
+      else if (imgR < vpR) { sh = Math.max(1, nw / vpR); sy = (nh - sh) * 0.5; }
+      ctx.drawImage(im, sx, sy, sw, sh, 0, 0, W, H);
+    } else {
+      ctx.drawImage(im, 0, 0, W, H);
+    }
     var d = ctx.getImageData(0, 0, W, H).data;
     var sumMid = 0, nMid = 0, sumTop = 0, nTop = 0, sumBot = 0, nBot = 0;
+    var darkTop = 0, darkMid = 0;
     var sumSat = 0, vividCnt = 0, totPx = W * H;
     for (var y = 0; y < H; y++) {
       for (var x = 0; x < W; x++) {
@@ -2521,16 +2533,20 @@ function showRollbackBanner(rb) {
         var sat = mxC > 12 ? (mxC - mnC) / mxC : 0;
         sumSat += sat;
         if (sat > 0.48 && mxC > 60 && lum > 25 && lum < 238) vividCnt++;
-        if (y < 9) { sumTop += lum; nTop++; }
-        else if (y < 27) { sumMid += lum; nMid++; }
+        if (y < 9) { sumTop += lum; nTop++; if (lum < 95) darkTop++; }
+        else if (y < 27) { sumMid += lum; nMid++; if (lum < 95) darkMid++; }
         else { sumBot += lum; nBot++; }
       }
     }
     var avgSat = totPx ? (sumSat / totPx) : 0;
     var vividRatio = totPx ? (vividCnt / totPx) : 0;
+    var nUpper = nTop + nMid;
+    var darkTopRatio = nTop ? (darkTop / nTop) : 0;
+    var darkMidRatio = nMid ? (darkMid / nMid) : 0;
+    var darkUpperRatio = nUpper ? ((darkTop + darkMid) / nUpper) : 0;
     return {
-      top: (nTop ? sumTop / nTop : 110) < 118 ? 'dark' : 'light',
-      tone: (nMid ? sumMid / nMid : 128) < 108 ? 'dark' : 'light',
+      top: ((nTop ? sumTop / nTop : 110) < 118 || darkTopRatio > 0.24) ? 'dark' : 'light',
+      tone: ((nMid ? sumMid / nMid : 128) < 108 || darkMidRatio > 0.24 || darkUpperRatio > 0.24) ? 'dark' : 'light',
       bot: (nBot ? sumBot / nBot : 110) < 108 ? 'dark' : 'light',
       vivid: avgSat >= 0.36 || vividRatio >= 0.28
     };
@@ -2558,10 +2574,10 @@ function showRollbackBanner(rb) {
     return _wpCtxFilterOk;
   }
 
-  /* 纯 JS 3 遍整数盒式模糊（StackBlur 近似，行主序滑动窗口 + 零 GC 缓冲复用，320x180 耗时 < 2ms） */
+  /* 纯 JS 3 遍整数盒式模糊（StackBlur 近似，行主序滑动窗口 + 零 GC 缓冲复用） */
   var _wpBlurWork = { tmp: null, rAcc: null, gAcc: null, bAcc: null };
   function boxBlur3PassRGBA(data, w, h, rad) {
-    rad = clamp(rad | 0, 1, 32);
+    rad = clamp(rad | 0, 1, 48);
     var len = w * h * 4;
     var src = new Uint8Array(data.buffer, data.byteOffset, len);
     if (!_wpBlurWork.tmp || _wpBlurWork.tmp.length < len) _wpBlurWork.tmp = new Uint8Array(len);
@@ -2623,12 +2639,12 @@ function showRollbackBanner(rb) {
     }
   }
 
-  /* 60fps 零透明闪烁双缓冲壁纸管线：
-   * 1) 原图内存解码后缓存 320px 离屏缩略源图，按当前模糊档位实时生成预模糊纹理（彻底告别全屏 CSS transition:filter 重算）；
+  /* 60fps 零透明闪烁双缓冲高清散景壁纸管线：
+   * 1) 原图内存解码后缓存短边 540px（长边上限 1080px）等比高清缩略源图，按视口短边换算模糊半径并做边缘像素夹紧无缩放预模糊；
    * 2) A/B 双层 .wp-img 待新纹理 onload/decode() 真正就绪后在单帧切换 opacity 并置 :root[data-wp-ready="1"] 隐藏 .mesh，零透明白板帧！ */
   var _wpLayers = null, _wpActiveIdx = 0, _wpHasReadyLayer = false, _wpWasActive = null;
   var _wpLoadSeq = 0, _wpSwapSeq = 0, _wpCurKey = '', _wpCurRawSrc = '', _wpSourceReady = false, _wpTainted = false;
-  var _wpThumbCv = null, _wpOutCv = null, _wpThumbBaseBytes = null, _wpBlurCache = {};
+  var _wpThumbCv = null, _wpPadCv = null, _wpOutCv = null, _wpThumbBaseBytes = null, _wpBlurCache = {};
 
   function styleWpLayer(el, taintedFallback, blurPx) {
     if (!el) return;
@@ -2638,7 +2654,7 @@ function showRollbackBanner(rb) {
       el.style.setProperty('bottom', '0', 'important');
       el.style.setProperty('left', '0', 'important');
       el.style.setProperty('inset', '0', 'important');
-      el.style.setProperty('filter', 'none', 'important');
+      el.style.removeProperty('filter');
       el.style.setProperty('transform', 'translateZ(0)', 'important');
       el.style.setProperty('transition', 'none', 'important');
     } else {
@@ -2702,6 +2718,27 @@ function showRollbackBanner(rb) {
     });
   }
 
+  /* 边缘像素夹紧扩展画布 (CLAMP_TO_EDGE)：中心 1:1 原尺寸无缩放绘制 + 四周 1px 边缘像素外延，彻底消除切换模糊档位时的构图缩放跳变与黑边暗角 */
+  function drawClampedPadCanvas(srcCv, tw, th, pad) {
+    var pw = tw + pad * 2, ph = th + pad * 2;
+    if (!_wpPadCv) _wpPadCv = document.createElement('canvas');
+    if (_wpPadCv.width !== pw || _wpPadCv.height !== ph) {
+      _wpPadCv.width = pw; _wpPadCv.height = ph;
+    }
+    var pctx = _wpPadCv.getContext('2d', { alpha: false });
+    pctx.filter = 'none';
+    pctx.drawImage(srcCv, pad, pad, tw, th);
+    pctx.drawImage(srcCv, 0, 0, tw, 1, pad, 0, tw, pad);
+    pctx.drawImage(srcCv, 0, th - 1, tw, 1, pad, pad + th, tw, pad);
+    pctx.drawImage(srcCv, 0, 0, 1, th, 0, pad, pad, th);
+    pctx.drawImage(srcCv, tw - 1, 0, 1, th, pad + tw, pad, pad, th);
+    pctx.drawImage(srcCv, 0, 0, 1, 1, 0, 0, pad, pad);
+    pctx.drawImage(srcCv, tw - 1, 0, 1, 1, pad + tw, 0, pad, pad);
+    pctx.drawImage(srcCv, 0, th - 1, 1, 1, 0, pad + th, pad, pad);
+    pctx.drawImage(srcCv, tw - 1, th - 1, 1, 1, pad + tw, pad + th, pad, pad);
+    return _wpPadCv;
+  }
+
   function buildBlurredTexUrl(blurPx) {
     var b = clamp(Math.round(num(blurPx, 0)), 0, 24);
     if (b <= 0 || !_wpThumbCv || _wpTainted) return _wpCurRawSrc;
@@ -2712,14 +2749,18 @@ function showRollbackBanner(rb) {
       _wpOutCv.width = tw; _wpOutCv.height = th;
     }
     var octx = _wpOutCv.getContext('2d', { alpha: false });
-    var rScaled = Math.max(1, b * (tw / 380));
+    var vw = (typeof window !== 'undefined' && window.innerWidth) || 390;
+    var vh = (typeof window !== 'undefined' && window.innerHeight) || 844;
+    var vpShort = clamp(Math.min(vw, vh), 320, 900);
+    var rScaled = Math.max(1, b * (Math.min(tw, th) / vpShort));
     try {
       if (canUseCanvasFilter()) {
-        var pad = Math.max(2, Math.ceil(rScaled * 1.35));
+        var pad = Math.max(4, Math.ceil(rScaled * 2.5));
+        var padCv = drawClampedPadCanvas(_wpThumbCv, tw, th, pad);
         octx.filter = 'none';
         octx.drawImage(_wpThumbCv, 0, 0, tw, th);
         octx.filter = 'blur(' + rScaled.toFixed(2) + 'px)';
-        octx.drawImage(_wpThumbCv, -pad, -pad, tw + pad * 2, th + pad * 2);
+        octx.drawImage(padCv, -pad, -pad, tw + pad * 2, th + pad * 2);
         octx.filter = 'none';
       } else {
         if (!_wpThumbBaseBytes) {
@@ -2731,7 +2772,11 @@ function showRollbackBanner(rb) {
         boxBlur3PassRGBA(workImg.data, tw, th, Math.max(1, Math.round(rScaled * 0.85)));
         octx.putImageData(workImg, 0, 0);
       }
-      var outUrl = _wpOutCv.toDataURL('image/jpeg', 0.86);
+      var outUrl = '';
+      try { outUrl = _wpOutCv.toDataURL('image/webp', 0.90); } catch (_) {}
+      if (!outUrl || outUrl.indexOf('data:image/webp') !== 0) {
+        outUrl = _wpOutCv.toDataURL('image/jpeg', 0.92);
+      }
       _wpBlurCache[b] = outUrl;
       return outUrl;
     } catch (_) {
@@ -2870,11 +2915,15 @@ function showRollbackBanner(rb) {
       _wpThumbBaseBytes = null;
       _wpTainted = false;
 
-      var nw = im.naturalWidth || im.width || 800, nh = im.naturalHeight || im.height || 600;
-      var tw = 320, th = clamp(Math.round(tw * nh / Math.max(1, nw)), 120, 720);
+      var nw = Math.max(1, im.naturalWidth || im.width || 800), nh = Math.max(1, im.naturalHeight || im.height || 600);
+      var shortSide = Math.min(nw, nh), longSide = Math.max(nw, nh);
+      var tScale = Math.min(540 / shortSide, 1080 / longSide);
+      var tw = Math.max(1, Math.round(nw * tScale)), th = Math.max(1, Math.round(nh * tScale));
       if (!_wpThumbCv) _wpThumbCv = document.createElement('canvas');
       _wpThumbCv.width = tw; _wpThumbCv.height = th;
       var tctx = _wpThumbCv.getContext('2d', { alpha: false });
+      tctx.imageSmoothingEnabled = true;
+      try { tctx.imageSmoothingQuality = 'high'; } catch (_) {}
       tctx.drawImage(im, 0, 0, tw, th);
 
       try {
@@ -2911,7 +2960,7 @@ function showRollbackBanner(rb) {
         '<span>' + esc(p.label) + '</span></button>';
     }).join('');
     var customBadge = S.wpId === 'custom' && S.wpCustom ? ' · 已启用自定义图' : '';
-    var curBlur = Math.round(num(S.wpBlur, 0)), curDim = Math.round(num(S.wpDim, 22));
+    var curBlur = Math.round(num(S.wpBlur, 0)), curDim = Math.round(num(S.wpDim, 12));
     var svgMinus = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg>';
     var svgPlus = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
     return '<div class="wp-panel" id="wp-panel">' +
@@ -2940,7 +2989,7 @@ function showRollbackBanner(rb) {
         '<div class="note" style="margin-bottom:-2px">遮罩护眼浓度 · <span id="wp-dim-v">' + curDim + '%</span>（花哨壁纸调高可保证文字锐利清晰）</div>' +
         '<div class="gx-step-bar" id="wp-dim" role="group" aria-label="遮罩护眼浓度">' +
           '<button type="button" class="gx-btn press" data-wp-step="dim:-5" aria-label="降低遮罩浓度">' + svgMinus + '</button>' +
-          [[10, '10%'], [22, '22%'], [40, '40%'], [65, '65%']].map(function (it) {
+          [[12, '12%'], [22, '22%'], [40, '40%'], [65, '65%']].map(function (it) {
             var on = curDim === it[0];
             return '<button type="button" class="gx-btn press' + (on ? ' on' : '') + '" data-wp-dim="' + it[0] + '" aria-pressed="' + on + '">' + it[1] + '</button>';
           }).join('') +
@@ -2993,17 +3042,19 @@ function showRollbackBanner(rb) {
     var cv = document.createElement('canvas');
     cv.width = w; cv.height = h;
     var ctx = cv.getContext('2d', { alpha: false });
+    ctx.imageSmoothingEnabled = true;
+    try { ctx.imageSmoothingQuality = 'high'; } catch (_) {}
     ctx.drawImage(img, 0, 0, w, h);
     var dataUrl = '';
     try { dataUrl = cv.toDataURL('image/webp', quality); } catch (_) {}
     if (!dataUrl || dataUrl.indexOf('data:image/webp') !== 0) {
-      dataUrl = cv.toDataURL('image/jpeg', Math.min(0.86, quality + 0.02));
+      dataUrl = cv.toDataURL('image/jpeg', Math.min(0.88, quality + 0.04));
     }
     return dataUrl;
   }
 
   function persistCustomWpWithQuotaRetry(img) {
-    var tiers = [[1280, 0.80], [960, 0.74], [720, 0.68], [540, 0.60]];
+    var tiers = [[1600, 0.84], [1280, 0.80], [960, 0.74], [720, 0.68], [540, 0.60]];
     var chosenUrl = '', savedTier = -1;
     for (var i = 0; i < tiers.length; i++) {
       var candidate = encodeWpAtTier(img, tiers[i][0], tiers[i][1]);

@@ -1312,6 +1312,11 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   font-size: 11.5px; font-weight: 650; background: var(--card-solid); color: var(--blue);
   border: 1px solid var(--stroke);
 }
+[data-glass="liquid"] .dev-v6-btn:not(.on) {
+  background: var(--lg-sub-2, var(--lg-sub));
+  border-color: transparent;
+  box-shadow: var(--lg-rim-inner, inset 0 1px .5px rgba(255, 255, 255, .46));
+}
 .dev-v6-btn.on { background: var(--green); color: #fff; border-color: transparent; }
 
 .bw-presets { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
