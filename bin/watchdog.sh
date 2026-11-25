@@ -329,6 +329,7 @@ do_full_init() {
     fi
     echo "ACTIVE:$iface" > "$STATE_FILE"
     log "STATE entered ACTIVE:$iface"
+    [ -f "$HNC_DIR/bin/hnc_offload_guard.sh" ] && sh "$HNC_DIR/bin/hnc_offload_guard.sh" apply >> "$LOG" 2>&1 || true
 
     # 补齐首次入 ACTIVE 时的单应用限速、应用感知 QoS 与 AP 客户端隔离恢复
     rm -f "$RUN/app_limits.full_state.sig" "$RUN/app_qos.sig" 2>/dev/null
@@ -391,6 +392,7 @@ do_migrate() {
     fi
     echo "ACTIVE:$new" > "$STATE_FILE"
     log "STATE entered ACTIVE:$new"
+    [ -f "$HNC_DIR/bin/hnc_offload_guard.sh" ] && sh "$HNC_DIR/bin/hnc_offload_guard.sh" apply >> "$LOG" 2>&1 || true
     rm -f "$RUN/app_limits.full_state.sig" "$RUN/app_qos.sig" 2>/dev/null
     if [ -f "$RUN/app_qos.plan" ]; then
         sed "s/^iface .*/iface $new/" "$RUN/app_qos.plan" > "$RUN/app_qos.plan.mig" 2>/dev/null && mv -f "$RUN/app_qos.plan.mig" "$RUN/app_qos.plan" 2>/dev/null || true

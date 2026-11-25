@@ -209,8 +209,9 @@ func puRunDumpsysHead(timeout time.Duration, maxLines int, service string) (stri
 func puIsLocalLogsHeader(line string) bool {
 	low := strings.ToLower(strings.TrimSpace(line))
 	return strings.HasPrefix(low, "local logs:") ||
-		strings.HasPrefix(low, "subscriptionmanagerservice local logs") ||
-		strings.HasPrefix(low, "subscriptioncontroller:") && strings.Contains(low, "local logs")
+		strings.HasPrefix(low, "local log:") ||
+		strings.HasPrefix(low, "subscriptionmanagerservice local log") ||
+		strings.HasPrefix(low, "subscriptioncontroller:") && strings.Contains(low, "local log")
 }
 
 // puParseSubID "1\n" -> 1; "null"/空/非正数 -> 0

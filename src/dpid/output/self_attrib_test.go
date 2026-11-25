@@ -182,3 +182,78 @@ func TestPMCommandKillsProcessGroupOnTimeout(t *testing.T) {
 	}
 }
 
+func TestSampleOnceFiltersOrphanZeroUIDAndProtectsRealAppFromVPNConduit(t *testing.T) {
+	oldSrcs := selfAttribProcNetSources
+	oldNetDir := sysClassNetDir
+	oldDumpFn := runDumpsysVPNFn
+	oldPkgList := packagesListPath
+	t.Cleanup(func() {
+		selfAttribProcNetSources = oldSrcs
+		sysClassNetDir = oldNetDir
+		runDumpsysVPNFn = oldDumpFn
+		packagesListPath = oldPkgList
+		resetDynamicVPNConduitCacheForTest()
+	})
+	resetDynamicVPNConduitCacheForTest()
+
+	tmp := t.TempDir()
+	fakeTCP := filepath.Join(tmp, "tcp")
+	// 01020304:01BB -> 4.3.2.1:443 (little-endian 0x04030201 -> 1.2.3.4:443)
+	// Row 0: FIN_WAIT1 (04) with uid=0 -> orphan, must be filtered
+	// Row 1: CLOSING (0B) with uid=10234 but inode=0 -> orphan, must be filtered
+	// Row 2: ESTABLISHED (01) with uid=0 -> root/kernel socket, must NEVER enter appsByUID or remoteToUID
+	// Row 3: ESTABLISHED (01) with dynamic VPN uid=10888 to 1.2.3.4:443
+	// Row 4: ESTABLISHED (01) with real app uid=10234 to 1.2.3.4:443 (different local port)
+	// Row 5: ESTABLISHED (01) with dynamic VPN uid=10888 to 1.2.3.4:8443 (same remote IP 1.2.3.4!)
+	tcpBody := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: 0100007F:C350 04030201:01BB 04 00000000:00000000 00:00000000 00000000     0        0 0\n" +
+		"   1: 0100007F:C351 04030201:01BB 0B 00000000:00000000 00:00000000 00000000 10234        0 0\n" +
+		"   2: 0100007F:C352 08080808:01BB 01 00000000:00000000 00:00000000 00000000     0        0 12345\n" +
+		"   3: 0100007F:C353 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10888        0 22345\n" +
+		"   4: 0100007F:C354 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10234        0 22346\n" +
+		"   5: 0100007F:C355 04030201:20FB 01 00000000:00000000 00:00000000 00000000 10888        0 22347\n"
+	if err := os.WriteFile(fakeTCP, []byte(tcpBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	selfAttribProcNetSources = []procNetSource{{"tcp", fakeTCP, false}}
+
+	fakePkgs := filepath.Join(tmp, "packages.list")
+	pkgBody := "" +
+		"com.ss.android.ugc.aweme 10234 0 /data/user/0/com.ss.android.ugc.aweme default:targetSdkVersion=34 3003\n" +
+		"com.custom.unknownvpn 10888 0 /data/user/0/com.custom.unknownvpn default:targetSdkVersion=34 3003\n"
+	if err := os.WriteFile(fakePkgs, []byte(pkgBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	packagesListPath = fakePkgs
+
+	fakeNet := filepath.Join(tmp, "net")
+	_ = os.MkdirAll(filepath.Join(fakeNet, "tun0"), 0o755)
+	_ = os.WriteFile(filepath.Join(fakeNet, "tun0", "tun_flags"), []byte("0x1001\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(fakeNet, "tun0", "ifindex"), []byte("19\n"), 0o644)
+	sysClassNetDir = fakeNet
+	runDumpsysVPNFn = func() (string, error) {
+		return "mOwnerUID=10888\n", nil
+	}
+
+	a := NewSelfAttribAggregator("")
+	if err := a.sampleOnce(); err != nil {
+		t.Fatalf("sampleOnce failed: %v", err)
+	}
+
+	snap := a.Snapshot()
+	if _, bad := snap.AppsByUID["0"]; bad {
+		t.Fatal("uid 0 must never be inserted into AppsByUID")
+	}
+	if _, _, ok := a.LookupUID("8.8.8.8", 443); ok {
+		t.Fatal("uid 0 socket must never populate remoteToUID")
+	}
+
+	// Real app (10234) must win over VPN conduit (10888) on both exact 1.2.3.4:443 and IP-only fallback (e.g. 1.2.3.4:9443).
+	if uid, pkg, ok := a.LookupUID("1.2.3.4", 443); !ok || uid != 10234 || pkg != "com.ss.android.ugc.aweme" {
+		t.Fatalf("exact 1.2.3.4:443 attribution overwritten by VPN: uid=%d pkg=%q ok=%v", uid, pkg, ok)
+	}
+	if uid, pkg, ok := a.LookupUID("1.2.3.4", 9443); !ok || uid != 10234 || pkg != "com.ss.android.ugc.aweme" {
+		t.Fatalf("IP-level fallback for 1.2.3.4 must preserve real app 10234 instead of VPN or -1: uid=%d pkg=%q ok=%v", uid, pkg, ok)
+	}
+}
+

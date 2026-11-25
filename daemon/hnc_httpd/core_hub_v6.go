@@ -884,27 +884,31 @@ func (b *Bulkhead) Health() BulkheadHealth {
 // ─── WorldSnapshot 无锁 RCU 原子快照与 CoreHub 中枢 ──────────────────
 
 type VectorLiveSummary struct {
-	HotspotActive bool           `json:"hotspot_active"`
-	Iface         string         `json:"iface"`
-	HotspotIface  string         `json:"hotspot_iface"`
-	HotspotIP     string         `json:"hotspot_ip"`
-	IfaceMethod   string         `json:"iface_method,omitempty"`
-	Online        int            `json:"online"`
-	Total         int            `json:"total"`
-	HotspotFlows  int            `json:"hotspot_flows"`
-	HostFlows     int            `json:"host_flows"`
-	RxBps         int64          `json:"rx_bps"`
-	TxBps         int64          `json:"tx_bps"`
-	Sim           bool           `json:"sim,omitempty"`
-	Signal        any            `json:"signal,omitempty"`
-	Autorate      any            `json:"autorate,omitempty"`
-	ActivityLevel string         `json:"activity_level,omitempty"`
-	Devices       []VectorDevice `json:"devices"`
+	HotspotActive       bool           `json:"hotspot_active"`
+	Iface               string         `json:"iface"`
+	HotspotIface        string         `json:"hotspot_iface"`
+	HotspotIP           string         `json:"hotspot_ip"`
+	IfaceMethod         string         `json:"iface_method,omitempty"`
+	USBTether           []string       `json:"usb_tether,omitempty"`
+	BTTether            []string       `json:"bt_tether,omitempty"`
+	Online              int            `json:"online"`
+	Total               int            `json:"total"`
+	HotspotFlows        int            `json:"hotspot_flows"`
+	HostFlows           int            `json:"host_flows"`
+	RxBps               int64          `json:"rx_bps"`
+	TxBps               int64          `json:"tx_bps"`
+	Sim                 bool           `json:"sim,omitempty"`
+	Signal              any            `json:"signal,omitempty"`
+	Autorate            any            `json:"autorate,omitempty"`
+	ThrottleSources     []string       `json:"throttle_sources"`
+	ActiveLimiterReason string         `json:"active_limiter_reason"`
+	ActivityLevel       string         `json:"activity_level,omitempty"`
+	Devices             []VectorDevice `json:"devices"`
 }
 
 type VectorDevice struct {
 	MAC          string  `json:"mac"`
-	IP           string  `json:"ip,omitempty"`
+	IP           string  `json:"ip"`
 	Hostname     string  `json:"hostname,omitempty"`
 	Online       bool    `json:"online"`
 	Status       string  `json:"status,omitempty"`
@@ -913,6 +917,7 @@ type VectorDevice struct {
 	LimitEnabled bool    `json:"limit_enabled,omitempty"`
 	DownMbps     float64 `json:"down_mbps,omitempty"`
 	UpMbps       float64 `json:"up_mbps,omitempty"`
+	Sim          bool    `json:"sim,omitempty"`
 }
 
 // WorldSnapshot 全栈不可变只读态势快照。一旦发布至 atomic.Pointer 永不原地修改。
@@ -1085,7 +1090,7 @@ func (h *CoreHub) Start(extStop <-chan struct{}) {
 			if want <= 0 {
 				stopTicker()
 				h.paused.Store(true)
-				return false
+				return !wasPaused
 			}
 			h.paused.Store(false)
 			if want != curInterval {
@@ -1292,6 +1297,7 @@ type dpiShmReadResult struct {
 	Attached       bool
 	Mmapped        bool
 	Stale          bool
+	simMerged      bool
 	Seq            uint64
 	UpdatedMonoNs  int64
 	UpdatedUnixNs  int64
@@ -1316,6 +1322,10 @@ func calibrateCoreHubFlowCounts(s *server, live *VectorLiveSummary, shmRes *dpiS
 		hsFlows = shmRes.HotspotFlows
 		if hsFlows == 0 && shmRes.ActiveFlows > 0 {
 			hsFlows = shmRes.ActiveFlows
+		}
+		if s != nil && s.simActive() && !shmRes.simMerged {
+			hsFlows += s.simActiveConnCount(time.Now())
+			shmRes.simMerged = true
 		}
 		hostFlows = shmRes.HostFlows
 		if hostFlows == 0 && s != nil && s.hncDir != "" {
@@ -2089,6 +2099,7 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 	}
 
 	nowUnix := now.Unix()
+	simOn := s.simOn()
 	macs := make([]string, 0, len(devMap))
 	for mac := range devMap {
 		macs = append(macs, mac)
@@ -2096,6 +2107,7 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 	sort.Strings(macs)
 
 	devices := make([]VectorDevice, 0, len(macs))
+	seenMAC := make(map[string]bool, len(macs))
 	online := 0
 	var totalRx, totalTx int64
 
@@ -2105,6 +2117,10 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 			continue
 		}
 		macKey := strings.ToLower(strings.TrimSpace(mac))
+		if !simOn && (strings.HasPrefix(macKey, simMACPrefix) || dm["sim"] == true) {
+			continue
+		}
+		seenMAC[macKey] = true
 		devIP := asString(dm["ip"])
 		lastSeen, _ := toInt64(dm["last_seen"])
 		isOnline := devIP != "" && (lastSeen == 0 || nowUnix-lastSeen <= activityOnlineWindow)
@@ -2149,12 +2165,67 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 		devices = append(devices, vd)
 	}
 
+	if simLive {
+		views, _ := s.simViews(now)
+		for i := range views {
+			v := &views[i]
+			macKey := strings.ToLower(strings.TrimSpace(v.D.MAC))
+			if macKey == "" || seenMAC[macKey] {
+				continue
+			}
+			seenMAC[macKey] = true
+			hn := v.D.Hostname
+			if v.D.Name != "" {
+				hn = v.D.Name
+			}
+			isOnline := !v.D.Offline
+			if isOnline {
+				online++
+			}
+			totalRx += v.Rx
+			totalTx += v.Tx
+			status := "allowed"
+			if v.D.Blocked {
+				status = "blocked"
+			}
+			devices = append(devices, VectorDevice{
+				MAC:          macKey,
+				IP:           v.D.IP,
+				Hostname:     hn,
+				Online:       isOnline,
+				Status:       status,
+				RxBps:        v.Rx,
+				TxBps:        v.Tx,
+				LimitEnabled: v.D.LimitDownMbps > 0 || v.D.LimitUpMbps > 0,
+				DownMbps:     v.D.LimitDownMbps,
+				UpMbps:       v.D.LimitUpMbps,
+				Sim:          true,
+			})
+		}
+	}
+
 	active := hotspotActiveFromState(s.hncDir, iface, ip, online)
 	if simLive {
 		active = true
 	}
+	if !active && !simLive {
+		online = 0
+		totalRx = 0
+		totalTx = 0
+		for i := range devices {
+			devices[i].Online = false
+			devices[i].RxBps = 0
+			devices[i].TxBps = 0
+		}
+	}
 	if det := readIfaceDetect(s.hncDir); det.Method != "" {
 		sum.IfaceMethod = det.Method
+		if len(det.USBTether) > 0 {
+			sum.USBTether = det.USBTether
+		}
+		if len(det.BTTether) > 0 {
+			sum.BTTether = det.BTTether
+		}
 	}
 	if s.signalCtl != nil {
 		if allowAsyncSignal {
@@ -2170,6 +2241,18 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 		if ar.Enabled {
 			sum.Autorate = ar
 		}
+	}
+	if !active && hotspotExplicitlyInactive(s.hncDir) && !simLive {
+		sum.ThrottleSources = []string{}
+		sum.ActiveLimiterReason = ""
+	} else {
+		arbSnap := s.shaperArbiter().Snapshot()
+		sources := arbSnap.ThrottleSources
+		if sources == nil {
+			sources = []string{}
+		}
+		sum.ThrottleSources = sources
+		sum.ActiveLimiterReason = arbSnap.ActiveLimiterReason
 	}
 
 	sum.HotspotActive = active

@@ -17,15 +17,13 @@ import (
 // 实际 1:1 根速率由 RootShaperArbiter 综合 static_shaper、5G Autorate 与 ThermoCruise 统一仲裁下发。
 func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 	hncDir := s.hncDir
+	disableAR := false
 	if rawAR, hasAR := p["autorate_enabled"]; hasAR && strings.TrimSpace(rawAR) != "" {
 		if arOn, ok := parseBoolStr(rawAR); ok {
 			if arOn {
 				return actionAutorateSet(s, p)
 			}
-			if s.autorate != nil {
-				s.autorate.bindServer(s)
-				s.autorate.DisableFromStaticShaper()
-			}
+			disableAR = true
 		}
 	}
 	enabled, ok := parseEnabledParam(p)
@@ -49,6 +47,10 @@ func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 		iface := resolveIface()
 		if err := s.shaperArbiter().SetStaticBaseline(time.Now(), iface, false, 0, 0, true); err != nil {
 			return actionResp{OK: false, Error: "shaper apply failed", Detail: err.Error()}
+		}
+		if disableAR && s.autorate != nil {
+			s.autorate.bindServer(s)
+			s.autorate.DisableFromStaticShaper()
 		}
 		return actionResp{OK: true, Detail: "global shaper off"}
 	}
@@ -98,6 +100,10 @@ func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 	if err := s.shaperArbiter().SetStaticBaseline(time.Now(), iface, true, downMbps, upMbps, true); err != nil {
 		runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "false")
 		return actionResp{OK: false, Error: "shaper apply failed", Detail: err.Error()}
+	}
+	if disableAR && s.autorate != nil {
+		s.autorate.bindServer(s)
+		s.autorate.DisableFromStaticShaper()
 	}
 	return actionResp{OK: true, Detail: "global shaper on down=" + rateDown + " up=" + rateUp}
 }

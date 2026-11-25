@@ -2088,6 +2088,8 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 
 	// 清空服务端 JSON 缓存并触发全部活跃 v6 引擎从磁盘热重载最新配置
 	reloadRuntimeCachesAndV6Engines(hncDir, optSrv...)
+	// 严守叶子锁序: 在全部外层锁释放后的末尾独立短持 macAliasMu 清空 macAliasCache(防同秒同字节恢复命中旧缓存)
+	invalidateMACAliasCache()
 	return restored, nil
 }
 

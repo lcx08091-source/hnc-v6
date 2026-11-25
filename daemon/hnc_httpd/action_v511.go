@@ -699,10 +699,26 @@ func triggerDPIRulesRebind(hncDir string) {
 	_, _ = runBin(hncDir, "dpi_rebind.sh", iface)
 }
 
-// GET /api/dpi_rules → 当前生效的自定义规则库; POST {rules:"<json>"} → 导入(≤512KB)
+type dpiMergeBool bool
+
+func (m *dpiMergeBool) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	switch strings.ToLower(s) {
+	case "true", `"true"`, "1", `"1"`:
+		*m = true
+		return nil
+	case "false", `"false"`, "0", `"0"`, "null", `""`:
+		*m = false
+		return nil
+	default:
+		return errors.New("invalid merge flag")
+	}
+}
+
+// GET /api/dpi_rules → 当前生效的自定义规则库; POST {rules:"<json>", merge?:true} → 导入(≤512KB)
 func (s *server) apiDPIRules(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		rc, out := runBin(s.hncDir, "dpi_rules_import.sh", "--export")
+		rc, out := runBinUnlimited(s.hncDir, "dpi_rules_import.sh", "--export")
 		if rc != 0 || !json.Valid([]byte(out)) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "export failed"})
 			return
@@ -712,7 +728,8 @@ func (s *server) apiDPIRules(w http.ResponseWriter, r *http.Request) {
 	}
 	s.requireMutationN(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Rules string `json:"rules"`
+			Rules string       `json:"rules"`
+			Merge dpiMergeBool `json:"merge"`
 		}
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
@@ -753,10 +770,17 @@ func (s *server) apiDPIRules(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "write failed"})
 			return
 		}
+		impArgs := []string{tmp}
+		if bool(req.Merge) {
+			impArgs = []string{"--merge", tmp}
+		}
 		s.actionMu.Lock()
-		rc, out := runBin(s.hncDir, "dpi_rules_import.sh", tmp)
+		rc, out := runBin(s.hncDir, "dpi_rules_import.sh", impArgs...)
 		s.actionMu.Unlock()
-		auditLog(s.hncDir, writeRateKey(r), "dpi_rules_import", map[string]string{"bytes": strconv.Itoa(len(body))}, map[bool]string{true: "ok", false: "error"}[rc == 0], lastLine(out))
+		auditLog(s.hncDir, writeRateKey(r), "dpi_rules_import", map[string]string{
+			"bytes": strconv.Itoa(len(body)),
+			"merge": strconv.FormatBool(bool(req.Merge)),
+		}, map[bool]string{true: "ok", false: "error"}[rc == 0], lastLine(out))
 		if rc != 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "import failed", "detail": lastLine(out)})
 			return

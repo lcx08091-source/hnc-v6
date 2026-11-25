@@ -251,9 +251,9 @@ list_watchdog_pids() {
                 pid_matches "$_p" hnc_watchdog && echo "$_p"
             done
         fi
-        if [ ! -r "$_proot/$$/cmdline" ]; then
+        if [ ! -r "$_proot/self/cmdline" ] && [ ! -r "$_proot/$$/cmdline" ]; then
             for _cand in $(pidof hnc_watchdog 2>/dev/null) \
-                         $(ps -A 2>/dev/null | awk '$0 !~ /awk/ && $0 !~ /grep/ && $0 ~ /(^|[ /])hnc_watchdog([[:space:]]|$)/ { print $2 }'); do
+                         $(ps -A 2>/dev/null | awk '$0 !~ /awk/ && $0 !~ /grep/ && $0 ~ /(^|[ \/])hnc_watchdog([[:space:]]|$)/ { print $2 }'); do
                 case "$_cand" in ''|*[!0-9]*) continue ;; esac
                 if [ -r "$_proot/$_cand/cmdline" ] && command -v pid_matches >/dev/null 2>&1; then
                     pid_matches "$_cand" hnc_watchdog && echo "$_cand"

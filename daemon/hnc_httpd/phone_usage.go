@@ -528,8 +528,132 @@ func actionPhoneUsageSet(hncDir string, p map[string]string) actionResp {
 	return actionPhoneUsageSetAt(hncDir, p, time.Now())
 }
 
+// puSlotBytesForDays 计算给定日切片中某物理卡槽的 HNC 累计蜂窝流量(含单卡确定性归并)。
+func puSlotBytesForDays(hncDir string, days []*puDay, cycStart, now time.Time, slotNum int) uint64 {
+	if len(days) == 0 || slotNum <= 0 {
+		return 0
+	}
+	agg := puAggSIM(days)
+	var eng *puEngine
+	if puEng != nil && puEng.hncDir == hncDir {
+		eng = puEng
+	}
+	var calRes *calResult
+	if cal := calGet(hncDir); cal != nil {
+		if r := cal.result(); calUsable(r, cycStart, now) {
+			calRes = r
+		}
+	}
+	maxSlots, presentSlots, slotsKnown := 2, map[int]puSIM(nil), false
+	if eng != nil {
+		maxSlots, presentSlots, slotsKnown = eng.simTopologySnapshot()
+	}
+	targetSlot, carrierHint := puPickUniqueCellSlot(calRes, maxSlots, presentSlots, slotsKnown)
+	_ = puReconcileAndStripInvalidSlots(agg, maxSlots, targetSlot, carrierHint)
+	if a := agg[slotNum]; a != nil {
+		return a.Rx + a.Tx
+	}
+	return 0
+}
+
+// puSlotBytesBetweenDays 计算左闭右开整日窗口 [dStart, dEndExcl) 内某物理卡槽的 HNC 累计蜂窝字节数。
+func puSlotBytesBetweenDays(hncDir string, slotNum int, dStart, dEndExcl, cycStart, now time.Time) uint64 {
+	if !dStart.Before(dEndExcl) || slotNum <= 0 {
+		return 0
+	}
+	startStr := dStart.Format("20060102")
+	endStr := dEndExcl.Format("20060102")
+	inclusiveEnd := dEndExcl.Add(-time.Second)
+	var rawDays []*puDay
+	if puEng != nil && puEng.hncDir == hncDir {
+		rawDays = puEng.days(dStart, inclusiveEnd)
+	} else {
+		rawDays = puReadDaysFromDisk(hncDir, dStart, inclusiveEnd)
+	}
+	filtered := make([]*puDay, 0, len(rawDays))
+	for _, d := range rawDays {
+		if d != nil && d.Date >= startStr && d.Date < endStr {
+			filtered = append(filtered, d)
+		}
+	}
+	return puSlotBytesForDays(hncDir, filtered, cycStart, now, slotNum)
+}
+
+// puMigrateCycleAnchors 在计费日变更或账期推进时逐卡审视现有手动校准锚点:
+// 仅淘汰 AnchorAt < newCycStart 的过期锚点; 当前新账期内仍然有效的锚点保留 AnchorGB, 重算 AnchorBase 并同步更新 AnchorCycle。
+func puMigrateCycleAnchors(hncDir string, c *puConfig, prevCycleStr string, newCycStart, now time.Time) {
+	newCycStr := newCycStart.Format("20060102")
+	if prevCycleStr == newCycStr {
+		return
+	}
+	newStartUnix := newCycStart.Unix()
+	var oldCycStart time.Time
+	hasOldStart := false
+	if len(prevCycleStr) == 8 {
+		if t, err := time.ParseInLocation("20060102", prevCycleStr, now.Location()); err == nil {
+			oldCycStart = t
+			hasOldStart = true
+		}
+	}
+	for _, slot := range []string{"1", "2"} {
+		hasGB := false
+		if c.AnchorGB != nil {
+			_, hasGB = c.AnchorGB[slot]
+		}
+		anchorAt := int64(0)
+		if c.AnchorAt != nil {
+			anchorAt = c.AnchorAt[slot]
+		}
+		if !hasGB || anchorAt < newStartUnix {
+			if c.AnchorGB != nil {
+				delete(c.AnchorGB, slot)
+			}
+			if c.AnchorBase != nil {
+				delete(c.AnchorBase, slot)
+			}
+			if c.AnchorNsBase != nil {
+				delete(c.AnchorNsBase, slot)
+			}
+			if c.AnchorAt != nil {
+				delete(c.AnchorAt, slot)
+			}
+			continue
+		}
+		slotNum, _ := strconv.Atoi(slot)
+		if c.AnchorBase == nil {
+			c.AnchorBase = map[string]uint64{}
+		}
+		oldBase := c.AnchorBase[slot]
+		if hasOldStart {
+			if newCycStart.After(oldCycStart) {
+				diff := puSlotBytesBetweenDays(hncDir, slotNum, oldCycStart, newCycStart, newCycStart, now)
+				c.AnchorBase[slot] = puSub(oldBase, diff)
+			} else if newCycStart.Before(oldCycStart) {
+				diff := puSlotBytesBetweenDays(hncDir, slotNum, newCycStart, oldCycStart, newCycStart, now)
+				c.AnchorBase[slot] = oldBase + diff
+			}
+		} else {
+			anchorTime := time.Unix(anchorAt, 0).In(now.Location())
+			var days []*puDay
+			if puEng != nil && puEng.hncDir == hncDir {
+				days = puEng.days(newCycStart, anchorTime)
+			} else {
+				days = puReadDaysFromDisk(hncDir, newCycStart, anchorTime)
+			}
+			c.AnchorBase[slot] = puSlotBytesForDays(hncDir, days, newCycStart, now, slotNum)
+		}
+		if c.AnchorNsBase != nil {
+			delete(c.AnchorNsBase, slot)
+		}
+	}
+	if len(c.AnchorGB) > 0 || prevCycleStr != "" {
+		c.AnchorCycle = newCycStr
+	}
+}
+
 func actionPhoneUsageSetAt(hncDir string, p map[string]string, now time.Time) actionResp {
 	c := puLoadConfig(hncDir)
+	prevCycleStr := c.AnchorCycle
 	changed := 0
 	if v, ok := p["billing_day"]; ok && strings.TrimSpace(v) != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
@@ -566,8 +690,24 @@ func actionPhoneUsageSetAt(hncDir string, p map[string]string, now time.Time) ac
 			return actionResp{OK: false, Error: "bad params", Detail: "use_netstats must be auto|prefer|off"}
 		}
 	}
+	// 先校验锚点参数合法性, 确保非法输入整体拒绝、不发生半截迁移
+	for _, key := range []string{"anchor_sim1_gb", "anchor_sim2_gb"} {
+		if v, ok := p[key]; ok {
+			sv := strings.TrimSpace(v)
+			if sv == "" || sv == "-1" || strings.EqualFold(sv, "clear") {
+				continue
+			}
+			f, err := strconv.ParseFloat(sv, 64)
+			if err != nil || math.IsNaN(f) || f < 0 || f > puMaxPlanGB {
+				return actionResp{OK: false, Error: "bad params", Detail: key + " must be 0-100000 or -1 to clear"}
+			}
+		}
+	}
+
 	cycStart := puCycleStart(now, c.BillingDay)
 	cycStr := cycStart.Format("20060102")
+	puMigrateCycleAnchors(hncDir, &c, prevCycleStr, cycStart, now)
+
 	for slot, key := range map[string]string{"1": "anchor_sim1_gb", "2": "anchor_sim2_gb"} {
 		if v, ok := p[key]; ok {
 			sv := strings.TrimSpace(v)
@@ -587,17 +727,8 @@ func actionPhoneUsageSetAt(hncDir string, p map[string]string, now time.Time) ac
 				changed++
 				continue
 			}
-			f, err := strconv.ParseFloat(sv, 64)
-			if err != nil || math.IsNaN(f) || f < 0 || f > puMaxPlanGB {
-				return actionResp{OK: false, Error: "bad params", Detail: key + " must be 0-100000 or -1 to clear"}
-			}
-			if c.AnchorCycle != cycStr {
-				c.AnchorGB = map[string]float64{}
-				c.AnchorBase = map[string]uint64{}
-				c.AnchorNsBase = map[string]uint64{}
-				c.AnchorAt = map[string]int64{}
-				c.AnchorCycle = cycStr
-			}
+			f, _ := strconv.ParseFloat(sv, 64)
+			c.AnchorCycle = cycStr
 			if c.AnchorGB == nil {
 				c.AnchorGB = map[string]float64{}
 			}
@@ -612,30 +743,17 @@ func actionPhoneUsageSetAt(hncDir string, p map[string]string, now time.Time) ac
 			}
 			slotNum, _ := strconv.Atoi(slot)
 			var cycDays []*puDay
-			var eng *puEngine
 			if puEng != nil && puEng.hncDir == hncDir {
-				eng = puEng
-				cycDays = eng.days(cycStart, now)
+				cycDays = puEng.days(cycStart, now)
 			} else {
 				cycDays = puReadDaysFromDisk(hncDir, cycStart, now)
 			}
-			agg := puAggSIM(cycDays)
+			baseBytes := puSlotBytesForDays(hncDir, cycDays, cycStart, now, slotNum)
 			var calRes *calResult
 			if cal := calGet(hncDir); cal != nil {
 				if r := cal.result(); calUsable(r, cycStart, now) {
 					calRes = r
 				}
-			}
-			maxSlots, presentSlots, slotsKnown := 2, map[int]puSIM(nil), false
-			if eng != nil {
-				maxSlots, presentSlots, slotsKnown = eng.simTopologySnapshot()
-			}
-			targetSlot, carrierHint := puPickUniqueCellSlot(calRes, maxSlots, presentSlots, slotsKnown)
-			_ = puReconcileAndStripInvalidSlots(agg, maxSlots, targetSlot, carrierHint)
-
-			var baseBytes uint64
-			if a := agg[slotNum]; a != nil {
-				baseBytes = a.Rx + a.Tx
 			}
 			c.AnchorGB[slot] = f
 			c.AnchorBase[slot] = baseBytes
@@ -659,6 +777,8 @@ func actionPhoneUsageSetAt(hncDir string, p map[string]string, now time.Time) ac
 	if err := puWriteAtomic(puConfigPath(hncDir), b); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
+	invalidateJSONCaches(puConfigPath(hncDir))
+	invalidateUsageCache()
 	calKick(hncDir) // v5.21: 计费日/对账模式/锚点变了, 后台尽快重新对账
 	return actionResp{OK: true, Detail: fmt.Sprintf("billing_day=%d sim1=%gGB sim2=%gGB warn=%d%% use_netstats=%s",
 		c.BillingDay, c.PlanGB["1"], c.PlanGB["2"], c.WarnPercent, c.netstatsMode())}

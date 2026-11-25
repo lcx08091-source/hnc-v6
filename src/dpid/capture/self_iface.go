@@ -61,6 +61,7 @@ var selfPositivePatterns = []*regexp.Regexp{
 	// rmnet — useless for SNI extraction. Link type ARPHRD_NONE (65534)
 	// for tun, handled by rawsocket.go's RawIP dispatch.
 	regexp.MustCompile(`^tun\d+$`),
+	regexp.MustCompile(`(?i)^meta\d*$`), // FlClash / Clash.Meta virtual TUN interface
 	regexp.MustCompile(`^vpn\d+$`),
 	regexp.MustCompile(`^wg\d+$`),
 	regexp.MustCompile(`^tailscale\d+$`),

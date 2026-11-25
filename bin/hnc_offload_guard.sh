@@ -395,17 +395,17 @@ do_restore() {
 }
 
 tick() {
-    local mode ifc state fb since calm sp="n/a" cl="off" detail policy_on=0 mtk_plat=0 rcode="ok" _co_rc="" _hw_rc=""
+    local mode _explicit_ifc="${1:-}" ifc="${1:-}" state fb since calm sp="n/a" cl="off" detail policy_on=0 mtk_plat=0 rcode="ok" _co_rc="" _hw_rc=""
     MTK_TETHER_SUPPRESSED=0
     mode=$(guard_mode)
-    ifc=$(hotspot_iface) || ifc=""
+    [ -n "$ifc" ] || ifc=$(hotspot_iface) || ifc=""
     fb=$(st_get fallback); [ "$fb" = 1 ] || fb=0
     since=$(st_get since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
     calm=$(st_get calm);   case "$calm" in ''|*[!0-9]*) calm=0 ;; esac
     has_active_policy && policy_on=1
     is_mtk_platform && mtk_plat=1
 
-    [ "$mode" != on ] && [ "$policy_on" = 0 ] && hwnat_restore
+    [ -z "$_explicit_ifc" ] && [ "$mode" != on ] && [ "$policy_on" = 0 ] && hwnat_restore
     if [ "$mode" = off ]; then
         if [ "$fb" = 1 ] || [ -f "$CLSACT_FLAG" ] || [ -f "$ORIG_TETHER_FILE" ]; then
             do_restore "$ifc"
@@ -439,6 +439,11 @@ tick() {
             want=1
             t0_preempt=1
             calm=0
+        elif [ "$mtk_plat" = "1" ] && [ -n "$ifc" ] && { [ "$policy_on" = 1 ] || [ -n "$_explicit_ifc" ]; }; then
+            # 天玑(MTK)平台存在激活策略(或显式指定接口 apply <iface>)且热点在线时, 收敛至 want=1 压制 MDDP 旁路!
+            want=1
+            t0_preempt=1
+            calm=0
         elif [ "$policy_on" = 1 ] && [ "${HNC_TEST_MODE:-0}" != "1" ] && [ "$state" = IDLE ] && [ -d /sys/fs/bpf/tethering ]; then
             want=1
             t0_preempt=1
@@ -465,24 +470,34 @@ tick() {
 
     if [ "$want" = 1 ]; then
         sp=$(slowpath_disable)
-        if [ "$fb" != 1 ]; then
-            since=$(now_s)
-        fi
-        fb=1
-        st_save "$fb" "$since" "$calm"
+        [ "$mtk_plat" = "1" ] && MTK_TETHER_SUPPRESSED=1
         cl=$(clsact_apply "$ifc")
         if [ "$mode" = on ] || [ "$t0_preempt" = 1 ] || { [ "$state" = ACTIVE ] && [ "$policy_on" = 1 ]; }; then
             HWNAT_ST=$(hwnat_disable)
         fi
-        log "fallback ON (mode=$mode offload=$state t0=$t0_preempt iface=$ifc slowpath=$sp clsact=$cl)"
+        if [ "$sp" = ok ] || [ "$sp" = empty ] || [ "$cl" = installed ] || [ "$HWNAT_ST" = disabled ] || [ "$MTK_TETHER_SUPPRESSED" = "1" ] || { [ "$fb" = 1 ] && [ "$calm" -gt 0 ]; }; then
+            if [ "$fb" != 1 ]; then
+                since=$(now_s)
+            fi
+            fb=1
+            st_save "$fb" "$since" "$calm"
+            log "fallback ON (mode=$mode offload=$state t0=$t0_preempt iface=$ifc slowpath=$sp clsact=$cl)"
+        else
+            fb=0; since=0; calm=0
+            st_save 0 0 0
+            log "fallback DEGRADED (mode=$mode offload=$state t0=$t0_preempt iface=$ifc slowpath=$sp clsact=$cl)"
+        fi
         case "$sp" in
             ok)          detail="已强制 offload 走慢路径(limit_map=0, 每轮重申)" ;;
             empty)       detail="offload map 暂无条目, 下一轮重试" ;;
             unavailable) detail="hotspotd 未运行或无 hnc_ipc, 无法强制慢路径" ;;
             *)           detail="强制慢路径失败(见 hotspotd 日志)" ;;
         esac
+        if [ "$mtk_plat" = "1" ] && [ "$state" = NOMAP ]; then
+            detail="联发科平台无 BPF offload map, 激活策略期间已置 tether_offload_disabled=1 防 MDDP 旁路"
+        fi
         [ "$mode" = auto ] && [ "$state" = ACTIVE ] && detail="检测到 offload 正在旁路限速; $detail"
-        [ "$mode" = auto ] && [ "$t0_preempt" = 1 ] && detail="检测到激活策略(T+0 零延迟抢占); $detail"
+        [ "$mode" = auto ] && [ "$t0_preempt" = 1 ] && [ "$state" != NOMAP ] && detail="检测到激活策略(T+0 零延迟抢占); $detail"
         [ "$cl" = skipped_pref1_mirred ] && detail="$detail; clsact 打标跳过(pref 1 为旧版 mirred)"
         case "$HWNAT_ST" in
             disabled) detail="$detail; 已关闭 MTK HWNAT" ;;
@@ -491,33 +506,15 @@ tick() {
     else
         if [ "$fb" = 1 ]; then
             st_save 0 0 0
-            if [ "$mtk_plat" = "1" ]; then
-                slowpath_restore_ipc_only
-                clsact_remove "$ifc"
-                hwnat_restore
-            else
-                do_restore "$ifc"
-            fi
+            do_restore "$ifc"
             log "fallback OFF (offload=$state, calm=$calm)"
+        elif [ -f "$ORIG_TETHER_FILE" ]; then
+            tether_hal_restore
         fi
         fb=0; since=0; calm=0; sp="n/a"; cl="off"
-        # 天玑(MTK)平台即使 check_offload 为 NOMAP/IDLE 也提前置 tether_offload_disabled=1, 阻止 MDDP 硬件直通旁路!
-        if [ "$mtk_plat" = "1" ]; then
-            tether_hal_suppress
-            MTK_TETHER_SUPPRESSED=1
-            if [ "$mode" = on ] || [ "$policy_on" = "1" ]; then
-                HWNAT_ST=$(hwnat_disable)
-            fi
-        fi
         case "$state" in
             NOHOTSPOT) detail="热点未开启" ;;
-            NOMAP)
-                if [ "$mtk_plat" = "1" ]; then
-                    detail="联发科平台无 BPF offload map, 已提前置 tether_offload_disabled=1 防 MDDP 旁路"
-                else
-                    detail="本机无 tether offload map(非 GKI 或未启用), 无需兜底"
-                fi
-                ;;
+            NOMAP)     detail="本机无 tether offload map(非 GKI 或未启用), 无需兜底" ;;
             IDLE)      detail="offload 未在转发, 无需兜底" ;;
             CAPABLE)   detail="本机具备 offload, 当前无激活策略, 持续监测" ;;
             ACTIVE)    detail="硬件加速正常运行中(当前无激活策略, 无需慢路径压制)" ;;
@@ -672,7 +669,7 @@ case "${1:-}" in
         trap 'og_unlock' EXIT
         trap 'og_unlock; trap - EXIT; exit 143' TERM
         trap 'og_unlock; trap - EXIT; exit 130' INT
-        tick
+        tick "${2:-}"
         cat "$STATUS" 2>/dev/null
         ;;
     restore)

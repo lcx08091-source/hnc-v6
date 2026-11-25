@@ -58,17 +58,6 @@ const (
 	// autoPromotedOutFile is the rule file brand-new-apex promotions go into.
 	autoPromotedOutFile = "_auto_promoted.json"
 
-	// candidateDecisionsFile holds user-approved apexes (manual "一键 promote"
-	// from the WebUI). dpid force-promotes these even in shadow mode. Re-read
-	// each tick (like the blocklist) so clicks take effect within 60s.
-	candidateDecisionsFile = "/data/local/hnc/etc/candidate_decisions.json"
-
-	// candidateAccumFile persists the accumulator across dpid restarts. dpid is
-	// restarted on every hotspot-iface change (2-3x per toggle), which would
-	// otherwise reset the per-apex window/uid progress so the flywheel could
-	// never reach the promotion window threshold on hotspot-toggling devices.
-	candidateAccumFile = "/data/local/hnc/run/candidate_accum.json"
-
 	// candSharedUIDThreshold: an apex contacted by >= this many distinct uids
 	// is treated as shared infrastructure (never attributed to one app).
 	candSharedUIDThreshold = 3
@@ -81,6 +70,19 @@ const (
 	candMaxPromoted = 500          // promoted-rule hard cap
 	candMaxSamples  = 40           // candidate samples surfaced in dpi_state (review queue)
 	candMaxAgeSec   = 24 * 60 * 60 // drop candidates unseen for 24h
+)
+
+var (
+	// candidateDecisionsFile holds user-approved apexes (manual "一键 promote"
+	// from the WebUI). dpid force-promotes these even in shadow mode. Re-read
+	// each tick (like the blocklist) so clicks take effect within 60s.
+	candidateDecisionsFile = "/data/local/hnc/etc/candidate_decisions.json"
+
+	// candidateAccumFile persists the accumulator across dpid restarts.
+	candidateAccumFile = "/data/local/hnc/run/candidate_accum.json"
+
+	// candPromotedRulesDir defaults to externalRulesDir (overridable in unit tests).
+	candPromotedRulesDir = externalRulesDir
 )
 
 // apexCandidate accumulates evidence for one brand-new apex across ticks.
@@ -318,6 +320,21 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 	}
 	acc.age(now)
 	for apex, c := range acc.byApex {
+		if c != nil {
+			for u := range c.UIDs {
+				if a.IsFlywheelExcludedUID(u) {
+					c.TotalHits -= c.UIDs[u]
+					if c.TotalHits < 0 {
+						c.TotalHits = 0
+					}
+					delete(c.UIDs, u)
+				}
+			}
+			if len(c.UIDs) == 0 {
+				delete(acc.byApex, apex)
+				continue
+			}
+		}
 		sampleHost := apex
 		if c != nil && c.SampleSNI != "" {
 			sampleHost = c.SampleSNI
@@ -336,18 +353,16 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 	// tick; force-promotion below works regardless of the auto_promote flag.
 	decisions := loadCandidateDecisions()
 
-	// v5.7.0-rc33: conduit auto-detection. A uid associated with many distinct
-	// brand-new apexes is a generic conduit (VPN/proxy/browser) even if it's not
-	// on the explicit exclude list — block it from AUTO-promotion. Computed from
-	// the current accumulator (listed VPNs were already skipped at observe-time,
-	// so this only catches the unlisted long tail).
+	// v5.7.0-rc33 + B028: conduit auto-detection + dynamic TUN VPN OwnerUid guard.
 	apexCountByUID := map[int]int{}
 	for _, c := range acc.byApex {
 		for uid := range c.UIDs {
 			apexCountByUID[uid]++
 		}
 	}
-	isConduitUID := func(uid int) bool { return apexCountByUID[uid] >= conduitApexThreshold }
+	isConduitUID := func(uid int) bool {
+		return apexCountByUID[uid] >= conduitApexThreshold || a.IsFlywheelExcludedUID(uid)
+	}
 
 	// v5.7.0-rc35: publish the detected conduit uids so Snapshot can badge those
 	// apps as flywheel-excluded in the WebUI (alongside the explicit list).
@@ -361,7 +376,7 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 
 	changed := false
 	// v5.7.0-rc33 + C073: demote already-promoted rules whose attributed app is now a
-	// VPN/proxy (explicit list), a detected conduit, or a shared_infra/auto-detected CDN domain.
+	// VPN/proxy (explicit or dynamic TUN OwnerUid), a detected conduit, or a shared_infra domain.
 	for apex, r := range promoted {
 		excludedByList := a.IsFlywheelExcludedPkg(r.Evidence.UIDPkg) || a.IsFlywheelExcludedUID(r.Evidence.UID)
 		conduit := r.Source == "auto_promoted" && isConduitUID(r.Evidence.UID)
@@ -389,13 +404,6 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 		if tier != "shared" && isCandidateSharedInfra(c.SampleSNI, apex, sharedInfra) {
 			tier, uid = "shared", 0
 		}
-		sum.pending++
-		switch tier {
-		case "high":
-			sum.high++
-		case "shared":
-			sum.shared++
-		}
 
 		if _, isProm := promoted[apex]; isProm {
 			// self-correct: a promoted apex that became multi-uid / shared
@@ -404,6 +412,7 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 			if tier == "shared" || len(c.UIDs) > 1 {
 				delete(promoted, apex)
 				c.SharedLearned = true
+				tier, uid = "shared", 0
 				changed = true
 				log.Printf("auto-promote: demoted %s (now multi-uid/shared, uids=%d)", apex, len(c.UIDs))
 			}
@@ -412,10 +421,10 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 			// promoted manually (decisions file), which works even in shadow
 			// mode. Both are single-uid, preserving the self-correct invariant.
 			_, manual := decisions[apex]
-			// v5.7.0-rc33: never AUTO-promote to a detected conduit uid
-			// (VPN/proxy/browser). Manual promote still wins (user override).
-			if !manual && isConduitUID(uid) {
-				// conduit uid: suppress auto-promotion (no rule minted)
+			// v5.7.0-rc33 + B028: never AUTO-promote to a detected conduit or VPN uid.
+			// Manual promote still wins (user override).
+			if !manual && (isConduitUID(uid) || a.IsFlywheelExcludedUID(uid)) {
+				// conduit/VPN uid: suppress auto-promotion (no rule minted)
 			} else if manual || (tier == "high" && autoPromoteOn) {
 				pkg, label := a.DisplayForUID(uid)
 				src := "auto_promoted"
@@ -428,11 +437,20 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 			}
 		}
 
+		_, isProm := promoted[apex]
+		sum.pending++
+		if !isProm && tier == "high" {
+			// B034: only unpromoted HIGH-tier items awaiting manual review count toward sum.high
+			// so auto-promoted rules never falsely light up the Apps tab notification dot.
+			sum.high++
+		} else if tier == "shared" {
+			sum.shared++
+		}
+
 		// surface only actionable candidates (high/med) in the review queue;
 		// shared total is reported via sum.shared, low is too ambiguous.
 		if len(sum.samples) < candMaxSamples && (tier == "high" || tier == "med") {
 			_, label := a.DisplayForUID(uid)
-			_, isProm := promoted[apex]
 			sum.samples = append(sum.samples, CandidateSample{
 				Apex: apex, Tier: tier, UID: uid, App: label,
 				Hits: c.TotalHits, Windows: c.Windows, Promoted: isProm,
@@ -515,7 +533,7 @@ func writePromotedRules(promoted map[string]autoExpandedRule) error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	dst := filepath.Join(externalRulesDir, autoPromotedOutFile)
+	dst := filepath.Join(candPromotedRulesDir, autoPromotedOutFile)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
@@ -606,7 +624,7 @@ func loadCandidateDecisions() map[string]struct{} {
 
 // loadExistingPromoted reloads the previous run's promoted rules (keyed by apex).
 func loadExistingPromoted() (map[string]autoExpandedRule, error) {
-	dst := filepath.Join(externalRulesDir, autoPromotedOutFile)
+	dst := filepath.Join(candPromotedRulesDir, autoPromotedOutFile)
 	data, err := os.ReadFile(dst)
 	if err != nil {
 		return nil, err

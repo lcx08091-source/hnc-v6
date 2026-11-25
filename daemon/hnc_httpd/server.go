@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -16,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // rateSample — RateLoop 私有的"上一帧"快照: 字节计数器变化时才前移, ts 记录
@@ -779,8 +782,20 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 
 	s.limitCtl.annotateDevices(out)   // quota / schedule / effective
 	s.annotateMacMerge(out, namesMap) // v5.21: randomized_mac / merge_suggestion / merged_into
+	onlineCount := 0
+	for _, d := range out {
+		if b, _ := d["online"].(bool); b {
+			onlineCount++
+		}
+	}
+	hsIface := s.currentHotspotIface()
+	hsActive := hotspotActiveFromState(s.hncDir, hsIface, ifaceIPv4(hsIface), onlineCount)
+	if s.simActive() {
+		hsActive = true
+	}
 	return http.StatusOK, map[string]interface{}{
 		"devices":        out,
+		"hotspot_active": hsActive,
 		"whitelist_mode": rulesMap["whitelist_mode"],
 		"remote_enabled": rulesMap["remote_enabled"],
 	}
@@ -1469,13 +1484,93 @@ func (s *server) pruneLoop(stop <-chan struct{}) {
 	}
 }
 
+const runBinUnlimitedMaxBytes = 512 * 1024
+
+type cappedExecBuffer struct {
+	buf      bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func (w *cappedExecBuffer) Write(p []byte) (int, error) {
+	origLen := len(p)
+	rem := w.limit - w.buf.Len()
+	if rem <= 0 {
+		w.overflow = true
+		return origLen, nil
+	}
+	if len(p) > rem {
+		w.overflow = true
+		_, _ = w.buf.Write(p[:rem])
+		return origLen, nil
+	}
+	_, _ = w.buf.Write(p)
+	return origLen, nil
+}
+
+// runBinUnlimited 与 runBin 具有相同的 argv/env/超时防护, 但输出上限放宽至 512KB,
+// 专供 json_health_panel.sh 与 dpi_rules_import.sh --export 等大 JSON 只读输出使用。
+func runBinUnlimited(hncDir, script string, args ...string) (int, string) {
+	timeoutSec := execTimeoutSec
+	switch script {
+	case "dpi_rules_import.sh":
+		timeoutSec = 30
+	case "json_health_panel.sh":
+		timeoutSec = 25
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+	cmdArgs := append([]string{hncDir + "/bin/" + script}, args...)
+	cmd := hardenCmd(exec.CommandContext(ctx, "sh", cmdArgs...))
+	cmd.Env = hubAppendAndroidEnv(
+		"HNC_DIR="+hncDir,
+		"HNC="+hncDir,
+		"PATH="+hncExecPATH,
+	)
+	outBuf := &cappedExecBuffer{limit: runBinUnlimitedMaxBytes}
+	cmd.Stdout = outBuf
+	cmd.Stderr = outBuf
+	err := cmd.Run()
+	rc := 0
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return 124, "timeout after " + strconv.Itoa(timeoutSec) + "s"
+		} else if ee, ok := err.(*exec.ExitError); ok {
+			rc = ee.ExitCode()
+		} else {
+			rc = -1
+		}
+	}
+	s := outBuf.buf.String()
+	if outBuf.overflow {
+		cut := len(s)
+		for cut > 0 && !utf8.RuneStart(s[cut-1]) {
+			cut--
+		}
+		if cut > 0 {
+			r, sz := utf8.DecodeRuneInString(s[cut-1:])
+			if r == utf8.RuneError && sz == 1 {
+				cut--
+			} else {
+				cut = cut - 1 + sz
+			}
+		}
+		if cut <= 0 {
+			s = strings.ToValidUTF8(s, "\uFFFD") + "..."
+		} else {
+			s = s[:cut] + "..."
+		}
+	}
+	return rc, s
+}
+
 // apiJSONHealth v5.36.0: 为远程浏览器访问 /json-health.html 提供只读 HTTP 诊断摘要
 func (s *server) apiJSONHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"ok": false, "error": "GET only"})
 		return
 	}
-	rc, out := runBin(s.hncDir, "json_health_panel.sh")
+	rc, out := runBinUnlimited(s.hncDir, "json_health_panel.sh")
 	trimmed := strings.TrimSpace(out)
 	if idx := strings.Index(trimmed, "{"); idx >= 0 {
 		var payload map[string]interface{}

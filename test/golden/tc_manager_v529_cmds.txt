@@ -72,9 +72,13 @@ tc|filter del dev ifb0 parent 1: protocol all pref 1 handle 0x00850000/0x00ff000
 tc|filter add dev ifb0 parent 1: protocol all pref 1 handle 0x00850000/0x00ff0000 fw flowid 1:5
 tc|class change dev ifb0 parent 1:1 classid 1:5 htb rate 2000kbit ceil 2000kbit burst 16k cburst 16k quantum 25000
 ip|-4 -o addr show
+ip|-4 route show table all
 ip|route show table all
+ip|-4 route get 1.1.1.1
 ip|route get 1.1.1.1
+ip|-4 route get 223.5.5.5
 ip|route get 223.5.5.5
+ip|-4 route get 8.8.8.8
 ip|route get 8.8.8.8
 iptables|-t filter -L tetherctrl_FORWARD -n -v
 ip|link show wlan2
@@ -153,9 +157,13 @@ tc|qdisc show dev wlan2
 tc|filter del dev wlan2 parent ffff: protocol ip prio 400
 tc|class show dev ifb0
 ip|-4 -o addr show
+ip|-4 route show table all
 ip|route show table all
+ip|-4 route get 1.1.1.1
 ip|route get 1.1.1.1
+ip|-4 route get 223.5.5.5
 ip|route get 223.5.5.5
+ip|-4 route get 8.8.8.8
 ip|route get 8.8.8.8
 tc|class show dev wlan2
 tc|class show dev ifb0

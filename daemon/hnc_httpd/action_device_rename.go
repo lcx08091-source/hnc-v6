@@ -141,13 +141,13 @@ func normalizeMAC(s string) string {
 	return string(out)
 }
 
-// validDeviceName: empty (clear) is OK; otherwise 1-32 printable UTF-8 bytes,
+// validDeviceName: empty (clear) is OK; otherwise 1-32 printable UTF-8 runes,
 // rejecting control chars (<0x20, 0x7f), double quotes, and backslashes while preserving '/'.
 func validDeviceName(s string) bool {
 	if s == "" {
 		return true // empty = clear
 	}
-	if len(s) > 32 || !utf8.ValidString(s) {
+	if !utf8.ValidString(s) || utf8.RuneCountInString(s) > 32 {
 		return false
 	}
 	for _, r := range s {

@@ -103,6 +103,7 @@ type simDevice struct {
 	JitterMs      int                `json:"jitter_ms,omitempty"`
 	LossPct       float64            `json:"loss_pct,omitempty"`
 	SQM           bool               `json:"sqm,omitempty"`
+	AppQoS        bool               `json:"app_qos,omitempty"`
 	Whitelist     bool               `json:"whitelist,omitempty"`
 	Offline       bool               `json:"offline,omitempty"`
 	AppLimits     map[string]float64 `json:"app_limits,omitempty"` // app_id → down_mbps
@@ -752,8 +753,8 @@ func simApplyFields(hncDir string, d *simDevice, p map[string]string) *actionRes
 	n := simCloneDevice(*d)
 	if v, ok := p["name"]; ok {
 		v = strings.TrimSpace(v)
-		if !simValidText(v, 24) {
-			r := simBad("name: ≤24 chars, no control chars")
+		if !simValidText(v, 32) {
+			r := simBad("name: <=32 chars, no control chars")
 			return &r
 		}
 		n.Name = v
@@ -857,6 +858,14 @@ func simApplyFields(hncDir string, d *simDevice, p map[string]string) *actionRes
 			}
 		}
 	}
+	if v, ok := p["app_qos"]; ok && v != "" {
+		b, ok := simParseBool(v)
+		if !ok {
+			r := simBad("app_qos must be true/false")
+			return &r
+		}
+		n.AppQoS = b
+	}
 	for _, k := range []string{"limit_down_mbps", "limit_up_mbps"} {
 		if v, ok := p[k]; ok && v != "" {
 			x, ok := simParseFloat(v, 0, 10000)
@@ -879,6 +888,10 @@ func simApplyFields(hncDir string, d *simDevice, p map[string]string) *actionRes
 		}
 		n.DelayMs = x
 	}
+	if n.AppQoS && (n.DelayMs > 0 || n.JitterMs > 0 || n.LossPct > 0) {
+		r := actionResp{OK: false, Error: "conflict", Detail: "按应用分优先级与延迟模拟互斥, 请先关闭其中一项"}
+		return &r
+	}
 	*d = n
 	return nil
 }
@@ -887,7 +900,7 @@ var simAddKeys = map[string]bool{"name": true, "type": true, "rx": true, "tx": t
 	"jitter": true, "ip": true, "vendor": true, "hostname": true}
 var simUpdateKeys = map[string]bool{"mac": true, "name": true, "hostname": true, "vendor": true, "type": true,
 	"ip": true, "rx": true, "tx": true, "jitter": true, "app": true, "app_name": true, "category": true,
-	"blocked": true, "offline": true, "limit_down_mbps": true, "limit_up_mbps": true, "delay_ms": true}
+	"blocked": true, "offline": true, "app_qos": true, "limit_down_mbps": true, "limit_up_mbps": true, "delay_ms": true}
 
 func simUnknownKey(p map[string]string, allowed map[string]bool) string {
 	for k := range p {
@@ -1184,12 +1197,12 @@ var simPresets = map[string][]simPresetItem{
 		{"iot", map[string]string{"name": "模拟-米家摄像头", "rx": "20k", "tx": "250k", "jitter": "0.3"}},
 		{"phone", map[string]string{"name": "模拟-陌生设备", "rx": "900k", "tx": "100k", "jitter": "0.5", "blocked": "true"}},
 	},
-	// 空闲: 4 台, 只有心跳级流量, 一台离线
+	// 空闲: 4 台, 只有心跳级流量, 默认全在线
 	"idle": {
 		{"phone", map[string]string{"name": "模拟-待机手机", "rx": "4k", "tx": "1k", "jitter": "0.9"}},
 		{"tablet", map[string]string{"name": "模拟-充电中的平板", "rx": "2k", "tx": "1k", "jitter": "0.9"}},
 		{"iot", map[string]string{"name": "模拟-智能插座", "rx": "512", "tx": "256", "jitter": "0.8"}},
-		{"laptop", map[string]string{"name": "模拟-合盖的笔记本", "rx": "8k", "tx": "2k", "jitter": "0.9", "offline": "true"}},
+		{"laptop", map[string]string{"name": "模拟-合盖的笔记本", "rx": "8k", "tx": "2k", "jitter": "0.9"}},
 	},
 }
 
@@ -1346,11 +1359,24 @@ func simDeviceAction(d *simDevice, action string, p map[string]string) actionRes
 		if !ok {
 			return simBad("loss_pct out of range (0-100)")
 		}
+		if (delay > 0 || jit > 0 || loss > 0) && d.AppQoS {
+			return actionResp{OK: false, Error: "conflict", Detail: "这台设备开着按应用分优先级; 两者都要占用下行队列, 先关掉它再设延迟"}
+		}
 		d.DelayMs, d.JitterMs, d.LossPct = delay, jit, loss
 		return actionResp{OK: true, Detail: "delay injected (sim)"}
 	case "delay_clear":
 		d.DelayMs, d.JitterMs, d.LossPct = 0, 0, 0
 		return actionResp{OK: true, Detail: "delay cleared (sim)"}
+	case "app_qos_set":
+		enabled, ok := parseEnabledParam(p)
+		if !ok {
+			return simBad("enabled must be true/false")
+		}
+		if enabled && (d.DelayMs > 0 || d.JitterMs > 0 || d.LossPct > 0) {
+			return actionResp{OK: false, Error: "conflict", Detail: "这台设备开着延迟模拟; 两者都要占用下行队列, 先关掉延迟模拟再开"}
+		}
+		d.AppQoS = enabled
+		return actionResp{OK: true, Detail: "app_qos=" + strconv.FormatBool(enabled) + " mac=" + d.MAC}
 	case "rule_sqm":
 		v, ok := parseEnabledParam(p)
 		if !ok {

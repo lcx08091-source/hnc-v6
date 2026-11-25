@@ -29,12 +29,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -58,7 +60,7 @@ var appLimitMu sync.Mutex
 // actionAppLimitSet adds or replaces a (mac, app_id) → down_mbps entry.
 //
 //	mac:     canonical aa:bb:cc:dd:ee:ff (lowercase or upper accepted)
-//	app_id:  classifier rule ID (e.g. "douyin", "weixin")
+//	app_id:  classifier rule ID (e.g. "douyin", "weixin", or "user:xxx")
 //	down_mbps: target downlink in Mbps, 0 = clear
 func actionAppLimitSet(hncDir string, p map[string]string) actionResp {
 	mac := canonMAC(p["mac"])
@@ -67,7 +69,7 @@ func actionAppLimitSet(hncDir string, p map[string]string) actionResp {
 	}
 	appID := strings.TrimSpace(p["app_id"])
 	if !validAppID(appID) {
-		return actionResp{OK: false, Error: "bad params", Detail: "app_id must be 1-32 chars, [a-z0-9_-]"}
+		return actionResp{OK: false, Error: "bad params", Detail: "app_id must be 1-64 chars [A-Za-z0-9_.-] or user:[A-Za-z0-9_.-]{1,59}"}
 	}
 	rateStr := strings.TrimSpace(p["down_mbps"])
 	rate, err := strconv.ParseFloat(rateStr, 64)
@@ -242,6 +244,107 @@ func triggerAppLimitApply(hncDir string) {
 	_ = os.WriteFile(marker, []byte{}, 0o644)
 }
 
+// loadAppLimitMapsWithUserRules 将 data/dpi_user_rules.json 用户纠正规则(含 user:xxx 自定义应用)
+// 合并进应用限速的 app_id→IP 候选表与 IP→应用共享判据表, 与 bin/apply_app_limits.sh 严格同源。
+func loadAppLimitMapsWithUserRules(hncDir string, names map[string]ipName, now time.Time) (map[string][]string, map[string]string) {
+	appIPs := loadIPAppFlat(hncDir)
+	nameApp := ipNameAppMapForDir(hncDir, names)
+	userRules := readDPIUserRules(hncDir)
+	if len(userRules) == 0 {
+		return appIPs, nameApp
+	}
+
+	nowUnix := now.Unix()
+	domainOwner := map[string]string{}
+	var ipRules []dpiUserRule
+	for _, r := range userRules {
+		if !r.live(nowUnix) || r.AppID == "" || r.Value == "" {
+			continue
+		}
+		switch r.Kind {
+		case "domain":
+			d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.Value)), ".")
+			if d != "" {
+				domainOwner[d] = r.AppID
+			}
+		case "ip":
+			ipRules = append(ipRules, r)
+		}
+	}
+
+	appendUniqueIP := func(appID, ip string) {
+		for _, ex := range appIPs[appID] {
+			if ex == ip {
+				return
+			}
+		}
+		appIPs[appID] = append(appIPs[appID], ip)
+	}
+
+	matchUserDomain := func(host string) string {
+		h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+		for h != "" {
+			if appID, ok := domainOwner[h]; ok {
+				return appID
+			}
+			i := strings.IndexByte(h, '.')
+			if i < 0 {
+				break
+			}
+			h = h[i+1:]
+		}
+		return ""
+	}
+
+	if len(domainOwner) > 0 {
+		for ip, n := range names {
+			if n.Name == "" || isPrivateIP(ip) || net.ParseIP(ip) == nil {
+				continue
+			}
+			uApp := matchUserDomain(n.Name)
+			if uApp == "" {
+				continue
+			}
+			ipCanon := net.ParseIP(ip).String()
+			appendUniqueIP(uApp, ipCanon)
+			if isAppCtlSharedOrMultiTenantDomain(hncDir, n.Name) || builtinAppLimitOnlySharedInfra().Match(n.Name) {
+				nameApp[ipCanon] = appLimitSharedInfraSentinel
+				continue
+			}
+			if payOwner := appCtlForeignPaymentOwner(n.Name); payOwner != "" && uApp != payOwner {
+				nameApp[ipCanon] = payOwner
+				continue
+			}
+			nameApp[ipCanon] = uApp
+		}
+	}
+
+	for _, r := range ipRules {
+		parsed := net.ParseIP(strings.TrimSpace(r.Value))
+		if parsed == nil {
+			continue
+		}
+		ipCanon := parsed.String()
+		if isPrivateIP(ipCanon) {
+			continue
+		}
+		appendUniqueIP(r.AppID, ipCanon)
+		if nm, ok := names[ipCanon]; ok && nm.Name != "" {
+			if isAppCtlSharedOrMultiTenantDomain(hncDir, nm.Name) || builtinAppLimitOnlySharedInfra().Match(nm.Name) {
+				nameApp[ipCanon] = appLimitSharedInfraSentinel
+				continue
+			}
+			if payOwner := appCtlForeignPaymentOwner(nm.Name); payOwner != "" && r.AppID != payOwner {
+				nameApp[ipCanon] = payOwner
+				continue
+			}
+		}
+		nameApp[ipCanon] = r.AppID
+	}
+
+	return appIPs, nameApp
+}
+
 // rc30.6: read current app rate limit config. Mirrors data/app_limits.json
 // but in a stable shape for WebUI consumption.
 //
@@ -255,7 +358,8 @@ func (s *server) apiAppLimits(w http.ResponseWriter, r *http.Request) {
 	realN := len(file.Items)
 	include := appLimitIncludeShared(s.hncDir)
 	items := s.simMergeAppLimits(file.Items) // 模拟环境; 关闭时原样
-	views := appLimitViews(items, realN, loadIPAppFlat(s.hncDir), ipNameAppMap(s.loadIPNames()), include)
+	appIPs, nameApp := loadAppLimitMapsWithUserRules(s.hncDir, s.loadIPNames(), time.Now())
+	views := appLimitViews(items, realN, appIPs, nameApp, include)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":                 true,
 		"items":              views,
@@ -283,12 +387,28 @@ func canonMAC(s string) string {
 	return strings.ReplaceAll(s, "-", ":")
 }
 
+func isAppIDTokenChar(c rune) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'
+}
+
 func validAppID(s string) bool {
-	if s == "" || len(s) > 32 {
+	if s == "" || len(s) > 64 {
 		return false
 	}
+	if strings.HasPrefix(s, "user:") {
+		rest := s[len("user:"):]
+		if len(rest) < 1 || len(rest) > 59 {
+			return false
+		}
+		for _, c := range rest {
+			if !isAppIDTokenChar(c) {
+				return false
+			}
+		}
+		return true
+	}
 	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+		if !isAppIDTokenChar(c) {
 			return false
 		}
 	}

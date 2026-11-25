@@ -192,6 +192,18 @@ func hostConnSocketStateName(proto string, st uint8) string {
 	}
 }
 
+func hostConnIsTCPOrphanCloseState(proto string, st uint8) bool {
+	if proto != "tcp" {
+		return false
+	}
+	switch st {
+	case 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C:
+		return true
+	default:
+		return false
+	}
+}
+
 func hostConnParseProcNetLine(line, proto string, isV6File bool) (hostConnSockEntry, bool) {
 	fp := ctFieldsPool.Get().(*[]string)
 	f := splitASCIIFieldsInto(*fp, line)
@@ -239,6 +251,11 @@ func hostConnParseProcNetLine(line, proto string, isV6File bool) (hostConnSockEn
 		uid = -1
 	}
 	inode, _ := strconv.ParseUint(f[9], 10, 64)
+
+	// 过滤 TCP 04/05/06/07/0B/0C 半关闭/TIME_WAIT 孤儿行 (内核释放 fd 后将 uid/inode 归零，严禁误归为 root)
+	if hostConnIsTCPOrphanCloseState(proto, st) && (uid <= 0 || inode == 0) {
+		return hostConnSockEntry{}, false
+	}
 
 	return hostConnSockEntry{
 		Proto:     proto,
@@ -297,6 +314,10 @@ func hostConnInvalidateProcCache() {
 	hostConnProcCache.mu.Lock()
 	hostConnProcCache.snap = nil
 	hostConnProcCache.mu.Unlock()
+
+	hostConnSplitCountCache.mu.Lock()
+	hostConnSplitCountCache.byDir = nil
+	hostConnSplitCountCache.mu.Unlock()
 }
 
 func hostConnBetterEntry(cand, prev hostConnSockEntry) bool {
@@ -867,11 +888,18 @@ func scalpelIsProtectedHostIdentity(id hostConnIdentity) (bool, string) {
 }
 
 // scalpelDetectCleartextRisk 标记 L1 明文/绕过风险:
-//   - appId >= 10000 直连 :53 -> "dns_direct"
-//   - TCP :80/:8080/:8000     -> "http_cleartext"
+//   - appId >= 10000 直连外部真实 :53 -> "dns_direct" (豁免 198.18.0.0/15 与 fc00::/18 代理 Fake-IP DNS)
+//   - TCP :80/:8080/:8000            -> "http_cleartext"
 func scalpelDetectCleartextRisk(proto string, dport int, uid int) string {
+	return scalpelDetectCleartextRiskForTarget(proto, "", dport, uid)
+}
+
+func scalpelDetectCleartextRiskForTarget(proto, dstIP string, dport, uid int) string {
 	if dport == 53 && uid >= scalpelHostAppMinID && (uid%scalpelHostPerUserRange) >= scalpelHostAppMinID {
-		return "dns_direct"
+		if !isBenchmarkOrFakeIP(dstIP) {
+			return "dns_direct"
+		}
+		return ""
 	}
 	if proto == "tcp" && (dport == 80 || dport == 8080 || dport == 8000) {
 		return "http_cleartext"
@@ -1081,11 +1109,11 @@ func scalpelLookupSocketUID(norm ScalpelTuple) (int, bool) {
 		return -1, false
 	}
 	k := norm.Proto + "|" + norm.SrcIP + "|" + strconv.Itoa(norm.Sport) + "|" + norm.DstIP + "|" + strconv.Itoa(norm.Dport)
-	if sk, ok := ps.byKey[k]; ok && sk.UID >= 0 {
+	if sk, ok := ps.byKey[k]; ok && sk.UID >= 0 && !(hostConnIsTCPOrphanCloseState(sk.Proto, sk.StateCode) && (sk.UID == 0 || sk.Inode == 0)) {
 		return sk.UID, true
 	}
 	rk := norm.Proto + "|" + norm.DstIP + "|" + strconv.Itoa(norm.Dport) + "|" + norm.SrcIP + "|" + strconv.Itoa(norm.Sport)
-	if sk, ok := ps.byRevKey[rk]; ok && sk.UID >= 0 {
+	if sk, ok := ps.byRevKey[rk]; ok && sk.UID >= 0 && !(hostConnIsTCPOrphanCloseState(sk.Proto, sk.StateCode) && (sk.UID == 0 || sk.Inode == 0)) {
 		return sk.UID, true
 	}
 	return -1, false
@@ -1220,8 +1248,15 @@ func evaluateScalpelHostGuard(s *server, norm ScalpelTuple, mode string, reqUID 
 		}
 	}
 
-	// 门禁 5: 严禁在本机 freeze_15m 冻结 :53/:853 系统 DNS 端口或三级共享 CDN 门禁拦截项
+	// 门禁 5: 严禁在本机 freeze_15m 冻结 :53/:853 系统 DNS 端口、Fake-IP 虚拟地址池或三级共享 CDN 门禁拦截项
 	if mode == scalpelModeFreeze15m {
+		if isBenchmarkOrFakeIP(norm.DstIP) {
+			return effectiveUID, id, &scalpelFreezeGuardError{
+				ReasonCode: "shared_cdn_freeze_blocked",
+				Vendor:     "Fake-IP 虚拟地址池",
+				Detail:     fmt.Sprintf("目标地址 %s 属于代理 Fake-IP 虚拟地址池（198.18.0.0/15 或 fc00::/18），已拒绝 15 分钟 IP 级冻结以防地址池轮转复用连坐误伤其他域名；仅允许使用 cut_once 执行一次性五元组秒斩", norm.DstIP),
+			}
+		}
 		if fgErr := evaluateScalpelFreezeGuard(s, norm); fgErr != nil {
 			return effectiveUID, id, fgErr
 		}
@@ -1482,10 +1517,26 @@ func scalpelBuildDeviceDirectory(s *server) (nameByMAC map[string]string, macByI
 	if s == nil || s.hncDir == "" {
 		return map[string]string{}, map[string]string{}
 	}
+	simEnabled := s.simOn()
 	nameByMAC, macByIP = s.buildDeviceDirectory()
+	if !simEnabled {
+		for m := range nameByMAC {
+			if strings.HasPrefix(strings.ToLower(m), simMACPrefix) {
+				delete(nameByMAC, m)
+			}
+		}
+		for ip, m := range macByIP {
+			if strings.HasPrefix(strings.ToLower(m), simMACPrefix) {
+				delete(macByIP, ip)
+			}
+		}
+	}
 	addIP := func(m, rawIP string) {
 		trimmed := strings.TrimSpace(rawIP)
 		if m == "" || trimmed == "" || trimmed == "-" {
+			return
+		}
+		if !simEnabled && strings.HasPrefix(strings.ToLower(m), simMACPrefix) {
 			return
 		}
 		if addr, err := netip.ParseAddr(trimmed); err == nil {
@@ -1508,6 +1559,9 @@ func scalpelBuildDeviceDirectory(s *server) (nameByMAC map[string]string, macByI
 				cMac := canonMAC(mac)
 				d, _ := v.(map[string]any)
 				if cMac == "" || d == nil {
+					continue
+				}
+				if !simEnabled && (strings.HasPrefix(cMac, simMACPrefix) || d["sim"] == true) {
 					continue
 				}
 				for _, k := range []string{"ipv6", "ip6", "ips", "client_ips"} {
@@ -1609,6 +1663,7 @@ func scalpelHotspotOnlineState(s *server) (hotspotActive bool, onlineCount int, 
 	}
 	hotspotIface = s.currentHotspotIface()
 	hotspotIP = ifaceIPv4(hotspotIface)
+	simEnabled := s.simOn()
 	simLive := s.simActive()
 	nowUnix := time.Now().Unix()
 
@@ -1626,17 +1681,23 @@ func scalpelHotspotOnlineState(s *server) (hotspotActive bool, onlineCount int, 
 			if dm == nil {
 				continue
 			}
+			cMac := strings.ToLower(strings.TrimSpace(mac))
+			if !simEnabled && (strings.HasPrefix(cMac, simMACPrefix) || dm["sim"] == true) {
+				continue
+			}
 			devIP := strings.TrimSpace(asString(dm["ip"]))
 			lastSeen, _ := toInt64(dm["last_seen"])
 			if devIP != "" && devIP != "-" && (lastSeen == 0 || nowUnix-lastSeen <= activityOnlineWindow) {
-				onlineMACs[strings.ToLower(strings.TrimSpace(mac))] = true
+				onlineMACs[cMac] = true
 			}
 		}
 	}
 	if simLive {
 		views, _ := s.simViews(time.Now())
 		for i := range views {
-			onlineMACs[strings.ToLower(views[i].D.MAC)] = true
+			if !views[i].D.Offline && !views[i].D.Blocked {
+				onlineMACs[strings.ToLower(views[i].D.MAC)] = true
+			}
 		}
 	}
 	onlineCount = len(onlineMACs)
@@ -1910,11 +1971,15 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 	}
 
 	appendHotspotEntry := func(ent ctEntry, clientMAC, clientIP, remoteIP string, sport, dport int, reversed bool) {
+		if !s.simOn() && strings.HasPrefix(strings.ToLower(clientMAC), simMACPrefix) {
+			return
+		}
 		upB, dnB := ent.UpB, ent.DnB
 		k := ent.key()
 		var upBps, dnBps float64
 		if ctSnap != nil {
-			upBps, dnBps = ctSnap.upBps[k], ctSnap.dnBps[k]
+			// ctSnap 内部存 bits/s (供 liveAppMinBps 使用), 对外连接行统一 / 8 输出 bytes/s
+			upBps, dnBps = ctSnap.upBps[k]/8, ctSnap.dnBps[k]/8
 		}
 		if reversed {
 			upB, dnB = ent.DnB, ent.UpB
@@ -2061,7 +2126,8 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 				usedCT[hit.idx] = true
 				upB, dnB = hit.ent.UpB, hit.ent.DnB
 				if ctSnap != nil {
-					upBps, dnBps = ctSnap.upBps[hit.ent.key()], ctSnap.dnBps[hit.ent.key()]
+					hk := hit.ent.key()
+					upBps, dnBps = ctSnap.upBps[hk]/8, ctSnap.dnBps[hk]/8
 				}
 				ttl = hit.ent.TTL
 				if state == "" {
@@ -2073,7 +2139,7 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 				upB, dnB = revHit.ent.DnB, revHit.ent.UpB
 				if ctSnap != nil {
 					rk := revHit.ent.key()
-					upBps, dnBps = ctSnap.dnBps[rk], ctSnap.upBps[rk]
+					upBps, dnBps = ctSnap.dnBps[rk]/8, ctSnap.upBps[rk]/8
 				}
 				ttl = revHit.ent.TTL
 				if state == "" {
@@ -2083,7 +2149,7 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 			}
 
 			id := scalpelResolveHostUID(s.hncDir, sk.UID)
-			risk := scalpelDetectCleartextRisk(sk.Proto, sk.Dport, sk.UID)
+			risk := scalpelDetectCleartextRiskForTarget(sk.Proto, sk.DstIP, sk.Dport, sk.UID)
 			domain, domainSrc, appID, appName, appSrc, appConf, ja4, company, ownerJSON, isSDK := enrichTarget(k, sk.Proto, sk.DstIP, sk.Dport)
 			if appName == "" {
 				appName = id.AppName
@@ -2202,10 +2268,10 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 		k := ent.key()
 		var upBps, dnBps float64
 		if ctSnap != nil {
-			upBps, dnBps = ctSnap.upBps[k], ctSnap.dnBps[k]
+			upBps, dnBps = ctSnap.upBps[k]/8, ctSnap.dnBps[k]/8
 		}
 		id := scalpelResolveHostUID(s.hncDir, -1)
-		risk := scalpelDetectCleartextRisk(ent.Proto, ent.Dport, -1)
+		risk := scalpelDetectCleartextRiskForTarget(ent.Proto, ent.Dst, ent.Dport, -1)
 		domain, domainSrc, appID, appName, appSrc, appConf, ja4, company, ownerJSON, isSDK := enrichTarget(k, ent.Proto, ent.Dst, ent.Dport)
 		tt, tconf, _ := flowTrafficType(k)
 
@@ -2247,6 +2313,107 @@ func scalpelCollectDualDomainFlows(s *server, activeHotspotRules, activeHostRule
 		})
 	}
 
+	// Step C (B015): 模拟环境开启时合并在线且未拉黑 (!Offline && !Blocked) 的 simConnsFor 模拟连接流;
+	// 当 !s.simOn() 时主动剔除任何残留 02:5e:00:* 模拟条目确保隔离。
+	if s.simActive() {
+		views, seed := s.simViews(now)
+		lib := func(id string) (simApp, bool) { return simFindApp(s.hncDir, id) }
+		for i := range views {
+			v := &views[i]
+			d := &v.D
+			if d.Offline || d.Blocked {
+				continue
+			}
+			out.Readable = true
+			srcIP := strings.TrimSpace(d.IP)
+			if srcIP == "" {
+				srcIP = "192.168.43.200"
+			}
+			devName := d.Name
+			if devName == "" {
+				devName = d.Hostname
+			}
+			if devName == "" {
+				devName = d.MAC
+			}
+			simAID, simAName, _ := simAppIDName(d)
+			for _, c := range simConnsFor(v, seed, lib) {
+				blocked := simConnBlocked(d.ConnBlocks, c.host, c.ip)
+				upBps := float64(v.Tx) * c.weight
+				dnBps := float64(v.Rx) * c.weight
+				if blocked {
+					upBps, dnBps = 0, 0
+				}
+				avg := float64(d.RxBps+d.TxBps) * c.weight
+				dnB := uint64(avg * c.age * 0.9)
+				upB := uint64(float64(d.TxBps) * c.weight * c.age)
+				if c.dport == 53 || c.dport == 123 {
+					dnB, upB = uint64(200+c.sport%800), uint64(80+c.sport%300)
+				}
+				fk := c.proto + "|" + srcIP + "|" + strconv.Itoa(c.sport) + "|" + c.ip + "|" + strconv.Itoa(c.dport)
+				st := ""
+				ttl := 30 + c.sport%150
+				if c.proto == "tcp" {
+					st = "ESTABLISHED"
+					ttl = 431000 + c.sport%999
+				}
+				fAppID, fAppName, fAppSrc := "", "", ""
+				if c.app && d.AppID != "" {
+					fAppID = simAID
+					fAppName = simAName
+					fAppSrc = "rule"
+				}
+				if fAppName == "" {
+					fAppName = wellKnownSvc(c.proto, c.dport)
+				}
+				var company string
+				var ownerJSON map[string]interface{}
+				if !isPrivateIP(c.ip) {
+					if org, ok := ipOwnerLookup(c.ip); ok {
+						company = org.Name
+						ownerJSON = org.JSON()
+					}
+				}
+				out.HotspotList = append(out.HotspotList, scalpelClassifiedFlow{
+					Scope:       scalpelHostScopeHotspot,
+					FlowKey:     fk,
+					Proto:       c.proto,
+					SrcIP:       srcIP,
+					Sport:       c.sport,
+					DstIP:       c.ip,
+					Dport:       c.dport,
+					IsV6:        false,
+					State:       st,
+					TTL:         ttl,
+					MAC:         d.MAC,
+					DeviceName:  devName,
+					UID:         -1,
+					Company:     company,
+					OwnerJSON:   ownerJSON,
+					Domain:      c.host,
+					DomainSrc:   c.nameSrc,
+					AppID:       fAppID,
+					AppName:     fAppName,
+					AppSrc:      fAppSrc,
+					UpBytes:     upB,
+					DownBytes:   dnB,
+					UpBps:       upBps,
+					DownBps:     dnBps,
+					FrozenUntil: frozenHotspot(d.MAC, srcIP, c.ip, c.dport, c.proto),
+				})
+			}
+		}
+	} else if !s.simOn() && len(out.HotspotList) > 0 {
+		filtered := out.HotspotList[:0]
+		for _, fl := range out.HotspotList {
+			if strings.HasPrefix(strings.ToLower(fl.MAC), simMACPrefix) {
+				continue
+			}
+			filtered = append(filtered, fl)
+		}
+		out.HotspotList = filtered
+	}
+
 	// 铁律校准: 当热点关闭或当前在线热点客户端数为 0 时，hotspot_flows 严格归零，绝不混入本机流或离线残留流！
 	if hotspotActive && onlineCount > 0 {
 		out.HotspotFlows = len(out.HotspotList)
@@ -2263,6 +2430,8 @@ type hostConnSplitCountEntry struct {
 	at           time.Time
 	procRoot     string
 	ctPath       string
+	simActive    bool
+	onlineCount  int
 	hotspotFlows uint32
 	hostFlows    uint32
 }
@@ -2279,6 +2448,7 @@ func scalpelCountSplitFlowsCached(s *server, hotspotActive bool, onlineCount int
 	now := time.Now()
 	procRoot := hostConnProcNetDirFn()
 	ctPath := conntrackPath()
+	simAct := s.simActive()
 
 	useCache := procRoot == "/proc/net" && os.Getenv("HNC_CONNTRACK_PATH") == ""
 	if useCache {
@@ -2286,6 +2456,7 @@ func scalpelCountSplitFlowsCached(s *server, hotspotActive bool, onlineCount int
 		if hostConnSplitCountCache.byDir != nil {
 			if c, ok := hostConnSplitCountCache.byDir[s.hncDir]; ok &&
 				c.procRoot == procRoot && c.ctPath == ctPath &&
+				c.simActive == simAct && (!simAct || c.onlineCount == onlineCount) &&
 				now.Sub(c.at) >= 0 && now.Sub(c.at) < hostConnCountCacheTTL {
 				hs := c.hotspotFlows
 				if !hotspotActive || onlineCount <= 0 {
@@ -2311,6 +2482,8 @@ func scalpelCountSplitFlowsCached(s *server, hotspotActive bool, onlineCount int
 			at:           now,
 			procRoot:     procRoot,
 			ctPath:       ctPath,
+			simActive:    simAct,
+			onlineCount:  onlineCount,
 			hotspotFlows: rawHotspot,
 			hostFlows:    rawHost,
 		}
@@ -2324,24 +2497,26 @@ func scalpelCountSplitFlowsCached(s *server, hotspotActive bool, onlineCount int
 }
 
 // scalpelLiveFlowCounts 结合 CoreHub 最新 SHM 快照（若有效且新鲜）或轻量正交分类计数，
-// 确保热点关闭或 0 在线设备时 hotspot_flows 恒为 0。
+// 确保热点关闭或 0 在线设备时 hotspot_flows 恒为 0，且模拟环境激活时准确计入模拟连接流。
 func scalpelLiveFlowCounts(s *server, hotspotActive bool, onlineCount int) (hotspotFlows, hostFlows uint32) {
 	if s == nil || s.hncDir == "" {
 		return 0, 0
 	}
-	if v, ok := serverHubMap.Load(s); ok {
-		if hub, _ := v.(*CoreHub); hub != nil {
-			if ws := hub.Snapshot(); ws != nil && monoNowNs()-ws.GeneratedMonoNs < int64(5*time.Second) {
-				hs := uint32(0)
-				if hotspotActive && onlineCount > 0 && ws.Live.HotspotFlows > 0 {
-					hs = uint32(ws.Live.HotspotFlows)
-				}
-				hf := uint32(0)
-				if ws.Live.HostFlows > 0 {
-					hf = uint32(ws.Live.HostFlows)
-				}
-				if hf > 0 || hs > 0 {
-					return hs, hf
+	if !s.simActive() {
+		if v, ok := serverHubMap.Load(s); ok {
+			if hub, _ := v.(*CoreHub); hub != nil {
+				if ws := hub.Snapshot(); ws != nil && ws.Live.Sim == s.simOn() && monoNowNs()-ws.GeneratedMonoNs < int64(5*time.Second) {
+					hs := uint32(0)
+					if hotspotActive && onlineCount > 0 && ws.Live.HotspotFlows > 0 {
+						hs = uint32(ws.Live.HotspotFlows)
+					}
+					hf := uint32(0)
+					if ws.Live.HostFlows > 0 {
+						hf = uint32(ws.Live.HostFlows)
+					}
+					if hf > 0 || hs > 0 {
+						return hs, hf
+					}
 				}
 			}
 		}

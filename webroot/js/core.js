@@ -758,7 +758,34 @@ function qdiscNote() {
   return '内核无 cake/fq_codel，使用 ' + (QD_T[c] || c);
 }
 var IFM_T = { override: '手动指定', tethering: '系统共享服务', tetherctrl: 'tetherctrl 转发表', wifi_softap: 'WiFi 热点服务', scan: '接口扫描（兜底）', none: '未识别' };
-function offloadRisk() { return (S.offload.detail === 'ACTIVE' || S.offload.detail === 'CAPABLE') && !(S.offload.guard && S.offload.guard.fallback_active); }
+function offloadGuardTakenOver(og) {
+  var g = og || (S.offload && S.offload.guard) || (S.cfg && S.cfg.offload_guard) || null;
+  return !!(g && (
+    g.fallback_active === true ||
+    g.clsact === 'installed' || g.clsact_attached === true ||
+    g.slowpath === 'ok' || g.slowpath_active === true ||
+    g.tether_offload_disabled === true || g.tether_limit_zeroed === true
+  ));
+}
+function hasActiveControlPolicy(cfg) {
+  var c = cfg || S.cfg || {};
+  var og = (S.offload && S.offload.guard) || c.offload_guard || null;
+  if (og && (og.policy_active === true || og.has_active_policy === true)) return true;
+  if (c.global_shaper_enabled === true || (c.autorate && c.autorate.enabled === true) || c.quic_block === true || c.client_isolation_enabled === true || c.whitelist_mode === true || c.whitelist_enabled === true) return true;
+  if (Array.isArray(c.blacklist) && c.blacklist.length > 0) return true;
+  if ((S.appLimits || []).length > 0) return true;
+  if ((S.devices || []).some(function (d) {
+    return !d.sim && (d.limitOn || d.hasDelay || d.blocked || d.sqm || d.appQos || !!d.quota || !!d.sched || (d.atl && d.atl.length > 0) || (d.cblocks && d.cblocks.length > 0));
+  })) return true;
+  if (S.live && S.live.active_limiter_reason && S.live.active_limiter_reason !== 'none') return true;
+  return false;
+}
+function offloadRisk() {
+  return S.hotspot.active !== false &&
+    hasActiveControlPolicy() &&
+    (S.offload.detail === 'ACTIVE' || S.offload.detail === 'CAPABLE') &&
+    !offloadGuardTakenOver();
+}
 
 /* ═════════════════════ 数据加载 ═════════════════════ */
 /* HNC v5.36.0 Apple SF Symbols / Lucide Duotone Vector SVG System (Zero Bitmap · Zero Phone Emoji) */
@@ -880,7 +907,7 @@ function mapDevice(d) {
   var mfName = d.merged_from_name || (Array.isArray(d.merged_from) && d.merged_from[0] && d.merged_from[0].old_name) || d.auto_inherited_name || '';
   var o = {
     mac: mac, ip: d.ip || '', name: name, manual: d.hostname_src === 'manual', vendor: d.vendor || '', lastSeen: num(d.last_seen),
-    blocked: d.status === 'blocked', online: active && d.online === true,
+    blocked: d.status === 'blocked', online: (active || d.sim === true) && d.online === true,
     down: num(d.down_mbps), up: num(d.up_mbps), limitOn: d.limit_enabled !== false && (num(d.down_mbps) > 0 || num(d.up_mbps) > 0),
     delay: num(d.delay_ms), jitter: num(d.jitter_ms), loss: num(d.loss_pct),
     sqm: d.sqm_enabled === true || d.sqm_enabled === 'true', wl: d.whitelist === true || d.whitelist === 'true', appQos: appQosOf(d),
@@ -927,7 +954,8 @@ function applyLive(l) {
   }
   S.live = l; S.lastOk = Date.now(); S.connected = true;
   var act = l.hotspot_active; S.hotspot.active = typeof act === 'boolean' ? act : S.hotspot.active;
-  S.hotspot.iface = l.hotspot_iface || l.iface || S.hotspot.iface; S.hotspot.ip = l.hotspot_ip || S.hotspot.ip;
+  S.hotspot.iface = l.hotspot_iface || l.iface || (S.hotspot.active === false ? '' : S.hotspot.iface);
+  S.hotspot.ip = S.hotspot.active === false ? '' : (l.hotspot_ip || S.hotspot.ip);
   if (l && l.autorate && typeof l.autorate === 'object' && l.autorate.enabled !== false) {
     S.autorate = l.autorate;
     if (S.cfg) S.cfg.autorate = l.autorate;
@@ -943,6 +971,7 @@ function applyLive(l) {
     if (typeof paintSignalPill === 'function') paintSignalPill();
   }
   S.spark.push(num(l.rx_bps)); if (S.spark.length > 30) S.spark.shift();
+  if (typeof renderOffloadBanner === 'function') renderOffloadBanner();
 }
 function loadLive(guardGen) {
   return api.get('/api/live', null, { timeout: 7000 }).then(function (l) {
@@ -960,8 +989,13 @@ function loadDevices(guardGen) {
 function applyDevices(r) {
   {
     if (typeof r.hotspot_active === 'boolean') S.hotspot.active = r.hotspot_active;
-    if (r.hotspot_iface) S.hotspot.iface = r.hotspot_iface;
-    if (r.hotspot_ip) S.hotspot.ip = r.hotspot_ip;
+    if (S.hotspot.active === false) {
+      S.hotspot.ip = '';
+      if (!r.hotspot_iface) S.hotspot.iface = '';
+    } else {
+      if (r.hotspot_iface) S.hotspot.iface = r.hotspot_iface;
+      if (r.hotspot_ip) S.hotspot.ip = r.hotspot_ip;
+    }
     S.devices = (r.devices || []).map(mapDevice).sort(function (a, b) {
       // 稳定排序: 在线在前、封锁在后、再按名字 —— 不按实时速率, 否则每次轮询卡片都会跳来跳去
       return (b.online - a.online) || (a.blocked - b.blocked) || (a.online ? 0 : b.lastSeen - a.lastSeen) || a.name.localeCompare(b.name, 'zh-CN') || a.mac.localeCompare(b.mac);
@@ -970,6 +1004,7 @@ function applyDevices(r) {
     // 后端有没有限速策略引擎(配额 / 分时段) —— 旧后端的设备行里没有 effective 字段, 此时不显示这两块
     S.polSupport = (r.devices || []).some(function (x) { return x && typeof x.effective === 'object' && x.effective; });
     if (r.devices_sig) S.sig = r.devices_sig;
+    if (typeof renderOffloadBanner === 'function') renderOffloadBanner();
     return S.devices;
   }
 }
@@ -989,6 +1024,7 @@ function loadConfig(guardGen) {
     S.cfg = c || {};
     if (S.cfg.autorate && S.cfg.autorate.enabled === true) S.autorate = S.cfg.autorate;
     else S.autorate = null;
+    if (typeof renderOffloadBanner === 'function') renderOffloadBanner();
     return S.cfg;
   });
 }
@@ -1015,6 +1051,7 @@ function loadAppLimits(guardGen) {
     // 逃生口「包含共享 CDN IP」; 旧后端没有这个字段 → 设置里不显示开关
     S.appLimitSharedKnown = !!(r && typeof r.include_shared_ips === 'boolean');
     S.appLimitShared = !!(r && r.include_shared_ips === true);
+    if (typeof renderOffloadBanner === 'function') renderOffloadBanner();
     return S.appLimits;
   });
 }
@@ -1045,7 +1082,7 @@ S.usage = null;
 function loadUsage() { return api.getSafe('/api/usage_month', null, null).then(function (r) { if (r && r.devices) S.usage = r; paintUsage(); }); }
 function usageOf(mac) { var u = S.usage && S.usage.devices && S.usage.devices[mac]; return u ? num(u.rx) + num(u.tx) : 0; }
 function paintUsage() {
-  var q = S.alertCfg && S.alertCfg.monthly_quota, lim = q && q.enabled ? num(q.limit_bytes) : 0;
+  var q = S.alertCfg && S.alertCfg.enabled !== false && S.alertCfg.monthly_quota, lim = q && q.enabled ? num(q.limit_bytes) : 0;
   S.devices.forEach(function (d) {
     var el = document.getElementById('mu-' + d.mac.replace(/:/g, '')); if (!el) return;
     var v = usageOf(d.mac);
@@ -1095,14 +1132,15 @@ function patchVectorDevicesInPlace(arr) {
     var mk = String(vd.mac || '').toLowerCase(), d = byMac[mk];
     if (!d) return;
     seen[mk] = 1;
-    if (vd.ip !== undefined) d.ip = vd.ip || '';
-    d.online = active && vd.online === true;
+    d.ip = vd.ip || '';
+    var isSim = d.sim === true || vd.sim === true;
+    d.online = (active || isSim) && vd.online === true;
     d.blocked = vd.status === 'blocked';
     d.rx = d.online ? num(vd.rx_bps) : 0;
     d.tx = d.online ? num(vd.tx_bps) : 0;
   });
   S.devices.forEach(function (d) {
-    if (!seen[d.mac]) { d.online = false; d.rx = 0; d.tx = 0; }
+    if (!seen[d.mac] && !d.sim) { d.online = false; d.rx = 0; d.tx = 0; }
   });
   return true;
 }

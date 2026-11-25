@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -221,6 +222,8 @@ type guardianHostEngine struct {
 	labelResolver    *appmeta.Resolver
 	liveLabelCache   map[string]string
 	liveLabelMtime   int64
+	liveLabelPath    string
+	vpnExcludeUser   map[string]bool
 
 	// DPI 广告/追踪 SDK 规则缓存
 	ruleMu          sync.RWMutex
@@ -237,6 +240,7 @@ type guardianHostEngine struct {
 	procNetDir           string
 	packagesListPath     string
 	fgUIDsFallbackFn     func() (map[int]bool, bool)
+	vpnActiveFn          func() bool
 	nowFn                func() time.Time
 }
 
@@ -411,12 +415,52 @@ var guardianWellKnownSystemUIDs = map[int]struct {
 	9999: {"nobody", "Nobody"},
 }
 
+func guardianIsCoreSystemAppID(uid int) bool {
+	if uid < 0 {
+		return true
+	}
+	return (uid % 100000) < 10000
+}
+
 func guardianIsSystemAppID(uid int) bool {
 	if uid < 0 {
 		return true
 	}
 	appID := uid % 100000
-	return appID < 10000
+	return appID < 10000 || appID >= 90000
+}
+
+var guardianBuiltinVPNConduitPkgs = map[string]bool{
+	"com.follow.clash":                     true,
+	"com.github.kr328.clash":               true,
+	"com.github.metacubex.clash.meta":      true,
+	"com.v2ray.ang":                        true,
+	"com.v2ray.actinium":                   true,
+	"io.nekohasekai.sfa":                   true,
+	"io.nekohasekai.sagernet":              true,
+	"moe.nb4a":                             true,
+	"moe.matsuri.lite":                     true,
+	"com.github.shadowsocks":               true,
+	"io.github.trojan_gfw.igniter":         true,
+	"com.getsurfboard":                     true,
+	"com.hiddify.hiddify":                  true,
+	"app.hiddify.com":                      true,
+	"com.wireguard.android":                true,
+	"net.openvpn.openvpn":                  true,
+	"de.blinkt.openvpn":                    true,
+	"org.torproject.android":               true,
+	"com.tailscale.ipn":                    true,
+	"net.mullvad.mullvadvpn":               true,
+	"org.outline.android.client":           true,
+	"ch.protonvpn.android":                 true,
+	"com.nordvpn.android":                  true,
+	"com.expressvpn.vpn":                   true,
+	"com.windscribe.vpn":                   true,
+	"com.surfshark.vpnclient.android":      true,
+	"com.cloudflare.onedotonedotonedotone": true,
+	"eu.faircode.netguard":                 true,
+	"com.celzero.bravedns":                 true,
+	"com.adguard.android":                  true,
 }
 
 func guardianParsePackagesListBytes(data []byte) (map[int]string, map[int]bool) {
@@ -481,11 +525,24 @@ func (e *guardianHostEngine) refreshPkgCatalogIfNeeded() {
 
 	var liveLabelsPath string
 	var liveMtime int64
+	var userExclude map[string]bool
 	if e.srv != nil && e.srv.hncDir != "" {
-		cand := filepath.Join(e.srv.hncDir, "run", "app_labels_live.json")
-		if st, err := os.Stat(cand); err == nil {
-			liveLabelsPath = cand
-			liveMtime = st.ModTime().UnixNano()
+		for _, sub := range []string{"data", "run"} {
+			cand := filepath.Join(e.srv.hncDir, sub, "app_labels_live.json")
+			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+				liveLabelsPath = cand
+				liveMtime = st.ModTime().UnixNano()
+				break
+			}
+		}
+		if exList := loadFlywheelExcludeUser(e.srv.hncDir); len(exList) > 0 {
+			userExclude = make(map[string]bool, len(exList))
+			for _, p := range exList {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					userExclude[p] = true
+				}
+			}
 		}
 	}
 
@@ -495,6 +552,7 @@ func (e *guardianHostEngine) refreshPkgCatalogIfNeeded() {
 		return
 	}
 	e.pkgLoadedMonoNs = nowMono
+	e.vpnExcludeUser = userExclude
 
 	if stSize > 0 && stSize <= 16<<20 && (stMtime != e.pkgListMtimeUnix || stSize != e.pkgListSize || len(e.uidToPkg) == 0) {
 		if raw, err := os.ReadFile(pPath); err == nil {
@@ -508,15 +566,78 @@ func (e *guardianHostEngine) refreshPkgCatalogIfNeeded() {
 		}
 	}
 
-	if liveLabelsPath != "" && liveMtime != e.liveLabelMtime {
+	if liveLabelsPath != "" && (liveLabelsPath != e.liveLabelPath || liveMtime != e.liveLabelMtime) {
 		if raw, err := os.ReadFile(liveLabelsPath); err == nil && len(raw) <= 4<<20 {
 			var parsed map[string]string
 			if json.Unmarshal(raw, &parsed) == nil && len(parsed) > 0 {
 				e.liveLabelCache = parsed
 				e.liveLabelMtime = liveMtime
+				e.liveLabelPath = liveLabelsPath
 			}
 		}
 	}
+}
+
+func (e *guardianHostEngine) isVPNConduitUID(uid int) bool {
+	if uid < 0 {
+		return false
+	}
+	if uid%100000 == 1016 {
+		return true
+	}
+	e.refreshPkgCatalogIfNeeded()
+
+	baseUID := uid % 100000
+	e.pkgMu.RLock()
+	pkg := e.uidToPkg[uid]
+	if pkg == "" && uid >= 100000 {
+		pkg = e.uidToPkg[baseUID]
+	}
+	userEx := e.vpnExcludeUser
+	e.pkgMu.RUnlock()
+
+	if pkg == "" {
+		return false
+	}
+	if guardianBuiltinVPNConduitPkgs[pkg] {
+		return true
+	}
+	return userEx != nil && userEx[pkg]
+}
+
+func (e *guardianHostEngine) isHostVPNActive() bool {
+	if e == nil {
+		return false
+	}
+	if e.vpnActiveFn != nil {
+		return e.vpnActiveFn()
+	}
+	if e.srv != nil && e.srv.hncDir != "" {
+		detPath := filepath.Join(e.srv.hncDir, "run", "iface_detect.json")
+		if raw, err := os.ReadFile(detPath); err == nil && len(raw) > 0 {
+			var det struct {
+				VPNActive     bool   `json:"vpn_active"`
+				LocalUpstream string `json:"local_upstream"`
+			}
+			if json.Unmarshal(raw, &det) == nil {
+				return det.VPNActive || isVPNIface(strings.TrimSpace(det.LocalUpstream))
+			}
+		}
+	}
+	// 单测注入模拟 packages.list 时不扫描宿主机真实网卡，保持测试可重复性
+	if e.packagesListPath != "" {
+		return false
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp != 0 && isVPNIface(ifc.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *guardianHostEngine) resolveAppMeta(uid int) guardianAppMeta {
@@ -536,6 +657,20 @@ func (e *guardianHostEngine) resolveAppMeta(uid int) guardianAppMeta {
 		}
 		return guardianAppMeta{
 			Package:  wk.pkg,
+			AppName:  name,
+			IsSystem: true,
+		}
+	}
+
+	if baseUID >= 90000 {
+		name := fmt.Sprintf("隔离沙盒进程 (UID %d)", uid)
+		if userProfile == 999 {
+			name += " (应用分身)"
+		} else if userProfile > 0 {
+			name = fmt.Sprintf("%s (用户%d)", name, userProfile)
+		}
+		return guardianAppMeta{
+			Package:  fmt.Sprintf("isolated:%d", baseUID),
 			AppName:  name,
 			IsSystem: true,
 		}
@@ -646,11 +781,19 @@ func guardianParseProcHexAddrPort(token string, ipv6 bool) (netip.Addr, int, boo
 	return netip.AddrFrom16(b16).Unmap(), int(portVal), true
 }
 
+func guardianIsTCPOrphanCloseState(stHex string) bool {
+	switch strings.ToUpper(stHex) {
+	case "04", "05", "06", "07", "0B", "0C":
+		return true
+	}
+	return false
+}
+
 func guardianIsActiveSocketState(proto, stHex string) bool {
 	stHex = strings.ToUpper(stHex)
 	if proto == "tcp" {
 		// Exclude 0A (LISTEN), 06 (TIME_WAIT — kernel zeroes sk_uid to 0!),
-		// 03 (SYN_RECV), and 07 (CLOSE).
+		// 03 (SYN_RECV), 07 (CLOSE), 0B (CLOSING), and 0C (NEW_SYN_RECV).
 		switch stHex {
 		case "01", "02", "04", "05", "08", "09":
 			return true
@@ -699,7 +842,7 @@ func guardianScanProcSocketsDir(procDir string) ([]guardianSocketEntry, bool) {
 			if len(fields) < 8 {
 				continue
 			}
-			stHex := fields[3]
+			stHex := strings.ToUpper(fields[3])
 			if !guardianIsActiveSocketState(sp.proto, stHex) {
 				continue
 			}
@@ -714,6 +857,16 @@ func guardianScanProcSocketsDir(procDir string) ([]guardianSocketEntry, bool) {
 			uid, err := strconv.Atoi(fields[7])
 			if err != nil || uid < 0 {
 				continue
+			}
+			if sp.proto == "tcp" && guardianIsTCPOrphanCloseState(stHex) {
+				if uid == 0 {
+					continue
+				}
+				if len(fields) >= 10 {
+					if inode, iErr := strconv.ParseUint(fields[9], 10, 64); iErr == nil && inode == 0 {
+						continue
+					}
+				}
 			}
 			var txQ uint64
 			if txHex, _, ok := strings.Cut(fields[4], ":"); ok {
@@ -900,8 +1053,26 @@ var guardianCaptivePortalAllowDomains = []string{
 	"nmcheck.gnome.org",
 }
 
+var (
+	guardianFakeIPPrefixV4 = netip.MustParsePrefix("198.18.0.0/15")
+	guardianFakeIPPrefixV6 = netip.MustParsePrefix("fc00::/18")
+)
+
+// isBenchmarkOrFakeIP 判定地址是否属于代理/TUN 常用 Fake-IP 虚拟地址池 (198.18.0.0/15 或 fc00::/18)。
+func isBenchmarkOrFakeIP(ipStr string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return guardianFakeIPPrefixV4.Contains(addr)
+	}
+	return guardianFakeIPPrefixV6.Contains(addr)
+}
+
 func guardianIsSystemCaptivePortalProbe(uid int, domain string) bool {
-	if !guardianIsSystemAppID(uid) {
+	if !guardianIsCoreSystemAppID(uid) {
 		return false
 	}
 	d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
@@ -926,8 +1097,11 @@ func guardianIsPublicRoutableIP(ipStr string) bool {
 		addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
 		return false
 	}
+	if isBenchmarkOrFakeIP(ipStr) {
+		return false
+	}
 	// Carrier-grade NAT 100.64.0.0/10 is upstream WAN on cellular networks, keep routable;
-	// filter documentation/benchmarking ranges if needed, otherwise treat global unicast as public.
+	// benchmarking/Fake-IP ranges (198.18.0.0/15, fc00::/18) are excluded above.
 	return true
 }
 
@@ -1088,6 +1262,7 @@ func (e *guardianHostEngine) runTrafficLeaseLoop(stopCh <-chan struct{}, doneCh 
 			newRates := make(map[int]guardianUIDRate, len(curSnap.ByUID))
 			var sumRxBps, sumTxBps int64
 			if prevSnap != nil && dtSec >= 0.005 {
+				vpnActive := e.isHostVPNActive()
 				for uid, curDet := range curSnap.ByUID {
 					prevDet, ok := prevSnap.ByUID[uid]
 					if !ok {
@@ -1102,8 +1277,10 @@ func (e *guardianHostEngine) runTrafficLeaseLoop(stopCh <-chan struct{}, doneCh 
 					}
 					if rxBps > 0 || txBps > 0 {
 						newRates[uid] = guardianUIDRate{rxBps: rxBps, txBps: txBps}
-						sumRxBps += rxBps
-						sumTxBps += txBps
+						if !(vpnActive && e.isVPNConduitUID(uid)) {
+							sumRxBps += rxBps
+							sumTxBps += txBps
+						}
 					}
 				}
 			}
@@ -1503,7 +1680,7 @@ func (e *guardianHostEngine) collectUIDConnEnrichment() map[int]*guardianUIDConn
 			guardianIsPublicRoutableIP(sk.RemoteIP) && !guardianIsSystemCaptivePortalProbe(sk.UID, dom) {
 			addFlag(sk.UID, "http_cleartext")
 		}
-		if sk.RemotePort == 53 && !guardianIsSystemAppID(sk.UID) {
+		if sk.RemotePort == 53 && !guardianIsSystemAppID(sk.UID) && !isBenchmarkOrFakeIP(sk.RemoteIP) {
 			addFlag(sk.UID, "dns_direct")
 		}
 	}
@@ -1743,6 +1920,7 @@ func (s *server) apiLocalAppsTraffic(w http.ResponseWriter, r *http.Request) {
 	var sumRxBps, sumTxBps int64
 	var sumTotalBytes, sumBgBytes, sumFgBytes uint64
 	activeConnApps := 0
+	vpnActive := e.isHostVPNActive()
 
 	for uid := range uidSet {
 		if uid < 0 || uid > 100_000_000 {
@@ -1833,8 +2011,10 @@ func (s *server) apiLocalAppsTraffic(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, row)
 
-		sumRxBps += row.RxBps
-		sumTxBps += row.TxBps
+		if !(vpnActive && e.isVPNConduitUID(uid)) {
+			sumRxBps += row.RxBps
+			sumTxBps += row.TxBps
+		}
 		sumTotalBytes += row.TotalBytes
 		sumBgBytes += row.BgTotalBytes
 		sumFgBytes += row.FgTotalBytes
@@ -3445,8 +3625,8 @@ func (s *server) apiLocalAppsPrivacyAudit(w http.ResponseWriter, r *http.Request
 			}
 		}
 
-		// 风险 2: dns_direct — 第三方应用(uid >= 10000)绕过系统 netd 直连外部 :53 明文 DNS
-		if sk.RemotePort == 53 && !guardianIsSystemAppID(sk.UID) {
+		// 风险 2: dns_direct — 第三方应用(uid >= 10000)绕过系统 netd 直连外部 :53 明文 DNS (豁免代理 Fake-IP 虚拟 DNS)
+		if sk.RemotePort == 53 && !guardianIsSystemAppID(sk.UID) && !isBenchmarkOrFakeIP(sk.RemoteIP) {
 			emitFinding(LocalAppPrivacyFinding{
 				RiskType:   "dns_direct",
 				Severity:   "high",

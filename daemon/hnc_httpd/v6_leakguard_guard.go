@@ -877,6 +877,37 @@ func evaluateLeakBlockGuard(s *server, kind, normVal string) leakBlockGuardDecis
 }
 
 // evaluateScopedLeakBlockGuard 对热点/本机/双域封禁目标执行统一的三级基础设施与共享 CDN 防误杀评估。
-func evaluateScopedLeakBlockGuard(s *server, kind, normVal, _ string) leakBlockGuardDecision {
+// 当 targetScope 为 host 且目标为单 IP 时, 硬性拒绝本机/网关 IP 及共享 CDN IP 进入 HNC_SELF_UID block_targets。
+func evaluateScopedLeakBlockGuard(s *server, kind, normVal, targetScope string) leakBlockGuardDecision {
+	if kind == "ip" && strings.EqualFold(strings.TrimSpace(targetScope), leakTargetScopeHost) {
+		if addr, err := netip.ParseAddr(normVal); err == nil {
+			canon := addr.Unmap().String()
+			if meta, ok := hardBlockPublicDNSIPs[canon]; ok {
+				return leakBlockGuardDecision{
+					Level:    leakGuardLevelHardBlock,
+					Vendor:   meta.Vendor,
+					Category: meta.Category,
+					Detail:   "禁止封禁公共 DNS 服务器 IP（" + meta.Vendor + "），否则将导致本机域名解析中断",
+				}
+			}
+			if reason := checkSelfBlockForbiddenHostOrGatewayIP(canon); reason != "" {
+				return leakBlockGuardDecision{
+					Level:    leakGuardLevelHardBlock,
+					Vendor:   "Host Network",
+					Category: "host_or_gateway",
+					Detail:   reason,
+				}
+			}
+			if shared, vendor := detectSharedInfraIP(s, canon); shared {
+				return leakBlockGuardDecision{
+					Level:    leakGuardLevelHardBlock,
+					Vendor:   vendor,
+					Category: "shared_ip",
+					Detail:   "禁止将 " + vendor + " 公共 CDN/云共享 IP 写入本机应用防火墙 block_targets，避免误封同节点正常服务",
+				}
+			}
+		}
+		return leakBlockGuardDecision{Level: leakGuardLevelAllow}
+	}
 	return evaluateLeakBlockGuard(s, kind, normVal)
 }

@@ -177,6 +177,11 @@ type SelfAttribAggregator struct {
 	// read in Snapshot to badge those apps as flywheel-excluded in the WebUI.
 	conduitUIDs map[int]struct{}
 
+	// v6.1.0-rc.7 (B028): active VPN OwnerUids & packages dynamically discovered
+	// via /sys/class/net/*/tun_flags ifindex gate + dumpsys vpn_management.
+	dynamicVPNUIDs map[int]struct{}
+	dynamicVPNPkgs map[string]struct{}
+
 	// ifaceState is the per-iface child status, owned by the
 	// reconciler (see self_capture goroutines in main.go).
 	ifaceState []SelfIfaceState
@@ -392,12 +397,15 @@ func (a *SelfAttribAggregator) RecordBytes(samples map[int]ByteSample, source st
 // extracted a SNI on a remote we have a uid for. Updates TopSNIs +
 // LastSeen for the relevant SelfApp.
 func (a *SelfAttribAggregator) RecordSNI(uid int, sni string, now int64) {
-	if uid == 0 || sni == "" {
+	if uid <= 0 || sni == "" {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	app := a.ensureAppLocked(uid, now)
+	if app == nil {
+		return
+	}
 	app.LastSeen = now
 	if a.snisByUID[uid] == nil {
 		a.snisByUID[uid] = make(map[string]int64)
@@ -412,12 +420,15 @@ func (a *SelfAttribAggregator) RecordSNI(uid int, sni string, now int64) {
 // "tencent_jkmobile_tft"). v5.6.0-rc2: now a counter (was set), feeds
 // the auto-expand evidence-#2 check via HitCount().
 func (a *SelfAttribAggregator) RecordRuleHit(uid int, ruleID string, now int64) {
-	if uid == 0 || ruleID == "" {
+	if uid <= 0 || ruleID == "" {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	app := a.ensureAppLocked(uid, now)
+	if app == nil {
+		return
+	}
 	app.LastSeen = now
 	if a.rulesByUID[uid] == nil {
 		a.rulesByUID[uid] = make(map[string]int)
@@ -455,7 +466,7 @@ func (a *SelfAttribAggregator) HitCount(uid int, ruleID string) int {
 // self_capture. RecordSNI stays as a lower-level primitive for code paths
 // (tests, future) that just want to register an SNI without classification.
 func (a *SelfAttribAggregator) ObserveSNI(uid int, sni string, now int64) {
-	if uid == 0 || sni == "" {
+	if uid <= 0 || sni == "" {
 		return
 	}
 	a.RecordSNI(uid, sni, now)
@@ -530,6 +541,21 @@ func (a *SelfAttribAggregator) SetConduitUIDs(uids map[int]struct{}) {
 	a.mu.Lock()
 	a.conduitUIDs = cp
 	a.mu.Unlock()
+	updateLiveExcludeSnapshot(nil, nil, nil, cp)
+}
+
+// IsConduitUID reports whether uid has been flagged as a high-cardinality conduit.
+func (a *SelfAttribAggregator) IsConduitUID(uid int) bool {
+	if a == nil || uid <= 0 {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.conduitUIDs == nil {
+		return false
+	}
+	_, ok := a.conduitUIDs[uid]
+	return ok
 }
 
 func (a *SelfAttribAggregator) resetUIDStateLocked(uid int) {
@@ -558,6 +584,9 @@ func (a *SelfAttribAggregator) resetUIDStateLocked(uid int) {
 }
 
 func (a *SelfAttribAggregator) ensureAppLocked(uid int, now int64) *SelfApp {
+	if uid <= 0 {
+		return nil
+	}
 	curPkg := a.resolvePkgByUIDLocked(uid)
 	app := a.appsByUID[uid]
 	if app != nil {
@@ -597,14 +626,23 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 	if len(a.appsByUID) > 0 {
 		s.AppsByUID = make(map[string]*SelfApp, len(a.appsByUID))
 		for uid, app := range a.appsByUID {
+			if uid <= 0 || app == nil {
+				continue
+			}
 			cp := *app // shallow copy
 			if a.systemPkgs != nil && cp.Pkg != "" {
 				_, cp.IsSystem = a.systemPkgs[cp.Pkg]
 			}
-			// v5.7.0-rc35: badge flywheel-excluded apps (VPN/proxy on the list, or
-			// a detected conduit uid) so the WebUI can explain why they get no rules.
+			// v5.7.0-rc35 + B028: badge flywheel-excluded apps (VPN/proxy on the list,
+			// dynamically discovered TUN OwnerUid, or a detected conduit uid).
 			if cp.Pkg != "" && a.flywheelExcludePkgs != nil {
 				_, cp.FlywheelExcluded = a.flywheelExcludePkgs[cp.Pkg]
+			}
+			if !cp.FlywheelExcluded && cp.Pkg != "" && a.dynamicVPNPkgs != nil {
+				_, cp.FlywheelExcluded = a.dynamicVPNPkgs[cp.Pkg]
+			}
+			if !cp.FlywheelExcluded && a.dynamicVPNUIDs != nil {
+				_, cp.FlywheelExcluded = a.dynamicVPNUIDs[uid]
 			}
 			if !cp.FlywheelExcluded && a.conduitUIDs != nil {
 				_, cp.FlywheelExcluded = a.conduitUIDs[uid]
@@ -768,10 +806,59 @@ func resolvePkgInMap(pkgMap map[int]string, uid int) string {
 	return ""
 }
 
+type procNetSource struct {
+	proto string
+	path  string
+	ipv6  bool
+}
+
+var selfAttribProcNetSources = []procNetSource{
+	{"tcp", "/proc/net/tcp", false},
+	{"tcp", "/proc/net/tcp6", true},
+	{"udp", "/proc/net/udp", false},
+	{"udp", "/proc/net/udp6", true},
+}
+
 func (a *SelfAttribAggregator) sampleOnce() error {
-	// 死定律四: getPkgCache() 可能在 packages.list 不可读时回退执行 pm 子进程,
+	// 死定律四: getPkgCache() 与 refreshDynamicVPNConduits() 可能执行子进程,
 	// 严格置于 sampleMu 与 a.mu 锁外执行。
 	pkgMap := a.getPkgCache()
+	dynUIDs, dynPkgs := refreshDynamicVPNConduits()
+
+	a.mu.Lock()
+	a.dynamicVPNUIDs = dynUIDs
+	a.dynamicVPNPkgs = dynPkgs
+	exclPkgs := copyStringSet(a.flywheelExcludePkgs)
+	conduitSnap := copyIntSet(a.conduitUIDs)
+	a.mu.Unlock()
+
+	isConduitUIDOrPkg := func(uid int, pkg string) bool {
+		if uid > 0 {
+			if dynUIDs != nil {
+				if _, ok := dynUIDs[uid]; ok {
+					return true
+				}
+			}
+			if conduitSnap != nil {
+				if _, ok := conduitSnap[uid]; ok {
+					return true
+				}
+			}
+		}
+		if pkg != "" {
+			if exclPkgs != nil {
+				if _, ok := exclPkgs[pkg]; ok {
+					return true
+				}
+			}
+			if dynPkgs != nil {
+				if _, ok := dynPkgs[pkg]; ok {
+					return true
+				}
+			}
+		}
+		return false
+	}
 
 	a.sampleMu.Lock()
 	defer a.sampleMu.Unlock()
@@ -784,22 +871,16 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 	newRemoteIPToUID := make(map[string]int, 128)
 	unknownConns := 0
 
-	for _, src := range []struct {
-		proto string
-		path  string
-		ipv6  bool
-	}{
-		{"tcp", "/proc/net/tcp", false},
-		{"tcp", "/proc/net/tcp6", true},
-		{"udp", "/proc/net/udp", false},
-		{"udp", "/proc/net/udp6", true},
-	} {
+	for _, src := range selfAttribProcNetSources {
 		entries, err := parseProcNet(src.path, src.proto, src.ipv6)
 		if err != nil {
 			// some kernels don't have all 4 — fine
 			continue
 		}
 		for _, e := range entries {
+			if e.UID <= 0 {
+				continue
+			}
 			key := e.Proto + "|" + e.Local + "|" + e.Remote
 			if seen[key] {
 				continue
@@ -807,14 +888,17 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 			seen[key] = true
 			if pkg := resolvePkgInMap(pkgMap, e.UID); pkg != "" {
 				e.Pkg = pkg
-			} else if e.UID > 0 {
+			} else {
 				unknownConns++
 			}
-			// v5.36.0: FIN_WAIT1/2, CLOSE, CLOSING 常在内核释放孤儿 socket 后变为 uid=0;
-			// 绝不允许 uid=0 覆盖同一远端 IP:Port 上已有的真实应用 UID (>0)。
+			curConduit := isConduitUIDOrPkg(e.UID, e.Pkg)
+			// B004 + B028: 严禁 uid<=0 写入 remoteToUID/remoteIPToUID, 且严禁 VPN/代理导管 UID
+			// 覆盖同一远端 IP(:Port) 上已有的真实业务 App UID。
 			if k := canonRemoteKey(e.Remote); k != "" {
-				if prev, exists := newRemoteToUID[k]; !exists || e.UID > 0 || prev <= 0 {
-					if e.UID > 0 || !exists {
+				if prev, exists := newRemoteToUID[k]; !exists || prev <= 0 {
+					newRemoteToUID[k] = e.UID
+				} else if prev != e.UID && !curConduit {
+					if isConduitUIDOrPkg(prev, resolvePkgInMap(pkgMap, prev)) {
 						newRemoteToUID[k] = e.UID
 					}
 				}
@@ -823,8 +907,16 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 						if ipk := canonIPOnly(host); ipk != "" {
 							if prevU, has := newRemoteIPToUID[ipk]; !has {
 								newRemoteIPToUID[ipk] = e.UID
-							} else if prevU != e.UID {
-								newRemoteIPToUID[ipk] = -1 // 多应用共享同一远端 IP 时禁用纯 IP 兜底, 绝不串应用
+							} else if prevU != e.UID && prevU != -1 {
+								prevConduit := isConduitUIDOrPkg(prevU, resolvePkgInMap(pkgMap, prevU))
+								switch {
+								case curConduit && !prevConduit:
+									// 保持真实业务 App prevU 不变, 禁导管覆盖或冲成 -1
+								case !curConduit && prevConduit:
+									newRemoteIPToUID[ipk] = e.UID
+								default:
+									newRemoteIPToUID[ipk] = -1 // 多真实业务应用共享同一远端 IP 时禁用纯 IP 兜底, 绝不串应用
+								}
 							}
 						}
 					}
@@ -868,9 +960,10 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 	a.lastTick = now.Unix()
 	a.unknownConns = unknownConns
 
-	// Evict stale per-UID cached state if an uninstalled UID was reassigned to a different package.
+	// Evict any invalid uid<=0 entries and stale reassigned UIDs.
 	for uid, app := range a.appsByUID {
-		if app == nil {
+		if uid <= 0 || app == nil {
+			a.resetUIDStateLocked(uid)
 			continue
 		}
 		if pkg := resolvePkgInMap(pkgMap, uid); pkg != "" && app.Pkg != "" && app.Pkg != pkg {
@@ -878,9 +971,12 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 		}
 	}
 
-	// Walk rows: bump active_conns + cumulative TotalConns counters per uid.
+	// Walk rows: bump active_conns + cumulative TotalConns counters per uid (strictly uid > 0).
 	activeByUID := make(map[int]int, 64)
 	for _, r := range rows {
+		if r.UID <= 0 {
+			continue
+		}
 		activeByUID[r.UID]++
 		if r.Pkg != "" {
 			if existing := a.appsByUID[r.UID]; existing != nil && existing.Pkg != "" && existing.Pkg != r.Pkg {
@@ -1092,34 +1188,75 @@ func (a *SelfAttribAggregator) IsSystemUID(uid int) bool {
 }
 
 // IsFlywheelExcludedUID reports whether uid resolves to a VPN/proxy package
-// excluded from the flywheel. Unknown uid → false (we can't decide until pm
-// resolves it; the stored-UIDPkg path in candidate.go covers demotion of
-// already-promoted rules even before pkg resolution). v5.7.0-rc33.
+// excluded from the flywheel or is an active VPN OwnerUid discovered via
+// /sys/class/net/*/tun_flags + dumpsys vpn_management.
 func (a *SelfAttribAggregator) IsFlywheelExcludedUID(uid int) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	pkg := a.resolvePkgByUIDLocked(uid)
-	if pkg == "" || a.flywheelExcludePkgs == nil {
+	if a == nil || uid <= 0 {
 		return false
 	}
-	_, ok := a.flywheelExcludePkgs[pkg]
-	return ok
+	a.mu.Lock()
+	if a.dynamicVPNUIDs != nil {
+		if _, ok := a.dynamicVPNUIDs[uid]; ok {
+			a.mu.Unlock()
+			return true
+		}
+	}
+	pkg := a.resolvePkgByUIDLocked(uid)
+	excluded := false
+	if pkg != "" {
+		if a.flywheelExcludePkgs != nil {
+			_, excluded = a.flywheelExcludePkgs[pkg]
+		}
+		if !excluded && a.dynamicVPNPkgs != nil {
+			_, excluded = a.dynamicVPNPkgs[pkg]
+		}
+	}
+	a.mu.Unlock()
+	if excluded {
+		return true
+	}
+	if snap := liveExcludeSnap.Load(); snap != nil {
+		if snap.dynUIDs != nil {
+			if _, ok := snap.dynUIDs[uid]; ok {
+				return true
+			}
+		}
+		if pkg != "" && snap.dynPkgs != nil {
+			if _, ok := snap.dynPkgs[pkg]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // IsFlywheelExcludedPkg reports whether a package name is on the flywheel
-// exclusion list. Used to demote already-promoted rules by their stored
-// Evidence.UIDPkg (robust even if the uid was recycled). v5.7.0-rc33.
+// exclusion list or active VPN package set. Used to demote already-promoted
+// rules by their stored Evidence.UIDPkg (robust even if the uid was recycled).
 func (a *SelfAttribAggregator) IsFlywheelExcludedPkg(pkg string) bool {
 	if pkg == "" {
 		return false
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.flywheelExcludePkgs == nil {
-		return false
+	if a.flywheelExcludePkgs != nil {
+		if _, ok := a.flywheelExcludePkgs[pkg]; ok {
+			a.mu.Unlock()
+			return true
+		}
 	}
-	_, ok := a.flywheelExcludePkgs[pkg]
-	return ok
+	if a.dynamicVPNPkgs != nil {
+		if _, ok := a.dynamicVPNPkgs[pkg]; ok {
+			a.mu.Unlock()
+			return true
+		}
+	}
+	a.mu.Unlock()
+	if snap := liveExcludeSnap.Load(); snap != nil && snap.dynPkgs != nil {
+		if _, ok := snap.dynPkgs[pkg]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // parsePackagesListBytes parses /data/system/packages.list rows:
@@ -1260,6 +1397,15 @@ func loadPkgUIDsViaPM() (map[int]string, error) {
 
 // ─── /proc/net parser ────────────────────────────────────────────────
 
+func isOrphanTCPState(stateHex string) bool {
+	switch stateHex {
+	case "04", "05", "06", "07", "0B", "0C":
+		return true
+	default:
+		return false
+	}
+}
+
 func parseProcNet(path, proto string, isIPv6 bool) ([]SelfAttribConnRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1281,25 +1427,28 @@ func parseProcNet(path, proto string, isIPv6 bool) ([]SelfAttribConnRow, error) 
 		}
 		local := parseHexAddr(fields[1], isIPv6)
 		remote := parseHexAddr(fields[2], isIPv6)
-		stateHex := fields[3]
+		stateHex := strings.ToUpper(fields[3])
 		state := tcpStateName(stateHex)
 
-		// v5.35.0: Skip TCP LISTEN (0A) and TIME_WAIT (06, kernel emits uid=0 after sock release,
-		// which otherwise overwrites active ESTABLISHED app UIDs on the same CDN IP:443).
+		// v5.35.0 + B004: Skip TCP LISTEN (0A), TIME_WAIT (06), and half-closed/orphan
+		// TCP states (04/05/06/07/0B/0C) where the kernel released the sock (uid<=0 or inode==0).
 		if proto == "tcp" && (stateHex == "0A" || stateHex == "06") {
 			continue
 		}
-		// Skip all-zero remote (UDP server sockets bound to 0.0.0.0:port,
-		// etc.) — they have no remote peer.
-		// v5.12: parseHexAddr 的 IPv6 输出不做 :: 压缩, 全零地址是
-		// "[0:0:0:0:0:0:0:0]:port", 旧的 "[::]:" 前缀永不匹配 → udp6/tcp6
-		// 未连接 socket 全被当成连接写进 JSONL 并计入 TotalConns。
 		if strings.HasPrefix(remote, "0.0.0.0:") || strings.HasPrefix(remote, "[::]:") ||
 			strings.HasPrefix(remote, "[0:0:0:0:0:0:0:0]:") {
 			continue
 		}
 
 		uid, _ := strconv.Atoi(fields[7])
+		inodeZero := len(fields) >= 10 && fields[9] == "0"
+		if proto == "tcp" && isOrphanTCPState(stateHex) && (uid <= 0 || inodeZero) {
+			continue
+		}
+		if uid <= 0 && inodeZero {
+			continue
+		}
+
 		out = append(out, SelfAttribConnRow{
 			Proto:  proto,
 			Local:  local,
@@ -1412,6 +1561,8 @@ func tcpStateName(hex string) string {
 		return "LISTEN"
 	case "0B":
 		return "CLOSING"
+	case "0C":
+		return "NEW_SYN_RECV"
 	default:
 		return hex
 	}

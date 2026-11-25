@@ -298,7 +298,8 @@ function appTimeSheet(d, id, name) {
 }
 function devBody(d) {
   var busy = S.busy[d.mac] ? ' disabled' : '';
-  var dis = htbOk() ? '' : ' disabled', upDis = upOk() ? '' : ' disabled', dlDis = netemOk() ? '' : ' disabled';
+  var canHtb = d.sim || htbOk(), canUp = d.sim || upOk(), canNetem = d.sim || netemOk();
+  var dis = canHtb ? '' : ' disabled', upDis = canUp ? '' : ' disabled', dlDis = canNetem ? '' : ' disabled';
   var curTab = (S.devTab && S.devTab[d.mac]) || 'limit';
   if (curTab === 'quota') atNeed(d);
   var h = '<div class="dev-body">';
@@ -313,11 +314,11 @@ function devBody(d) {
 
   // 顶部紧凑 3 格 Bento 快捷开关 + 单行连接速览条 + 3-Tab 分段器
   h += '<div class="cc-bento-row">' +
-    '<button type="button" class="cc-tile sqm-tile press' + (d.sqm ? ' on sqm-on' : '') + '" data-cc-tog="sqm"' + (d.hasDelay || !htbOk() ? ' disabled' : '') + '>' +
+    '<button type="button" class="cc-tile sqm-tile press' + (d.sqm ? ' on sqm-on' : '') + '" data-cc-tog="sqm"' + (d.hasDelay || !canHtb ? ' disabled' : '') + '>' +
       '<span class="cc-orb">' + bentoSvg('sqm') + '</span>' +
       '<span class="cc-txt"><b>低延迟优先</b><small>' + (d.sqm ? 'SQM 已开启' : '游戏/语音稳帧') + '</small></span>' +
     '</button>' +
-    '<button type="button" class="cc-tile qos-tile press' + (d.appQos ? ' on qos-on' : '') + '" data-cc-tog="appqos"' + (d.hasDelay || !htbOk() ? ' disabled' : '') + '>' +
+    '<button type="button" class="cc-tile qos-tile press' + (d.appQos ? ' on qos-on' : '') + '" data-cc-tog="appqos"' + (d.hasDelay || !canHtb ? ' disabled' : '') + '>' +
       '<span class="cc-orb">' + bentoSvg('appqos') + '</span>' +
       '<span class="cc-txt"><b>应用级分流</b><small>' + (d.appQos ? '智能优先中' : '前台优先队列') + '</small></span>' +
     '</button>' +
@@ -334,21 +335,22 @@ function devBody(d) {
         '<button type="button" class="linkish" data-act="conns">全部连接</button>' +
       '</span></div>';
   } else {
-    h += '<div class="conn-strip"><span>查看连接明细或单独断开异常连接</span>' +
-      '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>清理连接</span></button></div>';
+    h += '<div class="conn-strip"><span style="color:var(--text-3)">设备当前离线 · 暂无活跃连接</span>' +
+      '<button type="button" class="linkish" data-act="conns">封锁记录</button></div>';
   }
 
   if (typeof v6DeviceEscortStripHtml === 'function') h += v6DeviceEscortStripHtml(d);
   h += seg('dev-tab', [['limit', '限速分流'], ['quota', '应用配额'], ['conn', '连接画像']], curTab, 'small');
 
   // ── Pane 1: 限速分流 (默认首屏仅保留带宽限速 + 按需折叠弱网延迟，清爽一屏见底) ──
-  var dnStr = mbpsToMBs(d.down), upStr = upOk() ? mbpsToMBs(d.up) : '';
+  var dnStr = mbpsToMBs(d.down), upStr = canUp ? mbpsToMBs(d.up) : '';
   var dnVal = parseFloat(dnStr) || 0, upVal = parseFloat(upStr) || 0;
   var dnEq = dnVal > 0 ? '≈ ' + trim0((dnVal * 8).toFixed(1)) + ' Mbps' : '当前不限速';
-  var upEq = !upOk() ? '内核不支持' : (upVal > 0 ? '≈ ' + trim0((upVal * 8).toFixed(1)) + ' Mbps' : '当前不限速');
+  var upEq = !canUp ? '内核不支持' : (upVal > 0 ? '≈ ' + trim0((upVal * 8).toFixed(1)) + ' Mbps' : '当前不限速');
+  var maxDelay = d.sim ? 5000 : 10000;
   h += '<div class="dev-pane" data-dev-pane="limit"' + (curTab === 'limit' ? '' : ' hidden') + '>' +
     '<div class="ctrl lcc-ctrl bw-ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:7px"><i></i>双栈带宽限速 (IPv4 + IPv6)</span><button type="button" class="linkish" data-act="tpl">限速模板</button></div>' + effLine(d) +
-      (htbOk() ? '' : '<div class="note err">当前内核 / tc 不支持 HTB，限速不可用</div>') +
+      (canHtb ? '' : '<div class="note err">当前内核 / tc 不支持 HTB，限速不可用</div>') +
       '<div class="bw-cards">' +
         '<label class="bw-card dn' + (dnVal > 0 ? ' has-val' : '') + '">' +
           '<span class="bw-card-top"><span class="bw-dir"><i class="bw-dot dn"></i>↓ 下行上限</span><span class="bw-eq num" data-bw-eq="down">' + dnEq + '</span></span>' +
@@ -356,9 +358,9 @@ function devBody(d) {
             '<button type="button" class="bw-clr" data-bw-clr="down" aria-label="清空下行"' + (dnStr ? '' : ' hidden') + '>×</button>' +
             '<span class="u">MB/s</span></span>' +
         '</label>' +
-        '<label class="bw-card up' + (upVal > 0 ? ' has-val' : '') + (upOk() ? '' : ' is-dis') + '">' +
+        '<label class="bw-card up' + (upVal > 0 ? ' has-val' : '') + (canUp ? '' : ' is-dis') + '">' +
           '<span class="bw-card-top"><span class="bw-dir"><i class="bw-dot up"></i>↑ 上行上限</span><span class="bw-eq num" data-bw-eq="up">' + upEq + '</span></span>' +
-          '<span class="box bw-box"><input type="number" inputmode="decimal" min="0" max="1000" step="0.1" placeholder="' + (upOk() ? '不限速' : '不支持') + '" value="' + upStr + '" data-f="up"' + upDis + '>' +
+          '<span class="box bw-box"><input type="number" inputmode="decimal" min="0" max="1000" step="0.1" placeholder="' + (canUp ? '不限速' : '不支持') + '" value="' + upStr + '" data-f="up"' + upDis + '>' +
             '<button type="button" class="bw-clr" data-bw-clr="up" aria-label="清空上行"' + (upStr ? '' : ' hidden') + '>×</button>' +
             '<span class="u">MB/s</span></span>' +
         '</label>' +
@@ -370,14 +372,14 @@ function devBody(d) {
           return '<button type="button" class="bw-pre-pill press' + (isCur ? ' on' : '') + '" data-lcc-preset="' + p[0] + '"' + dis + '>' + p[1] + '</button>';
         }).join('') +
       '</div>' +
-      (upOk() && offloadRisk() ? '<div class="note warn">检测到系统 offload（' + esc(S.offload.detail) + '），应用限速时将自动通知 hotspotd 切慢路径</div>' : '') +
+      (!d.sim && canUp && offloadRisk() ? '<div class="note warn">检测到系统 offload（' + esc(S.offload.detail) + '），应用限速时将自动通知 hotspotd 切慢路径</div>' : '') +
       '<div class="btns"><button class="btn sec press" data-act="clear-limit"' + busy + '>清除</button><button class="btn pri press" data-act="apply-limit"' + busy + dis + '>应用限速</button></div>' +
     '</div>' +
     dFold('dly-' + d.mac, 'var(--purple)', '弱网延迟与丢包注入', d.hasDelay ? ('延迟 ' + (d.delay || 0) + 'ms · 丢包 ' + (d.loss || 0) + '%') : '默认关闭 · 测试用',
-      (netemOk() ? '' : '<div class="note err">当前内核不支持 netem</div>') +
+      (canNetem ? '' : '<div class="note err">当前内核不支持 netem</div>') +
       (d.sqm || d.appQos ? '<div class="note warn">低延迟 / 应用分流开启时与延迟注入互斥</div>' : '') +
       seg('delay-pre', [[0, '关闭'], [50, '50ms'], [100, '100ms'], [200, '200ms']], [0, 50, 100, 200].indexOf(d.delay) >= 0 ? d.delay : -1, 'small') +
-      '<div class="grid2" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px"><label class="field">延迟<span class="box"><input type="number" min="0" max="10000" placeholder="0" value="' + (d.delay || '') + '" data-f="delay"' + dlDis + '><span class="u">ms</span></span></label>' +
+      '<div class="grid2" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px"><label class="field">延迟<span class="box"><input type="number" min="0" max="' + maxDelay + '" placeholder="0" value="' + (d.delay || '') + '" data-f="delay"' + dlDis + '><span class="u">ms</span></span></label>' +
       '<label class="field">抖动<span class="box"><input type="number" min="0" max="5000" placeholder="0" value="' + (d.jitter || '') + '" data-f="jitter"' + dlDis + '><span class="u">ms</span></span></label>' +
       '<label class="field">丢包<span class="box"><input type="number" min="0" max="100" step="0.1" placeholder="0" value="' + (d.loss || '') + '" data-f="loss"' + dlDis + '><span class="u">%</span></span></label></div>' +
       '<div class="btns" style="margin-top:8px"><button class="btn sec press" data-act="clear-delay"' + busy + '>清除</button><button class="btn pri press" data-act="apply-delay"' + busy + (d.sqm || d.appQos ? ' disabled' : dlDis) + '>应用延迟</button></div>') +
@@ -743,9 +745,9 @@ function resortIfNeeded() {
 }
 function devHotspotFlows() {
   var onCnt = S.devices.filter(function (d) { return d.online; }).length;
-  if (S.hotspot.active === false || onCnt <= 0) return 0;
+  if ((S.hotspot.active === false && !simOn()) || onCnt <= 0) return 0;
   var l = S.live || {};
-  if (l.hotspot_flows != null) return Math.max(0, Math.round(num(l.hotspot_flows, 0)));
+  if (l.hotspot_flows != null && (S.hotspot.active !== false || num(l.hotspot_flows, 0) > 0)) return Math.max(0, Math.round(num(l.hotspot_flows, 0)));
   var sumN = 0;
   Object.keys(S.connCounts || {}).forEach(function (m) {
     var d = devBy(m);
@@ -771,9 +773,10 @@ function devStandbyHostBtnHtml(asCardRow) {
 function devListHtml() {
   if (!S.devLoaded) return '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
   var all = displayOrder(visibleDevs());
-  var noOnline = S.hotspot.active === false || S.devices.filter(function (d) { return d.online; }).length === 0;
+  var onCnt = S.devices.filter(function (d) { return d.online; }).length;
+  var noOnline = (S.hotspot.active === false && !simOn()) || onCnt === 0;
   if (all.length) return (noOnline && !S.q ? devStandbyHostBtnHtml(true) : '') + all.map(devCard).join('');
-  var msg = S.hotspot.active === false ? '热点未开启 · 在线设备会显示在这里' : S.q ? '没有匹配的设备，换个关键词试试' : S.filter === 'offline_rules' ? '没有留着规则的离线设备' : '暂无设备 · 连接热点后会出现在这里';
+  var msg = S.hotspot.active === false && !simOn() ? '热点未开启 · 在线设备会显示在这里' : S.q ? '没有匹配的设备，换个关键词试试' : S.filter === 'offline_rules' ? '没有留着规则的离线设备' : '暂无设备 · 连接热点后会出现在这里';
   return '<div class="glass empty">' + msg + (noOnline && !S.q ? devStandbyHostBtnHtml(false) : '') + '</div>';
 }
 function freshText() {
@@ -797,13 +800,29 @@ function simBannerHtml() {
   return '<div class="banner info thin" id="sim-banner"><span class="bi"><b>模</b></span><div style="min-width:0"><div class="bt">模拟环境已开启 · 数据含模拟设备</div></div><button class="btn sec press" data-act="sim-off">关闭模拟</button></div>';
 }
 function paintSimBanner() { var el = $('#sim-bn'); if (el) { var h = simBannerHtml(); if (el._h !== h) { el._h = h; el.innerHTML = h; } } }
+function pruneSimPicked(simOnly) {
+  if (!S.picked) return;
+  if (simOnly) {
+    S.devices.forEach(function (d) { if (d.sim) delete S.picked[d.mac]; });
+  } else {
+    Object.keys(S.picked).forEach(function (m) { var d = devBy(m); if (!d) delete S.picked[m]; });
+  }
+  var pn = $('#picked-n');
+  if (pn) pn.textContent = Object.keys(S.picked).length;
+}
 function simSet(on) {
+  if (!on) pruneSimPicked(true);
   if (typeof clearSignalClientHistory === 'function') clearSignalClientHistory();
   return api.action('sim_set', { enabled: String(on) }).then(function (r) {
     if (typeof clearSignalClientHistory === 'function') clearSignalClientHistory();
     S.cfg.sim_enabled = on; toast(r && r.detail ? String(r.detail).slice(0, 60) : on ? '模拟环境已开启' : '模拟环境已关闭');
     return Promise.all([loadSim(), globalRefresh()]);
-  }).then(function () { paintSimBanner(); if (S.page === 'settings') renderSettings(false); });
+  }).then(function () {
+    if (!on) pruneSimPicked(false);
+    paintSimBanner();
+    if (S.page === 'devices' && S.batch) renderDevices(false);
+    if (S.page === 'settings') renderSettings(false);
+  });
 }
 function activeLimiterBarHtml() {
   var l = S.live || {};
@@ -826,18 +845,29 @@ function paintLimiterBar() {
 }
 function renderOffloadBanner() {
   var el = $('#offload-banner'); if (!el) return;
-  var show = S.offload.active && S.offload.detail && S.offload.detail !== 'PENDING' && !(S.offload.guard && S.offload.guard.fallback_active) && SS.get('hnc.hw-dismiss') !== S.offload.detail;
+  var show = S.hotspot.active !== false &&
+    (typeof hasActiveControlPolicy === 'function' ? hasActiveControlPolicy() : true) &&
+    S.offload.active &&
+    S.offload.detail &&
+    S.offload.detail !== 'PENDING' &&
+    S.offload.detail !== 'NOHOTSPOT' &&
+    !(typeof offloadGuardTakenOver === 'function' ? offloadGuardTakenOver() : (S.offload.guard && S.offload.guard.fallback_active)) &&
+    SS.get('hnc.hw-dismiss') !== S.offload.detail;
   el.hidden = !show;
 }
 function renderDevices(anim1) {
-  var l = S.live || {}, on = S.hotspot.active === false ? 0 : S.devices.filter(function (d) { return d.online; }).length;
+  var isSim = simOn();
+  var l = S.live || {}, on = (S.hotspot.active === false && !isSim) ? 0 : S.devices.filter(function (d) { return d.online; }).length;
+  var heroOff = S.hotspot.active === false && !isSim;
+  var heroSt = S.hotspot.active === false ? (isSim ? '模拟在线' : '热点关') : '在线';
+  var heroOn = heroOff ? 0 : Math.max(on, S.hotspot.active === false ? 0 : num(l.online, on));
   var hsFlows = devHotspotFlows();
   var fl = FILTERS.filter(function (f) { return f[0] === S.filter; })[0] || FILTERS[0];
   var h = '<div class="wrap' + (wide() ? ' dev-split' : '') + '"><div class="wrap" style="margin:0;max-width:none">' + bridgeBanner() + '<div id="sim-bn" style="display:contents">' + simBannerHtml() + '</div>' +
     '<div class="banner warn" id="offload-banner" hidden><span class="bi"><b>!</b></span><div style="min-width:0"><div class="bt">检测到硬件 offload 正在转发流量</div><div class="bm">系统的 BPF tether offload 可能绕过 tc，导致限速偏松。若限速失灵，可在系统设置里关闭热点硬件加速，或重开一次热点。</div></div><button class="bx" data-act="offload-dismiss" aria-label="忽略">×</button></div>' +
     '<div class="glass hero"><div><div class="hero-l">下行</div><div class="hero-v num"><span id="h-dn">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
     '<div><div class="hero-l">上行</div><div class="hero-v num"><span id="h-up">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
-    '<div class="right"><div class="hero-l"><span class="breathe' + (S.hotspot.active === false ? ' off' : '') + '" id="h-dot"></span><span id="h-state">' + (S.hotspot.active === false ? '热点关' : '在线') + '</span></div><div class="hero-v num"><span id="h-on">' + (S.hotspot.active === false ? 0 : num(l.online, on)) + '</span><span class="u">/ <span id="h-total">' + num(l.total, S.devices.length) + '</span><span class="dw"> 设备</span></span></div></div>' +
+    '<div class="right"><div class="hero-l"><span class="breathe' + (heroOff ? ' off' : '') + '" id="h-dot"></span><span id="h-state">' + heroSt + '</span></div><div class="hero-v num"><span id="h-on">' + heroOn + '</span><span class="u">/ <span id="h-total">' + Math.max(S.devices.length, num(l.total, S.devices.length)) + '</span><span class="dw"> 设备</span></span></div></div>' +
     '<svg class="spark" id="spark" width="300" height="40" aria-label="近 60 秒下行速率"></svg></div>' +
     '<div id="hero-limiter-slot" style="display:contents">' + activeLimiterBarHtml() + '</div>' +
     '<div class="fresh" id="fresh"></div>' + '<div id="v6-dev-strip-mount" style="display:contents">' + (typeof v6DevicesStripHtml === 'function' ? v6DevicesStripHtml() : '') + '</div>' +
@@ -873,7 +903,7 @@ function renderDevList(animate) {
   if (flip) $$('#dev-list > .dev').forEach(function (c) { before[c.getAttribute('data-dev')] = c.getBoundingClientRect().top; });
   // 卡片元素复用 → 正在输入的框、焦点、光标位置天然保留(此前整表 innerHTML 要先快照再还原)
   morph(list, devListHtml()); placeSegs(list); paintOnlineHours(); paintSimBanner();
-  var lo = $('#list-on'); if (lo) lo.textContent = S.hotspot.active === false ? 0 : S.devices.filter(function (d) { return d.online; }).length;
+  var lo = $('#list-on'); if (lo) lo.textContent = (S.hotspot.active === false && !simOn()) ? 0 : S.devices.filter(function (d) { return d.online; }).length;
   var lf = $('#list-hs-flows'); if (lf) lf.textContent = devHotspotFlows();
   if (wide()) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); placeSegs(sd); } }
   if (animate) { stagger(list); return; }
@@ -885,12 +915,14 @@ function renderDevList(animate) {
   });
 }
 function paintHero(tw) {
+  var isSim = simOn(), heroOff = S.hotspot.active === false && !isSim;
+  var devOn = S.devices.filter(function (d) { return d.online; }).length;
   var l = S.live || {}, dn = num(l.rx_bps) / 1048576, up = num(l.tx_bps) / 1048576;
   if (tw) { tween($('#h-dn'), dn, 2); tween($('#h-up'), up, 2); }
   else if ($('#h-dn')) { $('#h-dn').textContent = dn.toFixed(2); $('#h-up').textContent = up.toFixed(2); }
-  if ($('#h-on')) { $('#h-on').textContent = S.hotspot.active === false ? 0 : num(l.online, 0); $('#h-total').textContent = num(l.total, S.devices.length); }
+  if ($('#h-on')) { $('#h-on').textContent = heroOff ? 0 : Math.max(devOn, S.hotspot.active === false ? 0 : num(l.online, 0)); $('#h-total').textContent = Math.max(S.devices.length, num(l.total, S.devices.length)); }
   var lf = $('#list-hs-flows'); if (lf) lf.textContent = devHotspotFlows();
-  var dot = $('#h-dot'); if (dot) { dot.classList.toggle('off', S.hotspot.active === false); $('#h-state').textContent = S.hotspot.active === false ? '热点关' : '在线'; }
+  var dot = $('#h-dot'); if (dot) { dot.classList.toggle('off', heroOff); $('#h-state').textContent = S.hotspot.active === false ? (isSim ? '模拟在线' : '热点关') : '在线'; }
   paintLimiterBar();
 }
 function drawSpark() {
@@ -973,24 +1005,26 @@ function readNum(ctx, f) { var el = $('[data-f="' + f + '"]', ctx); return el ? 
 function limitParams(d, downMbps, upMbps) {
   var p = { mac: d.mac };
   if (downMbps > 0) p.rate_down = fmtRate(downMbps);
-  if (upMbps > 0 && upOk()) p.rate_up = fmtRate(upMbps);
+  if (upMbps > 0 && ((d && d.sim) || upOk())) p.rate_up = fmtRate(upMbps);
   return p;
 }
 function doLimit(d, downMbps, upMbps) {
-  if (!(downMbps > 0) && !(upMbps > 0 && upOk())) return api.action('rule_clear', { mac: d.mac });
-  if (!htbOk()) return Promise.reject(new Error('当前内核 / tc 不支持 HTB，限速不可用'));
+  var canUp = (d && d.sim) || upOk(), canHtb = (d && d.sim) || htbOk();
+  if (!(downMbps > 0) && !(upMbps > 0 && canUp)) return api.action('rule_clear', { mac: d.mac });
+  if (!canHtb) return Promise.reject(new Error('当前内核 / tc 不支持 HTB，限速不可用'));
   return api.action('rule_set', limitParams(d, downMbps, upMbps));
 }
 function doDelay(d, delay, jitter, loss) {
   if (!(delay > 0) && !(jitter > 0) && !(loss > 0)) return api.action('delay_clear', { mac: d.mac });
-  if (!netemOk()) return Promise.reject(new Error('当前内核 / tc 不支持 netem，延迟注入不可用'));
+  if (!((d && d.sim) || netemOk())) return Promise.reject(new Error('当前内核 / tc 不支持 netem，延迟注入不可用'));
   if (d.sqm) return Promise.reject(new Error('先关闭低延迟模式再注入延迟'));
   if (d.appQos) return Promise.reject(new Error('先关闭按应用分优先级再注入延迟'));
-  return api.action('delay_set', { mac: d.mac, delay_ms: Math.round(delay), jitter_ms: Math.round(jitter), loss_pct: trim0(clamp(loss, 0, 100).toFixed(2)) });
+  var maxD = (d && d.sim) ? 5000 : 10000;
+  return api.action('delay_set', { mac: d.mac, delay_ms: clamp(Math.round(delay), 0, maxD), jitter_ms: clamp(Math.round(jitter), 0, 5000), loss_pct: trim0(clamp(loss, 0, 100).toFixed(2)) });
 }
 /* 网关保护: 看起来像路由器/网关的设备, 封锁前多问一句(旧版告警面板里的「拉黑」绕过了这一步) */
 function looksLikeGateway(d) {
-  if (!d) return false;
+  if (!d || d.sim) return false;
   if (d.iface && d.iface === 'wlan0') return true;
   var ip = String(d.ip || '').trim();
   if (!ip) return false;
@@ -1057,7 +1091,7 @@ function applyTemplate(targets, t) {
       setBusy(d.mac, true);
       return doLimit(d, t.down, t.up).then(function () {
         if (wantDelay) {
-          if (!netemOk() || d.sqm || d.appQos) { skipped++; return; }
+          if (!(d.sim || netemOk()) || d.sqm || d.appQos) { skipped++; return; }
           return doDelay(d, t.delay, t.jitter, t.loss);
         }
         if (d.hasDelay) return api.action('delay_clear', { mac: d.mac });
@@ -1161,8 +1195,8 @@ function setWhitelistMode(on, el) {
     if (el) el.setAttribute('aria-checked', String(on));
     busyWhile(el, api.action('whitelist_set', { enabled: on ? 'true' : 'false' })).then(function () {
       S.cfg.whitelist_mode = on;
-      var cnt = S.devices.filter(function (d) { return d.wl; }).length;
-      undoToast(on ? '白名单模式已开启 · 放行 ' + cnt + ' 台' : '白名单模式已关闭', function () {
+      var cnt = S.devices.filter(function (d) { return d.wl && !d.sim; }).length;
+      undoToast(on ? '白名单模式已开启 · 放行 ' + cnt + ' 台真实设备' : '白名单模式已关闭', function () {
         var rev = !on;
         return api.action('whitelist_set', { enabled: rev ? 'true' : 'false' }).then(function () {
           S.cfg.whitelist_mode = rev;
@@ -1174,13 +1208,14 @@ function setWhitelistMode(on, el) {
     }).catch(function (e) { if (el) el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); });
   };
   if (!on) { commit(); return; }
-  var wlCnt = S.devices.filter(function (d) { return d.wl; }).length;
+  var wlCnt = S.devices.filter(function (d) { return d.wl && !d.sim; }).length;
+  var simWlCnt = S.devices.filter(function (d) { return d.wl && d.sim; }).length;
   if (el) el.setAttribute('aria-checked', 'false');
   if (wlCnt <= 0) {
-    toast('请先将至少 1 台设备加入白名单', 'warn');
+    toast(simWlCnt > 0 ? '模拟设备不计入真实白名单，请先将至少 1 台真实设备加入白名单' : '请先将至少 1 台真实设备加入白名单', 'warn');
     return;
   }
-  confirmSheet('开启白名单模式？', '当前白名单共 ' + wlCnt + ' 台设备。开启后，未在白名单的设备将立即断网，确定要开启吗？', '确认开启').then(function (ok) {
+  confirmSheet('开启白名单模式？', '当前白名单共 ' + wlCnt + ' 台真实设备。开启后，未在白名单的设备将立即断网，确定要开启吗？', '确认开启').then(function (ok) {
     if (!ok) {
       if (el) el.setAttribute('aria-checked', 'false');
       return;

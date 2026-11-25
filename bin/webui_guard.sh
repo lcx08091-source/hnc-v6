@@ -46,7 +46,7 @@ LOG="$HNC_DIR/logs/service.log"
 CHAIN=HNC_WEBUI
 PORTS=${HNC_WEBUI_PORTS:-"8443 8080 8444"}
 CELL_IFACES="rmnet+ ccmni+ wwan+ seth_+ sipa_eth+ gti+ v4-+ clat+"
-UPSTREAM_TUN_IFACES="tun+ wg+ ppp+ tailscale+ utun+ sing_tun+"
+UPSTREAM_TUN_IFACES="tun+ wg+ ppp+ tailscale+ utun+ sing_tun+ Meta"
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
 
@@ -243,7 +243,7 @@ upstream_lan_ifaces() {
         [ "$_cand" = "lo" ] && continue
         case "$_hotspot_set" in *" $_cand "*) continue ;; esac
         case "$_cand" in
-            rmnet*|ccmni*|wwan*|seth_*|sipa_eth*|gti*|v4-*|clat*|eth*|tun*|wg*|ppp*|tailscale*|utun*|sing_tun*) continue ;;
+            rmnet*|ccmni*|wwan*|seth_*|sipa_eth*|gti*|v4-*|clat*|eth*|tun*|wg*|ppp*|tailscale*|utun*|sing_tun*|Meta) continue ;;
         esac
         case " $_list " in
             *" $_cand "*) ;;

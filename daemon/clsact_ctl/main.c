@@ -1546,7 +1546,7 @@ static int cmd_check(const char *iface)
     if (down4_cnt > 0) flow_total += down4_cnt;
     if (up6_cnt > 0)   flow_total += up6_cnt;
     if (up4_cnt > 0)   flow_total += up4_cnt;
-    int tether_active = (flow_total > 0 || tether_lim_nonzero > 0) ? 1 : 0;
+    int tether_active = (flow_total > 0 && (!tether_lim_readable || tether_lim_nonzero > 0)) ? 1 : 0;
 
     char safe_iface[IFNAMSIZ * 2];
     json_escape_str(iface, safe_iface, sizeof(safe_iface));

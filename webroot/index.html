@@ -295,20 +295,10 @@
   transition:opacity .22s ease!important;
 }
 :root[data-glass="liquid"][data-theme="dark"] .scrim{background:rgba(2,6,16,.58)!important}
-.sheet{
-  -webkit-backdrop-filter:blur(24px) saturate(190%)!important;
-  backdrop-filter:blur(24px) saturate(190%)!important;
-  transform:translate3d(-50%,38px,0) scale(.96);
-  transform-origin:50% 100%;
-  opacity:0;
-  will-change:transform,opacity;
-  transition:transform .28s cubic-bezier(.22,1.15,.36,1),opacity .18s ease,visibility 0s .28s!important;
-}
-.sheet.show{
-  transform:translate3d(-50%,0,0) scale(1);
-  opacity:1;
-  visibility:visible;
-  transition:transform .28s cubic-bezier(.22,1.15,.36,1),opacity .18s ease,visibility 0s!important;
+:root[data-glass="frosted"] .sheet{
+  background:var(--lg-fill-2);
+  -webkit-backdrop-filter:blur(26px) saturate(165%);
+  backdrop-filter:blur(26px) saturate(165%);
 }
 .fold{transition:grid-template-rows .28s cubic-bezier(.22,1,.36,1)!important}
 .fold-in{transition:opacity .2s ease,transform .28s cubic-bezier(.22,1,.36,1)!important}
@@ -1621,10 +1611,12 @@
   pointer-events:none;
   overflow:hidden;
 }
+html{
+  background:var(--bg)!important;
+}
 :root[data-has-wp="1"] #hnc-wallpaper{
   display:block;
 }
-html[data-has-wp="1"],
 :root[data-has-wp="1"] body{
   background:transparent!important;
 }
@@ -1648,27 +1640,29 @@ html[data-has-wp="1"],
   background:rgba(17,24,39,.76);
 }
 :root[data-has-wp="1"][data-style="cyber"] .glass{
-  background:rgba(228,236,245,.74);
+  background:rgba(228,236,245,.78);
   -webkit-backdrop-filter:blur(16px) saturate(140%);
   backdrop-filter:blur(16px) saturate(140%);
 }
 :root[data-has-wp="1"][data-style="cyber"][data-theme="dark"] .glass{
-  background:rgba(15,22,32,.74);
+  background:rgba(15,22,32,.78);
 }
 #hnc-wallpaper .wp-img{
   position:absolute;
-  top:-32px;
-  right:-32px;
-  bottom:-32px;
-  left:-32px;
-  inset:-32px;
+  top:0!important;
+  right:0!important;
+  bottom:0!important;
+  left:0!important;
+  inset:0!important;
+  width:100%!important;
+  height:100%!important;
   background-image:var(--wp-image,none);
   background-size:cover;
   background-position:center;
   background-repeat:no-repeat;
-  filter:blur(var(--wp-blur,0px)) saturate(1.06);
-  transform:translateZ(0);
-  transition:filter .2s ease;
+  filter:blur(var(--wp-blur,0px));
+  transform:scale(1.05) translateZ(0)!important;
+  transition:none!important;
 }
 #hnc-wallpaper .wp-scrim{
   position:absolute;
@@ -1698,9 +1692,9 @@ html.has-wallpaper[data-wp-top="light"]:not([data-theme="dark"]) .page::before{
   color:#09111F!important;
   text-shadow:0 1px 8px rgba(255,255,255,.45)!important;
 }
-:root[data-has-wp="1"]:not([data-wp-top="light"]) .header:not(.hs-on) .brand-title,
-:root[data-has-wp="1"]:not([data-wp-top="light"]) .header:not(.hs-on) .brand-sub,
-:root[data-has-wp="1"]:not([data-wp-top="light"]) .header:not(.hs-on) .htitle{
+:root[data-style="apple"][data-has-wp="1"]:not([data-wp-top="light"]) .header:not(.hs-on) .brand-title,
+:root[data-style="apple"][data-has-wp="1"]:not([data-wp-top="light"]) .header:not(.hs-on) .brand-sub,
+:root[data-style="apple"][data-has-wp="1"]:not([data-wp-top="light"]) .header:not(.hs-on) .htitle{
   color:#F8FAFC!important;
   text-shadow:0 1px 3px rgba(4,10,24,.46)!important;
 }
@@ -1948,9 +1942,12 @@ html.has-wallpaper:not([data-wp-tone="light"]) #fresh,
 
 /* === HNC v5.35.0 · Issue #1 & #2 Full Optical Overhaul + 3D Glass Icons + Self-Capture Studio === */
 
-/* 1) 修复根元素壁纸透明选择器 (:root[data-has-wp="1"] html 曾永远无法匹配)，同时兼容 html.has-wallpaper 与 data-has-wp="1" */
+/* 1) 根元素常驻 var(--bg) 防全透明穿底，仅 body 透明以透出 z-index:-1 的 #hnc-wallpaper */
+html,
 html[data-has-wp="1"],
-html.has-wallpaper,
+html.has-wallpaper{
+  background:var(--bg)!important;
+}
 html[data-has-wp="1"] body,
 html.has-wallpaper body{
   background:transparent!important;
@@ -2340,31 +2337,31 @@ html.has-wallpaper[data-glass="liquid"] .hero{
 html.has-wallpaper[data-glass="liquid"] .header::before,
 :root[data-has-wp="1"][data-glass="frosted"] .header::before,
 html.has-wallpaper[data-glass="frosted"] .header::before{
+  bottom:0!important;
+  -webkit-mask-image:none!important;
+  mask-image:none!important;
   opacity:calc(var(--hp,0) * (1 - var(--hs,0)))!important;
-  background:linear-gradient(to bottom,
-    rgba(12,20,36,calc(.28 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.10)) 0%,
-    rgba(12,20,36,.10) 58%,
-    rgba(12,20,36,0) 100%)!important;
-  -webkit-backdrop-filter:blur(12px) saturate(190%)!important;
-  backdrop-filter:blur(12px) saturate(190%)!important;
+  background:rgba(12,20,36,calc(.42 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
+  -webkit-backdrop-filter:blur(14px) saturate(150%)!important;
+  backdrop-filter:blur(14px) saturate(150%)!important;
 }
 :root[data-has-wp="1"][data-wp-top="light"]:not([data-theme="dark"])[data-glass] .header::before{
-  background:linear-gradient(to bottom,
-    rgba(242,248,255,calc(.28 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.12)) 0%,
-    rgba(242,248,255,.12) 58%,
-    rgba(242,248,255,0) 100%)!important;
+  bottom:0!important;
+  -webkit-mask-image:none!important;
+  mask-image:none!important;
+  background:rgba(248,251,255,calc(.56 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
 }
 :root[data-has-wp="1"][data-glass] .hbtn,
 html.has-wallpaper[data-glass] .hbtn{
   border:0!important;
-  background:rgba(12,20,36,calc(.36 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.12))!important;
+  background:rgba(12,20,36,calc(.48 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
   color:#F8FAFC!important;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 8px 20px -6px rgba(2,8,20,.36)!important;
 }
 :root[data-has-wp="1"][data-wp-top="light"]:not([data-theme="dark"])[data-glass] .hbtn{
-  background:rgba(248,251,255,calc(.32 + var(--gx-up,0)*.28 - var(--gx-dn,0)*.12))!important;
+  background:rgba(248,251,255,calc(.64 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
   color:#09111F!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.32),0 8px 18px -6px rgba(12,28,58,.20)!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.45),0 8px 18px -6px rgba(12,28,58,.18)!important;
 }
 :root[data-has-wp="1"] .hbadge{
   box-shadow:0 2px 6px rgba(0,0,0,.32)!important;
@@ -2381,33 +2378,33 @@ html.has-wallpaper[data-glass] .hbtn{
   inset:0;
   z-index:-1;
   pointer-events:none;
-  background:rgba(244,249,255,calc(.30 + var(--hs,0)*.12 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.16))!important;
-  -webkit-backdrop-filter:blur(calc(14px + var(--hs,0)*8px + var(--gx-up,0)*6px - var(--gx-dn,0)*5px)) saturate(205%) contrast(1.04)!important;
-  backdrop-filter:blur(calc(14px + var(--hs,0)*8px + var(--gx-up,0)*6px - var(--gx-dn,0)*5px)) saturate(205%) contrast(1.04)!important;
+  background:rgba(248,251,255,calc(.68 + var(--hs,0)*.10 + var(--gx-up,0)*.16 - var(--gx-dn,0)*.14))!important;
+  -webkit-backdrop-filter:blur(16px) saturate(160%)!important;
+  backdrop-filter:blur(16px) saturate(160%)!important;
   box-shadow:
     inset 0 -1px 0 rgba(255,255,255,calc(var(--hs,0)*.24)),
     0 1px 0 rgba(12,24,48,calc(var(--hs,0)*.10)),
-    0 12px 28px -14px rgba(12,24,48,calc(var(--scroll-p,0)*.20))!important;
+    0 12px 28px -14px rgba(12,24,48,calc(var(--scroll-p,0)*.18))!important;
   opacity:var(--hs,0)!important;
 }
 @media (prefers-color-scheme: dark){
   :root[data-glass="liquid"]:not([data-theme="light"]) .header.hs-on::after,
   :root[data-glass="frosted"]:not([data-theme="light"]) .header.hs-on::after{
-    background:rgba(10,16,30,calc(.44 + var(--hs,0)*.14 + var(--gx-up,0)*.28 - var(--gx-dn,0)*.18))!important;
-    box-shadow:inset 0 -1px 0 rgba(226,242,255,calc(var(--hs,0)*.18)),0 1px 0 rgba(0,0,0,calc(var(--hs,0)*.45)),0 14px 30px -14px rgba(0,0,0,calc(var(--scroll-p,0)*.45))!important;
+    background:rgba(12,18,30,calc(.72 + var(--hs,0)*.10 + var(--gx-up,0)*.14 - var(--gx-dn,0)*.14))!important;
+    box-shadow:inset 0 -1px 0 rgba(226,242,255,calc(var(--hs,0)*.16)),0 1px 0 rgba(0,0,0,calc(var(--hs,0)*.45)),0 14px 30px -14px rgba(0,0,0,calc(var(--scroll-p,0)*.42))!important;
   }
 }
 :root[data-glass="liquid"][data-theme="dark"] .header.hs-on::after,
 :root[data-glass="frosted"][data-theme="dark"] .header.hs-on::after{
-  background:rgba(10,16,30,calc(.44 + var(--hs,0)*.14 + var(--gx-up,0)*.28 - var(--gx-dn,0)*.18))!important;
-  box-shadow:inset 0 -1px 0 rgba(226,242,255,calc(var(--hs,0)*.18)),0 1px 0 rgba(0,0,0,calc(var(--hs,0)*.45)),0 14px 30px -14px rgba(0,0,0,calc(var(--scroll-p,0)*.45))!important;
+  background:rgba(12,18,30,calc(.72 + var(--hs,0)*.10 + var(--gx-up,0)*.14 - var(--gx-dn,0)*.14))!important;
+  box-shadow:inset 0 -1px 0 rgba(226,242,255,calc(var(--hs,0)*.16)),0 1px 0 rgba(0,0,0,calc(var(--hs,0)*.45)),0 14px 30px -14px rgba(0,0,0,calc(var(--scroll-p,0)*.42))!important;
 }
 
-/* 无壁纸标准态 #tabbar 与 #lens 水滴光晕 */
+/* 无壁纸标准态 #tabbar 与 #lens 水滴光晕（底色提至 .66 防透字） */
 :root[data-glass="liquid"] .tabbar{
-  background:var(--lg-fill)!important;
-  -webkit-backdrop-filter:var(--hyalite, blur(calc(14px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(210%) contrast(1.05))!important;
-  backdrop-filter:var(--hyalite, blur(calc(14px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(210%) contrast(1.05))!important;
+  background:rgba(255,255,255,calc(.66 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.16))!important;
+  -webkit-backdrop-filter:var(--hyalite, blur(calc(16px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(165%))!important;
+  backdrop-filter:var(--hyalite, blur(calc(16px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(165%))!important;
   box-shadow:var(--hyalite-edge, var(--lg-rim)),var(--lg-drop)!important;
 }
 :root[data-glass="liquid"] .tabbar::after{
@@ -2445,18 +2442,18 @@ html.has-wallpaper[data-glass] .hbtn{
     0 4px 16px -4px rgba(14,165,233,.22)!important;
 }
 
-/* 壁纸激活态 #tabbar（深邃清透烟熏微晶玻璃 · 随 data-wp-bot 明暗联动）与 #lens（水滴冰蓝折射光晕胶囊） */
+/* 壁纸激活态 #tabbar（底色提至 .68~.72 消除底栏透字）与 #lens */
 :root[data-has-wp="1"][data-glass] #tabbar.tabbar,
 html.has-wallpaper[data-glass] #tabbar.tabbar{
   border:0!important;
-  background:rgba(10,17,30,calc(.48 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.16))!important;
-  -webkit-backdrop-filter:var(--hyalite, blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(205%) contrast(1.06))!important;
-  backdrop-filter:var(--hyalite, blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(205%) contrast(1.06))!important;
+  background:rgba(12,19,32,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
+  -webkit-backdrop-filter:var(--hyalite, blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(150%))!important;
+  backdrop-filter:var(--hyalite, blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(150%))!important;
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.20),
     inset 0 -1px 0 rgba(0,0,0,.32),
-    0 18px 42px -10px rgba(2,6,18,.54),
-    0 4px 14px rgba(2,6,18,.28)!important;
+    0 18px 42px -10px rgba(2,6,18,.50),
+    0 4px 14px rgba(2,6,18,.26)!important;
 }
 :root[data-has-wp="1"][data-glass] .tabbar::after,
 html.has-wallpaper[data-glass] .tabbar::after{
@@ -2464,19 +2461,19 @@ html.has-wallpaper[data-glass] .tabbar::after{
 }
 :root[data-has-wp="1"][data-glass] #tabbar #tabs .tab,
 html.has-wallpaper[data-glass] #tabbar #tabs .tab{
-  color:rgba(236,243,252,.78)!important;
-  text-shadow:0 1px 2px rgba(0,0,0,.38)!important;
+  color:rgba(236,243,252,.84)!important;
+  text-shadow:0 1px 2px rgba(0,0,0,.36)!important;
 }
 :root[data-has-wp="1"][data-glass] #tabbar #tabs .tab.on,
 :root[data-has-wp="1"][data-glass] #tabbar #tabs .tab[aria-selected="true"],
 html.has-wallpaper[data-glass] #tabbar #tabs .tab.on,
 html.has-wallpaper[data-glass] #tabbar #tabs .tab[aria-selected="true"]{
   color:#67cbff!important;
-  text-shadow:0 0 14px rgba(56,189,248,.38)!important;
+  text-shadow:0 0 14px rgba(56,189,248,.34)!important;
 }
 :root[data-has-wp="1"][data-glass] #tabbar #tabs .tab.on svg,
 html.has-wallpaper[data-glass] #tabbar #tabs .tab.on svg{
-  filter:drop-shadow(0 3px 9px rgba(56,189,248,.46))!important;
+  filter:drop-shadow(0 3px 9px rgba(56,189,248,.42))!important;
 }
 :root[data-has-wp="1"][data-glass] #tabbar #lens.lens,
 html.has-wallpaper[data-glass] #tabbar #lens.lens{
@@ -2495,14 +2492,14 @@ html.has-wallpaper[data-glass] #tabbar #lens.lens{
     0 4px 16px -4px rgba(14,165,233,.24)!important;
 }
 
-/* 亮调壁纸底部 (data-wp-bot="light" 且非深色主题) 自动切换为冷雾透景微晶底栏 + 冰蓝水滴滑块 */
+/* 亮调壁纸底部 (data-wp-bot="light" 且非深色主题) 底栏底色提至 .68 防透字 */
 @media (prefers-color-scheme: light){
   :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"])[data-glass] #tabbar.tabbar{
-    background:rgba(238,246,255,calc(.34 + var(--gx-up,0)*.28 - var(--gx-dn,0)*.14))!important;
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.34),inset 0 -1px 0 rgba(15,23,42,.08),0 16px 38px -10px rgba(12,28,58,.24)!important;
+    background:rgba(246,250,255,calc(.68 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 -1px 0 rgba(15,23,42,.08),0 16px 38px -10px rgba(12,28,58,.22)!important;
   }
   :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"])[data-glass] #tabbar #tabs .tab{
-    color:rgba(15,23,42,.74)!important;
+    color:rgba(15,23,42,.80)!important;
     text-shadow:none!important;
   }
   :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"])[data-glass] #tabbar #tabs .tab.on,
@@ -2511,16 +2508,16 @@ html.has-wallpaper[data-glass] #tabbar #lens.lens{
     text-shadow:none!important;
   }
   :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"])[data-glass] #tabbar #lens.lens{
-    background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*22%) 10%,rgba(255,255,255,.28) 0%,rgba(56,189,248,.09) 52%,rgba(0,122,255,.15) 100%)!important;
-    box-shadow:inset 0 1px .5px rgba(255,255,255,.42),inset 0 -1px 1px rgba(0,122,255,.18),inset 1.5px 0 2.5px rgba(244,114,182,calc(.08 + var(--lens-v,0)*1.8)),inset -1.5px 0 2.5px rgba(56,189,248,calc(.10 + var(--lens-v,0)*1.8)),0 4px 14px -4px rgba(0,122,255,.18)!important;
+    background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*22%) 10%,rgba(255,255,255,.38) 0%,rgba(56,189,248,.10) 52%,rgba(0,122,255,.16) 100%)!important;
+    box-shadow:inset 0 1px .5px rgba(255,255,255,.52),inset 0 -1px 1px rgba(0,122,255,.18),inset 1.5px 0 2.5px rgba(244,114,182,calc(.08 + var(--lens-v,0)*1.8)),inset -1.5px 0 2.5px rgba(56,189,248,calc(.10 + var(--lens-v,0)*1.8)),0 4px 14px -4px rgba(0,122,255,.18)!important;
   }
 }
 :root[data-has-wp="1"][data-wp-bot="light"][data-theme="light"][data-glass] #tabbar.tabbar{
-  background:rgba(238,246,255,calc(.34 + var(--gx-up,0)*.28 - var(--gx-dn,0)*.14))!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.34),inset 0 -1px 0 rgba(15,23,42,.08),0 16px 38px -10px rgba(12,28,58,.24)!important;
+  background:rgba(246,250,255,calc(.68 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 -1px 0 rgba(15,23,42,.08),0 16px 38px -10px rgba(12,28,58,.22)!important;
 }
 :root[data-has-wp="1"][data-wp-bot="light"][data-theme="light"][data-glass] #tabbar #tabs .tab{
-  color:rgba(15,23,42,.74)!important;
+  color:rgba(15,23,42,.80)!important;
   text-shadow:none!important;
 }
 :root[data-has-wp="1"][data-wp-bot="light"][data-theme="light"][data-glass] #tabbar #tabs .tab.on,
@@ -2529,20 +2526,20 @@ html.has-wallpaper[data-glass] #tabbar #lens.lens{
   text-shadow:none!important;
 }
 :root[data-has-wp="1"][data-wp-bot="light"][data-theme="light"][data-glass] #tabbar #lens.lens{
-  background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*22%) 10%,rgba(255,255,255,.28) 0%,rgba(56,189,248,.09) 52%,rgba(0,122,255,.15) 100%)!important;
-  box-shadow:inset 0 1px .5px rgba(255,255,255,.42),inset 0 -1px 1px rgba(0,122,255,.18),inset 1.5px 0 2.5px rgba(244,114,182,calc(.08 + var(--lens-v,0)*1.8)),inset -1.5px 0 2.5px rgba(56,189,248,calc(.10 + var(--lens-v,0)*1.8)),0 4px 14px -4px rgba(0,122,255,.18)!important;
+  background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*22%) 10%,rgba(255,255,255,.38) 0%,rgba(56,189,248,.10) 52%,rgba(0,122,255,.16) 100%)!important;
+  box-shadow:inset 0 1px .5px rgba(255,255,255,.52),inset 0 -1px 1px rgba(0,122,255,.18),inset 1.5px 0 2.5px rgba(244,114,182,calc(.08 + var(--lens-v,0)*1.8)),inset -1.5px 0 2.5px rgba(56,189,248,calc(.10 + var(--lens-v,0)*1.8)),0 4px 14px -4px rgba(0,122,255,.18)!important;
 }
 
-/* 搜索框、快捷胶囊 (.qpill)、工具栏按钮 (.chip / .btn.sec / .dd-btn) 去死白外框并与壁纸明暗联动 */
+/* 搜索框、快捷胶囊 (.qpill)、工具栏按钮 (.chip / .btn.sec / .dd-btn) 高可读微晶填充 */
 :root[data-has-wp="1"] .search,
 html.has-wallpaper .search,
 :root[data-has-wp="1"] .seg:not(.small),
 html.has-wallpaper .seg:not(.small){
   border:0!important;
-  background:rgba(248,251,255,calc(.34 + var(--gx-up,0)*.32 - var(--gx-dn,0)*.14))!important;
-  -webkit-backdrop-filter:blur(var(--lg-blur,18px)) saturate(195%)!important;
-  backdrop-filter:blur(var(--lg-blur,18px)) saturate(195%)!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 8px 22px -8px rgba(6,14,32,.22)!important;
+  background:rgba(255,255,255,calc(.68 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.16))!important;
+  -webkit-backdrop-filter:blur(16px) saturate(150%)!important;
+  backdrop-filter:blur(16px) saturate(150%)!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.32),0 8px 22px -8px rgba(6,14,32,.20)!important;
 }
 :root[data-has-wp="1"] .qpill:not(.on),
 html.has-wallpaper .qpill:not(.on),
@@ -2553,25 +2550,9 @@ html.has-wallpaper .btn.sec,
 :root[data-has-wp="1"] .dd-btn,
 html.has-wallpaper .dd-btn{
   border:0!important;
-  background:rgba(248,251,255,calc(.32 + var(--gx-up,0)*.28 - var(--gx-dn,0)*.12))!important;
-  -webkit-backdrop-filter:blur(16px) saturate(190%)!important;
-  backdrop-filter:blur(16px) saturate(190%)!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 6px 16px -6px rgba(6,14,32,.20)!important;
+  background:rgba(255,255,255,calc(.68 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.16))!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 6px 16px -6px rgba(6,14,32,.18)!important;
   color:var(--text-1)!important;
-}
-/* 暗调壁纸上直接悬浮于照片表面的独立胶囊 (.qpill / .toolbar .chip) 自动采用烟熏微晶玻璃，根治深色岩石上黑字发闷与粉笔白圈 */
-:root[data-has-wp="1"]:not([data-wp-tone="light"]) .qpill:not(.on),
-html.has-wallpaper:not([data-wp-tone="light"]) .qpill:not(.on),
-:root[data-has-wp="1"]:not([data-wp-tone="light"]) .toolbar .chip:not(.on),
-html.has-wallpaper:not([data-wp-tone="light"]) .toolbar .chip:not(.on){
-  background:rgba(12,20,36,calc(.44 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.14))!important;
-  color:rgba(241,245,249,.92)!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.20),0 8px 18px -6px rgba(2,8,20,.34)!important;
-}
-:root[data-has-wp="1"]:not([data-wp-tone="light"]) .qpill:not(.on) b,
-html.has-wallpaper:not([data-wp-tone="light"]) .qpill:not(.on) b{
-  background:rgba(255,255,255,.14)!important;
-  color:rgba(226,232,240,.92)!important;
 }
 @media (prefers-color-scheme: dark){
   :root[data-has-wp="1"]:not([data-theme="light"]) .search,
@@ -2584,7 +2565,7 @@ html.has-wallpaper:not([data-wp-tone="light"]) .qpill:not(.on) b{
   html.has-wallpaper:not([data-theme="light"]) .chip:not(.on),
   :root[data-has-wp="1"]:not([data-theme="light"]) .btn.sec,
   :root[data-has-wp="1"]:not([data-theme="light"]) .dd-btn{
-    background:rgba(14,22,38,calc(.44 + var(--gx-up,0)*.28 - var(--gx-dn,0)*.16))!important;
+    background:rgba(18,24,36,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
     color:#F8FAFC!important;
     box-shadow:inset 0 1px 0 rgba(226,242,255,.16),0 8px 20px -6px rgba(0,4,14,.46)!important;
   }
@@ -2599,13 +2580,14 @@ html.has-wallpaper[data-theme="dark"] .qpill:not(.on),
 html.has-wallpaper[data-theme="dark"] .chip:not(.on),
 :root[data-has-wp="1"][data-theme="dark"] .btn.sec,
 :root[data-has-wp="1"][data-theme="dark"] .dd-btn{
-  background:rgba(14,22,38,calc(.44 + var(--gx-up,0)*.28 - var(--gx-dn,0)*.16))!important;
+  background:rgba(18,24,36,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
   color:#F8FAFC!important;
   box-shadow:inset 0 1px 0 rgba(226,242,255,.16),0 8px 20px -6px rgba(0,4,14,.46)!important;
 }
 
-/* 7) 经典毛玻璃模式 (data-glass="frosted") 与极简默认壁纸态（同步消灭 .45 白边框） */
+/* 7) 经典毛玻璃模式 (data-glass="frosted") 与极简默认壁纸态（补齐 .page 78/72px 顶距防撞顶栏） */
 :root[data-glass="frosted"] .header{height:calc(env(safe-area-inset-top,0px) + 62px);padding:calc(env(safe-area-inset-top,0px) + 9px) max(20px,calc((100vw - 1180px)/2)) 9px;gap:10px}
+:root[data-glass="frosted"] .page{padding-top:calc(env(safe-area-inset-top,0px) + 78px)}
 :root[data-glass="frosted"] .brand{visibility:visible;display:flex;align-items:center;gap:9px}
 :root[data-glass="frosted"] .brand-title{font-size:20px;letter-spacing:-.6px;font-weight:750;color:var(--text-1);background:none;flex:none}
 :root[data-glass="frosted"] .brand-sub{font-size:8px;font-weight:550;line-height:1.5;letter-spacing:.6px;white-space:normal;max-width:82px;opacity:.8}
@@ -2616,6 +2598,7 @@ html.has-wallpaper[data-theme="dark"] .chip:not(.on),
 :root[data-glass="frosted"] .ahero .stats{grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}
 @media (max-width:540px){
   :root[data-glass="frosted"] .header{padding-left:18px;padding-right:18px;height:calc(env(safe-area-inset-top,0px) + 58px)}
+  :root[data-glass="frosted"] .page{padding-top:calc(env(safe-area-inset-top,0px) + 72px)}
 }
 @media (max-width:440px){
   :root[data-glass="frosted"] .ahero .stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
@@ -2624,8 +2607,8 @@ html.has-wallpaper[data-theme="dark"] .chip:not(.on),
   border-radius:22px;
   border:0!important;
   background:var(--card);
-  -webkit-backdrop-filter:blur(calc(24px + var(--gx-up,0)*10px - var(--gx-dn,0)*8px)) saturate(175%)!important;
-  backdrop-filter:blur(calc(24px + var(--gx-up,0)*10px - var(--gx-dn,0)*8px)) saturate(175%)!important;
+  -webkit-backdrop-filter:blur(calc(22px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(155%)!important;
+  backdrop-filter:blur(calc(22px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(155%)!important;
   box-shadow:var(--lg-rim),var(--lg-drop);
 }
 :root[data-glass="frosted"] .glass::before,
@@ -2635,16 +2618,16 @@ html.has-wallpaper[data-theme="dark"] .chip:not(.on),
 :root[data-glass="frosted"] .tabbar{
   height:64px;
   border-radius:32px;
-  background:rgba(255,255,255,calc(.24 + var(--gx-up,0)*.36 - var(--gx-dn,0)*.14))!important;
-  -webkit-backdrop-filter:blur(calc(24px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(180%)!important;
-  backdrop-filter:blur(calc(24px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(180%)!important;
+  background:rgba(255,255,255,calc(.68 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.16))!important;
+  -webkit-backdrop-filter:blur(calc(22px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(160%)!important;
+  backdrop-filter:blur(calc(22px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(160%)!important;
   box-shadow:var(--lg-rim),var(--lg-drop)!important;
 }
 :root[data-glass="frosted"] .hbtn{
   width:40px;height:40px;margin-left:4px;color:var(--text-1);
   background:var(--lg-fill);
-  -webkit-backdrop-filter:blur(18px) saturate(175%)!important;
-  backdrop-filter:blur(18px) saturate(175%)!important;
+  -webkit-backdrop-filter:blur(18px) saturate(160%)!important;
+  backdrop-filter:blur(18px) saturate(160%)!important;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.32),0 6px 16px -6px rgba(30,45,90,.20);
 }
 @media (prefers-color-scheme: dark){
@@ -2653,7 +2636,7 @@ html.has-wallpaper[data-theme="dark"] .chip:not(.on),
     box-shadow:var(--lg-rim),var(--lg-drop);
   }
   :root[data-glass="frosted"]:not([data-theme="light"]) .tabbar{
-    background:rgba(14,22,38,calc(.40 + var(--gx-up,0)*.34 - var(--gx-dn,0)*.16))!important;
+    background:rgba(18,22,32,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
     box-shadow:var(--lg-rim),var(--lg-drop)!important;
   }
 }
@@ -2662,18 +2645,18 @@ html.has-wallpaper[data-theme="dark"] .chip:not(.on),
   box-shadow:var(--lg-rim),var(--lg-drop);
 }
 :root[data-glass="frosted"][data-theme="dark"] .tabbar{
-  background:rgba(14,22,38,calc(.40 + var(--gx-up,0)*.34 - var(--gx-dn,0)*.16))!important;
+  background:rgba(18,22,32,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
   box-shadow:var(--lg-rim),var(--lg-drop)!important;
 }
 
-/* 极简默认风格 (default) 开启壁纸时同步启用全层级无白框毛玻璃 */
+/* 极简默认风格 (default) 开启壁纸时同步启用高可读无白框毛玻璃 */
 :root[data-has-wp="1"]:not([data-style]):not([data-glass]) .glass,
 html.has-wallpaper:not([data-style]):not([data-glass]) .glass{
   border:0!important;
-  background:rgba(248,251,255,calc(.36 + var(--gx-up,0)*.32 - var(--gx-dn,0)*.16))!important;
-  -webkit-backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(175%)!important;
-  backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(175%)!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 14px 34px -12px rgba(6,14,32,.24)!important;
+  background:var(--card)!important;
+  -webkit-backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(150%)!important;
+  backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(150%)!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.28),0 14px 34px -12px rgba(6,14,32,.22)!important;
 }
 :root[data-has-wp="1"]:not([data-style]):not([data-glass]) .ctrl,
 :root[data-has-wp="1"]:not([data-style]):not([data-glass]) .cc-tile:not(.on),
@@ -2681,28 +2664,28 @@ html.has-wallpaper:not([data-style]):not([data-glass]) .glass{
 :root[data-has-wp="1"]:not([data-style]):not([data-glass]) .scard-rows>.row,
 :root[data-has-wp="1"]:not([data-style]):not([data-glass]) .scard-rows>.row-wrap{
   border:0!important;
-  background:rgba(255,255,255,calc(.22 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.16)!important;
+  background:var(--lg-sub)!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.24)!important;
 }
 :root[data-has-wp="1"]:not([data-style]):not([data-glass]) .header{
   border-bottom:0!important;
-  background:rgba(248,251,255,calc(.26 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.12))!important;
-  -webkit-backdrop-filter:blur(20px) saturate(175%)!important;
-  backdrop-filter:blur(20px) saturate(175%)!important;
+  background:rgba(248,251,255,calc(.62 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.16))!important;
+  -webkit-backdrop-filter:blur(18px) saturate(150%)!important;
+  backdrop-filter:blur(18px) saturate(150%)!important;
 }
 :root[data-has-wp="1"]:not([data-style]):not([data-glass]) .tabbar{
   border:0!important;
-  background:rgba(10,17,30,calc(.50 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.16))!important;
-  -webkit-backdrop-filter:blur(22px) saturate(185%)!important;
-  backdrop-filter:blur(22px) saturate(185%)!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.20),0 18px 42px -10px rgba(2,6,18,.52)!important;
+  background:rgba(12,19,32,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
+  -webkit-backdrop-filter:blur(20px) saturate(150%)!important;
+  backdrop-filter:blur(20px) saturate(150%)!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.20),0 18px 42px -10px rgba(2,6,18,.50)!important;
 }
 :root[data-has-wp="1"]:not([data-style]):not([data-glass]) #tabs .tab:not(.on){
-  color:rgba(236,243,252,.78)!important;
+  color:rgba(236,243,252,.84)!important;
 }
 @media (prefers-color-scheme: dark){
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style]):not([data-glass]) .glass{
-    background:rgba(15,23,38,calc(.44 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.18))!important;
+    background:var(--card)!important;
     box-shadow:inset 0 1px 0 rgba(226,242,255,.16),0 18px 42px -12px rgba(0,4,14,.62)!important;
   }
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style]):not([data-glass]) .ctrl,
@@ -2710,14 +2693,14 @@ html.has-wallpaper:not([data-style]):not([data-glass]) .glass{
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style]):not([data-glass]) .bw-card,
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style]):not([data-glass]) .scard-rows>.row,
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style]):not([data-glass]) .scard-rows>.row-wrap{
-    background:rgba(10,18,32,calc(.34 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
+    background:var(--lg-sub)!important;
   }
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style]):not([data-glass]) .header{
-    background:rgba(14,22,38,calc(.38 + var(--gx-up,0)*.32 - var(--gx-dn,0)*.16))!important;
+    background:rgba(14,22,38,calc(.62 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.16))!important;
   }
 }
 :root[data-has-wp="1"][data-theme="dark"]:not([data-style]):not([data-glass]) .glass{
-  background:rgba(15,23,38,calc(.44 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.18))!important;
+  background:var(--card)!important;
   box-shadow:inset 0 1px 0 rgba(226,242,255,.16),0 18px 42px -12px rgba(0,4,14,.62)!important;
 }
 :root[data-has-wp="1"][data-theme="dark"]:not([data-style]):not([data-glass]) .ctrl,
@@ -2725,29 +2708,20 @@ html.has-wallpaper:not([data-style]):not([data-glass]) .glass{
 :root[data-has-wp="1"][data-theme="dark"]:not([data-style]):not([data-glass]) .bw-card,
 :root[data-has-wp="1"][data-theme="dark"]:not([data-style]):not([data-glass]) .scard-rows>.row,
 :root[data-has-wp="1"][data-theme="dark"]:not([data-style]):not([data-glass]) .scard-rows>.row-wrap{
-  background:rgba(10,18,32,calc(.34 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
+  background:var(--lg-sub)!important;
 }
 :root[data-has-wp="1"][data-theme="dark"]:not([data-style]):not([data-glass]) .header{
-  background:rgba(14,22,38,calc(.38 + var(--gx-up,0)*.32 - var(--gx-dn,0)*.16))!important;
+  background:rgba(14,22,38,calc(.62 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.16))!important;
 }
 
-/* 8) 卡片内文字微对比衬线与浅色壁纸次要文字对比度增强 */
-:root[data-has-wp="1"][data-glass] .scard-h b,
-:root[data-has-wp="1"][data-glass] .scard-head b,
-:root[data-has-wp="1"][data-glass] .dev-name .nm,
-:root[data-has-wp="1"][data-glass] .ctrl-t,
-:root[data-has-wp="1"][data-glass] .row .t,
-:root[data-has-wp="1"][data-glass] .cc-txt b{
-  text-shadow:0 .5px 0 rgba(255,255,255,.42);
-}
+/* 8) 浅色壁纸次要文字对比度增强（彻底去除 0 .5px 0 半像素白影重影） */
 :root[data-has-wp="1"]:not([data-theme="dark"]) .sub,
 :root[data-has-wp="1"]:not([data-theme="dark"]) .note:not(.warn):not(.err),
 :root[data-has-wp="1"]:not([data-theme="dark"]) .scard-h small,
 :root[data-has-wp="1"]:not([data-theme="dark"]) .scard-head small,
 :root[data-has-wp="1"]:not([data-theme="dark"]) .v6-hero-sub,
 :root[data-has-wp="1"]:not([data-theme="dark"]) .row .s{
-  color:rgba(20,30,48,.80);
-  text-shadow:0 .5px 0 rgba(255,255,255,.52);
+  color:rgba(15,23,42,.82);
 }
 @media (prefers-color-scheme: dark){
   :root[data-has-wp="1"]:not([data-theme="light"]) .sub,
@@ -3156,20 +3130,46 @@ html.has-wallpaper body::after{
   animation:none!important;
 }
 
-/* 7.1 底部弹层 (#sheet) 可打断弹簧与亚像素跟手拖拽状态解耦
-   修复旧版 .sheet.show transition !important 抢占 touchmove 导致的 280ms 跟手粘滞 Bug */
+/* 7.1 底部弹层 (#sheet) 外层不滚动 + 内层 #sheet-body 独立滚动 + #v6-scalpel-drawer 固定定位与层级栈 */
+#v6-scalpel-scrim{
+  position:fixed!important;
+  z-index:80;
+}
+#v6-scalpel-drawer{
+  position:fixed!important;
+  z-index:81!important;
+}
+#scrim.scrim,
+.scrim{
+  z-index:82;
+  will-change:opacity;
+}
+#sheet.sheet,
 .sheet{
+  z-index:83;
+  overflow:hidden!important;
+  display:flex;
+  flex-direction:column;
   transform:translate3d(-50%,calc(100% + 40px),0);
   opacity:1;
   visibility:hidden;
   will-change:transform;
   transition:transform .26s var(--q,cubic-bezier(.16,1,.3,1)),opacity .18s ease,visibility 0s .26s;
 }
+#sheet.sheet.show,
 .sheet.show{
   transform:translate3d(-50%,0,0);
   opacity:1;
   visibility:visible;
   transition:transform .26s var(--q,cubic-bezier(.16,1,.3,1)),opacity .18s ease,visibility 0s;
+}
+#sheet-body{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overflow-x:hidden;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
 }
 .sheet.closing{
   visibility:visible!important;
@@ -3181,14 +3181,34 @@ html.has-wallpaper body::after{
   transition:none!important;
 }
 .sheet .grab{
+  flex:none;
   transition:transform .2s cubic-bezier(.22,1,.36,1),background-color .2s ease;
 }
 .sheet.is-dragging .grab{
   transform:scaleX(1.22);
   background:var(--blue);
 }
-.scrim{
-  will-change:opacity;
+.sheet .al-foot-btns{
+  position:sticky;
+  bottom:0;
+  z-index:4;
+  margin-top:12px;
+  padding:10px 0 2px;
+  background:var(--card-solid);
+  border-top:1px solid var(--divider);
+}
+[data-glass] .sheet .al-foot-btns,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .sheet .al-foot-btns{
+  background:rgba(248,251,255,.94);
+}
+:root[data-theme="dark"] .sheet .al-foot-btns{
+  background:rgba(24,26,34,.94);
+}
+:root.modal-open .page::before,
+body:has(#sheet.show) .page::before,
+body:has(#v6-scalpel-drawer.show) .page::before{
+  opacity:0!important;
+  visibility:hidden!important;
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
@@ -3760,56 +3780,54 @@ html.has-wallpaper body::after{
    3) 统一全页面同源冰晶透景材质，晴空雪山与绿叶花影壁纸均通透显色、字迹锐利
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* 8.1 防止壁纸背景高斯模糊在屏幕四边采样透明像素产生白边漏光 */
+/* 8.1 壁纸层几何锁死（禁止 inset:0 <-> -28px 切换触发全屏 GPU 纹理重建闪空） */
 #hnc-wallpaper{
   overflow:hidden!important;
 }
 #hnc-wallpaper .wp-img{
-  top:-28px!important;
-  right:-28px!important;
-  bottom:-28px!important;
-  left:-28px!important;
-  inset:-28px!important;
-  width:auto!important;
-  height:auto!important;
-  transform:scale(1.03)!important;
+  top:0!important;
+  right:0!important;
+  bottom:0!important;
+  left:0!important;
+  inset:0!important;
+  width:100%!important;
+  height:100%!important;
+  transform:scale(1.05) translateZ(0)!important;
+  transition:none!important;
 }
-/* 壁纸护眼遮罩改为纯中性冷墨滤镜，绝不给亮蓝天空/绿叶蒙上奶白雾膜 */
+/* 壁纸护眼遮罩改为全屏上下均匀中性滤镜（消除上下浓中间淡断层） */
 :root[data-has-wp="1"] #hnc-wallpaper .wp-scrim,
 html.has-wallpaper #hnc-wallpaper .wp-scrim{
-  background:linear-gradient(180deg,
-    rgba(6,12,24,calc(var(--wp-dim,.12) * .72)) 0%,
-    rgba(6,12,24,calc(var(--wp-dim,.12) * .42)) 48%,
-    rgba(6,12,24,calc(var(--wp-dim,.12) * .78)) 100%)!important;
+  background:rgba(6,12,24,calc(var(--wp-dim,.12) * .58))!important;
 }
 @media (prefers-color-scheme: dark){
   :root[data-has-wp="1"]:not([data-theme="light"]) #hnc-wallpaper .wp-scrim,
   html.has-wallpaper:not([data-theme="light"]) #hnc-wallpaper .wp-scrim{
-    background:rgba(4,9,20,calc(.22 + var(--wp-dim,.18) * .68))!important;
+    background:rgba(6,8,14,calc(.36 + var(--wp-dim,.18) * .52))!important;
   }
 }
 :root[data-has-wp="1"][data-theme="dark"] #hnc-wallpaper .wp-scrim,
 html.has-wallpaper[data-theme="dark"] #hnc-wallpaper .wp-scrim{
-  background:rgba(4,9,20,calc(.22 + var(--wp-dim,.18) * .68))!important;
+  background:rgba(6,8,14,calc(.36 + var(--wp-dim,.18) * .52))!important;
 }
 
-/* 8.2 壁纸态全局根变量：高透光冰晶折射（标准档仅 14% 轻薄底色，86% 真实壁纸色彩直透）+ 零白框描边 */
+/* 8.2 壁纸态全局根变量基准（高可读覆盖由 10.6 统一收口，保留 5 档 glass_tint 调节公式） */
 :root[data-has-wp="1"]:not([data-style="cyber"]),
 html.has-wallpaper:not([data-style="cyber"]){
   --stroke:rgba(15,23,42,.08);
   --stroke-2:rgba(15,23,42,.12);
   --divider:rgba(15,23,42,.07);
-  --input:rgba(255,255,255,calc(.14 + var(--gx-up,0)*.16 - var(--gx-dn,0)*.06));
-  --card:rgba(255,255,255,calc(.14 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.08))!important;
-  --card-2:rgba(255,255,255,calc(.19 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.09))!important;
-  --lg-fill:rgba(255,255,255,calc(.15 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.08))!important;
-  --lg-fill-2:rgba(244,249,255,calc(.28 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
-  --lg-sub:rgba(255,255,255,calc(.11 + var(--gx-up,0)*.16 - var(--gx-dn,0)*.05))!important;
-  --lg-sub-2:rgba(255,255,255,calc(.13 + var(--gx-up,0)*.16 - var(--gx-dn,0)*.06))!important;
-  --lg-tile-on:rgba(255,255,255,calc(.28 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.10))!important;
-  --lg-rim:inset 0 .5px 0 rgba(255,255,255,.16)!important;
+  --input:rgba(255,255,255,calc(.48 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14));
+  --card:rgba(255,255,255,calc(.62 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.20))!important;
+  --card-2:rgba(255,255,255,calc(.70 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.20))!important;
+  --lg-fill:rgba(255,255,255,calc(.64 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.18))!important;
+  --lg-fill-2:rgba(248,251,255,calc(.88 + var(--gx-up,0)*.08 - var(--gx-dn,0)*.14))!important;
+  --lg-sub:rgba(255,255,255,calc(.48 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
+  --lg-sub-2:rgba(255,255,255,calc(.54 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
+  --lg-tile-on:rgba(255,255,255,calc(.74 + var(--gx-up,0)*.16 - var(--gx-dn,0)*.16))!important;
+  --lg-rim:inset 0 .5px 0 rgba(255,255,255,.32)!important;
   --lg-rim-inner:none!important;
-  --lg-drop:0 14px 34px -12px rgba(4,12,28,.22),0 3px 10px -3px rgba(4,12,28,.11)!important;
+  --lg-drop:0 14px 34px -12px rgba(4,12,28,.20),0 3px 10px -3px rgba(4,12,28,.10)!important;
 }
 @media (prefers-color-scheme: dark){
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]),
@@ -3817,14 +3835,14 @@ html.has-wallpaper:not([data-style="cyber"]){
     --stroke:rgba(148,197,255,.10);
     --stroke-2:rgba(148,197,255,.14);
     --divider:rgba(226,232,240,.08);
-    --input:rgba(10,18,32,calc(.26 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10));
-    --card:rgba(10,18,32,calc(.26 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
-    --card-2:rgba(12,22,38,calc(.34 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.14))!important;
-    --lg-fill:rgba(10,18,32,calc(.28 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
-    --lg-fill-2:rgba(12,22,38,calc(.42 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.16))!important;
-    --lg-sub:rgba(8,15,28,calc(.22 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
-    --lg-sub-2:rgba(8,15,28,calc(.25 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
-    --lg-tile-on:rgba(28,52,88,calc(.42 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
+    --input:rgba(18,22,32,calc(.46 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.12));
+    --card:rgba(18,20,26,calc(.56 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.16))!important;
+    --card-2:rgba(24,27,35,calc(.66 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
+    --lg-fill:rgba(18,20,26,calc(.62 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
+    --lg-fill-2:rgba(24,26,34,calc(.88 + var(--gx-up,0)*.08 - var(--gx-dn,0)*.12))!important;
+    --lg-sub:rgba(255,255,255,calc(.07 + var(--gx-up,0)*.05 - var(--gx-dn,0)*.03))!important;
+    --lg-sub-2:rgba(255,255,255,calc(.09 + var(--gx-up,0)*.05 - var(--gx-dn,0)*.03))!important;
+    --lg-tile-on:rgba(28,52,88,calc(.54 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
     --lg-rim:inset 0 .5px 0 rgba(226,242,255,.12)!important;
     --lg-rim-inner:none!important;
     --lg-drop:0 18px 40px -12px rgba(0,4,14,.58),0 4px 12px -3px rgba(0,4,14,.34)!important;
@@ -3835,20 +3853,20 @@ html.has-wallpaper[data-theme="dark"]:not([data-style="cyber"]){
   --stroke:rgba(148,197,255,.10);
   --stroke-2:rgba(148,197,255,.14);
   --divider:rgba(226,232,240,.08);
-  --input:rgba(10,18,32,calc(.26 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10));
-  --card:rgba(10,18,32,calc(.26 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
-  --card-2:rgba(12,22,38,calc(.34 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.14))!important;
-  --lg-fill:rgba(10,18,32,calc(.28 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
-  --lg-fill-2:rgba(12,22,38,calc(.42 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.16))!important;
-  --lg-sub:rgba(8,15,28,calc(.22 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
-  --lg-sub-2:rgba(8,15,28,calc(.25 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
-  --lg-tile-on:rgba(28,52,88,calc(.42 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
+  --input:rgba(18,22,32,calc(.46 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.12));
+  --card:rgba(18,20,26,calc(.56 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.16))!important;
+  --card-2:rgba(24,27,35,calc(.66 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
+  --lg-fill:rgba(18,20,26,calc(.62 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
+  --lg-fill-2:rgba(24,26,34,calc(.88 + var(--gx-up,0)*.08 - var(--gx-dn,0)*.12))!important;
+  --lg-sub:rgba(255,255,255,calc(.07 + var(--gx-up,0)*.05 - var(--gx-dn,0)*.03))!important;
+  --lg-sub-2:rgba(255,255,255,calc(.09 + var(--gx-up,0)*.05 - var(--gx-dn,0)*.03))!important;
+  --lg-tile-on:rgba(28,52,88,calc(.54 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
   --lg-rim:inset 0 .5px 0 rgba(226,242,255,.12)!important;
   --lg-rim-inner:none!important;
   --lg-drop:0 18px 40px -12px rgba(0,4,14,.58),0 4px 12px -3px rgba(0,4,14,.34)!important;
 }
 
-/* 8.3 彻底斩断所有自定义壁纸下的 1px 粉笔白外描边与 mask 锯齿环 */
+/* 8.3 彻底斩断所有自定义壁纸下的 1px 粉笔白外描边与 mask 锯齿环（玻璃饱和度收敛至 150%，去 contrast(.93)） */
 :root[data-has-wp="1"]:not([data-style="cyber"]) .glass::before,
 html.has-wallpaper:not([data-style="cyber"]) .glass::before,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .tabbar::before,
@@ -3865,27 +3883,27 @@ html.has-wallpaper:not([data-style="cyber"]) .glass,
 html.has-wallpaper:not([data-style="cyber"]) .d-panel{
   border:0!important;
   background:var(--card)!important;
-  -webkit-backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(195%) contrast(.93) brightness(1.04)!important;
-  backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(195%) contrast(.93) brightness(1.04)!important;
+  -webkit-backdrop-filter:blur(calc(16px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(150%)!important;
+  backdrop-filter:blur(calc(16px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(150%)!important;
   box-shadow:var(--lg-rim),var(--lg-drop)!important;
 }
 @media (prefers-color-scheme: dark){
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .glass,
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .d-panel{
-    -webkit-backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(190%) contrast(1.02) brightness(.96)!important;
-    backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(190%) contrast(1.02) brightness(.96)!important;
+    -webkit-backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(150%)!important;
+    backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(150%)!important;
   }
 }
 :root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .glass,
 :root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .d-panel{
-  -webkit-backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(190%) contrast(1.02) brightness(.96)!important;
-  backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(190%) contrast(1.02) brightness(.96)!important;
+  -webkit-backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(150%)!important;
+  backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(150%)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) .glass:not(.seg)::after{
-  opacity:.24!important;
+  opacity:.20!important;
 }
 
-/* 8.4 统一搜索框 (.search)、快捷胶囊 (.qpill)、分段滑块 (.seg / .thumb)、工具芯片同源冰晶材质，消除上白下黑割裂 */
+/* 8.4 统一搜索框 (.search)、快捷胶囊 (.qpill)、分段滑块 (.seg / .thumb)、工具芯片同源高可读材质 */
 :root[data-has-wp="1"]:not([data-style="cyber"]) .search,
 html.has-wallpaper:not([data-style="cyber"]) .search,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .seg:not(.small),
@@ -3899,11 +3917,11 @@ html.has-wallpaper:not([data-style="cyber"]) .btn.sec,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .dd-btn,
 html.has-wallpaper:not([data-style="cyber"]) .dd-btn{
   border:0!important;
-  background:var(--card)!important;
+  background:rgba(255,255,255,calc(.68 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.16))!important;
   color:var(--text-1)!important;
-  -webkit-backdrop-filter:blur(16px) saturate(190%) contrast(.94)!important;
-  backdrop-filter:blur(16px) saturate(190%) contrast(.94)!important;
-  box-shadow:inset 0 .5px 0 rgba(255,255,255,.16),0 8px 20px -8px rgba(4,12,28,.20)!important;
+  -webkit-backdrop-filter:blur(14px) saturate(150%)!important;
+  backdrop-filter:blur(14px) saturate(150%)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.32),0 8px 20px -8px rgba(4,12,28,.18)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) .qpill:not(.on) b,
 html.has-wallpaper:not([data-style="cyber"]) .qpill:not(.on) b{
@@ -3920,7 +3938,7 @@ html.has-wallpaper:not([data-style="cyber"]) .qpill:not(.on) b{
   background:rgba(255,255,255,.12)!important;
   color:rgba(226,232,240,.90)!important;
 }
-/* 卡片内部小分段器与滑块拇指去死白 */
+/* 卡片内部小分段器与滑块拇指 */
 :root[data-has-wp="1"]:not([data-style="cyber"]) .seg.small,
 html.has-wallpaper:not([data-style="cyber"]) .seg.small{
   border:0!important;
@@ -3932,8 +3950,8 @@ html.has-wallpaper:not([data-style="cyber"]) .seg .thumb,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .seg.small .thumb,
 html.has-wallpaper:not([data-style="cyber"]) .seg.small .thumb{
   border:0!important;
-  background:rgba(255,255,255,.34)!important;
-  box-shadow:inset 0 .5px 0 rgba(255,255,255,.32),0 2px 8px -2px rgba(4,12,28,.16)!important;
+  background:rgba(255,255,255,.82)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.65),0 2px 8px -2px rgba(4,12,28,.16)!important;
 }
 @media (prefers-color-scheme: dark){
   :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .seg .thumb,
@@ -3948,18 +3966,20 @@ html.has-wallpaper:not([data-style="cyber"]) .seg.small .thumb{
   box-shadow:inset 0 .5px 0 rgba(226,242,255,.22),0 2px 8px -2px rgba(0,0,0,.42)!important;
 }
 
-/* 8.5 弹层 (.sheet)、下拉菜单 (.dd-menu) 与全部嵌套子面板去白块、去嵌套滤镜闪烁 */
+/* 8.5 弹层 (.sheet / .v6-drawer)、下拉菜单 (.dd-menu) 统一 .88 高不透明度填充与去嵌套滤镜闪烁 */
 :root[data-has-wp="1"]:not([data-style="cyber"]) .sheet,
 html.has-wallpaper:not([data-style="cyber"]) .sheet,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-drawer,
+html.has-wallpaper:not([data-style="cyber"]) .v6-drawer,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .dd-menu,
 html.has-wallpaper:not([data-style="cyber"]) .dd-menu,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .toast,
 html.has-wallpaper:not([data-style="cyber"]) .toast{
   border:0!important;
   background:var(--lg-fill-2)!important;
-  -webkit-backdrop-filter:blur(28px) saturate(200%) contrast(.94)!important;
-  backdrop-filter:blur(28px) saturate(200%) contrast(.94)!important;
-  box-shadow:inset 0 .5px 0 rgba(255,255,255,.20),0 24px 58px -12px rgba(4,12,28,.38)!important;
+  -webkit-backdrop-filter:blur(26px) saturate(150%)!important;
+  backdrop-filter:blur(26px) saturate(150%)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.28),0 24px 58px -12px rgba(4,12,28,.36)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) .sheet .glass,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .dbox,
@@ -3989,14 +4009,14 @@ html.has-wallpaper:not([data-style="cyber"]) .toast{
   box-shadow:none!important;
 }
 
-/* 8.6 底栏 #tabbar 与 #lens 水滴透镜：彻底清除白色外框与左格死白底，随底部明暗自适应冰晶折射 */
+/* 8.6 底栏 #tabbar 与 #lens 水滴透镜（底色提至 .68~.72 消除底栏透字重影） */
 :root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar.tabbar,
 html.has-wallpaper:not([data-style="cyber"]) #tabbar.tabbar{
   border:0!important;
-  background:rgba(14,22,38,calc(.34 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.12))!important;
-  -webkit-backdrop-filter:var(--hyalite, blur(20px) saturate(200%) contrast(.96))!important;
-  backdrop-filter:var(--hyalite, blur(20px) saturate(200%) contrast(.96))!important;
-  box-shadow:inset 0 .5px 0 rgba(255,255,255,.15),0 16px 38px -10px rgba(2,8,20,.44)!important;
+  background:rgba(14,22,38,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
+  -webkit-backdrop-filter:var(--hyalite, blur(20px) saturate(150%))!important;
+  backdrop-filter:var(--hyalite, blur(20px) saturate(150%))!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.18),0 16px 38px -10px rgba(2,8,20,.44)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar #lens.lens,
 html.has-wallpaper:not([data-style="cyber"]) #tabbar #lens.lens{
@@ -4015,11 +4035,11 @@ html.has-wallpaper:not([data-style="cyber"]) #tabbar .lens-tint{
   opacity:0!important;
 }
 :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar.tabbar{
-  background:rgba(240,248,255,calc(.24 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.10))!important;
-  box-shadow:inset 0 .5px 0 rgba(255,255,255,.24),0 14px 34px -10px rgba(8,20,46,.22)!important;
+  background:rgba(246,250,255,calc(.68 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.52),0 14px 34px -10px rgba(8,20,46,.22)!important;
 }
 :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #tabs .tab{
-  color:rgba(15,23,42,.78)!important;
+  color:rgba(15,23,42,.80)!important;
   text-shadow:none!important;
 }
 :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #tabs .tab.on,
@@ -4029,15 +4049,15 @@ html.has-wallpaper:not([data-style="cyber"]) #tabbar .lens-tint{
 }
 :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #lens.lens{
   background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*20%) 12%,
-    rgba(255,255,255,.26) 0%,
+    rgba(255,255,255,.38) 0%,
     rgba(56,189,248,.12) 55%,
     rgba(0,122,255,.16) 100%)!important;
-  box-shadow:inset 0 .5px 0 rgba(255,255,255,.28),0 4px 12px -4px rgba(0,122,255,.18)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.45),0 4px 12px -4px rgba(0,122,255,.18)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) .hbtn,
 html.has-wallpaper:not([data-style="cyber"]) .hbtn{
   border:0!important;
-  box-shadow:inset 0 .5px 0 rgba(255,255,255,.16),0 6px 16px -6px rgba(4,12,28,.28)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.22),0 6px 16px -6px rgba(4,12,28,.26)!important;
 }
 
 /* 8.7 v5.37 新增组件样式：常驻自训模式条、5G Autorate 遥测条与随机 MAC 护栏横幅 */
@@ -4105,6 +4125,23 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
 :root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-fair { color: #fbbf24; }
 :root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-weak,
 :root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-critical { color: #f87171; }
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on .hbtn {
+  background: rgba(248, 251, 255, calc(.72 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .14)) !important;
+  color: #09111F !important;
+  border: 0 !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .72), 0 6px 16px -6px rgba(12, 28, 58, .16) !important;
+}
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill {
+  background: rgba(248, 251, 255, calc(.72 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .14)) !important;
+  border-color: rgba(15, 23, 42, .12) !important;
+  color: #09111F;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .72), 0 4px 12px -6px rgba(12, 28, 58, .14);
+}
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-excellent,
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-good { color: var(--badge-ok, #15803d); }
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-fair { color: var(--badge-warn, #b45309); }
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-weak,
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-critical { color: var(--badge-red, #dc2626); border-color: rgba(220, 38, 38, .28) !important; }
 
 /* 9.3 液态玻璃底栏滑动膨胀放大折射透镜 (复刻实机录屏交互) */
 #tabbar.tabbar {
@@ -4921,49 +4958,65 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
 /* ───────────────────────────────────────────────────────────────────────────
    10.6 自定义壁纸 + 全模式 120fps 硬件合成保真（严守 CSP img-src 'self' data:）
    ─────────────────────────────────────────────────────────────────────────── */
-:root[data-has-wp="1"] .mesh {
+html {
+  background: var(--bg) !important;
+}
+:root[data-has-wp="1"][data-wp-ready="1"] .mesh {
   display: none !important;
   animation: none !important;
 }
-:root:not([data-wp-blurred="1"]) #hnc-wallpaper .wp-img {
+#hnc-wallpaper .wp-img,
+:root:not([data-wp-blurred="1"]) #hnc-wallpaper .wp-img,
+:root[data-wp-blurred="1"] #hnc-wallpaper .wp-img {
   top: 0 !important;
   right: 0 !important;
   bottom: 0 !important;
   left: 0 !important;
   inset: 0 !important;
-  filter: none !important;
-  transform: translateZ(0) !important;
+  width: 100% !important;
+  height: 100% !important;
+  transform: scale(1.05) translateZ(0) !important;
   transition: none !important;
 }
+:root:not([data-wp-blurred="1"]) #hnc-wallpaper .wp-img {
+  filter: none !important;
+}
 :root[data-wp-blurred="1"] #hnc-wallpaper .wp-img {
-  top: -28px !important;
-  right: -28px !important;
-  bottom: -28px !important;
-  left: -28px !important;
-  inset: -28px !important;
   filter: blur(var(--wp-blur, 0px)) !important;
-  transform: scale(1.04) translateZ(0) !important;
 }
-:root[data-has-wp="1"][data-theme="dark"] #hnc-wallpaper .wp-scrim {
-  background: linear-gradient(180deg,
-    rgba(6, 7, 10, calc(.40 + var(--wp-dim, .18) * .54)) 0%,
-    rgba(6, 7, 10, calc(.32 + var(--wp-dim, .18) * .50)) 50%,
-    rgba(6, 7, 10, calc(.46 + var(--wp-dim, .18) * .56)) 100%) !important;
+:root[data-has-wp="1"] #hnc-wallpaper .wp-scrim,
+html.has-wallpaper #hnc-wallpaper .wp-scrim {
+  background: rgba(6, 12, 24, calc(var(--wp-dim, .12) * .58)) !important;
 }
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) {
+:root[data-has-wp="1"][data-theme="dark"] #hnc-wallpaper .wp-scrim,
+html.has-wallpaper[data-theme="dark"] #hnc-wallpaper .wp-scrim {
+  background: rgba(6, 7, 10, calc(.36 + var(--wp-dim, .18) * .52)) !important;
+}
+:root[data-has-wp="1"]:not([data-theme="dark"]):not([data-style="cyber"]),
+html.has-wallpaper:not([data-theme="dark"]):not([data-style="cyber"]) {
+  --card: rgba(255, 255, 255, calc(.62 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .20)) !important;
+  --card-2: rgba(255, 255, 255, calc(.70 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .20)) !important;
+  --lg-fill: rgba(255, 255, 255, calc(.64 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .18)) !important;
+  --lg-fill-2: rgba(248, 251, 255, calc(.88 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .14)) !important;
+  --lg-sub: rgba(255, 255, 255, calc(.48 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .14)) !important;
+  --lg-sub-2: rgba(255, 255, 255, calc(.54 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .14)) !important;
+  --input: rgba(255, 255, 255, calc(.48 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .14)) !important;
+}
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]),
+html.has-wallpaper[data-theme="dark"]:not([data-style="cyber"]) {
   --card: rgba(18, 20, 26, calc(.56 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .16)) !important;
   --card-2: rgba(24, 27, 35, calc(.66 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .14)) !important;
   --lg-fill: rgba(18, 20, 26, calc(.62 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .14)) !important;
-  --lg-fill-2: rgba(24, 26, 34, calc(.78 + var(--gx-up, 0) * .16 - var(--gx-dn, 0) * .14)) !important;
+  --lg-fill-2: rgba(24, 26, 34, calc(.88 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .12)) !important;
   --lg-sub: rgba(255, 255, 255, calc(.07 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .03)) !important;
 }
 :root[data-has-wp="1"][data-glass="liquid"] .glass:not(#tabbar):not(.seg) {
-  -webkit-backdrop-filter: blur(12px) saturate(175%) !important;
-  backdrop-filter: blur(12px) saturate(175%) !important;
+  -webkit-backdrop-filter: blur(12px) saturate(150%) !important;
+  backdrop-filter: blur(12px) saturate(150%) !important;
 }
 :root[data-has-wp="1"][data-glass="liquid"] .hbtn {
-  -webkit-backdrop-filter: blur(10px) saturate(175%) !important;
-  backdrop-filter: blur(10px) saturate(175%) !important;
+  -webkit-backdrop-filter: blur(10px) saturate(150%) !important;
+  backdrop-filter: blur(10px) saturate(150%) !important;
 }
 :root[data-has-wp="1"] .qpill:not(.on),
 :root[data-has-wp="1"] .chip:not(.on),
@@ -4972,6 +5025,22 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
 :root[data-has-wp="1"] .seg:not(.small) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
+}
+:root[data-has-wp="1"]:not([data-theme="dark"]):not([data-style="cyber"]) .qpill:not(.on),
+:root[data-has-wp="1"]:not([data-theme="dark"]):not([data-style="cyber"]) .chip:not(.on),
+:root[data-has-wp="1"]:not([data-theme="dark"]):not([data-style="cyber"]) .btn.sec,
+:root[data-has-wp="1"]:not([data-theme="dark"]):not([data-style="cyber"]) .dd-btn,
+:root[data-has-wp="1"]:not([data-theme="dark"]):not([data-style="cyber"]) .seg:not(.small) {
+  background: rgba(255, 255, 255, calc(.68 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .16)) !important;
+  color: var(--text-1) !important;
+}
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .qpill:not(.on),
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .chip:not(.on),
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .btn.sec,
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .dd-btn,
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .seg:not(.small) {
+  background: rgba(22, 26, 36, calc(.72 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .14)) !important;
+  color: var(--text-1) !important;
 }
 :root[data-has-wp="1"] .glass.is-tilting {
   transform: none !important;

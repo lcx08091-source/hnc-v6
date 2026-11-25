@@ -41,6 +41,7 @@ type liveLabels struct {
 	mu        sync.RWMutex
 	byPkg     map[string]string
 	loadedAt  time.Time
+	fromDisk  bool
 	source    string // "pm_live" once a real run (or cache load) succeeds, else "none"
 	lastErr   string
 	dexPath   string
@@ -78,6 +79,19 @@ func (l *liveLabels) refresh(ctx context.Context) {
 	if l.dexPath == "" {
 		return
 	}
+	l.mu.RLock()
+	ttl := liveLabelTTL - liveLabelTimeout - 5*time.Second
+	if l.fromDisk {
+		ttl = liveLabelTTL
+	}
+	fresh := len(l.byPkg) > 0 && !l.loadedAt.IsZero() &&
+		!l.loadedAt.After(time.Now().Add(time.Minute)) &&
+		time.Since(l.loadedAt) < ttl
+	l.mu.RUnlock()
+	if fresh {
+		return
+	}
+
 	m, err := runAppLabelHelper(ctx, l.dexPath)
 	if err != nil {
 		l.mu.Lock()
@@ -95,6 +109,7 @@ func (l *liveLabels) refresh(ctx context.Context) {
 	l.mu.Lock()
 	l.byPkg = m
 	l.loadedAt = time.Now()
+	l.fromDisk = false
 	l.source = "pm_live"
 	l.lastErr = ""
 	l.mu.Unlock()
@@ -113,7 +128,11 @@ func runAppLabelHelper(ctx context.Context, dexPath string) (map[string]string, 
 	// "app_process" resolves to the 32/64-bit wrapper via PATH on device.
 	// Preserve BOOTCLASSPATH / SYSTEMSERVERCLASSPATH / ANDROID_* from os.Environ().
 	cmd := exec.CommandContext(cctx, "app_process", "/", "io.hnc.applabel.AppLabel")
-	cmd.Env = append(os.Environ(), "CLASSPATH="+dexPath)
+	env := append(os.Environ(), "CLASSPATH="+dexPath)
+	if os.Getenv("LD_LIBRARY_PATH") == "" {
+		env = append(env, "LD_LIBRARY_PATH=/system/lib64:/system/lib")
+	}
+	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil && cmd.Process.Pid > 0 {
@@ -203,9 +222,11 @@ func (l *liveLabels) loadPersisted() {
 	if l.persistTo == "" {
 		return
 	}
-	data, err := os.ReadFile(l.persistTo)
+	pathUsed := l.persistTo
+	data, err := os.ReadFile(pathUsed)
 	if err != nil && os.IsNotExist(err) {
 		if fb := legacyRunPath(l.persistTo); fb != "" {
+			pathUsed = fb
 			data, err = os.ReadFile(fb)
 		}
 	}
@@ -218,8 +239,14 @@ func (l *liveLabels) loadPersisted() {
 	}
 	if len(m) > 0 {
 		l.byPkg = m
-		// Mark as live-sourced; a fresh refresh will overwrite shortly.
 		l.source = "pm_live"
+		if fi, serr := os.Stat(pathUsed); serr == nil {
+			mt := fi.ModTime()
+			if !mt.IsZero() && !mt.After(time.Now().Add(time.Minute)) {
+				l.loadedAt = mt
+				l.fromDisk = true
+			}
+		}
 	}
 }
 

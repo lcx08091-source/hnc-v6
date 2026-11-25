@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "52-rom-vivo",
-  "rules_version": "hnc-curated-v6.1.0-rc.6#52-rom-vivo",
+  "rules_version": "hnc-curated-v6.1.0-rc.7#52-rom-vivo",
   "rules": [
     {
       "id": "vivo",

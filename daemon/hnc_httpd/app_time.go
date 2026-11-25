@@ -641,14 +641,179 @@ func (s *server) connBlockDerived(now time.Time) []connBlock {
 	return s.connBlockDerivedFrom(ctl, aliasUsedKeys(s.hncDir, appTimeUsedToday(now)), now)
 }
 
+// loadAppCatalogWithUserRules 在不修改 loadAppCatalog 全局缓存副本的前提下(Copy-on-Write),
+// 将 data/dpi_user_rules.json 中未过期的用户纠正规则合并进应用目录(支持 user:xxx 自定义应用与已有应用新增域名后缀)。
+func loadAppCatalogWithUserRules(hncDir string, now time.Time) *appCatalog {
+	base := loadAppCatalog(hncDir)
+	userRules := readDPIUserRules(hncDir)
+	if len(userRules) == 0 {
+		return base
+	}
+	nowUnix := now.Unix()
+	apps := make(map[string]*catalogApp, len(base.apps)+8)
+	cloned := map[string]bool{}
+	for k, v := range base.apps {
+		apps[k] = v
+	}
+	byCat := make(map[string][]string, len(base.byCat)+4)
+	for c, ids := range base.byCat {
+		cp := make([]string, len(ids))
+		copy(cp, ids)
+		byCat[c] = cp
+	}
+	addToCat := func(catName, id string) {
+		if catName == "" {
+			return
+		}
+		for _, ex := range byCat[catName] {
+			if ex == id {
+				return
+			}
+		}
+		byCat[catName] = append(byCat[catName], id)
+		sort.Strings(byCat[catName])
+	}
+	changed := false
+	for _, r := range userRules {
+		if !r.live(nowUnix) || r.AppID == "" || r.Value == "" {
+			continue
+		}
+		catName := strings.ToLower(strings.TrimSpace(r.Category))
+		a := apps[r.AppID]
+		if a == nil {
+			if catName == "" {
+				catName = "other"
+			}
+			nm := strings.TrimSpace(r.AppName)
+			if nm == "" {
+				nm = r.AppID
+			}
+			a = &catalogApp{ID: r.AppID, Name: nm, Category: catName}
+			apps[r.AppID] = a
+			cloned[r.AppID] = true
+			addToCat(catName, r.AppID)
+			changed = true
+		} else if !cloned[r.AppID] {
+			cp := *a
+			cp.Suffixes = append([]string(nil), a.Suffixes...)
+			if cp.Category == "" && catName != "" {
+				cp.Category = catName
+				addToCat(catName, r.AppID)
+			}
+			a = &cp
+			apps[r.AppID] = a
+			cloned[r.AppID] = true
+			changed = true
+		}
+		if r.Kind == "domain" {
+			sfx := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(r.Value)), "*."), "."), ".")
+			if sfx != "" && domainRe.MatchString(sfx) && len(sfx) <= 253 && strings.Contains(sfx, ".") {
+				dup := false
+				for _, ex := range a.Suffixes {
+					if ex == sfx {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					a.Suffixes = append(a.Suffixes, sfx)
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return base
+	}
+	return &appCatalog{apps: apps, byCat: byCat}
+}
+
+// mergeUserRulesIntoBlockMaps 将 data/dpi_user_rules.json 中未过期的 domain / ip 纠正规则合并入派生封锁所需的反查表与 IP 归属表副本。
+func mergeUserRulesIntoBlockMaps(hncDir string, names map[string]ipName, ipApps map[string]ipApp, now time.Time) (map[string]ipName, map[string]ipApp) {
+	userRules := readDPIUserRules(hncDir)
+	if len(userRules) == 0 {
+		return names, ipApps
+	}
+	nowUnix := now.Unix()
+	domainRules := map[string]dpiUserRule{}
+	var ipRules []dpiUserRule
+	for _, r := range userRules {
+		if !r.live(nowUnix) || r.AppID == "" || r.Value == "" {
+			continue
+		}
+		switch r.Kind {
+		case "domain":
+			d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.Value)), ".")
+			if d != "" {
+				domainRules[d] = r
+			}
+		case "ip":
+			ipRules = append(ipRules, r)
+		}
+	}
+	if len(domainRules) == 0 && len(ipRules) == 0 {
+		return names, ipApps
+	}
+	outNames := make(map[string]ipName, len(names))
+	for k, v := range names {
+		outNames[k] = v
+	}
+	outIPApps := make(map[string]ipApp, len(ipApps)+len(ipRules))
+	for k, v := range ipApps {
+		outIPApps[k] = v
+	}
+	if len(domainRules) > 0 {
+		for ip, nm := range outNames {
+			h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(nm.Name)), ".")
+			for cur := h; cur != ""; {
+				if r, ok := domainRules[cur]; ok {
+					ua := r.app()
+					nm.App = ua.ID
+					nm.AppName = ua.Name
+					if ua.Category != "" {
+						nm.Category = ua.Category
+					}
+					outNames[ip] = nm
+					break
+				}
+				i := strings.IndexByte(cur, '.')
+				if i < 0 {
+					break
+				}
+				cur = cur[i+1:]
+			}
+		}
+	}
+	for _, r := range ipRules {
+		parsed := net.ParseIP(strings.TrimSpace(r.Value))
+		if parsed == nil {
+			continue
+		}
+		ipCanon := parsed.String()
+		if isPrivateIP(ipCanon) || isNonExpandableBlockIP(ipCanon) {
+			continue
+		}
+		ua := r.app()
+		outIPApps[ipCanon] = ua
+		if nm, ok := outNames[ipCanon]; ok && nm.App != "" && nm.App != ua.ID {
+			nm.App = ua.ID
+			nm.AppName = ua.Name
+			if ua.Category != "" {
+				nm.Category = ua.Category
+			}
+			outNames[ipCanon] = nm
+		}
+	}
+	return outNames, outIPApps
+}
+
 func (s *server) connBlockDerivedFrom(ctl appControlsFile, used map[string]int, now time.Time) []connBlock {
 	exh := appTimeExhausted(ctl, used)
 	if len(exh) == 0 && len(ctl.CategoryBlocks) == 0 {
 		return nil
 	}
-	cat := loadAppCatalog(s.hncDir)
-	names := s.loadIPNames()
-	ipApps := s.loadIPApps()
+	cat := loadAppCatalogWithUserRules(s.hncDir, now)
+	names, ipApps := mergeUserRulesIntoBlockMaps(s.hncDir, s.loadIPNames(), s.loadIPApps(), now)
 	var out []connBlock
 	until := nextLocalMidnight(now).Unix()
 	for _, l := range ctl.TimeLimits {
@@ -697,9 +862,10 @@ func (s *server) connBlocksEffective(now time.Time) connBlockFile {
 
 // connBlocksForWithDerived 某台设备的全部封锁项(显示用, 派生项带 source)
 func (s *server) connBlocksForWithDerived(mac string, now time.Time) []connBlock {
+	mac = strings.ToLower(strings.TrimSpace(mac))
 	out := connBlocksFor(s.hncDir, mac)
 	for _, it := range s.connBlockDerived(now) {
-		if it.MAC == mac {
+		if strings.ToLower(strings.TrimSpace(it.MAC)) == mac {
 			out = append(out, it)
 		}
 	}
@@ -733,7 +899,7 @@ func (s *server) appTimeEnforce(now time.Time) {
 	}
 	used := aliasUsedKeys(s.hncDir, appTimeUsedToday(now))
 	date := now.Format("20060102")
-	cat := loadAppCatalog(s.hncDir)
+	cat := loadAppCatalogWithUserRules(s.hncDir, now)
 	appTimeAlerts.mu.Lock()
 	defer appTimeAlerts.mu.Unlock()
 	if !appTimeAlerts.loaded {
@@ -812,20 +978,12 @@ func (s *server) appTimeEnforce(now time.Time) {
 // ─── 动作 ──────────────────────────────────────────────────────────────
 
 func validCtlID(s string) bool {
-	if s == "" || len(s) > 64 {
-		return false
-	}
-	for _, c := range s {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
-			return false
-		}
-	}
-	return true
+	return validAppID(s)
 }
 
-// appKnownUserApp app_id 是否是「真应用」: 规则库里有, 或今天的用量里见过(类别属于应用档)
+// appKnownUserApp app_id 是否是「真应用」: 规则库 / 用户纠正规则里有, 或今天的用量里见过(类别属于应用档)
 func (s *server) appKnownUserApp(appID string) (string, bool) {
-	if a := loadAppCatalog(s.hncDir).apps[appID]; a != nil {
+	if a := loadAppCatalogWithUserRules(s.hncDir, time.Now()).apps[appID]; a != nil {
 		return a.Name, appTier(a.Category) == tierApp
 	}
 	appUsage.mu.Lock()
@@ -966,7 +1124,7 @@ func actionCategoryBlockSet(s *server, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true|false"}
 	}
 	if en {
-		if _, ok := appBlockableCategories(loadAppCatalog(s.hncDir))[c]; !ok && !(dpiCtlSkipMAC(mac) && s.simKnownCategory(c)) {
+		if _, ok := appBlockableCategories(loadAppCatalogWithUserRules(s.hncDir, time.Now()))[c]; !ok && !(dpiCtlSkipMAC(mac) && s.simKnownCategory(c)) {
 			return actionResp{OK: false, Error: "bad params", Detail: "unknown category (或属于系统/SDK 类, 不可封锁)"}
 		}
 	}
@@ -1007,7 +1165,7 @@ func (s *server) appControlsByMAC(now time.Time) map[string]map[string]interface
 	if len(ctl.TimeLimits) == 0 && len(ctl.CategoryBlocks) == 0 {
 		return nil
 	}
-	cat := loadAppCatalog(s.hncDir)
+	cat := loadAppCatalogWithUserRules(s.hncDir, now)
 	used := aliasUsedKeys(s.hncDir, appTimeUsedToday(now))
 	s.simAddAppTimeUsed(used, now) // 模拟设备的已用量(只显示; 关闭时空操作)
 	until := nextLocalMidnight(now).Unix()

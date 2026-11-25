@@ -140,6 +140,26 @@ func actionAlertDismissAll(hncDir string, p map[string]string) actionResp {
 	return actionResp{OK: true, Detail: "dismissed " + plural(len(ids), "alert")}
 }
 
+// actionAlertClear atomically clears run/alerts.jsonl and run/alerts_seen.json
+// (or purges only leakguard alerts when kind=="leakguard").
+func actionAlertClear(hncDir string, p map[string]string) actionResp {
+	cfg := alert.NewConfig(hncDir)
+	kind := strings.ToLower(strings.TrimSpace(p["kind"]))
+	if kind != "" && kind != "all" {
+		if kind != "leakguard" {
+			return actionResp{OK: false, Error: "bad params", Detail: "kind must be all|leakguard"}
+		}
+		if err := alert.PurgeLeakGuard(cfg, nil); err != nil {
+			return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+		}
+		return actionResp{OK: true, Detail: "cleared leakguard alerts"}
+	}
+	if err := alert.Clear(cfg); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	}
+	return actionResp{OK: true, Detail: "cleared all alerts"}
+}
+
 func plural(n int, base string) string {
 	if n == 1 {
 		return "1 " + base

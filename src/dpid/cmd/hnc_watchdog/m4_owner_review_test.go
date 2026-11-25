@@ -808,3 +808,51 @@ func TestM4StopCancelsFirstGenerationLockAndIdempotentHotspotDownZeroing(t *test
 	}
 }
 
+func TestM4SameIfaceRebuildUpdatesAtomicIfIdxWithout30sBlindness(t *testing.T) {
+	m4TestEnv(t)
+
+	var curIfIdx atomic.Int32
+	curIfIdx.Store(7)
+
+	r, src := startTestRunner(
+		t,
+		func() []neigh.Entry { return nil },
+		func() (int, error) { return int(curIfIdx.Load()), nil },
+		func(mac, ip string) (string, string) { return "rebuilt-client", "dhcp" },
+	)
+	defer stopRunner(t, r)
+
+	if _, ok := waitDevices(t, 2*time.Second, func(s string) bool { return strings.TrimSpace(s) == "{}" }); !ok {
+		t.Fatal("initial empty devices.json should be written")
+	}
+
+	// Same hotspot interface name "wlan2" recreated by kernel with new ifindex 19 (no 30s full-sync yet).
+	curIfIdx.Store(19)
+	mgr := &m4WriterMgr{runner: r}
+	mgr.tick("wlan2", time.Now())
+	if got := r.atomicIfIdx.Load(); got != 19 {
+		t.Fatalf("ensureGoRunnerLocked must atomically update atomicIfIdx to 19, got %d", got)
+	}
+	if _, tblIdx := r.table.Iface(); tblIdx != 19 {
+		t.Fatalf("table.SetIface must update ifindex to 19, got %d", tblIdx)
+	}
+
+	// Simulate another rapid rebuild to ifindex 23 arriving first on the neighbor subscription stream before tick!
+	curIfIdx.Store(23)
+	src.ch <- []neigh.Entry{{
+		IfIndex: 23,
+		IP:      net.ParseIP("192.168.43.77"),
+		MAC:     "02:5a:00:00:00:77",
+		State:   neigh.NUDReachable,
+	}}
+
+	if _, ok := waitDevices(t, 2*time.Second, func(s string) bool { return strings.Contains(s, "192.168.43.77") }); !ok {
+		b, _ := os.ReadFile(m4DevicesJSON)
+		t.Fatalf("neighbor event on rebuilt ifindex=23 must not be dropped (30s blindness): %s", b)
+	}
+	if got := r.atomicIfIdx.Load(); got != 23 {
+		t.Fatalf("subscription reader should atomically sync atomicIfIdx to 23, got %d", got)
+	}
+	mgr.runner = nil
+}
+

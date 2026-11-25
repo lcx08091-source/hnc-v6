@@ -735,3 +735,49 @@ func TestAPIPowerContract(t *testing.T) {
 		t.Errorf("POST code %d", w2.Code)
 	}
 }
+
+func TestTakePowerSampleNoDoubleCountDaemonTree(t *testing.T) {
+	files := map[string]string{
+		"/proc/uptime":          "5000.00 9000.00\n",
+		"/h/run/watchdog.pid":   "200\n",
+		"/h/run/dpid_guard.pid": "290\n",
+		"/h/run/dpid.child.pid": "300\n",
+		"/proc/100/stat":        statLine(100, 1, "hnc_httpd", 50, 10, 0, 0, 500),
+		"/proc/100/cmdline":     "/data/local/hnc/daemon/hnc_httpd/hnc_httpd",
+		"/proc/200/stat":        statLine(200, 1, "hnc_watchdog", 20, 10, 40, 10, 600),
+		"/proc/200/cmdline":     "/data/local/hnc/bin/hnc_watchdog",
+		"/proc/201/stat":        statLine(201, 200, "sh", 6, 4, 0, 0, 610),
+		"/proc/201/cmdline":     "sh\x00/data/local/hnc/bin/hnc_offload_guard.sh",
+		"/proc/290/stat":        statLine(290, 200, "hnc_launcher", 5, 2, 600, 200, 650),
+		"/proc/290/cmdline":     "/data/local/hnc/bin/hnc_launcher",
+		"/proc/300/stat":        statLine(300, 290, "hnc_dpid", 1000, 500, 0, 0, 700),
+		"/proc/300/cmdline":     "/data/local/hnc/bin/hnc_dpid\x00-config\x00/data/local/hnc/etc/dpi_config.json",
+	}
+	fs := powerFS{
+		ReadFile: func(p string) ([]byte, error) {
+			if v, ok := files[p]; ok {
+				return []byte(v), nil
+			}
+			return nil, os.ErrNotExist
+		},
+		ReadDir: func(p string) ([]string, error) {
+			if p == "/proc" {
+				return []string{"100", "200", "201", "290", "300"}, nil
+			}
+			return nil, os.ErrNotExist
+		},
+		SelfPID: 100,
+	}
+	smp := takePowerSample(fs, "/h", time.Unix(1_700_000_000, 0), lvlActive)
+	// watchdog: 自身 30 + 已回收 50 + 普通工具子进程 10 = 90 (剪枝跳过 dpid_guard 290 与 hnc_dpid 300)
+	if got := smp.Procs["watchdog"].Ticks; got != 90 {
+		t.Fatalf("watchdog double-counted daemon child: got %d want 90", got)
+	}
+	// dpid_guard(hnc_launcher): 仅计自身 Own=7, 不加已回收 Child(800) 也不加存活 hnc_dpid(1500)
+	if got := smp.Procs["dpid_guard"].Ticks; got != 7 {
+		t.Fatalf("dpid_guard double-counted child CPU: got %d want 7", got)
+	}
+	if got := smp.Procs["hnc_dpid"].Ticks; got != 1500 {
+		t.Fatalf("hnc_dpid ticks got %d want 1500", got)
+	}
+}

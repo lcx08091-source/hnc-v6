@@ -39,18 +39,19 @@ import (
 )
 
 const (
-	selfFirewallUIDChain       = "HNC_SELF_UID"
-	selfFirewallDNSChain       = "HNC_SELF_DNS"
-	selfFirewallPerUserRange   = 100000
-	selfFirewallMinAppUID      = 10000
-	selfFirewallMaxAppUID      = 99999999
-	selfFirewallSandboxMinUID  = 10000
-	selfFirewallSandboxMaxUID  = 19999
-	selfFirewallSandboxOffset  = 10000
-	selfFirewallMaxUIDRules    = 512
-	selfFirewallMaxDomains     = 1000
-	selfFirewallMaxTargets     = 64
-	selfFirewallRestoreTimeout = 3 * time.Second
+	selfFirewallUIDChain         = "HNC_SELF_UID"
+	selfFirewallDNSChain         = "HNC_SELF_DNS"
+	selfFirewallPerUserRange     = 100000
+	selfFirewallMinAppUID        = 10000
+	selfFirewallIsolatedMinAppID = 90000
+	selfFirewallMaxAppUID        = 99999999
+	selfFirewallSandboxMinUID    = 10000
+	selfFirewallSandboxMaxUID    = 19999
+	selfFirewallSandboxOffset    = 10000
+	selfFirewallMaxUIDRules      = 512
+	selfFirewallMaxDomains       = 1000
+	selfFirewallMaxTargets       = 64
+	selfFirewallRestoreTimeout   = 3 * time.Second
 
 	SelfFirewallModeAllow          = "allow"
 	SelfFirewallModeBlockCleartext = "block_cleartext"
@@ -70,6 +71,15 @@ var selfFirewallCellularIfaces = []string{
 	"seth_w+",
 	"clat4+",
 	"v4-+",
+}
+
+// selfFirewallCellularVPNIfaces 仅在全表默认路由中 VPN 活跃且物理默认路由仅有蜂窝口(无非 AP Wi-Fi/有线/USB)时动态追加。
+var selfFirewallCellularVPNIfaces = []string{
+	"tun+",
+	"Meta",
+	"wg+",
+	"utun+",
+	"sing_tun+",
 }
 
 // selfFirewallProtectedPackages 硬性受保护的 Root 管理器、WebView 与宿主包名列表（排序稳定输出）。
@@ -99,7 +109,8 @@ type SelfFirewallUIDRule struct {
 	SDKSandboxUID int      `json:"sdk_sandbox_uid,omitempty"`
 	Pkg           string   `json:"pkg,omitempty"`
 	AppName       string   `json:"app_name,omitempty"`
-	Mode          string   `json:"mode"` // "block_cleartext" | "block_cellular" | "block_all"
+	DisplayName   string   `json:"display_name,omitempty"`
+	Mode          string   `json:"mode"` // "allow"(with non-empty block_targets) | "block_cleartext" | "block_cellular" | "block_all"
 	BlockTargets  []string `json:"block_targets,omitempty"`
 	UpdatedAt     int64    `json:"updated_at"`
 }
@@ -157,6 +168,7 @@ type selfFirewallEngine struct {
 	blockedDomains   map[string]bool
 	packagesListPath string
 	forceDataplane   bool
+	cellularVPNHook  func() bool
 	restoreExec      selfFirewallRestoreFunc
 	iptExec          selfFirewallIptFunc
 	resolveBin       func(string) string
@@ -235,7 +247,33 @@ func isProtectedSelfFirewallSystemUID(uid int) bool {
 		return true
 	}
 	_, appID := splitSelfFirewallUID(uid)
-	return appID < selfFirewallMinAppUID
+	return appID < selfFirewallMinAppUID || appID >= selfFirewallIsolatedMinAppID
+}
+
+func stripSyntheticSelfFirewallPkg(raw string) string {
+	p := strings.ToLower(strings.TrimSpace(raw))
+	if strings.HasPrefix(p, "uid:") || strings.HasPrefix(p, "isolated:") {
+		return ""
+	}
+	return p
+}
+
+func isPlaceholderSelfAppName(name, pkg string, uid int) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return true
+	}
+	if pkg != "" && strings.EqualFold(trimmed, pkg) {
+		return true
+	}
+	low := strings.ToLower(trimmed)
+	if strings.HasPrefix(low, "uid:") || strings.HasPrefix(low, "uid ") || strings.HasPrefix(low, "isolated:") {
+		return true
+	}
+	if uid > 0 && (low == fmt.Sprintf("本机应用 · uid %d", uid) || low == fmt.Sprintf("系统服务 (uid %d)", uid)) {
+		return true
+	}
+	return false
 }
 
 func sdkSandboxUIDForApp(uid int) int {
@@ -360,9 +398,9 @@ func (e *selfFirewallEngine) lookupPackagesByUIDFromSystem(uid int) []string {
 	return lookupPackagesByUIDFromPath(pPath, uid)
 }
 
-// resolveLocalAppMetadata 尝试从本机缓存与 packages.list 补齐 UID 对应的包名与显示名。
+// resolveLocalAppMetadata 尝试从本机缓存、packages.list 与 hostConnLookupPkgLabel 补齐 UID 对应的包名与显示名。
 func (e *selfFirewallEngine) resolveLocalAppMetadata(uid int, hintPkg, hintAppName string) (pkg, appName string, allPkgs []string) {
-	pkg = strings.ToLower(strings.TrimSpace(hintPkg))
+	pkg = stripSyntheticSelfFirewallPkg(hintPkg)
 	appName = sanitizeSelfFirewallText(hintAppName, 64)
 
 	sysPkgs := e.lookupPackagesByUIDFromSystem(uid)
@@ -376,16 +414,22 @@ func (e *selfFirewallEngine) resolveLocalAppMetadata(uid int, hintPkg, hintAppNa
 		allPkgs = append(allPkgs, pkg)
 	}
 
-	if e != nil && e.srv != nil && e.srv.hncDir != "" {
-		// 读取 run/dpi_state.json 中 self.apps_by_uid（若存在）补充包名与应用名
-		if raw, err := os.ReadFile(filepath.Join(e.srv.hncDir, "run", "dpi_state.json")); err == nil && len(raw) < 4<<20 {
+	var dpiName string
+	hncDir := ""
+	if e != nil && e.srv != nil {
+		hncDir = e.srv.hncDir
+	}
+	if hncDir != "" {
+		// 读取 run/dpi_state.json 中 self.apps_by_uid（含 display_name / app_name / label）补充包名与应用名
+		if raw, err := os.ReadFile(filepath.Join(hncDir, "run", "dpi_state.json")); err == nil && len(raw) < 4<<20 {
 			var doc struct {
 				Self *struct {
 					AppsByUID map[string]struct {
-						Pkg     string   `json:"pkg"`
-						Pkgs    []string `json:"pkgs"`
-						AppName string   `json:"app_name"`
-						Label   string   `json:"label"`
+						Pkg         string   `json:"pkg"`
+						Pkgs        []string `json:"pkgs"`
+						DisplayName string   `json:"display_name"`
+						AppName     string   `json:"app_name"`
+						Label       string   `json:"label"`
 					} `json:"apps_by_uid"`
 				} `json:"self"`
 			}
@@ -399,41 +443,58 @@ func (e *selfFirewallEngine) resolveLocalAppMetadata(uid int, hintPkg, hintAppNa
 				}
 				for _, k := range lookupKeys {
 					if ap, ok := doc.Self.AppsByUID[k]; ok {
-						if p := strings.ToLower(strings.TrimSpace(ap.Pkg)); p != "" && !seen[p] {
+						if p := stripSyntheticSelfFirewallPkg(ap.Pkg); p != "" && !seen[p] {
 							seen[p] = true
 							allPkgs = append(allPkgs, p)
 						}
 						for _, p := range ap.Pkgs {
-							lp := strings.ToLower(strings.TrimSpace(p))
+							lp := stripSyntheticSelfFirewallPkg(p)
 							if lp != "" && !seen[lp] {
 								seen[lp] = true
 								allPkgs = append(allPkgs, lp)
 							}
 						}
-						if appName == "" {
-							if ap.AppName != "" {
-								appName = sanitizeSelfFirewallText(ap.AppName, 64)
-							} else if ap.Label != "" {
-								appName = sanitizeSelfFirewallText(ap.Label, 64)
+						if dpiName == "" {
+							for _, cand := range []string{ap.DisplayName, ap.AppName, ap.Label} {
+								if clean := sanitizeSelfFirewallText(cand, 64); clean != "" {
+									dpiName = clean
+									break
+								}
 							}
 						}
 					}
 				}
 			}
 		}
-		if pkg == "" && len(sysPkgs) > 0 {
-			pkg = sysPkgs[0]
-		}
-		if pkg != "" && appName == "" {
-			if ix := e.srv.loadAPKIndex(); len(ix.labels) > 0 {
-				if lb := strings.TrimSpace(ix.labels[pkg]); lb != "" {
-					appName = sanitizeSelfFirewallText(lb, 64)
-				}
-			}
-		}
+	}
+
+	if pkg == "" && len(sysPkgs) > 0 {
+		pkg = sysPkgs[0]
 	}
 	if pkg == "" && len(allPkgs) > 0 {
 		pkg = allPkgs[0]
+	}
+
+	if isPlaceholderSelfAppName(appName, pkg, uid) {
+		if dpiName != "" && !isPlaceholderSelfAppName(dpiName, pkg, uid) {
+			appName = dpiName
+		} else if e != nil && e.srv != nil && pkg != "" {
+			if ix := e.srv.loadAPKIndex(); len(ix.labels) > 0 {
+				if lb := sanitizeSelfFirewallText(ix.labels[pkg], 64); lb != "" {
+					appName = lb
+				}
+			}
+		}
+		if isPlaceholderSelfAppName(appName, pkg, uid) && pkg != "" {
+			if lb := sanitizeSelfFirewallText(hostConnLookupPkgLabel(hncDir, pkg), 64); lb != "" && !strings.EqualFold(lb, pkg) {
+				appName = lb
+			} else if appName == "" && lb != "" {
+				appName = lb
+			}
+		}
+		if appName == "" && dpiName != "" {
+			appName = dpiName
+		}
 	}
 	return pkg, appName, allPkgs
 }
@@ -445,7 +506,34 @@ type parsedSelfBlockTarget struct {
 	IsIPv6    bool
 }
 
-// parseAndValidateSelfBlockTarget 严格校验单个远端 IP 或 ip:port / [ipv6]:port 目标。
+func checkSelfBlockForbiddenHostOrGatewayIP(canonIP string) string {
+	if canonIP == "" {
+		return ""
+	}
+	for _, ifi := range webuiListIfaces() {
+		for _, ipn := range ifi.Addrs {
+			if ipn == nil || ipn.IP == nil || ipn.IP.IsUnspecified() || ipn.IP.IsMulticast() {
+				continue
+			}
+			var own string
+			if v4 := ipn.IP.To4(); v4 != nil {
+				own = v4.String()
+			} else {
+				own = ipn.IP.String()
+			}
+			if own == canonIP {
+				return "host own IP (" + canonIP + ") cannot be added to block_targets"
+			}
+		}
+	}
+	if gwIPs := parseDefaultGatewayIPsFromProcRoute(blProcNetRoutePath); gwIPs[canonIP] {
+		return "default gateway IP (" + canonIP + ") cannot be added to block_targets"
+	}
+	return ""
+}
+
+// parseAndValidateSelfBlockTarget 严格校验单个远端公网 IP 或 ip:port / [ipv6]:port 目标。
+// 严禁将私网/回环/CGNAT、198.18.0.0/15 Fake-IP、本机/网关 IP、:53/:853/WebUI 端口、公共 DNS 或共享 CDN IP 塞入 block_targets。
 func parseAndValidateSelfBlockTarget(raw string) (parsedSelfBlockTarget, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" || len(s) > 128 {
@@ -493,15 +581,37 @@ func parseAndValidateSelfBlockTarget(raw string) (parsedSelfBlockTarget, error) 
 		return parsedSelfBlockTarget{}, errors.New("block_target must be a valid literal IP or ip:port")
 	}
 	addr = addr.Unmap()
-	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() {
-		return parsedSelfBlockTarget{}, errors.New("loopback, link-local, multicast, or unspecified IP cannot be blocked")
+	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsPrivate() ||
+		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() {
+		return parsedSelfBlockTarget{}, errors.New("private, loopback, link-local, multicast, or unspecified IP cannot be blocked")
 	}
-	canonIP := addr.String()
-	if _, isPublicDNS := hardBlockPublicDNSIPs[canonIP]; isPublicDNS && (portNum == 0 || portNum == 53 || portNum == 853) {
-		return parsedSelfBlockTarget{}, errors.New("public DNS resolver IP cannot be blocked")
+	if addr.Is4() {
+		b := addr.As4()
+		if b[0] == 0 || (b[0] == 255 && b[1] == 255 && b[2] == 255 && b[3] == 255) {
+			return parsedSelfBlockTarget{}, errors.New("reserved or broadcast IPv4 cannot be blocked")
+		}
+		if b[0] == 100 && (b[1]&0xc0) == 64 {
+			return parsedSelfBlockTarget{}, errors.New("CGNAT 100.64.0.0/10 IP cannot be added to block_targets")
+		}
+		if b[0] == 198 && (b[1]&0xfe) == 18 {
+			return parsedSelfBlockTarget{}, errors.New("proxy Fake-IP 198.18.0.0/15 cannot be added to block_targets")
+		}
+	}
+	if portNum == 53 || portNum == 853 {
+		return parsedSelfBlockTarget{}, errors.New("DNS/DoT port 53/853 cannot be blocked in block_targets")
 	}
 	if portNum == 8443 || portNum == 8444 || portNum == 8080 {
 		return parsedSelfBlockTarget{}, errors.New("WebUI management port cannot be blocked")
+	}
+	canonIP := addr.String()
+	if _, isPublicDNS := hardBlockPublicDNSIPs[canonIP]; isPublicDNS {
+		return parsedSelfBlockTarget{}, errors.New("public DNS resolver IP cannot be blocked")
+	}
+	if reason := checkSelfBlockForbiddenHostOrGatewayIP(canonIP); reason != "" {
+		return parsedSelfBlockTarget{}, errors.New(reason)
+	}
+	if shared, vendor := detectSharedInfraIP(nil, canonIP); shared {
+		return parsedSelfBlockTarget{}, fmt.Errorf("shared CDN/cloud IP (%s) cannot be added to block_targets", vendor)
 	}
 
 	isV6 := addr.Is6()
@@ -522,6 +632,10 @@ func parseAndValidateSelfBlockTarget(raw string) (parsedSelfBlockTarget, error) 
 }
 
 func normalizeSelfBlockTargetsList(rawTargets []string) ([]string, error) {
+	return normalizeSelfBlockTargetsListForServer(nil, rawTargets)
+}
+
+func normalizeSelfBlockTargetsListForServer(s *server, rawTargets []string) ([]string, error) {
 	if len(rawTargets) == 0 {
 		return nil, nil
 	}
@@ -539,6 +653,11 @@ func normalizeSelfBlockTargetsList(rawTargets []string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
+			if s != nil {
+				if shared, vendor := detectSharedInfraIP(s, pt.IP); shared {
+					return nil, fmt.Errorf("shared CDN/cloud IP (%s) cannot be added to block_targets", vendor)
+				}
+			}
 			if !seen[pt.Canonical] {
 				seen[pt.Canonical] = true
 				out = append(out, pt.Canonical)
@@ -550,6 +669,45 @@ func normalizeSelfBlockTargetsList(rawTargets []string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func sanitizePersistedSelfBlockTargets(s *server, rawTargets []string) []string {
+	if len(rawTargets) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(rawTargets))
+	out := make([]string, 0, len(rawTargets))
+	for _, raw := range rawTargets {
+		for _, tok := range strings.FieldsFunc(raw, func(r rune) bool {
+			return r == ',' || unicode.IsSpace(r)
+		}) {
+			trimmed := strings.TrimSpace(tok)
+			if trimmed == "" {
+				continue
+			}
+			pt, err := parseAndValidateSelfBlockTarget(trimmed)
+			if err != nil {
+				continue
+			}
+			if s != nil {
+				if shared, _ := detectSharedInfraIP(s, pt.IP); shared {
+					continue
+				}
+			}
+			if !seen[pt.Canonical] {
+				seen[pt.Canonical] = true
+				out = append(out, pt.Canonical)
+				if len(out) >= selfFirewallMaxTargets {
+					break
+				}
+			}
+		}
+		if len(out) >= selfFirewallMaxTargets {
+			break
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // normalizeSelfDNSBlockDomain 严格规范化并校验本机 DNS 拦截域名（禁止通配符、禁止单标签 TLD、禁止纯 IP）。
@@ -660,10 +818,10 @@ func (e *selfFirewallEngine) loadFromDisk() bool {
 						continue
 					}
 					mode := strings.ToLower(strings.TrimSpace(r.Mode))
-					if mode == "" || mode == SelfFirewallModeAllow || !isValidSelfFirewallMode(mode) {
+					if mode == "" || !isValidSelfFirewallMode(mode) {
 						continue
 					}
-					pkg := strings.ToLower(strings.TrimSpace(r.Pkg))
+					pkg := stripSyntheticSelfFirewallPkg(r.Pkg)
 					if isProtectedSelfFirewallPkg(pkg) {
 						continue
 					}
@@ -677,9 +835,9 @@ func (e *selfFirewallEngine) loadFromDisk() bool {
 					if blockedBySys {
 						continue
 					}
-					targets, terr := normalizeSelfBlockTargetsList(r.BlockTargets)
-					if terr != nil {
-						targets = nil
+					targets := sanitizePersistedSelfBlockTargets(e.srv, r.BlockTargets)
+					if mode == SelfFirewallModeAllow && len(targets) == 0 {
+						continue
 					}
 					r.Pkg = pkg
 					r.AppName = sanitizeSelfFirewallText(r.AppName, 64)
@@ -835,9 +993,178 @@ func (e *selfFirewallEngine) SyncIfDirtyAfterCooldown(minCooldown time.Duration)
 
 // ── 双栈 iptables-restore / ip6tables-restore 规则载荷纯函数构造器 ────────────
 
+// evalCellularOnlyVPNFromRoutes 评估当前全表默认路由是否满足:
+//  1) 存在活跃 VPN 默认路由接口 (tun*/Meta/wg*/utun*/sing_tun* 等);
+//  2) 底层物理默认路由仅含蜂窝口 (rmnet*/ccmni*/seth_*/sipa_eth*/wwan*/clat4*);
+//  3) 无任何非热点 AP 的 Wi-Fi / 有线 / USB 上游默认路由 (wlan*/eth*/usb*/rndis*/ncm*)。
+// 仅在三者同时成立时返回 true, 彻底杜绝连 Wi-Fi 开 FlClash/VPN 时误断网!
+func evalCellularOnlyVPNFromRoutes(defaultRouteDevs []string, activeIfaces map[string]bool, apIface string) bool {
+	if len(defaultRouteDevs) == 0 {
+		return false
+	}
+	apIface = strings.TrimSpace(apIface)
+	hasVPN := false
+	hasCellular := false
+	hasNonAPWifiOrWired := false
+
+	for _, rawDev := range defaultRouteDevs {
+		dev := strings.TrimSpace(rawDev)
+		if dev == "" || dev == "lo" {
+			continue
+		}
+		if activeIfaces != nil && !activeIfaces[dev] {
+			continue
+		}
+		if isVPNIface(dev) {
+			hasVPN = true
+			continue
+		}
+		phys := strings.TrimPrefix(dev, "v4-")
+		phys = strings.TrimPrefix(phys, "clat4-")
+		if (apIface != "" && (dev == apIface || phys == apIface)) || isAPIfaceName(dev) || isAPIfaceName(phys) {
+			continue
+		}
+		switch {
+		case isCellIface(phys) ||
+			strings.HasPrefix(phys, "rmnet") ||
+			strings.HasPrefix(phys, "ccmni") ||
+			strings.HasPrefix(phys, "seth_") ||
+			strings.HasPrefix(phys, "sipa_eth") ||
+			strings.HasPrefix(phys, "wwan") ||
+			strings.HasPrefix(dev, "clat4"):
+			hasCellular = true
+		case strings.HasPrefix(phys, "wlan") ||
+			strings.HasPrefix(phys, "eth") ||
+			strings.HasPrefix(phys, "usb") ||
+			strings.HasPrefix(phys, "rndis") ||
+			strings.HasPrefix(phys, "ncm") ||
+			strings.HasPrefix(phys, "enx"):
+			hasNonAPWifiOrWired = true
+		}
+	}
+	return hasVPN && hasCellular && !hasNonAPWifiOrWired
+}
+
+func selfFirewallDetectActiveHotspotIface(hncDir string) string {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		return ""
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state")); err == nil {
+		st := strings.TrimSpace(string(b))
+		if strings.HasPrefix(st, "ACTIVE:") {
+			if ifc := strings.TrimSpace(strings.TrimPrefix(st, "ACTIVE:")); isValidHotspotIfaceName(ifc) {
+				return ifc
+			}
+		}
+	}
+	_, authIfc := v6ReadIfaceDetectDefaultWANs(hncDir)
+	return authIfc
+}
+
+func selfFirewallIsCellularOnlyVPNActive(hncDir string) bool {
+	ifs, err := v6LiveInterfacesFn()
+	if err != nil || len(ifs) == 0 {
+		return false
+	}
+	activeIfaces := make(map[string]bool, len(ifs))
+	byIdx := make(map[int]string, len(ifs))
+	seenDev := make(map[string]bool, 8)
+	var defaultDevs []string
+	addDev := func(name string) {
+		name = strings.TrimSpace(name)
+		if name != "" && !seenDev[name] {
+			seenDev[name] = true
+			defaultDevs = append(defaultDevs, name)
+		}
+	}
+
+	for _, ifi := range ifs {
+		name := strings.TrimSpace(ifi.Name)
+		if name == "" {
+			continue
+		}
+		byIdx[ifi.Index] = name
+		if (ifi.Flags & net.FlagUp) != 0 {
+			activeIfaces[name] = true
+			// Clash Meta / OpenVPN 常使用 0.0.0.0/1 + 128.0.0.0/1 (prefixLen=1) 劫持全局流量:
+			// 只要 VPN 虚拟网卡处于 UP 且已配置单播地址, 即视为活跃 VPN 隧道候选。
+			if isVPNIface(name) {
+				if addrs, aerr := ifi.Addrs(); aerr == nil && len(addrs) > 0 {
+					addDev(name)
+				}
+			}
+		}
+	}
+
+	if b, err := os.ReadFile("/proc/net/route"); err == nil {
+		for idx, ln := range strings.Split(string(b), "\n") {
+			if idx == 0 {
+				continue
+			}
+			fs := strings.Fields(ln)
+			if len(fs) >= 8 && fs[1] == "00000000" && fs[7] == "00000000" {
+				if flags, ferr := strconv.ParseUint(fs[3], 16, 32); ferr == nil && (flags&0x1) != 0 {
+					addDev(fs[0])
+				}
+			}
+		}
+	}
+	if b6, err := os.ReadFile("/proc/net/ipv6_route"); err == nil {
+		for _, ln := range strings.Split(string(b6), "\n") {
+			fs := strings.Fields(ln)
+			// dest_net(0) dest_prefix(1) ... flags(8) dev(9)
+			if len(fs) >= 10 && fs[0] == "00000000000000000000000000000000" && fs[1] == "00" {
+				if flags, ferr := strconv.ParseUint(fs[8], 16, 32); ferr == nil && (flags&0x1) != 0 && (flags&0x00200000) == 0 {
+					addDev(fs[9])
+				}
+			}
+		}
+	}
+	if v6DumpDefaultRouteIfindexesFn != nil {
+		if idxMap, nerr := v6DumpDefaultRouteIfindexesFn(); nerr == nil {
+			for idx := range idxMap {
+				if nm := byIdx[idx]; nm != "" {
+					addDev(nm)
+				}
+			}
+		}
+	}
+	if hncDir != "" {
+		detWANs, _ := v6ReadIfaceDetectDefaultWANs(hncDir)
+		for k := range detWANs {
+			addDev(k)
+		}
+	}
+
+	apIface := selfFirewallDetectActiveHotspotIface(hncDir)
+	return evalCellularOnlyVPNFromRoutes(defaultDevs, activeIfaces, apIface)
+}
+
+func (e *selfFirewallEngine) shouldBlockCellularVPN() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	hook := e.cellularVPNHook
+	forced := e.forceDataplane
+	e.mu.Unlock()
+	if hook != nil {
+		return hook()
+	}
+	if forced {
+		return false
+	}
+	return selfFirewallIsCellularOnlyVPNActive(e.srvHncDir())
+}
+
 // buildSelfUIDRestorePayload 生成 *filter 表 HNC_SELF_UID 子链的 --noflush 载荷。
 // 当 rules 非空时, 链首第 1 条铁定且仅放行 -o lo (本机 127.0.0.1 及本机局域网 IP 均经内核 table local 走 lo, 严禁无目的 IP 豁免 8080/8443)。
 func buildSelfUIDRestorePayload(isIPv6 bool, rules []SelfFirewallUIDRule) (payload string, ruleCount int) {
+	return buildSelfUIDRestorePayloadWithOpts(isIPv6, rules, false)
+}
+
+func buildSelfUIDRestorePayloadWithOpts(isIPv6 bool, rules []SelfFirewallUIDRule, blockCellVPN bool) (payload string, ruleCount int) {
 	var b strings.Builder
 	b.WriteString("*filter\n")
 	b.WriteString(":" + selfFirewallUIDChain + " - [0:0]\n")
@@ -855,6 +1182,9 @@ func buildSelfUIDRestorePayload(isIPv6 bool, rules []SelfFirewallUIDRule) (paylo
 		explicitUIDSet[r.UID] = true
 	}
 
+	var bodyBuf strings.Builder
+	bodyRuleCnt := 0
+
 	emitForUID := func(u int, r SelfFirewallUIDRule) {
 		for _, rawTgt := range r.BlockTargets {
 			pt, err := parseAndValidateSelfBlockTarget(rawTgt)
@@ -862,34 +1192,41 @@ func buildSelfUIDRestorePayload(isIPv6 bool, rules []SelfFirewallUIDRule) (paylo
 				continue
 			}
 			if pt.Port > 0 {
-				fmt.Fprintf(&b, "-A %s -d %s -p tcp --dport %d -m owner --uid-owner %d -j REJECT --reject-with tcp-reset\n",
+				fmt.Fprintf(&bodyBuf, "-A %s -d %s -p tcp --dport %d -m owner --uid-owner %d -j REJECT --reject-with tcp-reset\n",
 					selfFirewallUIDChain, pt.IP, pt.Port, u)
-				fmt.Fprintf(&b, "-A %s -d %s -p udp --dport %d -m owner --uid-owner %d -j REJECT\n",
+				fmt.Fprintf(&bodyBuf, "-A %s -d %s -p udp --dport %d -m owner --uid-owner %d -j REJECT\n",
 					selfFirewallUIDChain, pt.IP, pt.Port, u)
-				ruleCount += 2
+				bodyRuleCnt += 2
 			} else {
-				fmt.Fprintf(&b, "-A %s -d %s -m owner --uid-owner %d -j REJECT\n",
+				fmt.Fprintf(&bodyBuf, "-A %s -d %s -m owner --uid-owner %d -j REJECT\n",
 					selfFirewallUIDChain, pt.IP, u)
-				ruleCount++
+				bodyRuleCnt++
 			}
 		}
 
 		switch r.Mode {
 		case SelfFirewallModeBlockCleartext:
 			// 仅拦截明文 HTTP 端口 80,8080,8000,8008,8888, 100% 保留 :443 HTTPS 正常使用
-			fmt.Fprintf(&b, "-A %s -p tcp -m multiport --dports %s -m owner --uid-owner %d -j REJECT --reject-with tcp-reset\n",
+			fmt.Fprintf(&bodyBuf, "-A %s -p tcp -m multiport --dports %s -m owner --uid-owner %d -j REJECT --reject-with tcp-reset\n",
 				selfFirewallUIDChain, selfFirewallCleartextPortCSV, u)
-			ruleCount++
+			bodyRuleCnt++
 		case SelfFirewallModeBlockCellular:
 			for _, ifc := range selfFirewallCellularIfaces {
-				fmt.Fprintf(&b, "-A %s -o %s -m owner --uid-owner %d -j REJECT\n",
+				fmt.Fprintf(&bodyBuf, "-A %s -o %s -m owner --uid-owner %d -j REJECT\n",
 					selfFirewallUIDChain, ifc, u)
-				ruleCount++
+				bodyRuleCnt++
+			}
+			if blockCellVPN {
+				for _, vIfc := range selfFirewallCellularVPNIfaces {
+					fmt.Fprintf(&bodyBuf, "-A %s -o %s -m owner --uid-owner %d -j REJECT\n",
+						selfFirewallUIDChain, vIfc, u)
+					bodyRuleCnt++
+				}
 			}
 		case SelfFirewallModeBlockAll:
-			fmt.Fprintf(&b, "-A %s -m owner --uid-owner %d -j REJECT\n",
+			fmt.Fprintf(&bodyBuf, "-A %s -m owner --uid-owner %d -j REJECT\n",
 				selfFirewallUIDChain, u)
-			ruleCount++
+			bodyRuleCnt++
 		}
 	}
 
@@ -904,6 +1241,8 @@ func buildSelfUIDRestorePayload(isIPv6 bool, rules []SelfFirewallUIDRule) (paylo
 		}
 	}
 
+	b.WriteString(bodyBuf.String())
+	ruleCount += bodyRuleCnt
 	b.WriteString("COMMIT\n")
 	return b.String(), ruleCount
 }
@@ -1144,6 +1483,17 @@ func (e *selfFirewallEngine) syncDataplane() error {
 
 	hasUID := len(rules) > 0
 	hasDNS := len(domains) > 0
+	hasCellularRule := false
+	for _, r := range rules {
+		if r.Mode == SelfFirewallModeBlockCellular {
+			hasCellularRule = true
+			break
+		}
+	}
+	blockCellVPN := false
+	if hasUID && hasCellularRule {
+		blockCellVPN = e.shouldBlockCellularVPN()
+	}
 
 	var syncErr error
 	recordErr := func(isV6 bool, stage string, err error) {
@@ -1168,7 +1518,7 @@ func (e *selfFirewallEngine) syncDataplane() error {
 	for _, isV6 := range []bool{false, true} {
 		// 1) HNC_SELF_UID 子链同步或零开销拆链
 		if hasUID {
-			uidPayload, _ := buildSelfUIDRestorePayload(isV6, rules)
+			uidPayload, _ := buildSelfUIDRestorePayloadWithOpts(isV6, rules, blockCellVPN)
 			var rerr error
 			if restoreFn != nil {
 				rerr = restoreFn(isV6, uidPayload)
@@ -1228,7 +1578,18 @@ func (e *selfFirewallEngine) syncDataplane() error {
 
 // ── 核心读写操作与防自锁守卫校验 ────────────────────────────────────────────
 
-// SetUIDRule 设置或移除单个应用 UID 的防火墙规则（mode=="allow" 时移除该 UID 限制）。
+func protectedUIDReasonDetail(uid int) string {
+	_, appID := splitSelfFirewallUID(uid)
+	if appID >= selfFirewallIsolatedMinAppID {
+		return fmt.Sprintf("拒绝操作 UID %d：Android 隔离沙盒临时进程 (appId >= 90000) 无固定身份，不可持久封禁", uid)
+	}
+	return fmt.Sprintf("拒绝操作 UID %d：系统核心守护进程与特权服务 (appId < 10000) 永不可封禁", uid)
+}
+
+// SetUIDRule 设置或移除单个应用 UID 的防火墙规则:
+//   - rawTargets == nil (未传 block_targets) 时自动继承该 UID 已有的 BlockTargets;
+//   - mode == "allow" 且最终 block_targets 为空时调用 RemoveUIDRule 删除整条规则;
+//   - mode == "allow" 且最终 block_targets 非空时保留单 UID 的 IP 封禁规则。
 func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string, rawTargets []string) (*SelfFirewallUIDRule, bool, error) {
 	if e == nil {
 		return nil, false, errors.New("selfFirewall engine unavailable")
@@ -1243,7 +1604,7 @@ func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string
 		e.guardRejects.Add(1)
 		return nil, false, &selfFirewallValidationError{
 			Code:   "protected_uid",
-			Detail: fmt.Sprintf("拒绝操作 UID %d：系统核心守护进程与特权服务 (appId < 10000) 永不可封禁", uid),
+			Detail: protectedUIDReasonDetail(uid),
 		}
 	}
 
@@ -1255,7 +1616,7 @@ func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string
 		}
 	}
 
-	inPkg := strings.ToLower(strings.TrimSpace(rawPkg))
+	inPkg := stripSyntheticSelfFirewallPkg(rawPkg)
 	if inPkg != "" && !isValidAndroidPkgName(inPkg) {
 		return nil, false, &selfFirewallValidationError{
 			Code:   "bad params",
@@ -1263,8 +1624,32 @@ func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string
 		}
 	}
 
-	// mode == "allow": 移除该 UID 的全部防火墙限制（允许为任意 appId >= 10000 的 UID 解除限制）
-	if normMode == SelfFirewallModeAllow {
+	var normTargets []string
+	if rawTargets == nil {
+		e.mu.Lock()
+		if prev, ok := e.uidRules[uid]; ok && len(prev.BlockTargets) > 0 {
+			normTargets = append([]string(nil), prev.BlockTargets...)
+			if inPkg == "" && prev.Pkg != "" {
+				inPkg = stripSyntheticSelfFirewallPkg(prev.Pkg)
+			}
+			if strings.TrimSpace(rawAppName) == "" && prev.AppName != "" {
+				rawAppName = prev.AppName
+			}
+		}
+		e.mu.Unlock()
+	} else if len(rawTargets) > 0 {
+		parsed, err := normalizeSelfBlockTargetsListForServer(e.srv, rawTargets)
+		if err != nil {
+			return nil, false, &selfFirewallValidationError{
+				Code:   "bad params",
+				Detail: err.Error(),
+			}
+		}
+		normTargets = parsed
+	}
+
+	// mode == "allow" 且无任何单 IP 拦截目标时: 移除该 UID 的全部防火墙限制
+	if normMode == SelfFirewallModeAllow && len(normTargets) == 0 {
 		removed, err := e.RemoveUIDRule(uid)
 		return nil, removed, err
 	}
@@ -1285,14 +1670,6 @@ func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string
 				Code:   "protected_package",
 				Detail: fmt.Sprintf("UID %d 归属受保护的核心应用 (%s)，已硬性拒绝封禁以防自锁", uid, p),
 			}
-		}
-	}
-
-	normTargets, err := normalizeSelfBlockTargetsList(rawTargets)
-	if err != nil {
-		return nil, false, &selfFirewallValidationError{
-			Code:   "bad params",
-			Detail: err.Error(),
 		}
 	}
 
@@ -1331,6 +1708,198 @@ func (e *selfFirewallEngine) SetUIDRule(uid int, mode, rawPkg, rawAppName string
 	return &rule, true, nil
 }
 
+// AddUIDBlockTarget 为指定应用 UID 追加单个远端公网 IP/ip:port 封禁目标（保留该 UID 原有 Mode, 无规则时以 mode="allow" 承载）。
+func (e *selfFirewallEngine) AddUIDBlockTarget(uid int, rawTarget, rawPkg, rawAppName string) (*SelfFirewallUIDRule, bool, error) {
+	if e == nil {
+		return nil, false, errors.New("selfFirewall engine unavailable")
+	}
+	if uid > selfFirewallMaxAppUID {
+		return nil, false, &selfFirewallValidationError{
+			Code:   "bad params",
+			Detail: "uid out of valid Android range",
+		}
+	}
+	if isProtectedSelfFirewallSystemUID(uid) {
+		e.guardRejects.Add(1)
+		return nil, false, &selfFirewallValidationError{
+			Code:   "protected_uid",
+			Detail: protectedUIDReasonDetail(uid),
+		}
+	}
+	inPkg := stripSyntheticSelfFirewallPkg(rawPkg)
+	if inPkg != "" && !isValidAndroidPkgName(inPkg) {
+		return nil, false, &selfFirewallValidationError{
+			Code:   "bad params",
+			Detail: "invalid Android package name",
+		}
+	}
+	if isProtectedSelfFirewallPkg(inPkg) {
+		e.guardRejects.Add(1)
+		return nil, false, &selfFirewallValidationError{
+			Code:   "protected_package",
+			Detail: fmt.Sprintf("禁止封禁受保护的核心管理器/WebView/宿主应用 (%s)", inPkg),
+		}
+	}
+
+	normOne, err := normalizeSelfBlockTargetsListForServer(e.srv, []string{rawTarget})
+	if err != nil || len(normOne) == 0 {
+		detail := "invalid block_target"
+		if err != nil {
+			detail = err.Error()
+		}
+		return nil, false, &selfFirewallValidationError{
+			Code:   "bad params",
+			Detail: detail,
+		}
+	}
+	canonTgt := normOne[0]
+
+	resolvedPkg, resolvedAppName, allPkgs := e.resolveLocalAppMetadata(uid, inPkg, rawAppName)
+	for _, p := range allPkgs {
+		if isProtectedSelfFirewallPkg(p) {
+			e.guardRejects.Add(1)
+			return nil, false, &selfFirewallValidationError{
+				Code:   "protected_package",
+				Detail: fmt.Sprintf("UID %d 归属受保护的核心应用 (%s)，已硬性拒绝封禁以防自锁", uid, p),
+			}
+		}
+	}
+
+	now := time.Now().Unix()
+	e.mu.Lock()
+	cur, exists := e.uidRules[uid]
+	if !exists && len(e.uidRules) >= selfFirewallMaxUIDRules {
+		e.mu.Unlock()
+		return nil, false, &selfFirewallValidationError{
+			Code:   "bad params",
+			Detail: fmt.Sprintf("uid_rules reached max capacity (%d)", selfFirewallMaxUIDRules),
+		}
+	}
+	mode := cur.Mode
+	if mode == "" || !isValidSelfFirewallMode(mode) {
+		mode = SelfFirewallModeAllow
+	}
+	merged := make([]string, 0, len(cur.BlockTargets)+1)
+	already := false
+	for _, t := range cur.BlockTargets {
+		if t == canonTgt {
+			already = true
+		}
+		merged = append(merged, t)
+	}
+	if !already {
+		if len(merged) >= selfFirewallMaxTargets {
+			e.mu.Unlock()
+			return nil, false, &selfFirewallValidationError{
+				Code:   "bad params",
+				Detail: fmt.Sprintf("too many block_targets (max %d)", selfFirewallMaxTargets),
+			}
+		}
+		merged = append(merged, canonTgt)
+		sort.Strings(merged)
+	}
+	if resolvedPkg == "" {
+		resolvedPkg = cur.Pkg
+	}
+	if resolvedAppName == "" {
+		resolvedAppName = cur.AppName
+	}
+	nextRule := SelfFirewallUIDRule{
+		UID:           uid,
+		SDKSandboxUID: sdkSandboxUIDForApp(uid),
+		Pkg:           resolvedPkg,
+		AppName:       resolvedAppName,
+		Mode:          mode,
+		BlockTargets:  merged,
+		UpdatedAt:     now,
+	}
+	e.uidRules[uid] = nextRule
+	saveErr := e.saveLocked(now)
+	e.mu.Unlock()
+	if saveErr != nil {
+		return nil, false, saveErr
+	}
+
+	e.syncDirty.Store(true)
+	dpErr := e.syncDataplane()
+	e.notifyLeakGuardChanged()
+	if dpErr != nil {
+		return &nextRule, !already, dpErr
+	}
+	return &nextRule, !already, nil
+}
+
+// RemoveUIDBlockTarget 从指定应用 UID 的防火墙规则中移除单个 IP/ip:port 目标;
+// 若该 UID 的 Mode 为 "allow" 且移除后无剩余目标, 自动删除整条 UID 规则并在空表时拆链。
+func (e *selfFirewallEngine) RemoveUIDBlockTarget(uid int, rawTarget string) (bool, error) {
+	if e == nil {
+		return false, errors.New("selfFirewall engine unavailable")
+	}
+	if uid > selfFirewallMaxAppUID {
+		return false, &selfFirewallValidationError{
+			Code:   "bad params",
+			Detail: "uid out of valid Android range",
+		}
+	}
+	if isProtectedSelfFirewallSystemUID(uid) {
+		return false, &selfFirewallValidationError{
+			Code:   "protected_uid",
+			Detail: protectedUIDReasonDetail(uid),
+		}
+	}
+	canonTgt := strings.TrimSpace(rawTarget)
+	if pt, err := parseAndValidateSelfBlockTarget(canonTgt); err == nil {
+		canonTgt = pt.Canonical
+	}
+	if canonTgt == "" {
+		return false, &selfFirewallValidationError{
+			Code:   "bad params",
+			Detail: "empty block_target",
+		}
+	}
+
+	now := time.Now().Unix()
+	e.mu.Lock()
+	cur, exists := e.uidRules[uid]
+	if !exists || len(cur.BlockTargets) == 0 {
+		e.mu.Unlock()
+		return false, nil
+	}
+	var kept []string
+	removed := false
+	for _, t := range cur.BlockTargets {
+		if strings.EqualFold(t, canonTgt) {
+			removed = true
+			continue
+		}
+		kept = append(kept, t)
+	}
+	if !removed {
+		e.mu.Unlock()
+		return false, nil
+	}
+	if (cur.Mode == "" || cur.Mode == SelfFirewallModeAllow) && len(kept) == 0 {
+		delete(e.uidRules, uid)
+	} else {
+		cur.BlockTargets = kept
+		cur.UpdatedAt = now
+		e.uidRules[uid] = cur
+	}
+	saveErr := e.saveLocked(now)
+	e.mu.Unlock()
+	if saveErr != nil {
+		return false, saveErr
+	}
+
+	e.syncDirty.Store(true)
+	dpErr := e.syncDataplane()
+	e.notifyLeakGuardChanged()
+	if dpErr != nil {
+		return true, dpErr
+	}
+	return true, nil
+}
+
 // RemoveUIDRule 移除指定应用 UID 的本机防火墙规则。
 func (e *selfFirewallEngine) RemoveUIDRule(uid int) (bool, error) {
 	if e == nil {
@@ -1345,7 +1914,7 @@ func (e *selfFirewallEngine) RemoveUIDRule(uid int) (bool, error) {
 	if isProtectedSelfFirewallSystemUID(uid) {
 		return false, &selfFirewallValidationError{
 			Code:   "protected_uid",
-			Detail: "uid appId must be >= 10000",
+			Detail: protectedUIDReasonDetail(uid),
 		}
 	}
 	now := time.Now().Unix()
@@ -1635,6 +2204,24 @@ func (e *selfFirewallEngine) snapshotPayload() map[string]any {
 	e.mu.Lock()
 	rules, domains, updatedAt := e.sortedSnapshotLocked()
 	e.mu.Unlock()
+	for i := range rules {
+		cleanPkg := stripSyntheticSelfFirewallPkg(rules[i].Pkg)
+		if cleanPkg != rules[i].Pkg {
+			rules[i].Pkg = cleanPkg
+		}
+		if rules[i].Pkg == "" || isPlaceholderSelfAppName(rules[i].AppName, rules[i].Pkg, rules[i].UID) {
+			pkg, appName, _ := e.resolveLocalAppMetadata(rules[i].UID, rules[i].Pkg, rules[i].AppName)
+			if rules[i].Pkg == "" && pkg != "" {
+				rules[i].Pkg = pkg
+			}
+			if appName != "" {
+				rules[i].AppName = appName
+			}
+		}
+		if rules[i].DisplayName == "" && rules[i].AppName != "" {
+			rules[i].DisplayName = rules[i].AppName
+		}
+	}
 	return map[string]any{
 		"ok":                   true,
 		"updated_at":           updatedAt,
@@ -1656,7 +2243,7 @@ func (e *selfFirewallEngine) summary() map[string]any {
 	domCnt := len(e.blockedDomains)
 	updatedAt := e.updatedAt
 	lastErr := e.lastSyncErr
-	var cleartextCnt, cellularCnt, blockAllCnt int
+	var cleartextCnt, cellularCnt, blockAllCnt, ipTargetOnlyCnt int
 	for _, r := range e.uidRules {
 		switch r.Mode {
 		case SelfFirewallModeBlockCleartext:
@@ -1665,6 +2252,10 @@ func (e *selfFirewallEngine) summary() map[string]any {
 			cellularCnt++
 		case SelfFirewallModeBlockAll:
 			blockAllCnt++
+		case SelfFirewallModeAllow:
+			if len(r.BlockTargets) > 0 {
+				ipTargetOnlyCnt++
+			}
 		}
 	}
 	e.mu.Unlock()
@@ -1675,6 +2266,7 @@ func (e *selfFirewallEngine) summary() map[string]any {
 		"block_cleartext_apps": cleartextCnt,
 		"block_cellular_apps":  cellularCnt,
 		"block_all_apps":       blockAllCnt,
+		"ip_target_only_apps":  ipTargetOnlyCnt,
 		"apply_commits":        e.applyCommits.Load(),
 		"guard_rejects":        e.guardRejects.Load(),
 		"sync_dirty":           e.syncDirty.Load(),
@@ -1696,10 +2288,21 @@ func parseFlexibleTargetStrings(raw string) []string {
 	if strings.HasPrefix(s, "[") {
 		var arr []string
 		if json.Unmarshal([]byte(s), &arr) == nil {
+			if arr == nil {
+				return []string{}
+			}
 			return arr
 		}
 	}
 	return []string{s}
+}
+
+func parseExplicitTargetStrings(raw string) []string {
+	out := parseFlexibleTargetStrings(raw)
+	if out == nil {
+		return []string{}
+	}
+	return out
 }
 
 func firstNonEmptyParam(p map[string]string, keys ...string) string {
@@ -1757,7 +2360,10 @@ func dispatchSelfFirewallAction(s *server, action string, p map[string]string) a
 		if mode == "" {
 			return actionResp{OK: false, Error: "bad params", Detail: "mode is required"}
 		}
-		targets := parseFlexibleTargetStrings(p["block_targets"])
+		var targets []string
+		if rawTgt, hasTgt := p["block_targets"]; hasTgt {
+			targets = parseExplicitTargetStrings(rawTgt)
+		}
 		rule, _, serr := eng.SetUIDRule(uid, mode, p["pkg"], p["app_name"], targets)
 		if serr != nil {
 			return mapErrToActionResp(serr)
@@ -1881,11 +2487,15 @@ func (s *server) apiSelfFirewall(w http.ResponseWriter, r *http.Request) {
 		if len(req.BlockTargets) > 0 && string(bytes.TrimSpace(req.BlockTargets)) != "null" {
 			var arr []string
 			if json.Unmarshal(req.BlockTargets, &arr) == nil {
-				parsedTargets = arr
+				if arr == nil {
+					parsedTargets = []string{}
+				} else {
+					parsedTargets = arr
+				}
 			} else {
 				var single string
 				if json.Unmarshal(req.BlockTargets, &single) == nil {
-					parsedTargets = parseFlexibleTargetStrings(single)
+					parsedTargets = parseExplicitTargetStrings(single)
 				} else {
 					writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": "block_targets must be array of strings or comma-separated string"})
 					return

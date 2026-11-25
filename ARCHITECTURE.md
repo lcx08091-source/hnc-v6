@@ -85,8 +85,8 @@ HNC `v6.1`（Vector 架构）采用 **Go 1.27 控制与分析面 + C11 / eBPF �
 2. **`hnc_dpid`（深度包检测与共享内存 v3 写端）**：
    - 基于 `AF_PACKET` 与纯 `epoll` 事件驱动捕获双栈流量，无需安装中间人根证书即可提取 DNS CNAME 链、TLS ClientHello SNI 与 JA4 指纹、抗后量子分片 QUIC Initial 与 QTP 传输参数、前 8 包方向与包长序列（SPLT），以及 120ms 门控时间因果突发传播。
    - 默认启用威布尔半马尔可夫「智能防抖」前台意图识别模型，支持长视频分段缓冲保持、语音/音乐伴随轨解耦与锁屏防后台推送篡位。
-   - 内置 `LeakGuard` 与按需 L2 `self_capture` HTTP/DNS 明文深度载荷审计引擎，非阻塞检测未加密请求中的手机号、IMEI/OAID、精确经纬度、MAC、高危鉴权凭据（`CREDENTIAL`）及通过 ISO 7064 (MOD 11-2) 强校验的二代身份证号（`ID_CARD`）。
-   - 在连接追踪与共享内存发布层将热点下游转发流（`hotspot_flows`）与宿主本机流（`host_flows`）正交隔离；接口未就绪时通过可恢复错误判定自动退避重试，避免永久滞留盲模式。
+   - 内置 `LeakGuard` 与按需 L2 `self_capture` HTTP/DNS 明文深度载荷审计引擎，非阻塞检测未加密请求中的手机号、IMEI/OAID、精确经纬度、MAC（硬过滤 Android 占位假 MAC `02:00:00:00:00:00`）、高危鉴权凭据（`CREDENTIAL`，设短业务 `sid` 长度与熵值门槛防误报）及通过 ISO 7064 (MOD 11-2) 强校验的二代身份证号（`ID_CARD`）；自动旁路 `tun+`（如 `FlClash`）代理虚拟接口二次重抓消除三重重复告警。
+   - 在连接追踪与共享内存发布层将热点下游转发流（`hotspot_flows`）与宿主本机流（`host_flows`）正交隔离，连接级速率严格统一字节/比特量纲换算（杜绝 `B/s` 与 `bps` 8 倍错位），并对进入 `TIME_WAIT` 态的本机连接保持原套接字 UID 归属而不误归入 `UID 0`；接口未就绪时通过可恢复错误判定自动退避重试，避免永久滞留盲模式。
 3. **`hnc_watchdog`（生命周期巡检与单一设备写盘者）**：
    - 通过 Linux `pidfd` 与 `run/*.pid` 心跳时间戳巡检各守护进程存活状态；监听热点启停与上下行接口切换，驱动数据面规则重放与自愈。
    - 内嵌 `m4_owner.go`（调用 `src/dpid/devscan` 与 `src/dpid/devname`）订阅 `RTNLGRP_NEIGH` 内核邻居事件（配 `500ms` 读取超时、`512KiB` 缓冲、`ENOBUFS` `1 Hz` 限流全量重同步与 `1s..30s` 指数退避重连），作为全系统唯一合法写盘者原子更新 `/data/local/hnc/data/devices.json`。
@@ -106,10 +106,10 @@ HNC `v6.1`（Vector 架构）采用 **Go 1.27 控制与分析面 + C11 / eBPF �
 
 | 舱壁标识 | 内部组件 | 职责范围 | 超时与熔断护栏 |
 |---|---|---|---|
-| `dataplane` | `DataplaneBulkhead` | RTNetlink 队列调速、双栈防火墙规则批量提交、流控对账 | 单写者串行有界队列 + `recover()` 异常隔离 + 单调时钟心跳 |
+| `dataplane` | `DataplaneBulkhead` | RTNetlink 队列调速、双栈防火墙规则批量提交、流控对账 | 单写者串行有界队列 + 单向固定锁序（严禁反向加锁死锁） + `recover()` 异常隔离 + 单调时钟心跳 |
 | `dpi_shm` | `DpiShmBulkhead` | 无锁读取 `run/shm_vector.bin` 共享内存与 `run/dpi_state.json` 回退缓存 | 页大小与头部强校验 + `SIGBUS` 保护 + 超期零报错回退 JSON |
 | `android_bridge` | `AndroidBridgeBulkhead` | 调用 `dumpsys`、`cmd` 等系统桥接查询 | `ExecIsolatedAndroidCmd` 强制 `Setpgid: true` 2s 硬超时向 `-pgid` 发送 `SIGKILL` 连根清理孙进程；连续 2 次超时触发 45s 半开熔断 |
-| `storage` | `StorageBulkhead` | 持久化配置读写、统计归档、备份导出与配置医生自检 | 互斥锁 + 同目录 `.tmp` `fsync + rename` 原子写 + 失败即删 `.tmp` |
+| `storage` | `StorageBulkhead` | 持久化配置读写、统计归档、备份导出与配置医生自检 | 互斥锁 + 同目录 `.tmp` `fsync + rename` 原子写 + 失败即删 `.tmp` + `/api/json_health` 完整缓冲输出防截断 |
 
 前端主轮询端点 `GET /api/vector_sync` 直接通过 `atomic.Pointer[WorldSnapshot]` 无锁读取后台协程预编码的最新快照（耗时 `<50ns`），请求路径零互斥锁等待、零磁盘 I/O、零子进程派生。
 
@@ -155,9 +155,9 @@ Android 系统 `netd` 依赖 `skb->mark` 的低 16 位执行策略路由（`ip r
 - 在进入策略路由前由 `HNC_PREROUTE_GUARD` 保护策略路由位，`HNC_RESTORE` 挂载于 `mangle/FORWARD` 首部，避免下行包误触宿主 `unreachable` 路由规则；
 - 在 `mangle/POSTROUTING` 中，`HNC_APP_LIMIT_DOWN`、`HNC_APP_QOS` 及战术舱标记链严格排在 `HNC_SAVE`（写入 `CONNMARK`）之前，尾部辅以 `HNC_EGRESS_FIX`（排除蜂窝上游 `rmnet+`）防止宿主 ROM 的 `bw_mangle_POSTROUTING` 清零高位标记。
 
-### 3.2 三级自适应数据面（Tier-A -> Tier-B -> Tier-C）
+### 3.2 三级自适应数据面（Tier-A -> Tier-B -> Tier-C）与四态加速展示契约
 
-`ProbeDataplaneTier` 在热点就绪时按内核真实能力自动探测并热切换最优执行层级：
+`ProbeDataplaneTier` 在热点就绪时按内核真实能力自动探测并热切换最优执行层级，同时在控制面与 WebUI 将 **内核 L3 `clsact eBPF` 软件流控快径** 与 **宿主系统热点硬件加速（IPA / MDDP / DIT）** 严格正交拆分为四态语义（硬件加速已关闭 / 模块已自动压制 / 热点待机未激活 / 固件硬旁路需手动关闭）：
 
 1. **Tier-A（`tier1_ebpf_edt`：`clsact eBPF + Native Netlink HTB`）**：
    - 条件：硬件卸载已受控 + `hnc_clsact.o` 成功挂载至热点口 `clsact` + 内核调度器支持就绪。
@@ -211,8 +211,8 @@ Android 系统 `netd` 依赖 `skb->mark` 的低 16 位执行策略路由（`ip r
    - 经 `AndroidBridgeBulkhead` 流式逐行解析 `dumpsys batterystats --charged`（避免将数十 MB 原始输出整体读入内存造成 GC 尖峰），内置 `singleflight` 并发请求合并与缓存窗口。
    - 精准提取各 UID 充电后累计耗电（Android 14+ 支持拆分后台/息屏独立 `mAh`）、Partial Wakelock 持锁时长、Alarm 定时唤醒次数以及蜂窝基带射频唤醒（Cellular Radio Wakeup）归因排行。
 3. **L1 零抓包实时套接字审计 + L2 深度载荷隐私安检（`GET /api/local_apps/privacy_audit` & `self_capture`）**：
-   - **L1 零抓包实时套接字审计**：无需开启网卡混杂抓包，直接关联本机活跃 Socket UID、目标端口（如 `:80`/`:8080` 明文端口、外网 `:53` 直连明文 DNS）与内置广告/追踪 SDK 域名指纹库，零额外功耗揭示本机应用后台明文联网与追踪连接态势。
-   - **L2 按需 `self_capture` HTTP/DNS 深度载荷审计**：用户主动开启本机深度审计时，非阻塞扫描未加密 HTTP 请求头/体与明文 DNS 报文，在手机号、IMEI/OAID、精确经纬度与 MAC 基础上，新增高危登录鉴权凭据（`CREDENTIAL`）与经 **ISO 7064 (MOD 11-2) 校验位强核验**的 18 位身份证号（`ID_CARD`）防泄露检测。
+   - **L1 零抓包实时套接字审计**：无需开启网卡混杂抓包，直接关联本机活跃 Socket UID（含 `TIME_WAIT` 历史归属保持，杜绝套接字释放瞬间错归 `UID 0`）、目标端口（如 `:80`/`:8080` 明文端口、外网 `:53` 直连明文 DNS）与内置广告/追踪 SDK 域名指纹库，零额外功耗揭示本机应用后台明文联网与追踪连接态势。
+   - **L2 按需 `self_capture` HTTP/DNS 深度载荷审计**：用户主动开启本机深度审计时，自动跳过 `tun+` 代理虚拟网卡回流重抓（消除 `FlClash` 等代理软件下的三重重复告警），非阻塞扫描未加密 HTTP 请求头/体与明文 DNS 报文，在手机号、IMEI/OAID、精确经纬度与真实 MAC（过滤 `02:00:00:00:00:00` 隐私占位地址）基础上，检测高熵登录鉴权凭据（`CREDENTIAL`，剔除短业务 `sid` 误报）与经 **ISO 7064 (MOD 11-2) 校验位强核验**的 18 位身份证号（`ID_CARD`）。
 4. **本机安全防火墙四档管控、`uid+10000` 沙盒协同与本机手术刀**：
    - `filter/OUTPUT` `HNC_SELF_UID` 提供单应用四档管控：**放行**、**仅禁明文 HTTP**（精确拦截非加密 HTTP 端口，倒逼回落 HTTPS 而不影响正常加密业务）、**禁移动数据**（蜂窝上游 `rmnet+`/`ccmni+` 等阻断、Wi-Fi 放行）与**全局禁网**。
    - **Android 13+ SDK Sandbox 协同封禁**：对常规宿主应用 UID（`appId` 位于 `10000..19999`），自动推导并同步封禁其伴生沙盒进程 UID（`uid + 10000`），封堵内嵌广告 SDK 借独立沙盒 UID 绕过宿主网络限制的通道。
@@ -220,18 +220,18 @@ Android 系统 `netd` 依赖 `skb->mark` 的低 16 位执行策略路由（`ip r
 
 ## 五、控制面关键可靠性契约
 
-1. **双卡物理卡槽真值与防「第 3 张幽灵卡」铁律**：
+1. **双卡物理卡槽真值、5G SA/NSA 权威判定与防「第 3 张幽灵卡 / 过期假干扰」铁律**：
    - Android `telephony.db/siminfo` 的自增主键 `_id`（`subId`）随历史换卡不断增大，严禁将其直接当作卡槽号。
-   - `daemon/hnc_httpd/sim.go`、`phone_usage_sim.go` 与 `signal_monitor.go` 统一走原生 `dumpsys isub` + `dumpsys telephony.registry` 权威链路，严格过滤 `INVALID_SUBSCRIPTION_ID`（`2147483647`）、`pid>=2` 软 SIM 槽及 `v4-` CLAT 接口前缀，按 `activeDataSubId` -> `defaultDataSubId` -> 在位物理卡槽 `simSlotIndex`（`0` 为卡 1，`1` 为卡 2）精确映射，自动剔除已拔出历史卡（`simSlotIndex < 0`）与虚拟云卡/副流量逻辑槽（`isOpportunistic=1` 或超出硬件 `Active modem count`）。
+   - `daemon/hnc_httpd/sim.go`、`phone_usage_sim.go` 与 `signal_monitor.go` 统一走原生 `dumpsys isub` + `dumpsys telephony.registry` 权威链路，严格过滤 `INVALID_SUBSCRIPTION_ID`（`2147483647`）、`pid>=2` 软 SIM 槽及 `v4-` CLAT 接口前缀，按 `activeDataSubId` -> `defaultDataSubId` -> 在位物理卡槽 `simSlotIndex`（`0` 为卡 1，`1` 为卡 2）精确映射，锁定当前数据卡真实 5G SA / NSA 注册态（防止副卡字段将 5G SA 误导为 NSA），并对射频信号样本执行严格新鲜度窗口校验（自动淘汰隔天超期样本，杜绝旧样本触发假强干扰告警）。
    - 双卡硬件（`modemCount <= 2`）严格最多渲染卡 1、卡 2 两张实体卡片；开机瞬态尚未归属卡槽的零星蜂窝字节自动按唯一上网卡或系统 `NetworkStats` 校正归并，无法归属时仅作底部文字说明。
 2. **ThermoCruise 电池与机身壳温双源交叉校准及热点待机实时只读刷新**：
    - 同时直读 `/sys/class/power_supply/*/temp` 电芯温度与 `/sys/class/thermal/thermal_zone*` 机身表皮/壳温热区（匹配 `shell_*`、`skin*` 等传感器），自动识别毫摄氏度（如 `42000`）、十分之一摄氏度（如 `420`）与摄氏度（如 `42`）三种内核量纲；一旦读数越出合理物理区间 `[-20°C, 100°C]` 立即熔断剔除异常源。
    - **防低温伪装模块致盲**：当设备装有快充伪装模块（如将电池温度人为拉低 `-10°C`）导致电芯温度显著低于机身壳温时，双源交叉校准自动识别偏置并以真实机身壳温估算值接管温控判据；在热点待机或零客户端状态下，传感器看板支持无写盘、无流控副作用的实时只读刷新。
 3. **DNS 接管单锁串行与 Captive Portal 门户逃生**：
    - `dns_takeover.go` 与 `dns_forwarder.go` 采用单一互斥锁串行控制转发规则，弱网偶发超时期间通过 `serve-stale` 保持已有解析不断网，上行切网瞬间清空陈旧缓存并重置上游健康探测窗口；对酒店/校园网 Captive Portal 联网探测域名（如 `connectivitycheck.gstatic.com`、`captive.apple.com`、`connect.rom.miui.com` 等）强制直通上游真实响应，严禁返回过期缓存阻断认证页弹出。
-4. **待机零唤醒、看门狗身份核验与零假数据铁律**：
-   - 后台探活路由（`/api/health`）与未鉴权公开路由严格排除在 `activityTouchMiddleware` 之外，杜绝看门狗周期探活误刷新 `webuiLastHit` 锁死活跃档位；热点关闭或在线客户端数为 `0` 时，`200ms` 卡顿黑匣子、战术舱巡检定时器、流控对账、Netlink 高频轮询与 `shm_vector.bin` 刷写全部停表休眠（断流空闲期不写空白帧，完整保留断流前 `60s` 真实卡顿现场）；`hnc_watchdog` 对守护进程执行判活或超时强杀前强制核验 `/proc/<pid>/cmdline`（回退 `comm`），根除 PID 复用误杀隐患。
-   - 生产运行态严禁任何硬编码模拟曲线或假成功状态；底层计数器或传感器不支持时明确返回 `supported: false` / `available: false` 与具体 `reason_code`；前端离线预览仿真脚本 `tools/ui_mock/fake_api.js` 排除在刷机包之外并由打包门禁双重拦截。
+4. **待机零唤醒、看门狗身份核验、WebUI 光学渲染与零假数据铁律**：
+   - 后台探活路由（`/api/health`）与未鉴权公开路由严格排除在 `activityTouchMiddleware` 之外，杜绝看门狗周期探活误刷新 `webuiLastHit` 锁死活跃档位；热点关闭或在线客户端数为 `0` 时，`200ms` 卡顿黑匣子、战术舱巡检定时器、流控对账、Netlink 高频轮询与 `shm_vector.bin` 刷写全部停表休眠（断流空闲期不写空白帧，完整保留断流前 `60s` 真实卡顿现场）；`hnc_watchdog` 对守护进程执行判活或超时强杀前强制核验 `/proc/<pid>/cmdline`（回退 `comm`），后台 Shell 哨兵严格遵循 POSIX `awk` 正则转义无告警规范。
+   - WebUI 自定义壁纸采用 12 态高对比光学底色矩阵与离屏降采样小画布双缓冲 `60fps` 零闪烁实时模糊，半屏抽屉统一单一顶栏与底部导航安全区避让；生产运行态严禁任何硬编码模拟曲线或假成功状态，底层不支持时明确返回 `supported: false` / `available: false` 与具体 `reason_code`；前端离线预览仿真脚本 `tools/ui_mock/fake_api.js` 仅用于开发预览在线交互（排除在刷机包之外并由打包门禁双重拦截）。
 
 ## 六、目录结构契约
 

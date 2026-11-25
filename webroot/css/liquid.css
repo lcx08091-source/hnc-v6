@@ -59,9 +59,9 @@
 [data-glass="liquid"] .lens-in .tab{color:var(--blue);opacity:1;font-weight:600}
 [data-glass="liquid"] .tabbar.drag .lens-tint{opacity:.05}
 /* 顶栏: 边缘渐隐的模糊(iOS 26 滚动边缘效果), 按钮是一颗颗玻璃圆 */
-[data-glass="liquid"] .header::before{bottom:-26px;background:linear-gradient(to bottom,rgba(248,249,252,.92) 0%,rgba(248,249,252,.80) 55%,rgba(248,249,252,0));background:linear-gradient(to bottom,color-mix(in srgb,var(--bg) 92%,transparent) 0%,color-mix(in srgb,var(--bg) 80%,transparent) 55%,color-mix(in srgb,var(--bg) 0%,transparent));box-shadow:none;
+[data-glass="liquid"] .header::before{bottom:-8px;background:linear-gradient(to bottom,rgba(248,249,252,.92) 0%,rgba(248,249,252,.80) 55%,rgba(248,249,252,0));background:linear-gradient(to bottom,color-mix(in srgb,var(--bg) 92%,transparent) 0%,color-mix(in srgb,var(--bg) 80%,transparent) 55%,color-mix(in srgb,var(--bg) 0%,transparent));box-shadow:none;
   -webkit-backdrop-filter:blur(14px) saturate(180%);backdrop-filter:blur(14px) saturate(180%);
-  -webkit-mask-image:linear-gradient(to bottom,#000 62%,transparent);mask-image:linear-gradient(to bottom,#000 62%,transparent);
+  -webkit-mask-image:linear-gradient(to bottom,#000 76%,transparent);mask-image:linear-gradient(to bottom,#000 76%,transparent);
   opacity:calc(var(--hp,0) * (1 - var(--hs,0)))}
 /* 内容真正滚到顶栏下面(大标题收起之后): 渐隐边缘换成一条统一的实底顶栏 + 底部细线(iOS 27), 文字不再透出来。
    --hs 由 fx.js navSync 按滚动距离写; .hs-on 只在 --hs > 0 时挂, 平时不多画一层磨砂 */
@@ -74,7 +74,7 @@
   box-shadow:var(--hyalite-edge, var(--lg-rim)),0 6px 16px -6px rgba(30,45,90,.25)}
 [data-glass="liquid"] .hbtn svg{width:20px;height:20px}
 /* 弹层: 悬浮的玻璃面板(四角大圆角、离边 8px), 高磨砂保证文字可读 */
-[data-glass="liquid"] .sheet{bottom:calc(env(safe-area-inset-bottom,0px) + 8px);width:min(640px,calc(100% - 16px));border-radius:34px;padding:10px 18px 22px;
+[data-glass="liquid"] .sheet{bottom:calc(env(safe-area-inset-bottom,0px) + 8px);width:min(640px,calc(100% - 16px));border-radius:34px;padding:10px 18px 22px;overflow:hidden!important;display:flex;flex-direction:column;
   background:var(--lg-fill-2);-webkit-backdrop-filter:var(--hyalite, blur(34px) saturate(190%));backdrop-filter:var(--hyalite, blur(34px) saturate(190%));
   box-shadow:var(--hyalite-edge, var(--lg-rim)),0 24px 60px -12px rgba(20,30,60,.32)}
 [data-glass="liquid"] .sheet .glass{background:rgba(255,255,255,.42);-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:var(--lg-rim)}
@@ -184,6 +184,8 @@
 
 [data-glass="liquid"] .v6-drawer,
 [data-glass="frosted"] .v6-drawer {
+  position: fixed !important;
+  z-index: 81;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
   width: min(760px, calc(100% - 16px));
   padding-bottom: 18px;
@@ -200,12 +202,7 @@
   background: var(--card-solid);
 }
 
-/* 自定义壁纸下护航主标题与统计对比度保护 */
-:root[data-has-wp="1"][data-glass] .v6-hero-title,
-:root[data-has-wp="1"][data-glass] .v6-conn-pill b,
-:root[data-has-wp="1"][data-glass] .lgd-dev {
-  text-shadow: 0 .5px 0 rgba(255, 255, 255, .46);
-}
+/* 自定义壁纸下深色护航主标题与统计对比度保护 */
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-hero-title,
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-conn-pill b,
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .lgd-dev {

@@ -51,7 +51,14 @@ var PU_C = { cell: 'var(--blue)', wifi: 'var(--cyan)', hotspot: 'var(--orange)',
 function loadPhoneUsage(period, force) {
   var c = S.pu[period];
   if (c && !force && Date.now() - c.at < 60000) return Promise.resolve(c);
-  return api.get('/api/phone_usage', { period: period }, { timeout: 10000 }).then(function (r) { S.pu[period] = { at: Date.now(), r: r }; S.puCfg = r.config || S.puCfg; })
+  return api.get('/api/phone_usage', { period: period }, { timeout: 10000 }).then(function (r) {
+    S.pu[period] = { at: Date.now(), r: r };
+    if (r && r.config) {
+      S.puCfg = r.config;
+      var st = $('#pu-set');
+      if (st) st._filled = false;
+    }
+  })
     .catch(function (e) { S.pu[period] = { at: Date.now(), err: e && e.status === 404 ? '当前后端还没有本机流量统计（需要新版 hnc_httpd）' : errText(e) }; })
     .then(function () { return S.pu[period]; });
 }
@@ -168,7 +175,15 @@ function puSave() {
   else { if (!(num(p1, -1) >= 0)) { toast('卡1 套餐填 0 或正数', 'err'); return; } p.plan_sim1_gb = trim0(num(p1).toFixed(2)); }
   if (p2 === '') p.plan_sim2_gb = '0';
   else { if (!(num(p2, -1) >= 0)) { toast('卡2 套餐填 0 或正数', 'err'); return; } p.plan_sim2_gb = trim0(num(p2).toFixed(2)); }
-  api.action('phone_usage_set', p).then(function () { toast('已保存 · 计费日 ' + bd + ' 号'); S.pu = {}; var st = $('#pu-set'); if (st) st._filled = false; return refreshPU(true); }).catch(function (e) { toast(errText(e), 'err'); });
+  api.action('phone_usage_set', p).then(function () {
+    toast('已保存 · 计费日 ' + bd + ' 号');
+    S.pu = {};
+    var st = $('#pu-set'); if (st) st._filled = false;
+    return Promise.all([refreshPU(true), typeof loadUsage === 'function' ? loadUsage() : Promise.resolve()]);
+  }).then(function () {
+    var rk = $('#pu-dev-rank');
+    if (rk && S.page === 'stats' && S.aseg === 'stats') morph(rk, hsMonthRankHtml());
+  }).catch(function (e) { toast(errText(e), 'err'); });
 }
 function afterAseg() {
   if (S.aseg === 'stats') { updateStatsCounters(); refreshStats(); refreshPU(); }
@@ -211,9 +226,9 @@ function appUsageBars(r, max) {
   var tot = num(r.total_up) + num(r.total_down);
   if (!tot) return '';
   var top = apps.slice(0, max || 8), rest = sum(apps.slice(max || 8), function (a) { return a.v; }); if (rest > 0) top.push({ n: '其他', v: rest, gray: true });
-  var mx = Math.max.apply(null, top.map(function (a) { return a.v; }).concat([1])), unk = apps.filter(function (a) { return a.n === '未识别'; })[0];
-  return '<div class="note" style="margin-bottom:6px">合计 ↓ ' + bytes(r.total_down) + ' · ↑ ' + bytes(r.total_up) + (unk ? ' · 未识别占 ' + Math.round(unk.v / tot * 100) + '%' : '') + (num(r.inferred_bytes) > 0 ? ' · 其中 ' + bytes(r.inferred_bytes) + ' 为推测归属' : '') + '</div>' +
-    top.map(function (a, i) { return '<div class="hbar"><span class="n"' + (a.id === TUNNEL_ID ? ' title="VPN/代理隧道：隧道里的应用看不到，按协议特征归到这里"' : '') + '>' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-4)' : HIST_COLORS[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%' + (a.t >= 60 && !a.gray && a.id !== TUNNEL_ID ? '<small>使用 ' + fmtDur(a.t) + '</small>' : '') + (a.inf > 0 ? '<small title="目的地址没有域名，按同一时刻建连的应用推测">含推测 ' + bytes(a.inf) + '</small>' : '') + '</span></div>'; }).join('');
+  var mx = Math.max.apply(null, top.map(function (a) { return a.v; }).concat([1])), unk = apps.filter(function (a) { return a.n === '未识别'; })[0], pal = activeHistColors();
+  return '<div class="note" style="margin-bottom:6px;color:var(--text-2)">合计 ↓ ' + bytes(r.total_down) + ' · ↑ ' + bytes(r.total_up) + (unk ? ' · 未识别占 ' + Math.round(unk.v / tot * 100) + '%' : '') + (num(r.inferred_bytes) > 0 ? ' · 其中 ' + bytes(r.inferred_bytes) + ' 为推测归属' : '') + '</div>' +
+    top.map(function (a, i) { return '<div class="hbar"><span class="n" style="color:var(--text-1);font-weight:600"' + (a.id === TUNNEL_ID ? ' title="VPN/代理隧道：隧道里的应用看不到，按协议特征归到这里"' : '') + '>' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-3)' : pal[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v" style="color:var(--text-2)">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%' + (a.t >= 60 && !a.gray && a.id !== TUNNEL_ID ? '<small style="color:var(--text-2)">使用 ' + fmtDur(a.t) + '</small>' : '') + (a.inf > 0 ? '<small style="color:var(--text-2)" title="目的地址没有域名，按同一时刻建连的应用推测">含推测 ' + bytes(a.inf) + '</small>' : '') + '</span></div>'; }).join('');
 }
 function paintStatsApps() {
   var el = $('#st-apps'); if (!el) return;
@@ -408,16 +423,80 @@ function fmtDpiRuleVersionHtml(rawVer, dfpEnabled) {
   }
   return '<span title="' + esc(raw) + '">' + esc(raw + tail) + '</span>';
 }
+function isNonApProbeIface(s) {
+  var v = String(s || '').trim();
+  return !v || /^(vgate\d*|veth\w*|tun\d*|Meta|lo|dummy\d*|sit\d*|ip6tnl\d*|rmnet\w*|ccmni\w*)$/i.test(v);
+}
+function dpiHasActiveControlPolicy() {
+  if (typeof hasActiveControlPolicy === 'function') return hasActiveControlPolicy();
+  var og = (S.offload && S.offload.guard) || (S.cfg && S.cfg.offload_guard) || null;
+  if (og && (og.policy_active === true || og.has_active_policy === true)) return true;
+  if (S.cfg && (S.cfg.global_shaper_enabled === true || (S.cfg.autorate && S.cfg.autorate.enabled === true) || S.cfg.quic_block === true || S.cfg.client_isolation_enabled === true || S.cfg.whitelist_mode === true || S.cfg.whitelist_enabled === true)) return true;
+  if (S.cfg && Array.isArray(S.cfg.blacklist) && S.cfg.blacklist.length > 0) return true;
+  if ((S.appLimits || []).length > 0) return true;
+  if ((S.devices || []).some(function (d) { return !d.sim && (d.limitOn || d.hasDelay || d.blocked || d.sqm || d.appQos || !!d.quota || !!d.sched || (d.atl && d.atl.length > 0) || (d.cblocks && d.cblocks.length > 0)); })) return true;
+  if (S.live && S.live.active_limiter_reason && S.live.active_limiter_reason !== 'none') return true;
+  return false;
+}
+function dpiL3ProbeRow(pr, hsStandby) {
+  var evArr = Array.isArray(pr.offload_evidence) ? pr.offload_evidence.filter(Boolean) : (pr.offload_evidence ? [String(pr.offload_evidence)] : []);
+  var evTxt = evArr.length ? evArr.join(' / ') : '';
+  var og = (S.offload && S.offload.guard) || (S.cfg && S.cfg.offload_guard) || null;
+  var gm = (S.cfg && S.cfg.clsact_bpf_mode) || (og && og.mode) || 'auto';
+  if (hsStandby || (S.offload && S.offload.detail === 'NOHOTSPOT') || (og && og.offload_state === 'NOHOTSPOT')) {
+    return stRow('L3 · eBPF clsact 二层直通观测', '热点待机中 · 按需就绪', '', '热点开启后自动协同硬件直通加速与 eBPF 二层限速接管' + (evTxt ? ' · 内核能力 ' + esc(evTxt) : ''));
+  }
+  var hasPol = dpiHasActiveControlPolicy();
+  var guardTakenOver = !!(og && (
+    og.fallback_active === true ||
+    og.clsact === 'installed' || og.clsact_attached === true ||
+    og.slowpath === 'ok' || og.slowpath_active === true ||
+    og.tether_offload_disabled === true || og.tether_limit_zeroed === true
+  ));
+  var dpvBypass = !!(typeof DPV_STATE === 'object' && DPV_STATE && DPV_STATE.lastData && DPV_STATE.lastData.sampled_ok && DPV_STATE.lastData.is_bypass === true);
+  var rawOffloadActive = (S.offload && S.offload.detail === 'ACTIVE') || !!(og && og.offload_state === 'ACTIVE') || !!(og && og.bypass_detected === true) || dpvBypass;
+  var isBypass = hasPol && (dpvBypass || !!(og && og.bypass_detected === true) || (gm === 'off' && (rawOffloadActive || !!pr.offload_hint)) || (rawOffloadActive && !guardTakenOver));
+  if (isBypass) {
+    return stRow('L3 · eBPF clsact 二层直通观测', '硬件分流绕过预警', 'warn', '存在活跃限速策略但硬件分流尚未压制，可在「设置 → 硬件加速兜底」一键修复' + (evTxt ? ' · ' + esc(evTxt) : ''));
+  }
+  if (hasPol || guardTakenOver || gm === 'on') {
+    return stRow('L3 · eBPF clsact 二层直通观测', 'eBPF 二层加速接管中', 'ok', 'L2 MAC 精确记账与防逃逸压制生效中，限速与识别精准协同' + (evTxt ? ' · ' + esc(evTxt) : ''));
+  }
+  return stRow('L3 · eBPF clsact 二层直通观测', '硬件直通加速中 · 零损耗满速', 'ok', evTxt ? '内核快径（' + esc(evTxt) + '）满速直通 · 设限速时自动无缝切换 eBPF 接管' : '当前无活跃限速策略 · 零挂载满速直通，设限速时自动无缝接管');
+}
+function dpiL4ProbeState() {
+  var stCap = (S.studio && S.studio.capture) || null;
+  var mode = typeof studioCurMode === 'function' ? studioCurMode() : ((stCap && stCap.mode) || '');
+  if (stCap) {
+    if (mode === 'off' || stCap.mode === 'off') {
+      return { v: '已手动关闭', cls: '', s: '本机真值自训练已手动关闭（零唤醒）· 可在上方自训工作台开启' };
+    }
+    if (stCap.capturing_now === false || (stCap.capturing_now == null && stCap.screen_on === false)) {
+      return { v: '熄屏省电暂停', cls: '', s: '熄屏静默挂起零耗电，亮屏自动恢复采样并按需增量蒸馏' };
+    }
+    return { v: mode === 'lease_15m' ? '15m 集中快训中' : '亮屏常驻', cls: 'ok', s: '本机双网卡 Socket inode → Android 应用 UID 零误差蒸馏至热点' };
+  }
+  var hasExplicitCfg = S.selfCfg && typeof S.selfCfg.enabled === 'boolean';
+  var rawOn = S.self ? S.self.enabled === true : (hasExplicitCfg ? S.selfCfg.enabled : false);
+  if (rawOn) return { v: '亮屏常驻', cls: 'ok', s: '本机双网卡 Socket inode → Android 应用 UID 零误差蒸馏至热点' };
+  if ((S.self && (S.self.paused_screen_off === true || S.self.mode === 'smart_screen')) || (S.selfCfg && (S.selfCfg.opt_in === true || S.selfCfg.paused_screen_off === true || S.selfCfg.mode === 'smart_screen'))) {
+    return { v: '熄屏省电暂停', cls: '', s: '熄屏静默挂起零耗电，亮屏自动恢复采样并按需增量蒸馏' };
+  }
+  return { v: '已手动关闭', cls: '', s: '本机双网卡 Socket inode → Android 应用 UID 零误差蒸馏至热点' };
+}
 function paintDpi() {
   var hero = $('#dpi-hero'); if (!hero) return;
   var r = S.dpi, dpiAlive = isDpiEngineAlive(), st = dpiAlive ? r.state : null, s = (st && st.stats) || {};
   var health = st ? (st.health || 'ok') : 'down', ok = dpiAlive && !/stall|crash|down|error/i.test(health) && st.mode !== 'unavailable';
   var badge = !r ? ['加载中', 'b-gray'] : !dpiAlive ? ['DPI 引擎未运行', 'b-gray'] : ok ? ['运行中', 'b-ok'] : [health, 'b-warn'];
   var inactiveMsg = S.dpiErr || (r && r.error) || (r && r.stale ? 'DPI 引擎未运行（状态快照已陈旧）' : 'DPI 引擎未运行');
+  var hsStandby = S.hotspot.active === false || !!(st && st.mode === 'waiting');
+  var pr = S.probe;
+  var apIf = !hsStandby ? ([st && st.interface, S.hotspot && S.hotspot.iface, pr && pr.ap_iface].filter(function (x) { return !isNonApProbeIface(x); })[0] || '待绑定') : '';
   hero.innerHTML = '<div class="glass dpihero">' +
     '<div class="dpihero-eyebrow"><span class="l">主力识别通道 · 五层被动感知</span><span class="badge ' + badge[1] + ' dpihero-badge">' + (badge[1] === 'b-ok' ? '<span class="breathe"></span>&nbsp;' : '') + esc(badge[0]) + '</span></div>' +
-    '<div class="top"><div class="dpihero-mode-wrap"><div class="mode">' + esc(st ? (MODE_T[st.mode] || st.mode || '—') : inactiveMsg) + '</div></div><div id="dpi-ring-slot" class="dpi-ring-slot"></div></div>' +
-    (st ? '<div class="note" style="margin-top:6px">' + esc(st.interface || '—') + ' · 运行 ' + hms(st.uptime_s) + (st.stall_seconds ? ' · 停滞 ' + st.stall_seconds + ' 秒' : '') + (st.blind_reason ? ' · ' + esc(st.blind_reason) : '') + ' · 客户端 ' + num(st.client_count) + '</div>' : '<div class="note" style="margin-top:6px">DPI 引擎未运行，暂不引用陈旧快照伪造实时活跃占比</div>') +
+    '<div class="top"><div class="dpihero-mode-wrap"><div class="mode">' + esc(st ? (hsStandby ? '热点待机中 · 本机抓包就绪' : (MODE_T[st.mode] || st.mode || '—')) : inactiveMsg) + '</div></div><div id="dpi-ring-slot" class="dpi-ring-slot"></div></div>' +
+    (st ? '<div class="note" style="margin-top:6px">' + esc(hsStandby ? '热点待机中 · 本机抓包就绪' : apIf) + ' · 运行 ' + hms(st.uptime_s) + (st.stall_seconds ? ' · 停滞 ' + st.stall_seconds + ' 秒' : '') + (st.blind_reason ? ' · ' + esc(st.blind_reason) : '') + ' · 客户端 ' + num(st.client_count) + '</div>' : '<div class="note" style="margin-top:6px">DPI 引擎未运行，暂不引用陈旧快照伪造实时活跃占比</div>') +
     '<div class="grid">' + [['packets', '已抓包', 'var(--blue)'], ['dns_events', 'DNS 事件', 'var(--cyan)'], ['tls_events', 'TLS 事件', 'var(--purple)'], ['kernel_drops', '内核丢包', 'var(--red)']].map(function (x) {
       return '<div><div class="n num">' + (dpiAlive ? fmtN(s[x[0]]) : '—') + '</div><div class="l">' + x[1] + '</div>' + (dpiAlive ? sparkSvg(S.dpiSpark[x[0]], x[2]) : '<svg class="spark-mini" width="100" height="26"></svg>') + '</div>'; }).join('') + '</div>' +
     '<div class="dpi-algo-bar">' +
@@ -439,15 +518,15 @@ function paintDpi() {
     stRow('重新绑定', num(st.rebind_count) + ' 次', '', '<button class="linkish" data-act="dpi-rebind">立即重新绑定</button>') +
     (p ? stRow('进程健康', esc(p.status || '—'), /ok|healthy/i.test(p.status) ? 'ok' : 'warn', p.counts ? 'dpid ' + num(p.counts.hnc_dpid) + ' · httpd ' + num(p.counts.hnc_httpd) + ' · hotspotd ' + num(p.counts.hotspotd) + ' · watchdog ' + num(p.counts.watchdog_main) + ' · launcher ' + num(p.counts.dpid_guard_main) : esc(p.detail || '')) : '');
   // 五层抓包与流量感知矩阵探测
-  var pr = S.probe, selfOn = S.selfCfg ? S.selfCfg.enabled !== false : (S.self ? S.self.enabled === true : false);
+  var l4St = dpiL4ProbeState();
   $('#dpi-probe').innerHTML = (!pr ? '' :
-    stRow('L1 · AF_PACKET + cBPF 旁路抓头', !dpiAlive ? 'DPI 引擎未运行' : (pr.af_packet_available ? '就绪 · 零改包' : '受限 · 自动降级'), !dpiAlive ? '' : (pr.af_packet_available ? 'ok' : 'warn'), '只抓 DNS / TLS / QUIC 握手包头（384B），不解密正文 · 接口 ' + esc(pr.ap_iface || (st && st.interface) || '未探测')) +
+    stRow('L1 · AF_PACKET + cBPF 旁路抓头', !dpiAlive ? 'DPI 引擎未运行' : (pr.af_packet_available ? (hsStandby ? '热点待机中 · 本机抓包就绪' : '就绪 · 零改包') : '受限 · 自动降级'), !dpiAlive ? '' : (pr.af_packet_available ? 'ok' : 'warn'), '只抓 DNS / TLS / QUIC 握手包头（384B），不解密正文 · ' + (hsStandby ? '热点待机中 · 本机抓包就绪' : '接口 ' + esc(apIf))) +
     stRow('L2 · nf_conntrack 内核连接对账', pr.conntrack_readable ? '可读 · 全字节' : '不可读', pr.conntrack_readable ? 'ok' : 'warn', '即使 AF_PACKET 受限仍可按连接表统计真实上下行字节 · ' + esc(pr.conntrack_path || '/proc/net/nf_conntrack')) +
-    stRow('L3 · eBPF clsact 二层直通观测', pr.offload_hint ? '硬件分流活跃' : '慢路径清晰', pr.offload_hint ? 'warn' : 'ok', esc(pr.offload_evidence || 'L2 MAC 精确记账与防逃逸打标协同'))) +
+    dpiL3ProbeRow(pr, hsStandby)) +
     (!dpiAlive
       ? stRow('L4 · /proc/net UID 本机真值对齐', 'DPI 引擎未运行', '', 'DPI 引擎未运行，暂不展示陈旧 L4 实时协议分布') +
         stRow('L5 · 被动终端栈与密文几何画像', 'DPI 引擎未运行', '', 'DPI 引擎未运行，暂不展示陈旧 L5 协议特征与活跃占比')
-      : stRow('L4 · /proc/net UID 本机真值对齐', selfOn ? '亮屏常驻' : '已手动关闭', selfOn ? 'ok' : '', '本机双网卡 Socket inode → Android 应用 UID 零误差蒸馏至热点') +
+      : stRow('L4 · /proc/net UID 本机真值对齐', l4St.v, l4St.cls, l4St.s) +
         stRow('L5 · 被动终端栈与密文几何画像', st && st.dfp_enabled !== false ? '已启用' : '基础模式', 'ok', 'DHCP Option 55/60 + mDNS + JA4 + 8 包 SPLT 序列应对 ECH/无域名流'));
   paintDpiHist(); paintClients(); paintUnknown(); paintUnkTraffic(); paintIdent(); paintDiscEntry();
   if (S.open.deval) {
@@ -477,7 +556,7 @@ function paintUnkTraffic() {
   var r = c.r || {}, items = (r.items || []).slice(0, 20), tot = num(r.total_unknown_bytes), tb = num(r.tunnel_bytes), ib = num(r.inferred_bytes);
   // 已从「未识别」里分出去的两块 —— VPN/代理隧道、共现推断
   var split = tb > 0 || ib > 0 ? '<div class="note" style="padding:10px 14px 0">另有 ' + [tb > 0 ? '<b>' + bytes(tb) + '</b> 已归为 ' + ico('tunnel', 'tun-i') + 'VPN 隧道' : '', ib > 0 ? '<b>' + bytes(ib) + '</b> 为推测归属（按同一时刻建连的应用）' : ''].filter(Boolean).join('、') + '，不算在未识别里</div>' : '';
-  if (!items.length) { el.innerHTML = split + '<div class="empty">' + (tot ? '有 ' + bytes(tot) + ' 未识别流量，但没记下去向' : uiSvg('sparkles') + ' 这段时间的流量已全部精准识别') + '</div>'; return; }
+  if (!items.length) { el.innerHTML = split + '<div class="empty">' + (tot ? '有 ' + bytes(tot) + ' 未识别流量，但没记下去向' : uiSvg('check') + ' 这段时间的流量已全部精准识别') + '</div>'; return; }
   el.innerHTML = split + '<div class="note" style="padding:10px 14px 0">' + ({ 1: '今日', 3: '近 3 天', 7: '近 7 天' }[S.dpiDays] || '') + '未识别共 ' + bytes(tot) + ' · 下面是最多的 ' + items.length + ' 个去向</div>' +
     items.map(function (u) {
       var ds = devNames(u.macs || []);
@@ -503,11 +582,11 @@ function paintDpiHist() {
   var apps = (r.by_app || []).map(function (a) { return { id: a.app_id || a.id, n: a.name || a.app_id || '未知', v: num(a.rx) + num(a.tx) }; }).sort(function (a, b) { return b.v - a.v; });
   var tot = num(r.total_rx) + num(r.total_tx);
   if (!tot) { el.innerHTML = '<div class="note">这段时间没有 DPI 流量记录</div>'; return; }
-  var top = apps.slice(0, 7), rest = sum(apps.slice(7), function (a) { return a.v; }); if (rest > 0) top.push({ n: '其他', v: rest });
-  var mx = top.length ? top[0].v : 1;
+  var top = apps.slice(0, 7), rest = sum(apps.slice(7), function (a) { return a.v; }); if (rest > 0) top.push({ n: '其他', v: rest, gray: true });
+  var mx = top.length ? top[0].v : 1, pal = activeHistColors();
   var hrs = r.by_hour || [], hm = Math.max.apply(null, hrs.map(function (h) { return num(h.rx) + num(h.tx); }).concat([1]));
-  el.innerHTML = '<div class="note" style="margin-bottom:6px">合计 ↓ ' + bytes(r.total_rx) + ' · ↑ ' + bytes(r.total_tx) + ' · ' + num(r.sample_count) + ' 个采样</div>' +
-    top.map(function (a, i) { return '<div class="hbar"><span class="n">' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + HIST_COLORS[i % 8] + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%</span></div>'; }).join('') +
+  el.innerHTML = '<div class="note" style="margin-bottom:6px;color:var(--text-2)">合计 ↓ ' + bytes(r.total_rx) + ' · ↑ ' + bytes(r.total_tx) + ' · ' + num(r.sample_count) + ' 个采样</div>' +
+    top.map(function (a, i) { return '<div class="hbar"><span class="n" style="color:var(--text-1);font-weight:600">' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-3)' : pal[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v" style="color:var(--text-2)">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%</span></div>'; }).join('') +
     (hrs.length ? '<div class="note" style="margin-top:10px">按小时分布</div><div class="mini-bars">' + hrs.map(function (h, i) { var v = num(h.rx) + num(h.tx); return '<i title="' + i + ':00 · ' + bytes(v) + '" style="height:' + Math.max(1.5, v / hm * 100).toFixed(1) + '%;animation-delay:' + i * 15 + 'ms"></i>'; }).join('') + '</div><div class="mini-axis"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>' : '');
 }
 function paintClients() {
@@ -592,7 +671,7 @@ function discListHtml() {
   var head = '<div class="dbox" style="margin-bottom:6px"><div class="row2"><span class="k">本机安装包</span><span class="v">' + (sc.app_count ? '已扫描 ' + sc.app_count + ' 个 App · ' + ago(sc.generated_at) : '还没扫描') + (sc.requested ? ' · 排队中' : '') + '</span></div>' +
     '<div class="row2"><span class="k">服务器证书</span><span class="v">' + (r.cert_probe ? '自动获取中' : '已关闭') + '</span></div>' +
     '<div class="btns" style="margin:2px 0 0"><button class="btn sec press" data-act="disc-scan">' + ico('refresh') + '立即扫描本机 App</button></div></div>';
-  if (!gs.length) return head + '<div class="note" style="text-align:center;padding:20px 0">' + (r.available === false ? 'dpid 还没产出发现结果（需要 DPI 运行一段时间）' : uiSvg('sparkles') + ' 暂时没有规则库认不出的应用') + '</div>';
+  if (!gs.length) return head + '<div class="note" style="text-align:center;padding:20px 0">' + (r.available === false ? 'dpid 还没产出发现结果（需要 DPI 运行一段时间）' : uiSvg('check') + ' 暂时没有规则库认不出的应用') + '</div>';
   return head + gs.map(function (g) {
     var gs2 = g.guess || {}, sg2 = g.suggest || {};
     return '<button class="dg press" data-disc="' + esc(g.id) + '"><span class="h"><span class="nm">' + esc(sg2.name || gs2.name || (g.suffixes || [])[0] || g.id) + '</span><span class="pill-count">' + num(g.hits) + ' 次</span>' + ico('right', 'chev') + '</span>' +
@@ -615,16 +694,17 @@ function discManageHtml() {
       return '<div class="row2"><span class="k mono" style="color:var(--text-1)">' + esc((g.suffixes || []).join(' · ') || g.id) + (g.gone ? '<div class="note">已不再出现</div>' : '') + '</span><button class="linkish" data-unign="' + esc(g.id) + '">撤销</button></div>'; }).join('') + '</div>' : '<div class="note">还没有</div>');
 }
 function discSheet() {
-  S.discOpen = true; S.discSel = null; S.discManage = false;
+  S.discSel = null; S.discManage = false;
   sheet('<h3>新发现的应用</h3><div class="sub">规则库认不出的域名会自动聚成"同一个 App"，再从本机安装包、服务器证书、网络指纹里找出它是谁</div><div id="disc-body">' + discListHtml() + '</div>' +
     '<button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true, kind: 'disc', onClose: function () { S.discOpen = false; S.discSel = null; } });
+  S.discOpen = true;
   loadDisc();
 }
 function discGroup(id) { var gs = (S.disc && S.disc.groups) || []; for (var i = 0; i < gs.length; i++) if (gs[i].id === id) return gs[i]; return null; }
 function paintDiscSheet() {
   var el = $('#disc-body'); if (!el) return;
   if (S.discManage) { el.innerHTML = discManageHtml(); return; }
-  if (S.discSel) { var ni = $('#dc-name'); if (ni && document.activeElement === ni) return; if (ni && S.discForm) S.discForm.name = ni.value; var g = discGroup(S.discSel); if (g) { var st = $('#sheet').scrollTop; el.innerHTML = discDetailHtml(g); $('#sheet').scrollTop = st; return; } S.discSel = null; }
+  if (S.discSel) { var ni = $('#dc-name'); if (ni && document.activeElement === ni) return; if (ni && S.discForm) S.discForm.name = ni.value; var g = discGroup(S.discSel); if (g) { var sb = $('#sheet-body') || $('#sheet'), st = sb ? sb.scrollTop : 0; el.innerHTML = discDetailHtml(g); if (sb) sb.scrollTop = st; return; } S.discSel = null; }
   el.innerHTML = discListHtml();
 }
 function discOpenDetail(id) {
@@ -636,7 +716,7 @@ function discOpenDetail(id) {
   S.discForm = { name: pre, cat: 'unknown', sufs: {} };
   (g.suffixes || []).forEach(function (x) { S.discForm.sufs[x] = true; });
   (g.cert_siblings || []).forEach(function (x) { if (!(x in S.discForm.sufs)) S.discForm.sufs[x] = false; });
-  $('#disc-body').innerHTML = discDetailHtml(g); $('#sheet').scrollTop = 0;
+  $('#disc-body').innerHTML = discDetailHtml(g); var sb0 = $('#sheet-body') || $('#sheet'); if (sb0) sb0.scrollTop = 0;
 }
 function kv(k, v) { return '<div class="row2"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>'; }
 /* v5.30 T1c: 与这个组一起出现的公共 DNS / CDN / 对象存储 / 支付 SDK —— 很多应用共用, 只作附属证据 */
@@ -757,8 +837,33 @@ function mergeCustomDpiRules(existingRaw, incomingObj) {
     rules: merged
   };
 }
+function findInvalidOrSharedRuleDomain(rulesArr) {
+  var list = Array.isArray(rulesArr) ? rulesArr : [];
+  for (var i = 0; i < list.length; i++) {
+    var r = list[i];
+    if (!r || typeof r !== 'object') continue;
+    var doms = [].concat(Array.isArray(r.suffixes) ? r.suffixes : [], Array.isArray(r.domains) ? r.domains : []);
+    for (var j = 0; j < doms.length; j++) {
+      var d = String(doms[j] || '').trim().toLowerCase().replace(/^\*\.?/, '').replace(/^\.+|\.+$/g, '');
+      if (!d) continue;
+      if (d.indexOf('.') < 0 || /^(com|net|org|gov|edu)\.cn$|^co\.(uk|jp)$|^com\.(au|br|hk|tw)$/.test(d)) {
+        return { host: d, reason: '禁止将公共顶级后缀写入单应用规则' };
+      }
+      var inf = typeof classifyInfraHost === 'function' ? classifyInfraHost(d) : null;
+      if (inf && inf.shared) {
+        return { host: d, reason: '属于多应用共用的公共基础设施（' + (inf.label || 'CDN/SDK') + '），请移除后再保存以免误伤其他应用' };
+      }
+    }
+  }
+  return null;
+}
 function ruleTemplate(host) {
   var suf = guessSuffix(host), ta = $('#rules-text'); if (!ta || !suf) return;
+  var inf0 = typeof classifyInfraHost === 'function' ? classifyInfraHost(suf) : null;
+  if (inf0 && inf0.shared) {
+    toast('「' + suf + '」属于公共共享基础设施（' + (inf0.label || 'CDN/SDK') + '），不可绑定单一应用', 'warn');
+    return;
+  }
   var rule = { id: ('user_' + suf.replace(/[^a-z0-9]+/g, '_')).replace(/_+$/, '').slice(0, 48), app: '待确认应用', category: 'unknown', confidence: 'user', suffixes: [suf] };
   var wasEmpty = !ta.value.trim();
   var obj = null; try { obj = !wasEmpty ? JSON.parse(ta.value) : null; } catch (_) { obj = null; }
@@ -778,8 +883,7 @@ function ruleTemplate(host) {
       if (!cur || !Array.isArray(cur.rules)) return;
       var merged = mergeCustomDpiRules(r.rules, cur);
       ta.value = JSON.stringify(merged, null, 2);
-      ta.dataset.exported = '1';
-      delete ta.dataset.needsMerge;
+      ta.dataset.needsMerge = '1';
     });
   }
   toast('已加入规则模板（' + suf + '），改好 app / category 后点「保存并重载」');
@@ -802,10 +906,14 @@ function rulesAct(act) {
     try { parsed = JSON.parse(txt); } catch (e) { rulesOut('JSON 格式错误：' + e.message, 'err'); return; }
     if (!parsed || !Array.isArray(parsed.rules)) { rulesOut('JSON 缺少顶层 rules 数组', 'err'); return; }
     if (txt.length > 512 * 1024) { rulesOut('超过 512 KB', 'err'); return; }
+    var badDom = findInvalidOrSharedRuleDomain(parsed.rules);
+    if (badDom) {
+      rulesOut('拒绝保存域名「' + badDom.host + '」：' + badDom.reason, 'err');
+      toast('请先移除共享或非法域名：' + badDom.host, 'warn');
+      return;
+    }
     var shouldMerge = ta.dataset.exported !== '1' || ta.dataset.needsMerge === '1';
-    var desc = shouldMerge
-      ? '将与当前已有自定义规则按 id 合并保存（保留既有自定义规则，内置规则不受影响），dpid 随后自动重载。'
-      : '将保存当前编辑的自定义规则库（内置规则不受影响），dpid 随后自动重载。';
+    var desc = '将与当前已有自定义规则按 id 原子合并保存（保留既有自定义规则，内置规则不受影响），dpid 随后自动重载。';
     return confirmSheet('保存自定义规则库？', desc, '保存', { safe: true }).then(function (ok) {
       if (!ok) return;
       rulesOut('保存中…');
@@ -819,7 +927,7 @@ function rulesAct(act) {
           })
         : Promise.resolve(txt);
       return prep.then(function (sendTxt) {
-        return api.post('/api/dpi_rules', { rules: sendTxt }, { timeout: 30000, maxTime: 28 });
+        return api.post('/api/dpi_rules', { rules: sendTxt, merge: true }, { timeout: 30000, maxTime: 28 });
       }).then(function (r) {
         if (r.ok === false) throw new Error(r.error || '导入失败');
         rulesOut(r.detail || '已保存');

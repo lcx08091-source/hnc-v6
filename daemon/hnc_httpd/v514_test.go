@@ -83,8 +83,8 @@ func TestLiveAppsAndDNSCorrelation(t *testing.T) {
 	if len(la) != 1 || la[0]["id"] != "bilibili" {
 		t.Fatalf("live apps = %v, want only bilibili (SDK hidden, system suppressed)", la)
 	}
-	if bps := la[0]["bps"].(int64); bps < 2_000_000 || bps > 4_200_000 {
-		t.Fatalf("bilibili ewma bps = %d, want ~2.8M after 1.5 tau", bps)
+	if bps := la[0]["bps"].(int64); bps < 250_000 || bps > 525_000 {
+		t.Fatalf("bilibili ewma bps = %d, want ~350KB/s (bytes/s) after 1.5 tau", bps)
 	}
 	// 停止流量 2 分钟以上 → 衰减消失
 	for i := 0; i < 70; i++ {

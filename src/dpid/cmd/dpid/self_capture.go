@@ -149,8 +149,25 @@ type liveCap struct {
 	// lastErr is the last open/run error, if any. Surfaced into
 	// SelfIfaceState.LastError so the WebUI can show it without us
 	// having to invent a separate log stream.
-	lastErrMu sync.Mutex
-	lastErr   string
+	lastErrMu  sync.Mutex
+	lastErr    string
+	tunSelfIPs []net.IP
+}
+
+func (lc *liveCap) hasTUNSelfIP(ip net.IP) bool {
+	if lc == nil || len(lc.tunSelfIPs) == 0 {
+		return false
+	}
+	v4 := ip.To4()
+	if len(v4) != 4 {
+		return false
+	}
+	for _, selfIP := range lc.tunSelfIPs {
+		if selfIP.Equal(v4) {
+			return true
+		}
+	}
+	return false
 }
 
 func (lc *liveCap) setErr(s string) {
@@ -179,6 +196,12 @@ func runSelfCaptures(
 	getAPIface func() string,
 ) {
 	flagPath := filepath.Join(cfg.RunDir, "self_capture.enabled")
+	if leakEngine != nil && selfAttrib != nil {
+		leakEngine.SetConduitCheck(func(uid int, pkg string) bool {
+			return (uid > 0 && selfAttrib.IsFlywheelExcludedUID(uid)) ||
+				(pkg != "" && selfAttrib.IsFlywheelExcludedPkg(pkg))
+		})
+	}
 
 	live := map[string]*liveCap{}
 	var liveMu sync.Mutex
@@ -415,6 +438,7 @@ func runOneSelfCapture(
 	}
 	defer h.Close()
 	lc.setErr("") // clear stale error on successful open
+	lc.tunSelfIPs = detectSelfTUNIPv4s(lc.iface)
 
 	// v5.6.0-rc3: log linkType so the right parser dispatch is visible
 	// at a glance (rmnet=519 RawIP, tun=65534 None, wlan0=1 Ether).
@@ -504,15 +528,22 @@ func dispatchSelfCaptureEvent(
 			dstIP = ev.DstIP.String()
 		}
 
-		dstHost := ev.HTTP.Host
-		if dstHost != "" && ipNames != nil && dstIP != "" {
-			ipNames.RecordConnName(dstIP, dstHost, output.IPNameSrcHTTP, ev.Time)
+		domainHost := ev.HTTP.Host
+		if domainHost != "" && ipNames != nil && dstIP != "" {
+			ipNames.RecordConnName(dstIP, domainHost, output.IPNameSrcHTTP, ev.Time)
 		}
-		if dstHost == "" && ipNames != nil && dstIP != "" {
+		if domainHost == "" && ipNames != nil && dstIP != "" {
 			if e, ok := ipNames.Lookup(dstIP, ev.Time); ok && e.Name != "" {
-				dstHost = e.Name
+				domainHost = e.Name
 			}
 		}
+		// Drop in-stack 198.18.0.0/15 TUN gateway/redirect loopback traffic, or FakeIP packets lacking a domain Host.
+		if isFakeIPInStackLoopback(ev.SrcIP, ev.DstIP, ev.DstPort, lc) ||
+			(isFakeIPBenchmarkNetIP(ev.DstIP) && domainHost == "") {
+			return
+		}
+
+		dstHost := domainHost
 		if dstHost == "" {
 			dstHost = ev.HTTP.RawHost
 		}
@@ -520,15 +551,24 @@ func dispatchSelfCaptureEvent(
 			dstHost = dstIP
 		}
 
-		var uid int
+		uid := -1
 		var pkg, appName string
 		if selfAttrib != nil {
-			var ok bool
-			uid, pkg, ok = selfAttrib.LookupUID(dstIP, ev.DstPort)
-			if !ok {
-				if u, found := lookupProcTCPUID(ev.SrcPort, ev.DstIP, ev.DstPort); found && u > 0 {
-					uid = u
+			uAttr, pAttr, okAttr := selfAttrib.LookupUID(dstIP, ev.DstPort)
+			if !okAttr || selfAttrib.IsFlywheelExcludedUID(uAttr) {
+				if uProc, found := lookupProcTCPUID(ev.SrcPort, ev.DstIP, ev.DstPort); found {
+					if !okAttr {
+						uid = uProc
+					} else if uProc > 0 && !selfAttrib.IsFlywheelExcludedUID(uProc) {
+						uid = uProc
+					} else {
+						uid, pkg = uAttr, pAttr
+					}
+				} else if okAttr {
+					uid, pkg = uAttr, pAttr
 				}
+			} else {
+				uid, pkg = uAttr, pAttr
 			}
 			if uid > 0 {
 				resolvedPkg, resolvedLabel := selfAttrib.DisplayForUID(uid)
@@ -540,6 +580,8 @@ func dispatchSelfCaptureEvent(
 					selfAttrib.ObserveSNI(uid, ev.HTTP.Host, ev.Time.Unix())
 				}
 			}
+		} else if uProc, found := lookupProcTCPUID(ev.SrcPort, ev.DstIP, ev.DstPort); found {
+			uid = uProc
 		}
 
 		if leakEngine != nil {
@@ -551,6 +593,7 @@ func dispatchSelfCaptureEvent(
 				AppName:    appName,
 				ClientIP:   srcIP,
 				DstIP:      dstIP,
+				SrcPort:    ev.SrcPort,
 				DstPort:    ev.DstPort,
 				Method:     ev.HTTP.Method,
 				Path:       ev.HTTP.Path,
@@ -574,8 +617,75 @@ func dispatchSelfCaptureEvent(
 	}
 }
 
+func isFakeIPBenchmarkNetIP(ip net.IP) bool {
+	v4 := ip.To4()
+	return len(v4) == 4 && v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
+}
+
+func isIPv4Exact(ip net.IP, a, b, c, d byte) bool {
+	v4 := ip.To4()
+	return len(v4) == 4 && v4[0] == a && v4[1] == b && v4[2] == c && v4[3] == d
+}
+
+func detectSelfTUNIPv4s(ifaceName string) []net.IP {
+	if ifaceName == "" {
+		return nil
+	}
+	ifc, err := net.InterfaceByName(ifaceName)
+	if err != nil || ifc == nil {
+		return nil
+	}
+	addrs, err := ifc.Addrs()
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+	var out []net.IP
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if v4 := ip.To4(); len(v4) == 4 && isFakeIPBenchmarkNetIP(v4) {
+			cp := make(net.IP, 4)
+			copy(cp, v4)
+			out = append(out, cp)
+		}
+	}
+	return out
+}
+
+func isFakeIPInStackLoopback(srcIP, dstIP net.IP, dstPort uint16, lc *liveCap) bool {
+	if !isFakeIPBenchmarkNetIP(dstIP) {
+		return false
+	}
+	if lc != nil && lc.hasTUNSelfIP(dstIP) {
+		return true
+	}
+	if isIPv4Exact(dstIP, 198, 18, 0, 1) {
+		return true
+	}
+	if isIPv4Exact(dstIP, 198, 19, 0, 1) && isIPv4Exact(srcIP, 198, 19, 0, 2) {
+		return true
+	}
+	if isFakeIPBenchmarkNetIP(srcIP) {
+		if srcIP.To4().Equal(dstIP.To4()) {
+			return true
+		}
+		if dstPort != 80 && dstPort != 8080 {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	procTCPScanMinInterval = 200 * time.Millisecond
+	procTCPRescanCooldown  = 30 * time.Millisecond
+	procTCPMissNegCacheTTL = 2 * time.Second
+	procTCPMissNegCacheMax = 1024
 	procTCPScanMaxRows     = 4096
 )
 
@@ -591,6 +701,7 @@ var (
 	lastProcTCPScanAt   time.Time
 	lastProcTCPPathsKey string
 	lastProcTCPRows     []procTCPRow
+	procTCPMissUntil    map[string]time.Time
 )
 
 func extractNAT64IPv4(ip net.IP) net.IP {
@@ -607,6 +718,19 @@ func extractNAT64IPv4(ip net.IP) net.IP {
 	return nil
 }
 
+func canonProcRemoteIPKey(ip net.IP) string {
+	if len(ip) == 0 {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	if n4 := extractNAT64IPv4(ip); n4 != nil {
+		return n4.String()
+	}
+	return ip.String()
+}
+
 func sameProcRemoteIP(a, b net.IP) bool {
 	if len(a) == 0 || len(b) == 0 {
 		return false
@@ -621,6 +745,15 @@ func sameProcRemoteIP(a, b net.IP) bool {
 		return true
 	}
 	return false
+}
+
+func isClosingOrWaitTCPStateHex(st string) bool {
+	switch strings.ToUpper(strings.TrimSpace(st)) {
+	case "04", "05", "06", "07", "0B", "0C":
+		return true
+	default:
+		return false
+	}
 }
 
 func scanProcTCPRowsLocked(paths []string) []procTCPRow {
@@ -641,13 +774,29 @@ func scanProcTCPRowsLocked(paths []string) []procTCPRow {
 			if len(fields) < 8 {
 				continue
 			}
+			st := strings.ToUpper(fields[3])
+			if st == "0A" {
+				continue
+			}
 			_, lPort, ok1 := parseProcHexAddrPort(fields[1])
 			rIP, rPort, ok2 := parseProcHexAddrPort(fields[2])
-			if !ok1 || !ok2 || len(rIP) == 0 {
+			if !ok1 || !ok2 || len(rIP) == 0 || rIP.IsUnspecified() {
 				continue
 			}
 			u, uerr := strconv.Atoi(fields[7])
-			if uerr != nil || u <= 0 {
+			if uerr != nil || u < 0 {
+				continue
+			}
+			hasInode := len(fields) >= 10
+			var inode uint64
+			if hasInode {
+				inode, _ = strconv.ParseUint(fields[9], 10, 64)
+			}
+			// Drop half-closed/waiting (04/05/06/07/0B/0C) orphan sockets where kernel released uid=0 or inode=0.
+			if isClosingOrWaitTCPStateHex(st) && (u == 0 || (hasInode && inode == 0)) {
+				continue
+			}
+			if hasInode && inode == 0 && u == 0 {
 				continue
 			}
 			rows = append(rows, procTCPRow{
@@ -668,24 +817,8 @@ func scanProcTCPRowsLocked(paths []string) []procTCPRow {
 	return rows
 }
 
-func lookupProcTCPUID(srcPort uint16, dstIP net.IP, dstPort uint16) (int, bool) {
-	if (srcPort == 0 && dstPort == 0) || len(dstIP) == 0 {
-		return 0, false
-	}
-	paths := append([]string(nil), procNetTCPPaths...)
-	pathsKey := strings.Join(paths, "\x00")
-	now := time.Now()
-
-	procTCPScanMu.Lock()
-	if pathsKey != lastProcTCPPathsKey || lastProcTCPScanAt.IsZero() ||
-		now.Sub(lastProcTCPScanAt) >= procTCPScanMinInterval || now.Before(lastProcTCPScanAt) {
-		lastProcTCPRows = scanProcTCPRowsLocked(paths)
-		lastProcTCPScanAt = now
-		lastProcTCPPathsKey = pathsKey
-	}
-	rows := lastProcTCPRows
-	procTCPScanMu.Unlock()
-
+func matchProcTCPRows(rows []procTCPRow, srcPort uint16, dstIP net.IP, dstPort uint16) (int, bool) {
+	foundZero := false
 	for _, row := range rows {
 		if dstPort != 0 && row.rPort != dstPort {
 			continue
@@ -694,10 +827,78 @@ func lookupProcTCPUID(srcPort uint16, dstIP net.IP, dstPort uint16) (int, bool) 
 			continue
 		}
 		if sameProcRemoteIP(row.rIP, dstIP) {
-			return row.uid, true
+			if row.uid > 0 {
+				return row.uid, true
+			}
+			foundZero = true
 		}
 	}
+	if foundZero {
+		return 0, true
+	}
 	return 0, false
+}
+
+func lookupProcTCPUID(srcPort uint16, dstIP net.IP, dstPort uint16) (int, bool) {
+	if (srcPort == 0 && dstPort == 0) || len(dstIP) == 0 {
+		return 0, false
+	}
+	paths := append([]string(nil), procNetTCPPaths...)
+	pathsKey := strings.Join(paths, "\x00")
+	missKey := strconv.Itoa(int(srcPort)) + "|" + canonProcRemoteIPKey(dstIP) + "|" + strconv.Itoa(int(dstPort))
+	now := time.Now()
+
+	procTCPScanMu.Lock()
+	if pathsKey != lastProcTCPPathsKey {
+		lastProcTCPRows = nil
+		lastProcTCPScanAt = time.Time{}
+		lastProcTCPPathsKey = pathsKey
+		procTCPMissUntil = nil
+	}
+
+	if !lastProcTCPScanAt.IsZero() && !now.Before(lastProcTCPScanAt) && now.Sub(lastProcTCPScanAt) < procTCPScanMinInterval {
+		if u, ok := matchProcTCPRows(lastProcTCPRows, srcPort, dstIP, dstPort); ok {
+			procTCPScanMu.Unlock()
+			return u, true
+		}
+	}
+
+	if procTCPMissUntil != nil {
+		if exp, exists := procTCPMissUntil[missKey]; exists {
+			if now.Before(exp) {
+				procTCPScanMu.Unlock()
+				return 0, false
+			}
+			delete(procTCPMissUntil, missKey)
+		}
+	}
+
+	didRescan := false
+	if lastProcTCPScanAt.IsZero() || now.Sub(lastProcTCPScanAt) >= procTCPRescanCooldown || now.Before(lastProcTCPScanAt) {
+		lastProcTCPRows = scanProcTCPRowsLocked(paths)
+		lastProcTCPScanAt = now
+		didRescan = true
+	}
+	rows := lastProcTCPRows
+	u, ok := matchProcTCPRows(rows, srcPort, dstIP, dstPort)
+	if !ok && didRescan {
+		if procTCPMissUntil == nil {
+			procTCPMissUntil = make(map[string]time.Time, 64)
+		} else if len(procTCPMissUntil) >= procTCPMissNegCacheMax {
+			for k, exp := range procTCPMissUntil {
+				if !now.Before(exp) {
+					delete(procTCPMissUntil, k)
+				}
+			}
+			if len(procTCPMissUntil) >= procTCPMissNegCacheMax {
+				clear(procTCPMissUntil)
+			}
+		}
+		procTCPMissUntil[missKey] = now.Add(procTCPMissNegCacheTTL)
+	}
+	procTCPScanMu.Unlock()
+
+	return u, ok
 }
 
 func parseProcHexAddrPort(s string) (net.IP, uint16, bool) {

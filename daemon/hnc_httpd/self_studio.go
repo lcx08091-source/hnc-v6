@@ -151,7 +151,7 @@ func reconcileStudioFlagsLocked(s *server, now time.Time) (captureActive bool, s
 	case "smart_screen":
 		captureActive = screenOn
 	case "lease_15m":
-		captureActive = screenOn
+		captureActive = true
 	default:
 		captureActive = false
 	}
@@ -208,13 +208,13 @@ func (s *server) SelfResidentLoop(stopCh <-chan struct{}) {
 			ensureStudioPolicyLocked(s)
 			wasCapErr := func() bool { _, e := os.Stat(s.selfFlagPath()); return e == nil }()
 			capNow, screenOn, _ := reconcileStudioFlagsLocked(s, now)
-			needQuietDistill := !screenOn && studioPolicy.Mode != "off" && !studioDistilling &&
+			needQuietDistill := !capNow && !screenOn && studioPolicy.Mode != "off" && !studioDistilling &&
 				now.Unix()-studioPolicy.LastDistillUnix >= 900 && hasNewLabelSamplesLocked(s.hncDir)
 			if needQuietDistill && studioQuietTimer == nil {
 				studioQuietTimer = time.AfterFunc(25*time.Second, func() {
 					studioMu.Lock()
 					ensureStudioPolicyLocked(s)
-					if studioDistilling || studioPolicy.Mode == "off" || screenCurrentlyOn() {
+					if studioDistilling || studioPolicy.Mode == "off" || studioPolicy.Mode == "lease_15m" || screenCurrentlyOn() {
 						studioQuietTimer = nil
 						studioMu.Unlock()
 						return
@@ -369,11 +369,12 @@ func (s *server) apiSelfStudio(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, ifc := range st.Self.Interfaces {
 				kind := "other"
-				if strings.HasPrefix(ifc.Name, "wlan") {
+				lowIf := strings.ToLower(ifc.Name)
+				if strings.HasPrefix(lowIf, "wlan") {
 					kind = "wifi"
-				} else if strings.HasPrefix(ifc.Name, "rmnet") || strings.HasPrefix(ifc.Name, "ccmni") || strings.HasPrefix(ifc.Name, "wwan") {
+				} else if strings.HasPrefix(lowIf, "rmnet") || strings.HasPrefix(lowIf, "ccmni") || strings.HasPrefix(lowIf, "wwan") || strings.HasPrefix(lowIf, "sipa_eth") || strings.HasPrefix(lowIf, "seth_") {
 					kind = "cellular"
-				} else if strings.HasPrefix(ifc.Name, "tun") || strings.HasPrefix(ifc.Name, "wg") {
+				} else if strings.HasPrefix(lowIf, "tun") || strings.HasPrefix(lowIf, "wg") || strings.HasPrefix(lowIf, "meta") || strings.HasPrefix(lowIf, "utun") || strings.HasPrefix(lowIf, "vpn") || strings.HasPrefix(lowIf, "tailscale") {
 					kind = "tun"
 				}
 				tlsEvents += int(ifc.TLSEvents)
@@ -471,6 +472,7 @@ func dispatchStudioAction(s *server, action string, p map[string]string) (action
 	case "self_studio_export":
 		return actionSelfStudioExport(s, p), true
 	case "dpi_distill_now":
+		purgeDynamicVPNConduitSamples(s.hncDir)
 		return actionDPIDistillNow(s, p), true
 	case "flow_cls_retrain":
 		n, cls, ok := TriggerFlowClsRetrain(s.hncDir, time.Now())
@@ -623,12 +625,175 @@ func actionSelfStudioStart(s *server, p map[string]string) actionResp {
 	return actionResp{OK: true, Detail: string(b)}
 }
 
+// detectDynamicVPNConduitUIDsAndPkgs 汇总动态检测到的 VPN/代理导管 UID 与包名:
+//  1. run/dpi_state.json 中 dpid 实时标记了 flywheel_excluded=true 的 UID/Pkg(含改包名持 /dev/tun 与高基数导管);
+//  2. run/vpn_conduit_uids.json(可选辅助快照);
+//  3. 当本机存在活跃 TUN 接口(/sys/class/net/*/tun_flags)时, 实时扫描 /proc/<pid>/fd 持有 /dev/tun 或 /dev/net/tun 的应用 UID(>=10000)。
+func detectDynamicVPNConduitUIDsAndPkgs(hncDir string) (map[int]bool, map[string]bool) {
+	uids := map[int]bool{}
+	pkgs := buildConduitPkgSet(hncDir)
+
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "dpi_state.json")); err == nil && len(b) > 0 && len(b) < 8<<20 {
+		var doc struct {
+			Self *struct {
+				AppsByUID map[string]struct {
+					UID              int    `json:"uid"`
+					Pkg              string `json:"pkg"`
+					FlywheelExcluded bool   `json:"flywheel_excluded"`
+				} `json:"apps_by_uid"`
+			} `json:"self"`
+		}
+		if json.Unmarshal(b, &doc) == nil && doc.Self != nil {
+			for k, ap := range doc.Self.AppsByUID {
+				if !ap.FlywheelExcluded {
+					continue
+				}
+				u := ap.UID
+				if u <= 0 {
+					u, _ = strconv.Atoi(strings.TrimSpace(k))
+				}
+				if u >= 10000 {
+					uids[u] = true
+				}
+				if p := strings.TrimSpace(ap.Pkg); p != "" {
+					pkgs[p] = true
+				}
+			}
+		}
+	}
+
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "vpn_conduit_uids.json")); err == nil && len(b) > 0 && len(b) < 64<<10 {
+		var extra struct {
+			UIDs []int    `json:"uids"`
+			Pkgs []string `json:"pkgs"`
+		}
+		if json.Unmarshal(b, &extra) == nil {
+			for _, u := range extra.UIDs {
+				if u >= 10000 {
+					uids[u] = true
+				}
+			}
+			for _, p := range extra.Pkgs {
+				if p = strings.TrimSpace(p); p != "" {
+					pkgs[p] = true
+				}
+			}
+		}
+	}
+
+	hasActiveTun := false
+	if netDevs, err := os.ReadDir("/sys/class/net"); err == nil {
+		for _, nd := range netDevs {
+			if _, terr := os.Stat(filepath.Join("/sys/class/net", nd.Name(), "tun_flags")); terr == nil {
+				hasActiveTun = true
+				break
+			}
+		}
+	}
+	if hasActiveTun {
+		if procs, err := os.ReadDir("/proc"); err == nil {
+			for _, pe := range procs {
+				if !pe.IsDir() {
+					continue
+				}
+				name := pe.Name()
+				if len(name) == 0 || name[0] < '1' || name[0] > '9' {
+					continue
+				}
+				stBytes, err := os.ReadFile(filepath.Join("/proc", name, "status"))
+				if err != nil {
+					continue
+				}
+				procUID := 0
+				for _, ln := range strings.Split(string(stBytes), "\n") {
+					if strings.HasPrefix(ln, "Uid:") {
+						fields := strings.Fields(ln)
+						if len(fields) >= 2 {
+							procUID, _ = strconv.Atoi(fields[1])
+						}
+						break
+					}
+				}
+				if procUID < 10000 || uids[procUID] {
+					continue
+				}
+				fdDir := filepath.Join("/proc", name, "fd")
+				fds, err := os.ReadDir(fdDir)
+				if err != nil {
+					continue
+				}
+				for _, fd := range fds {
+					target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+					if err != nil {
+						continue
+					}
+					if target == "/dev/tun" || target == "/dev/net/tun" || strings.Contains(target, "[tun]") {
+						uids[procUID] = true
+						break
+					}
+				}
+			}
+		}
+	}
+	return uids, pkgs
+}
+
+// purgeDynamicVPNConduitSamples 在执行本机指纹/冷启动/原型蒸馏前清洗 label_samples.*.jsonl 中由动态 VPN 导管 UID 产生的代发污染样本。
+// 若文件中无命中行则零写盘返回。
+func purgeDynamicVPNConduitSamples(hncDir string) int {
+	if strings.TrimSpace(hncDir) == "" {
+		return 0
+	}
+	conduitUIDs, conduitPkgs := detectDynamicVPNConduitUIDsAndPkgs(hncDir)
+	if len(conduitUIDs) == 0 && len(conduitPkgs) == 0 {
+		return 0
+	}
+	files := selfStudioLabelSampleFiles(hncDir)
+	removed := 0
+	for _, path := range files {
+		raw, err := os.ReadFile(path)
+		if err != nil || len(raw) == 0 || len(raw) > 32<<20 {
+			continue
+		}
+		lines := strings.Split(string(raw), "\n")
+		var kept []string
+		changed := false
+		for _, ln := range lines {
+			trimmed := strings.TrimSpace(ln)
+			if trimmed == "" {
+				continue
+			}
+			var sm struct {
+				UID int    `json:"uid"`
+				Pkg string `json:"pkg"`
+			}
+			if json.Unmarshal([]byte(trimmed), &sm) == nil {
+				if (sm.UID >= 10000 && conduitUIDs[sm.UID]) || (sm.Pkg != "" && conduitPkgs[sm.Pkg]) {
+					changed = true
+					removed++
+					continue
+				}
+			}
+			kept = append(kept, trimmed)
+		}
+		if changed {
+			var out []byte
+			if len(kept) > 0 {
+				out = []byte(strings.Join(kept, "\n") + "\n")
+			}
+			_ = discoverWriteAtomic(path, out)
+		}
+	}
+	return removed
+}
+
 func runStudioDistillPipeline(s *server) (studioDistillSummary, error) {
 	studioDistillRunMu.Lock()
 	defer studioDistillRunMu.Unlock()
 
 	t0 := time.Now()
 	synced := pokeDPIDStudio(s.hncDir, 1200*time.Millisecond)
+	purgeDynamicVPNConduitSamples(s.hncDir)
 	now := time.Now()
 	rep, err := s.DistillPersonalNow(now, DistillOptions{LookbackDays: 7, AllowUnmappedPkg: true})
 	nbN, nbCls, _ := TriggerFlowClsRetrain(s.hncDir, now)

@@ -337,7 +337,46 @@ func detectMtkHwnatNoKnob(hncDir string, guard map[string]interface{}) bool {
 	return false
 }
 
+func isHotspotOnlineForOffloadHint(hncDir string, resp *offloadResp, guard map[string]interface{}) bool {
+	if resp != nil {
+		switch strings.ToUpper(strings.TrimSpace(resp.Detail)) {
+		case "NOHOTSPOT", "SKIPPED":
+			return false
+		}
+	}
+	if guard != nil {
+		gst := strings.ToUpper(strings.TrimSpace(asString(guard["offload_state"])))
+		if gst == "NOHOTSPOT" || gst == "SKIPPED" {
+			return false
+		}
+		if _, hasIface := guard["iface"]; hasIface && strings.TrimSpace(asString(guard["iface"])) == "" {
+			return false
+		}
+	}
+	if hncDir != "" {
+		if b, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state")); err == nil {
+			line := strings.ToUpper(strings.TrimSpace(string(b)))
+			if !strings.HasPrefix(line, "ACTIVE:") || strings.TrimSpace(line[len("ACTIVE:"):]) == "" {
+				return false
+			}
+			return true
+		}
+		if _, err := os.Stat(filepath.Join(hncDir, "run", "iface_detect.json")); err == nil {
+			if strings.TrimSpace(readIfaceDetect(hncDir).Iface) == "" {
+				return false
+			}
+		}
+	}
+	if act := activityNow(); act.Known && act.Level == lvlHotspotOff {
+		return false
+	}
+	return true
+}
+
 func applyMtkNoKnobHint(resp *offloadResp, hncDir string, guard map[string]interface{}) {
+	if !isHotspotOnlineForOffloadHint(hncDir, resp, guard) {
+		return
+	}
 	if strings.EqualFold(resp.Detail, "detected_no_knob") || detectMtkHwnatNoKnob(hncDir, guard) {
 		resp.Active = true
 		resp.HWNAT = "detected_no_knob"

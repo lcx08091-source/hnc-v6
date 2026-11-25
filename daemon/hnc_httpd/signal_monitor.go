@@ -251,6 +251,10 @@ func (m *signalMonitor) Get(s *server) hostSignalStatus {
 	cp := cloneHostSignalStatus(m.last)
 	m.mu.RUnlock()
 
+	if now := time.Now().Unix(); cp.UpdatedAt > 0 && now-cp.UpdatedAt > 600 {
+		cp.HandoverCount = 0
+		cp.JitterdB = 0
+	}
 	if s != nil {
 		enrichSignalDiagnosis(&cp, s)
 	}
@@ -410,15 +414,17 @@ func (m *signalMonitor) recordHistoryLocked(st *hostSignalStatus, curRTT float64
 		return
 	}
 
-	// 蜂窝 PCI 或主频段跳变统计(近 300 秒滑窗)
+	// 蜂窝 PCI 或主频段跳变统计(近 300 秒滑窗, 且与上一采样点相邻间隔 <= 300s 才计切换, 排除长时间休眠后唤醒跨站)
 	if st.Mode == "cellular" {
 		if m.histLen > 0 {
 			prevIdx := (m.histHead - 1 + sigHistoryCap) % sigHistoryCap
 			prev := m.history[prevIdx]
-			pciChanged := st.HasPCI && prev.HasPCI && st.PCI != prev.PCI
-			bandChanged := st.Band != "" && prev.Band != "" && st.Band != prev.Band
-			if pciChanged || bandChanged {
-				m.handoverTs = append(m.handoverTs, st.UpdatedAt)
+			if prev.Ts > 0 && st.UpdatedAt >= prev.Ts && st.UpdatedAt-prev.Ts <= sigHandoverWindowS {
+				pciChanged := st.HasPCI && prev.HasPCI && st.PCI != prev.PCI
+				bandChanged := st.Band != "" && prev.Band != "" && st.Band != prev.Band
+				if pciChanged || bandChanged {
+					m.handoverTs = append(m.handoverTs, st.UpdatedAt)
+				}
 			}
 		}
 		cutoff := st.UpdatedAt - sigHandoverWindowS
@@ -457,6 +463,27 @@ func (m *signalMonitor) recordHistoryLocked(st *hostSignalStatus, curRTT float64
 		if st.HasPCI {
 			pt.PCI = st.PCI
 			pt.HasPCI = true
+		}
+	}
+
+	// 剔除 Ts < UpdatedAt-600 的跨天/长休眠过期旧样本(兼容 500s 滑窗单测), 消除 27h 前旧点造成假抖动强干扰
+	if m.histLen > 0 && st.UpdatedAt > 600 {
+		minTs := st.UpdatedAt - 600
+		oldStart := (m.histHead - m.histLen + sigHistoryCap) % sigHistoryCap
+		var compacted [sigHistoryCap]SignalHistoryPoint
+		kept := 0
+		for i := 0; i < m.histLen; i++ {
+			item := m.history[(oldStart+i)%sigHistoryCap]
+			if item.Ts > 0 && item.Ts < minTs {
+				continue
+			}
+			compacted[kept] = item
+			kept++
+		}
+		if kept < m.histLen {
+			m.history = compacted
+			m.histLen = kept
+			m.histHead = kept % sigHistoryCap
 		}
 	}
 
@@ -1386,39 +1413,45 @@ func runFastSystemCmd(timeout time.Duration, name string, args ...string) (strin
 }
 
 var (
-	rePhoneBlock     = regexp.MustCompile(`^\s*Phone Id\s*=\s*(-?\d+)`)
-	reActiveSub      = regexp.MustCompile(`(?i)\b(?:mActiveDataSubId|active\s*data\s*sub(?:scription)?\s*id)\s*[=:]\s*(-?\d+)`)
-	reSubIDField     = regexp.MustCompile(`\bmSubId\s*=\s*(-?\d+)`)
-	reNrSignal       = regexp.MustCompile(`CellSignalStrengthNr:\s*\{[^}]*?ssRsrp\s*=\s*(-?\d+)[^}]*?ssRsrq\s*=\s*(-?\d+)[^}]*?ssSinr\s*=\s*(-?\d+)`)
-	reLteSignal      = regexp.MustCompile(`CellSignalStrengthLte:[^,}\n]*?\brssi\s*=\s*(-?\d+)\s+rsrp\s*=\s*(-?\d+)\s+rsrq\s*=\s*(-?\d+)\s+rssnr\s*=\s*(-?\d+)`)
-	reAccessTech     = regexp.MustCompile(`accessNetworkTechnology\s*=\s*([A-Za-z0-9_ -]+)`)
-	reEndcAvail      = regexp.MustCompile(`isEnDcAvailable\s*=\s*true`)
-	reNrConnected    = regexp.MustCompile(`nrState\s*=\s*CONNECTED`)
-	reDispOverride   = regexp.MustCompile(`override(?:Network|NetworkType)?\s*=\s*(NR_NSA|NR_ADVANCED|NR_MMWAVE|LTE_CA|LTE_ADVANCED_PRO)`)
-	reOperatorLong   = regexp.MustCompile(`mOperatorAlphaLong\s*=\s*([^,\n}]+)`)
-	reOperatorShrt   = regexp.MustCompile(`mOperatorAlphaShort\s*=\s*([^,\n}]+)`)
-	reOperatorNum    = regexp.MustCompile(`mOperatorNumeric\s*=\s*(\d{5,6})`)
-	reMccMncPair     = regexp.MustCompile(`mMcc\s*=\s*(\d{3})\s*,?\s*mMnc\s*=\s*(\d{2,3})`)
-	reDataIface      = regexp.MustCompile(`InterfaceName:\s*([A-Za-z0-9_.-]+)`)
-	rePhysChanEntry  = regexp.MustCompile(`\{[^{}]*mConnectionStatus\s*=\s*(PrimaryServing|SecondaryServing|1|2)[^{}]*\}`)
-	reChanConnStatus = regexp.MustCompile(`mConnectionStatus\s*=\s*(PrimaryServing|SecondaryServing|1|2)`)
-	reChanNetType    = regexp.MustCompile(`mNetworkType\s*=\s*(NR|LTE|13|20)`)
-	reChanBand       = regexp.MustCompile(`mBand\s*=\s*(\d+)`)
-	reChanDLKhz      = regexp.MustCompile(`mCellBandwidthDownlinkKhz\s*=\s*(\d+)`)
-	reChanDLArfcn    = regexp.MustCompile(`(?:mDownlinkChannelNumber|mChannelNumber)\s*=\s*(\d+)`)
-	rePhysCellId     = regexp.MustCompile(`\b(?:mPhysicalCellId|mPci)\s*=\s*(-?\d+)`)
-	rePciField       = regexp.MustCompile(`\bmPci\s*=\s*(-?\d+)`)
-	reUnregCellInfo  = regexp.MustCompile(`CellInfo(?:Nr|Lte|Wcdma|Gsm):\s*\{[^{}]*mRegistered\s*=\s*(?:NO|false)[^{}]*CellIdentity(?:Nr|Lte):\s*\{[^}]*\}`)
-	reCellIdNr       = regexp.MustCompile(`CellIdentityNr:\s*\{[^}]*\}`)
-	reCellIdLte      = regexp.MustCompile(`CellIdentityLte:\s*\{[^}]*\}`)
-	reNrArfcnField   = regexp.MustCompile(`mNrArfcn\s*=\s*(\d+)`)
-	reEarfcnField    = regexp.MustCompile(`mEarfcn\s*=\s*(\d+)`)
-	reBandsArray     = regexp.MustCompile(`mBands\s*=\s*\[([0-9,\s]+)\]`)
-	reLteBwField     = regexp.MustCompile(`mBandwidth\s*=\s*(\d+)`)
-	reWifiRSSI       = regexp.MustCompile(`RSSI:\s*(-?\d+)`)
-	reWifiSpeed      = regexp.MustCompile(`(?:Tx\s+)?Link speed:\s*(\d+)\s*Mbps`)
-	reWifiFreq       = regexp.MustCompile(`Frequency:\s*(\d+)\s*MHz`)
-	reWifiNoise      = regexp.MustCompile(`Noise:\s*(-?\d+)`)
+	rePhoneBlock       = regexp.MustCompile(`^\s*Phone Id\s*=\s*(-?\d+)`)
+	reActiveSub        = regexp.MustCompile(`(?i)\b(?:mActiveDataSubId|active\s*data\s*sub(?:scription)?\s*id)\s*[=:]\s*(-?\d+)`)
+	reSubIDField       = regexp.MustCompile(`\bmSubId\s*=\s*(-?\d+)`)
+	reDataConnState    = regexp.MustCompile(`\bmDataConnectionState\s*=\s*(-?\d+)`)
+	reNrSignal         = regexp.MustCompile(`CellSignalStrengthNr:\s*\{[^}]*?ssRsrp\s*=\s*(-?\d+)[^}]*?ssRsrq\s*=\s*(-?\d+)[^}]*?ssSinr\s*=\s*(-?\d+)`)
+	reLteSignal        = regexp.MustCompile(`CellSignalStrengthLte:[^,}\n]*?\brssi\s*=\s*(-?\d+)\s+rsrp\s*=\s*(-?\d+)\s+rsrq\s*=\s*(-?\d+)\s+rssnr\s*=\s*(-?\d+)`)
+	reAccessTech       = regexp.MustCompile(`(?i)\b(?:m?access(?:Network)?Technology)\s*=\s*(LTE[\s_-]+CA\b|NR[\s_-]+(?:SA|NSA|ADVANCED|MMWAVE)\b|[A-Za-z0-9_+-]+)`)
+	reRilDataRadioSA   = regexp.MustCompile(`(?i)\b(?:get|m)?RilDataRadioTechnology\s*=\s*(?:[^\n,}]*\(NR_SA\)|NR_SA\b)`)
+	reRilDataRadioNSA  = regexp.MustCompile(`(?i)\b(?:get|m)?RilDataRadioTechnology\s*=\s*(?:[^\n,}]*\(NR_NSA\)|NR_NSA\b)`)
+	reEndcAvail        = regexp.MustCompile(`isEnDcAvailable\s*=\s*true`)
+	reNrConnected      = regexp.MustCompile(`nrState\s*=\s*CONNECTED`)
+	reDispOverride     = regexp.MustCompile(`override(?:Network|NetworkType)?\s*=\s*(NR_NSA|NR_ADVANCED|NR_MMWAVE|LTE_CA|LTE_ADVANCED_PRO)`)
+	reOperatorLong     = regexp.MustCompile(`mOperatorAlphaLong\s*=\s*([^,\n}]+)`)
+	reOperatorShrt     = regexp.MustCompile(`mOperatorAlphaShort\s*=\s*([^,\n}]+)`)
+	reOperatorNum      = regexp.MustCompile(`mOperatorNumeric\s*=\s*(\d{5,6})`)
+	reMccMncPair       = regexp.MustCompile(`mMcc\s*=\s*(\d{3})\s*,?\s*mMnc\s*=\s*(\d{2,3})`)
+	reDataIface        = regexp.MustCompile(`InterfaceName:\s*([A-Za-z0-9_.-]+)`)
+	reNonEmptyPcscf    = regexp.MustCompile(`(?i)PcscfAddresses:\s*\[\s*[^\s\]]`)
+	reVoiceApnToken    = regexp.MustCompile(`(?i)(?:\[\s*(?:ims|emergency)(?:\s*,\s*(?:ims|emergency))*\s*\]|\b(?:apn|apnTypes?|mApnTypes?)\s*[=:]\s*\[?\s*(?:ims|emergency)\b|,\s*(?:ims|emergency)\s*,)`)
+	reDataBearingApn   = regexp.MustCompile(`(?i)\b(?:default|dun|hipri|internet)\b`)
+	rePhysChanEntry    = regexp.MustCompile(`\{[^{}]*mConnectionStatus\s*=\s*(PrimaryServing|SecondaryServing|1|2)[^{}]*\}`)
+	reChanConnStatus   = regexp.MustCompile(`mConnectionStatus\s*=\s*(PrimaryServing|SecondaryServing|1|2)`)
+	reChanNetType      = regexp.MustCompile(`mNetworkType\s*=\s*(NR|LTE|13|20)`)
+	reChanBand         = regexp.MustCompile(`mBand\s*=\s*(\d+)`)
+	reChanDLKhz        = regexp.MustCompile(`mCellBandwidthDownlinkKhz\s*=\s*(\d+)`)
+	reChanDLArfcn      = regexp.MustCompile(`(?:mDownlinkChannelNumber|mChannelNumber)\s*=\s*(\d+)`)
+	rePhysCellId       = regexp.MustCompile(`\b(?:mPhysicalCellId|mPci)\s*=\s*(-?\d+)`)
+	rePciField         = regexp.MustCompile(`\bmPci\s*=\s*(-?\d+)`)
+	reUnregCellInfo    = regexp.MustCompile(`CellInfo(?:Nr|Lte|Wcdma|Gsm):\s*\{[^{}]*mRegistered\s*=\s*(?:NO|false)[^{}]*CellIdentity(?:Nr|Lte):\s*\{[^}]*\}`)
+	reCellIdNr         = regexp.MustCompile(`CellIdentityNr:\s*\{[^}]*\}`)
+	reCellIdLte        = regexp.MustCompile(`CellIdentityLte:\s*\{[^}]*\}`)
+	reNrArfcnField     = regexp.MustCompile(`mNrArfcn\s*=\s*(\d+)`)
+	reEarfcnField      = regexp.MustCompile(`mEarfcn\s*=\s*(\d+)`)
+	reBandsArray       = regexp.MustCompile(`mBands\s*=\s*\[([0-9,\s]+)\]`)
+	reLteBwField       = regexp.MustCompile(`mBandwidth\s*=\s*(\d+)`)
+	reWifiRSSI         = regexp.MustCompile(`RSSI:\s*(-?\d+)`)
+	reWifiSpeed        = regexp.MustCompile(`(?:Tx\s+)?Link speed:\s*(\d+)\s*Mbps`)
+	reWifiFreq         = regexp.MustCompile(`Frequency:\s*(\d+)\s*MHz`)
+	reWifiNoise        = regexp.MustCompile(`Noise:\s*(-?\d+)`)
 )
 
 type parsedServingCarrier struct {
@@ -1434,6 +1467,7 @@ type parsedServingCarrier struct {
 type parsedPhoneSlot struct {
 	PhoneID           int
 	SubID             int
+	DataConnState     int
 	AlphaLong         string
 	AlphaShort        string
 	MCCMNC            string
@@ -1454,6 +1488,7 @@ type parsedPhoneSlot struct {
 	HasLTESinr        bool
 	IsSA              bool
 	IsNSA             bool
+	ExplicitNSA       bool
 	IsLTE             bool
 	Is5GA             bool
 	IsLTECA           bool
@@ -1479,6 +1514,59 @@ func validNRPCI(v int) bool     { return v >= 0 && v <= 1007 }
 func validLTEPCI(v int) bool    { return v >= 0 && v <= 503 }
 func validWifiNoise(v int) bool { return v >= -120 && v <= -40 }
 
+// sigExtractNonVoiceDataIfaces 从单行提取数据承载网卡名:
+// 严禁按名字硬滤 rmnet_data1; 仅剔除明确标为纯 ims/emergency(不含 default/dun/hipri/internet)或含非空 PcscfAddresses 的语音专用承载。
+func sigExtractNonVoiceDataIfaces(line string) []string {
+	matches := reDataIface.FindAllStringSubmatchIndex(line, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(matches))
+	prevEnd := 0
+	for i, loc := range matches {
+		ifName := line[loc[2]:loc[3]]
+		if ifName == "" {
+			continue
+		}
+		nextStart := len(line)
+		if i+1 < len(matches) {
+			nextStart = matches[i+1][0]
+		}
+		linkStart := loc[0]
+		for k := loc[0] - 1; k >= prevEnd; k-- {
+			if line[k] == '{' {
+				linkStart = k
+				break
+			}
+		}
+		linkEnd := nextStart
+		depth := 0
+		for k := linkStart; k < nextStart; k++ {
+			if line[k] == '{' {
+				depth++
+			} else if line[k] == '}' {
+				depth--
+				if depth <= 0 {
+					linkEnd = k + 1
+					break
+				}
+			}
+		}
+		apnCtx := line[prevEnd:loc[0]]
+		linkBlk := line[linkStart:linkEnd]
+		prevEnd = linkEnd
+
+		hasDataApn := reDataBearingApn.MatchString(apnCtx)
+		if !hasDataApn {
+			if reNonEmptyPcscf.MatchString(linkBlk) || reVoiceApnToken.MatchString(apnCtx) {
+				continue
+			}
+		}
+		out = append(out, ifName)
+	}
+	return out
+}
+
 func sigLineIndent(s string) int {
 	n := 0
 	for i := 0; i < len(s); i++ {
@@ -1497,7 +1585,7 @@ func sigLineIndent(s string) int {
 func sigIsRegistryTopSection(trimmed string) bool {
 	low := strings.ToLower(trimmed)
 	return strings.HasPrefix(low, "registrations:") ||
-		strings.HasPrefix(low, "local logs") ||
+		strings.HasPrefix(low, "local log") ||
 		strings.HasPrefix(low, "mdefaultsubid=") ||
 		strings.HasPrefix(low, "defaultsubid=") ||
 		strings.HasPrefix(low, "carrier privilege") ||
@@ -1570,7 +1658,7 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 				continue
 			}
 			curIndent = sigLineIndent(line)
-			cur = &parsedPhoneSlot{PhoneID: pid, Ifaces: map[string]bool{}}
+			cur = &parsedPhoneSlot{PhoneID: pid, DataConnState: -1, Ifaces: map[string]bool{}}
 			slots = append(slots, cur)
 			continue
 		}
@@ -1591,6 +1679,11 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 				}
 			}
 		}
+		if m := reDataConnState.FindStringSubmatch(line); m != nil {
+			if stCode, err := strconv.Atoi(m[1]); err == nil {
+				cur.DataConnState = stCode
+			}
+		}
 		if m := reOperatorLong.FindStringSubmatch(line); m != nil && cur.AlphaLong == "" {
 			if v := cleanOperatorToken(m[1]); v != "" {
 				cur.AlphaLong = v
@@ -1609,12 +1702,10 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 				cur.MCCMNC = m[1] + m[2]
 			}
 		}
-		for _, im := range reDataIface.FindAllStringSubmatch(line, -1) {
-			if im[1] != "" {
-				cur.Ifaces[im[1]] = true
-				if phys := strings.TrimPrefix(im[1], "v4-"); phys != "" {
-					cur.Ifaces[phys] = true
-				}
+		for _, ifName := range sigExtractNonVoiceDataIfaces(line) {
+			cur.Ifaces[ifName] = true
+			if phys := strings.TrimPrefix(ifName, "v4-"); phys != "" {
+				cur.Ifaces[phys] = true
 			}
 		}
 		if m := reNrSignal.FindStringSubmatch(line); m != nil {
@@ -1658,15 +1749,29 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		}
 		for _, am := range reAccessTech.FindAllStringSubmatch(line, -1) {
 			tech := strings.ToUpper(strings.TrimSpace(am[1]))
+			techNorm := strings.NewReplacer(" ", "_", "-", "_").Replace(tech)
 			switch {
-			case tech == "NR" || tech == "NR_SA":
+			case techNorm == "NR" || techNorm == "NR_SA":
 				cur.IsSA = true
-			case strings.Contains(tech, "LTE"):
+			case techNorm == "NR_NSA":
+				cur.IsNSA = true
+				cur.ExplicitNSA = true
+			case techNorm == "NR_ADVANCED" || techNorm == "NR_MMWAVE":
+				cur.IsSA = true
+				cur.Is5GA = true
+			case strings.Contains(techNorm, "LTE"):
 				cur.IsLTE = true
-				if strings.Contains(tech, "CA") {
+				if strings.Contains(techNorm, "CA") {
 					cur.IsLTECA = true
 				}
 			}
+		}
+		if reRilDataRadioSA.MatchString(line) {
+			cur.IsSA = true
+		}
+		if reRilDataRadioNSA.MatchString(line) {
+			cur.IsNSA = true
+			cur.ExplicitNSA = true
 		}
 		if reEndcAvail.MatchString(line) || reNrConnected.MatchString(line) {
 			cur.IsNSA = true
@@ -1675,6 +1780,7 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 			switch dm[1] {
 			case "NR_NSA":
 				cur.IsNSA = true
+				cur.ExplicitNSA = true
 			case "NR_ADVANCED", "NR_MMWAVE":
 				// 严禁把 SA 下的 NR_ADVANCED (5G-A) 误标为 NSA!
 				cur.Is5GA = true
@@ -1689,46 +1795,87 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 			cellScanLine = reUnregCellInfo.ReplaceAllString(line, "")
 		}
 		for _, nrBlk := range reCellIdNr.FindAllString(cellScanLine, -1) {
+			var arfcn, pci, bw int
+			var hasPCI bool
+			var band string
 			if am := reNrArfcnField.FindStringSubmatch(nrBlk); am != nil {
-				if arfcn, err := strconv.Atoi(am[1]); err == nil && arfcn > 0 && arfcn != sigUnavailable {
-					cur.FallbackNRArfcn = arfcn
-					if b, _ := nrBandFromARFCN(arfcn, cur.MCCMNC); b != "" && cur.FallbackNRBand == "" {
-						cur.FallbackNRBand = b
-					}
+				if v, err := strconv.Atoi(am[1]); err == nil && v > 0 && v != sigUnavailable {
+					arfcn = v
 				}
 			}
 			if pm := rePciField.FindStringSubmatch(nrBlk); pm != nil {
-				if pci, err := strconv.Atoi(pm[1]); err == nil && validNRPCI(pci) {
-					cur.FallbackNRPCI = pci
-					cur.HasFallbackNRPCI = true
+				if v, err := strconv.Atoi(pm[1]); err == nil && validNRPCI(v) {
+					pci = v
+					hasPCI = true
 				}
 			}
-			if bm := reBandsArray.FindStringSubmatch(nrBlk); bm != nil && cur.FallbackNRBand == "" {
-				cur.FallbackNRBand = parseBandsBracket(bm[1], "n")
+			if bm := reBandsArray.FindStringSubmatch(nrBlk); bm != nil {
+				band = parseBandsBracket(bm[1], "n")
+			}
+			if bwm := reLteBwField.FindStringSubmatch(nrBlk); bwm != nil {
+				if khz, err := strconv.Atoi(bwm[1]); err == nil && khz >= 1000 && khz <= 400000 {
+					bw = khz / 1000
+				}
+			}
+			if pci == 0 && arfcn == 0 && band == "" && bw == 0 {
+				continue
+			}
+			if arfcn > 0 {
+				cur.FallbackNRArfcn = arfcn
+				if band == "" {
+					band, _ = nrBandFromARFCN(arfcn, cur.MCCMNC)
+				}
+			}
+			if hasPCI {
+				cur.FallbackNRPCI = pci
+				cur.HasFallbackNRPCI = true
+			}
+			if band != "" && cur.FallbackNRBand == "" {
+				cur.FallbackNRBand = band
 			}
 		}
 		for _, lteBlk := range reCellIdLte.FindAllString(cellScanLine, -1) {
+			var earfcn, pci, bw int
+			var hasEarfcn, hasPCI bool
+			var band string
 			if am := reEarfcnField.FindStringSubmatch(lteBlk); am != nil {
-				if earfcn, err := strconv.Atoi(am[1]); err == nil && earfcn >= 0 && earfcn != sigUnavailable {
-					cur.FallbackLTEArfcn = earfcn
-					if b, _ := lteBandFromEARFCN(earfcn); b != "" && cur.FallbackLTEBand == "" {
-						cur.FallbackLTEBand = b
-					}
+				if v, err := strconv.Atoi(am[1]); err == nil && v >= 0 && v != sigUnavailable {
+					earfcn = v
+					hasEarfcn = true
 				}
 			}
 			if pm := rePciField.FindStringSubmatch(lteBlk); pm != nil {
-				if pci, err := strconv.Atoi(pm[1]); err == nil && validLTEPCI(pci) {
-					cur.FallbackLTEPCI = pci
-					cur.HasFallbackLTEPCI = true
+				if v, err := strconv.Atoi(pm[1]); err == nil && validLTEPCI(v) {
+					pci = v
+					hasPCI = true
 				}
 			}
-			if bm := reBandsArray.FindStringSubmatch(lteBlk); bm != nil && cur.FallbackLTEBand == "" {
-				cur.FallbackLTEBand = parseBandsBracket(bm[1], "B")
+			if bm := reBandsArray.FindStringSubmatch(lteBlk); bm != nil {
+				band = parseBandsBracket(bm[1], "B")
 			}
-			if bwm := reLteBwField.FindStringSubmatch(lteBlk); bwm != nil && cur.FallbackLTEBWMHz == 0 {
+			if bwm := reLteBwField.FindStringSubmatch(lteBlk); bwm != nil {
 				if khz, err := strconv.Atoi(bwm[1]); err == nil && khz >= 1000 && khz <= 100000 {
-					cur.FallbackLTEBWMHz = khz / 1000
+					bw = khz / 1000
 				}
+			}
+			if pci == 0 && earfcn == 0 && band == "" && bw == 0 {
+				continue
+			}
+			if hasEarfcn {
+				cur.FallbackLTEArfcn = earfcn
+				if band == "" {
+					band, _ = lteBandFromEARFCN(earfcn)
+				}
+			}
+			if hasPCI {
+				cur.FallbackLTEPCI = pci
+				cur.HasFallbackLTEPCI = true
+			}
+			if band != "" && cur.FallbackLTEBand == "" {
+				cur.FallbackLTEBand = band
+			}
+			if bw > 0 && cur.FallbackLTEBWMHz == 0 {
+				cur.FallbackLTEBWMHz = bw
 			}
 		}
 
@@ -1789,6 +1936,10 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 						bandStr, _ = lteBandFromEARFCN(arfcn)
 					}
 				}
+				// 仅当 pci==0 且无频段/带宽/频点 全空占位时跳过, 严禁盲删有频段/频点的合法 3GPP PCI=0!
+				if hasPCI && pci == 0 && bandStr == "" && bwMHz == 0 && arfcn == 0 {
+					continue
+				}
 				if bandStr != "" || bwMHz > 0 || arfcn > 0 || hasPCI {
 					lineCarriers = append(lineCarriers, parsedServingCarrier{
 						IsPrimary: isPri,
@@ -1838,6 +1989,18 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		}
 	}
 	if chosen == nil {
+		// 缺 mSubId 时优先选取 mDataConnectionState=2 (CONNECTED) 的上网槽位
+		for _, sl := range slots {
+			if sl.SawSubID && sl.SubID <= 0 {
+				continue
+			}
+			if sl.DataConnState == 2 && (sl.HasNRValid || sl.HasLTEValid) {
+				chosen = sl
+				break
+			}
+		}
+	}
+	if chosen == nil {
 		for _, sl := range slots {
 			if sl.SawSubID && sl.SubID <= 0 {
 				continue
@@ -1868,9 +2031,10 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 	var comboParts []string
 	var outCarriers []SignalCarrierInfo
 	wantNR := chosen.HasNRValid
+	isEffectiveNSA := chosen.IsNSA && (!chosen.IsSA || chosen.ExplicitNSA)
 
 	for _, c := range chosen.Carriers {
-		if wantNR && !c.IsNR && !chosen.IsNSA {
+		if wantNR && !c.IsNR && !isEffectiveNSA {
 			continue
 		}
 		activeCount++
@@ -2049,9 +2213,9 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		}
 		// 若明确为 SA 且未启用 EN-DC 锚点, RAT 记为 "5G SA", 否则记为 "5G NSA" (100% 保持既有单测兼容);
 		// 5G-A 图标展示统一走 DisplayRAT = "5G-A"。
-		if chosen.IsSA && !chosen.IsNSA {
+		if chosen.IsSA && !isEffectiveNSA {
 			out.RAT = "5G SA"
-		} else if chosen.IsSA && !chosen.HasLTEValid {
+		} else if chosen.IsSA && !chosen.HasLTEValid && !chosen.ExplicitNSA {
 			out.RAT = "5G SA"
 		} else {
 			out.RAT = "5G NSA"

@@ -717,3 +717,290 @@ func TestHostOriginPerAppDeduplicationAndCanonicalTypes(t *testing.T) {
 		t.Fatalf("same host app should aggregate within cooldown: newA2=%v hit=%d len=%d", newA2, evA2.HitCount, rb.Len())
 	}
 }
+
+func TestRealDeviceFourCategoryFalsePositiveRegressions(t *testing.T) {
+	dir := t.TempDir()
+	eng := NewEngine(dir)
+	defer eng.Close()
+
+	t0 := time.Unix(1764000000, 0)
+
+	// Category 1 (B001): Non-Cookie sid business params (Alibaba AMDC, Xingyu, MiniMax),
+	// numeric snowflake IDs, snake-case version constants, and masked/constant passwords -> ZERO hits.
+	fpCredReq := "POST /amdc/mobileDispatch?sid=1920202470728&session_id=19202024707281234567 HTTP/1.1\r\n" +
+		"Host: amdc.m.taobao.com\r\n" +
+		"Sid: da_wr_v13_g1\r\n" +
+		"Cookie: sid=rrBPjfmojvS0; session_id=1234567890123456\r\n" +
+		"Content-Type: application/json\r\n\r\n" +
+		`{"sid":"rrBPjfmojvS0","access_token":"da_wr_v13_g1_rel","api_key":"default_session_token","password":"********","pwd":"000000","passwd":"short"}`
+	if evs, n := eng.ProcessSync(PacketInput{Time: t0, Origin: OriginHost, UID: 10200, RawPayload: []byte(fpCredReq)}); len(evs) != 0 || n != 0 {
+		t.Fatalf("B001 regression: expected 0 hits for AMDC/Xingyu/MiniMax sid & low-entropy/masked credentials, got n=%d evs=%+v", n, evs)
+	}
+
+	// Category 1 positive control: high-entropy Cookie sid (>=16), non-Cookie session_id (>=20), and real password (6..128).
+	tpCredReq := "GET /api/profile?session_id=sess_query_AbCdEf987654 HTTP/1.1\r\n" +
+		"Host: account.example.com\r\n" +
+		"Cookie: sid=sess_abcdef123456\r\n" +
+		"Content-Type: application/x-www-form-urlencoded\r\n\r\n" +
+		"pwd=RealPass#2026"
+	evsCredOK, nCredOK := eng.ProcessSync(PacketInput{
+		Time:       t0.Add(time.Second),
+		Origin:     OriginHost,
+		UID:        10201,
+		Pkg:        "com.example.account",
+		SrcPort:    54321,
+		DstPort:    80,
+		RawPayload: []byte(tpCredReq),
+	})
+	if nCredOK != 3 || len(evsCredOK) != 3 || evsCredOK[0].SrcPort != 54321 {
+		t.Fatalf("B001 positive control failed: n=%d evs=%+v", nCredOK, evsCredOK)
+	}
+
+	// Category 2 (B002): Android privacy placeholder 02:00:00:00:00:00, multicast, and all-same-byte MACs -> ZERO hits;
+	// legitimate locally-administered unicast MAC 02:00:00:00:00:01 -> MUST hit.
+	fpMACReq := "GET /dev?wifi_mac=02:00:00:00:00:00&bssid=01:00:5e:00:00:fb&mac=aa:aa:aa:aa:aa:aa&hwaddr=ff:ff:ff:ff:ff:ff HTTP/1.1\r\nHost: sdk.iot.example\r\n\r\n"
+	if evs, n := eng.ProcessSync(PacketInput{Time: t0.Add(2 * time.Second), ClientMAC: "02:00:00:00:00:00", RawPayload: []byte(fpMACReq)}); len(evs) != 0 || n != 0 {
+		t.Fatalf("B002 regression: fake/multicast/constant MACs must be rejected, got n=%d evs=%+v", n, evs)
+	}
+	if _, err := NormalizeIgnoreRule(IgnoreRule{Scope: ScopeDeviceHostType, MAC: "02:00:00:00:00:00", DstHost: "sdk.iot.example", LeakType: TypeMACAddr}); err == nil {
+		t.Fatal("NormalizeIgnoreRule must reject 02:00:00:00:00:00 placeholder MAC")
+	}
+	tpMACReq := "GET /dev?wifi_mac=02:00:00:00:00:01 HTTP/1.1\r\nHost: sdk.iot.example\r\n\r\n"
+	evsMACOK, nMACOK := eng.ProcessSync(PacketInput{Time: t0.Add(3 * time.Second), ClientMAC: "3c:22:fb:11:22:33", RawPayload: []byte(tpMACReq)})
+	if nMACOK != 1 || len(evsMACOK) != 1 || evsMACOK[0].RawValue != "02:00:00:00:00:01" {
+		t.Fatalf("B002 positive control: valid unicast random MAC 02:00:00:00:00:01 must trigger, got n=%d evs=%+v", nMACOK, evsMACOK)
+	}
+
+	// Category 3 (B003): Fake device IDs (permission_denied, 9774d56d682e549c, all-same-char) & phone key substring FPs -> ZERO hits;
+	// valid IMEISV (16d), IMSI (15d), MEID (14h), ANDROID_ID (16h), 64-hex OAID, and user_phone -> MUST hit.
+	fpDevReq := "POST /collect HTTP/1.1\r\nHost: ad.sdk.example\r\nContent-Type: application/json\r\n\r\n" +
+		`{"imei":"permission_denied","oaid":"unavailable","android_id":"9774d56d682e549c","idfa":"00000000-0000-0000-0000-000000000000","meid":"ffffffffffffff","hotel_id":"13800138000","headphone":"13900139000"}`
+	if evs, n := eng.ProcessSync(PacketInput{Time: t0.Add(4 * time.Second), ClientMAC: "3c:22:fb:11:22:33", RawPayload: []byte(fpDevReq)}); len(evs) != 0 || n != 0 {
+		t.Fatalf("B003 regression: fake device IDs and non-phone keys must produce 0 hits, got n=%d evs=%+v", n, evs)
+	}
+	oaid64 := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tpDevReq := "POST /collect HTTP/1.1\r\nHost: ad.sdk.example\r\nContent-Type: application/json\r\n\r\n" +
+		`{"imeisv":"4901542032375180","imsi":"460001380013800","meid":"A000001F2B3C4D","android_id":"4f8a2c91b7e03d65","oaid":"` + oaid64 + `","user_phone":"13800138000"}`
+	evsDevOK, nDevOK := eng.ProcessSync(PacketInput{Time: t0.Add(5 * time.Second), ClientMAC: "3c:22:fb:11:22:33", RawPayload: []byte(tpDevReq)})
+	if nDevOK != 6 || len(evsDevOK) != 6 {
+		t.Fatalf("B003 positive control: expected 6 hits (imeisv, imsi, meid, android_id, 64h oaid, user_phone), got n=%d evs=%+v", nDevOK, evsDevOK)
+	}
+
+	// Category 4 (B004/B005/B008): FlClash cross-iface (<5s) host deduplication without HitCount inflation,
+	// standalone proxy subscription leak preservation, two real apps (<5s) non-collision, and ScopeAppHostType whitelist.
+	rb := NewRingBuffer(64, 300)
+	// Case 4a: Physical iface (FlClash conduit) arrives first, virtual Meta iface (real business app) arrives 1s later ->
+	// upgrades attribution to real business app, upgrades FakeIP DstIP to public IP, keeps HitCount == 1!
+	_, newC1 := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10300,
+		Pkg:      "com.follow.clash",
+		AppName:  "FlClash",
+		ClientIP: "192.168.1.25",
+		DstIP:    "203.0.113.88",
+		SrcPort:  41001,
+		DstPort:  80,
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0)
+	mergedEv, newC2 := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10234,
+		Pkg:      "com.real.videoapp",
+		AppName:  "某视频",
+		ClientIP: "198.18.0.1",
+		DstIP:    "198.18.0.55",
+		SrcPort:  52002,
+		DstPort:  80,
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(time.Second))
+	if !newC1 || newC2 || rb.Len() != 1 || mergedEv.HitCount != 1 {
+		t.Fatalf("B005 reverse-order FlClash merge failed: new1=%v new2=%v len=%d ev=%+v", newC1, newC2, rb.Len(), mergedEv)
+	}
+	if mergedEv.UID != 10234 || mergedEv.Pkg != "com.real.videoapp" || mergedEv.DstIP != "203.0.113.88" || mergedEv.SrcPort != 52002 {
+		t.Fatalf("B005 merged event lost real app attribution or public DstIP: %+v", mergedEv)
+	}
+	// Third duplicate from unattributed UID=-1 within <5s must also merge without overwriting real app or inflating HitCount.
+	mergedEv2, newC3 := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      -1,
+		ClientIP: "10.0.0.8",
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(2*time.Second))
+	if newC3 || mergedEv2.UID != 10234 || mergedEv2.HitCount != 1 {
+		t.Fatalf("B004/B005 UID=-1 merge corrupted real app event: new3=%v ev=%+v", newC3, mergedEv2)
+	}
+
+	// Case 4b: Two distinct real business apps within 1s (<5s) MUST NOT swallow each other!
+	_, newRealA := rb.Record(LeakEvent{
+		Origin: OriginHost, UID: 10501, Pkg: "com.real.one", DstHost: "shared.sdk.example", LeakType: TypePhone, RawValue: "13800138000",
+	}, t0.Add(10*time.Second))
+	_, newRealB := rb.Record(LeakEvent{
+		Origin: OriginHost, UID: 10502, Pkg: "com.real.two", DstHost: "shared.sdk.example", LeakType: TypePhone, RawValue: "13800138000",
+	}, t0.Add(11*time.Second))
+	if !newRealA || !newRealB || rb.Len() != 3 {
+		t.Fatalf("two distinct real apps within <5s collided: newA=%v newB=%v len=%d", newRealA, newRealB, rb.Len())
+	}
+
+	// Case 4c: ScopeAppHostType ignore rule matches only target host app while keeping legacy 3-scope UniqueKey intact.
+	legacyRule, err := NormalizeIgnoreRule(IgnoreRule{Scope: ScopeHostType, DstHost: "trusted.login.example", LeakType: TypePhone})
+	if err != nil || legacyRule.UniqueKey() != "host_type||trusted.login.example|PHONE" {
+		t.Fatalf("legacy UniqueKey changed unexpectedly: err=%v uk=%q", err, legacyRule.UniqueKey())
+	}
+	appRule, err := NormalizeIgnoreRule(IgnoreRule{
+		Scope:    ScopeAppHostType,
+		UID:      10501,
+		Pkg:      "COM.Real.One",
+		DstHost:  "sdk.example",
+		LeakType: "phone",
+	})
+	if err != nil || appRule.Pkg != "com.real.one" {
+		t.Fatalf("NormalizeIgnoreRule(ScopeAppHostType) failed: err=%v rule=%+v", err, appRule)
+	}
+	if purged := rb.PurgeIgnored(appRule.MatchesEvent); purged != 1 || rb.Len() != 2 {
+		t.Fatalf("expected ScopeAppHostType rule to purge only com.real.one event (purged=%d len=%d)", purged, rb.Len())
+	}
+	if appRule.MatchesEvent(LeakEvent{Origin: OriginHotspot, MAC: "3c:22:fb:11:22:33", DstHost: "shared.sdk.example", LeakType: TypePhone}) {
+		t.Fatal("ScopeAppHostType must never match downstream hotspot device events")
+	}
+}
+
+func TestCrossIfaceOutOfOrderCooldownReplayFoldsWithoutDuplicateSplit(t *testing.T) {
+	rb := NewRingBuffer(16, 300)
+	t0 := time.Unix(1764100000, 0)
+
+	// 1. t=0s: Real business app sends first cleartext request (real packet arrives first, conduit 1s later).
+	seedEv, new0 := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10234,
+		Pkg:      "com.real.videoapp",
+		AppName:  "某视频",
+		ClientIP: "198.18.0.1",
+		DstIP:    "198.18.0.55",
+		SrcPort:  52001,
+		DstPort:  80,
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0)
+	_, new0Dup := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10300,
+		Pkg:      "com.follow.clash",
+		AppName:  "FlClash",
+		ClientIP: "192.168.1.25",
+		DstIP:    "203.0.113.88",
+		SrcPort:  41001,
+		DstPort:  80,
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(time.Second))
+	if !new0 || new0Dup || rb.Len() != 1 {
+		t.Fatalf("t=0s initial cross-iface pair unexpected state: new0=%v new0Dup=%v len=%d", new0, new0Dup, rb.Len())
+	}
+
+	// 2. t=30s (within 300s cooldown): Physical FlClash conduit packet arrives 1ms BEFORE virtual TUN real app packet.
+	// Step 2a: Conduit arrives at t=30s (>5s after t=0s, so it initially occupies a temporary new slot).
+	_, _ = rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10300,
+		Pkg:      "com.follow.clash",
+		AppName:  "FlClash",
+		ClientIP: "192.168.1.25",
+		DstIP:    "203.0.113.99",
+		SrcPort:  41002,
+		DstPort:  80,
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(30*time.Second))
+	// Step 2b: 1ms later at t=30s, real business app packet arrives -> upgrades temporary slot and folds it
+	// back into the t=0s real business app entry, removing the redundant slot so zero duplicate split remains.
+	folded30, new30Real := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10234,
+		Pkg:      "com.real.videoapp",
+		AppName:  "某视频",
+		ClientIP: "198.18.0.1",
+		DstIP:    "198.18.0.55",
+		SrcPort:  52002,
+		DstPort:  80,
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(30*time.Second+time.Millisecond))
+	if new30Real || rb.Len() != 1 {
+		t.Fatalf("t=30s out-of-order replay caused duplicate split: new=%v len=%d snap=%+v", new30Real, rb.Len(), rb.Snapshot())
+	}
+	if folded30.ID != seedEv.ID || folded30.FirstSeen != t0.Unix() || folded30.LastSeen != t0.Add(30*time.Second).Unix() || folded30.HitCount != 2 {
+		t.Fatalf("t=30s folded event metadata mismatch: got %+v, seedID=%s", folded30, seedEv.ID)
+	}
+	if folded30.UID != 10234 || folded30.Pkg != "com.real.videoapp" || folded30.DstIP != "203.0.113.99" || folded30.SrcPort != 52002 {
+		t.Fatalf("t=30s folded event lost real attribution or public DstIP: %+v", folded30)
+	}
+
+	// 3. t=60s (within 300s cooldown, with an unrelated app event interleaved after the temporary slot):
+	// Unattributed UID=-1 packet arrives first at t=60s, unrelated app arrives at t=60s, real app arrives 1ms later.
+	_, _ = rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      -1,
+		ClientIP: "10.0.0.8",
+		DstIP:    "203.0.113.100",
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(60*time.Second))
+	_, newOther := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10888,
+		Pkg:      "com.other.reader",
+		DstHost:  "news.example.com",
+		LeakType: TypePhone,
+		RawValue: "13800138000",
+	}, t0.Add(60*time.Second))
+	folded60, new60Real := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10234,
+		Pkg:      "com.real.videoapp",
+		ClientIP: "198.18.0.1",
+		DstIP:    "198.18.0.55",
+		SrcPort:  52003,
+		DstPort:  80,
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(60*time.Second+time.Millisecond))
+	if !newOther || new60Real || rb.Len() != 2 || folded60.HitCount != 3 || folded60.DstIP != "203.0.113.100" {
+		t.Fatalf("t=60s interleaved UID=-1 out-of-order fold failed: newOther=%v new60=%v len=%d folded=%+v snap=%+v",
+			newOther, new60Real, rb.Len(), folded60, rb.Snapshot())
+	}
+
+	// 4. t=400s (>300s after LastSeen=t0+60s): Post-cooldown out-of-order pair MUST remain a distinct post-cooldown entry.
+	_, _ = rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10300,
+		Pkg:      "com.follow.clash",
+		DstIP:    "203.0.113.101",
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(400*time.Second))
+	postEv, postNew := rb.Record(LeakEvent{
+		Origin:   OriginHost,
+		UID:      10234,
+		Pkg:      "com.real.videoapp",
+		DstIP:    "198.18.0.55",
+		DstHost:  "track.direct.example",
+		LeakType: TypeDeviceID,
+		RawValue: "490154203237518",
+	}, t0.Add(400*time.Second+time.Millisecond))
+	if postNew || rb.Len() != 3 || postEv.ID == seedEv.ID || postEv.HitCount != 1 {
+		t.Fatalf("t=400s post-cooldown pair should stay a new entry: postNew=%v len=%d postEv=%+v", postNew, rb.Len(), postEv)
+	}
+}

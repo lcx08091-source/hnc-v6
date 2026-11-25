@@ -419,3 +419,183 @@ func TestWave4RC6EncdnsImmediateSyncAndDNSFailOpen(t *testing.T) {
 		t.Fatalf("expected bgSem drained to 0 after Close() waited on wg, got %d", len(fwdBg.bgSem))
 	}
 }
+
+func TestRC7DualSimBillingDayMigrationDNSKeepaliveAndUserAppRules(t *testing.T) {
+	// 1. B032: 修改 billing_day 时仅淘汰 AnchorAt < newCycStart 的旧账期锚点,
+	//    处于新账期内的有效锚点自动重算 AnchorBase 并更新 AnchorCycle, 且绝不误清另一张 SIM 卡有效锚点
+	dir := t.TempDir()
+	for _, sub := range []string{"data", "run", "bin"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loc := time.FixedZone("CST", 8*3600)
+	// 写入 10 月 12 日(2 GiB)与 10 月 18 日(3 GiB)的卡1蜂窝日计费记录
+	writeSim1Day := func(date string, gib uint64) {
+		day := &puDay{
+			Date: date,
+			Cell: map[string][2]uint64{"1|CMCC": {gib * puGiB, 0}},
+		}
+		b, _ := json.Marshal(day)
+		if err := os.WriteFile(puDayPath(dir, date), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSim1Day("20261012", 2)
+	writeSim1Day("20261018", 3)
+
+	// 10 月 5 日设 billing_day=1 + 卡2锚点 12 GB (AnchorAt=2026-10-05)
+	tOct5 := time.Date(2026, 10, 5, 10, 0, 0, 0, loc)
+	if r := actionPhoneUsageSetAt(dir, map[string]string{
+		"billing_day":    "1",
+		"plan_sim1_gb":   "100",
+		"plan_sim2_gb":   "50",
+		"anchor_sim2_gb": "12",
+	}, tOct5); !r.OK {
+		t.Fatalf("set sim2 anchor failed: %+v", r)
+	}
+	// 10 月 20 日设卡1锚点 30 GB (AnchorAt=2026-10-20, 此时 billing_day=1 下 AnchorBase=2+3=5 GiB)
+	tOct20 := time.Date(2026, 10, 20, 15, 0, 0, 0, loc)
+	if r := actionPhoneUsageSetAt(dir, map[string]string{
+		"anchor_sim1_gb": "30",
+	}, tOct20); !r.OK {
+		t.Fatalf("set sim1 anchor failed: %+v", r)
+	}
+	cfgBefore := puLoadConfig(dir)
+	if v2, ok := cfgBefore.AnchorGB["2"]; !ok || v2 != 12.0 {
+		t.Fatalf("setting anchor_sim1_gb must NOT wipe SIM2 anchor, got %+v", cfgBefore.AnchorGB)
+	}
+
+	// 10 月 22 日修改 billing_day=15 (newCycStart=2026-10-15, newCyc="20261015"):
+	//  - 卡2 AnchorAt(10-05) < 10-15 -> 淘汰清空;
+	//  - 卡1 AnchorAt(10-20) >= 10-15 -> 保留 30 GB, AnchorCycle 更新为 "20261015", AnchorBase 重算为 [10-15..10-20] = 3 GiB!
+	tOct22 := time.Date(2026, 10, 22, 9, 0, 0, 0, loc)
+	if r := actionPhoneUsageSetAt(dir, map[string]string{
+		"billing_day": "15",
+	}, tOct22); !r.OK {
+		t.Fatalf("change billing_day=15 failed: %+v", r)
+	}
+	cfgAfter := puLoadConfig(dir)
+	if _, has2 := cfgAfter.AnchorGB["2"]; has2 {
+		t.Fatalf("expired SIM2 anchor (10-05 < 10-15) must be evicted on billing_day change, got %+v", cfgAfter.AnchorGB)
+	}
+	if v1, has1 := cfgAfter.AnchorGB["1"]; !has1 || v1 != 30.0 || cfgAfter.AnchorCycle != "20261015" {
+		t.Fatalf("in-cycle SIM1 anchor must survive billing_day=15 with cycle=20261015, got gb=%+v cycle=%q",
+			cfgAfter.AnchorGB, cfgAfter.AnchorCycle)
+	}
+	if cfgAfter.AnchorBase["1"] != 3*puGiB {
+		t.Fatalf("SIM1 AnchorBase must recompute for [10-15..10-20] = 3 GiB, got %d", cfgAfter.AnchorBase["1"])
+	}
+
+	// 验证 DPI 本机归因关闭态(!enabled)但热点存在 ip_app_map.json 时 evalDPI 仍填充 LANSelfConsistency
+	if err := os.WriteFile(filepath.Join(dir, "run", "ip_app_map.json"), []byte(`{"entries":[{"ip":"203.0.113.50","app_id":"weixin"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	evRes := evalDPI(dir, 7, tOct22)
+	if evRes.Enabled || evRes.LANSelfConsistency == nil {
+		t.Fatalf("evalDPI(!enabled) must still populate LANSelfConsistency, got enabled=%v ptr=%v",
+			evRes.Enabled, evRes.LANSelfConsistency)
+	}
+
+	// 2. B033: SetUpstream("") 弱网瞬断保留 180s 保活缓存, 切异源非空上游才清空; cooling && !active 前置不触发 chooseUpstream 探针
+	fwd := newDNSForwarder()
+	defer fwd.Close()
+	fwd.SetUpstream("10.0.0.1:53")
+	qKeep := dnsBuildQuery(0x801, "keepalive.rc7.test", dnsTypeA, 0, false)
+	pqKeep, _ := dnsParseQuery(qKeep)
+	rawKeep := buildTestAReply(qKeep, pqKeep, net.IPv4(1, 2, 3, 4), 60, false)
+	nowDNS := time.Now()
+	fwd.cache.put(dnsCacheKey(pqKeep), rawKeep, mustResp(t, rawKeep), nowDNS)
+
+	fwd.SetUpstream("") // 弱网瞬断置空上游 -> 严禁清空保活缓存
+	if !fwd.cache.hasStale(dnsCacheKey(pqKeep), nowDNS.Add(70*time.Second)) {
+		t.Fatal("SetUpstream(\"\") must NOT flush 180s Serve-Stale cache during transient upstream loss")
+	}
+	fwd.SetUpstream("10.0.0.1:53") // 恢复同一上游 -> 仍保留缓存
+	if !fwd.cache.hasStale(dnsCacheKey(pqKeep), nowDNS.Add(75*time.Second)) {
+		t.Fatal("restoring identical upstream after empty gap must keep cache")
+	}
+	fwd.SetUpstream("10.0.0.2:53") // 切换不同非空上游 -> 清空旧网缓存
+	if fwd.cache.hasStale(dnsCacheKey(pqKeep), nowDNS.Add(80*time.Second)) {
+		t.Fatal("switching to a distinct non-empty upstream must flush cache")
+	}
+
+	hCool := newTKHarness(t)
+	hCool.conf(`{"enabled":true}`)
+	probeHits := 0
+	hCool.tk.probe = func(string, time.Duration) (time.Duration, int, error) {
+		probeHits++
+		return time.Millisecond, dnsRcodeNoError, nil
+	}
+	hCool.tk.mu.Lock()
+	hCool.tk.active = false
+	hCool.tk.retryAt = hCool.now.Add(60 * time.Second)
+	hCool.tk.foReason = "selftest"
+	hCool.tk.mu.Unlock()
+	hCool.tk.tick()
+	if probeHits != 0 {
+		t.Fatalf("cooling && !active must return before chooseUpstream probe, got probeHits=%d", probeHits)
+	}
+
+	// connBlocksFor 大小写 MAC 归一化验证
+	if err := os.WriteFile(connBlocksPath(dir), []byte(`{"items":[{"mac":"AA:BB:CC:DD:EE:99","kind":"domain","value":"example.org"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gotCB := connBlocksFor(dir, "AA:BB:CC:DD:EE:99")
+	if len(gotCB) != 1 || gotCB[0].MAC != "aa:bb:cc:dd:ee:99" {
+		t.Fatalf("connBlocksFor must normalize MAC to lowercase, got %+v", gotCB)
+	}
+
+	// 3. B036: user:xxx 自定义应用规则打通应用限速(actionAppLimitSet + apiAppLimits)与应用时长派生阻断(connBlockDerived)
+	resetAppTimeGlobals(t)
+	t.Setenv("HNC_DIR", dir)
+	writeStub(t, dir, "connblock_sync.sh", "echo CONN_BLOCK=on\n")
+	writeStub(t, dir, "apply_app_limits.sh", "exit 0\n")
+
+	userRulesJSON := `{"schema":1,"rules":[
+		{"id":"u1","kind":"domain","value":"erp.corp-rc7.example","app_id":"user:Corp.ERP-1","app_name":"企业ERP","category":"work","created":1800000000},
+		{"id":"u2","kind":"ip","value":"198.51.100.77","app_id":"user:Corp.ERP-1","app_name":"企业ERP","category":"work","created":1800000000,"expires":4102444800}
+	]}`
+	if err := os.WriteFile(filepath.Join(dir, "data", "dpi_user_rules.json"), []byte(userRulesJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(
+		`{"entries":{"198.51.100.78":{"name":"sso.erp.corp-rc7.example","src":"dns","ts":10}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "rules.json"), []byte(`{"devices":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sUser := newServer(dir)
+	uMAC := "aa:bb:cc:11:22:33"
+	if r := actionAppLimitSet(dir, map[string]string{"mac": uMAC, "app_id": "user:Corp.ERP-1", "down_mbps": "5"}); !r.OK {
+		t.Fatalf("actionAppLimitSet must accept user:Corp.ERP-1, got %+v", r)
+	}
+	recAL := httptest.NewRecorder()
+	sUser.apiAppLimits(recAL, httptest.NewRequest("GET", "/api/app_limits", nil))
+	var alUser struct {
+		Items []appLimitView `json:"items"`
+	}
+	if err := json.Unmarshal(recAL.Body.Bytes(), &alUser); err != nil || len(alUser.Items) != 1 {
+		t.Fatalf("apiAppLimits user:Corp.ERP-1 bad resp: %v %s", err, recAL.Body.String())
+	}
+	if alUser.Items[0].IPsTotal != 2 || alUser.Items[0].IPsLimited != 2 {
+		t.Fatalf("expected user:Corp.ERP-1 to match both explicit IP and domain->ipname IP (total=2), got %+v", alUser.Items[0])
+	}
+
+	nowU := time.Now()
+	setTodayActive(nowU, uMAC+"|user:Corp.ERP-1", 3600)
+	if r := actionAppTimeLimitSet(sUser, map[string]string{"mac": uMAC, "app_id": "user:Corp.ERP-1", "minutes": "15"}); !r.OK {
+		t.Fatalf("actionAppTimeLimitSet must accept user:Corp.ERP-1, got %+v", r)
+	}
+	sUser.connBlockRefresh()
+	uDNS := readFileStr(connBlocksDNS(dir))
+	uFlat := readFileStr(connBlocksFlat(dir))
+	if !strings.Contains(uDNS, uMAC+" erp.corp-rc7.example\n") {
+		t.Fatalf("expected user:Corp.ERP-1 domain in conn_blocks.dns, got:\n%s", uDNS)
+	}
+	if !strings.Contains(uFlat, uMAC+" 198.51.100.77") || !strings.Contains(uFlat, uMAC+" 198.51.100.78") {
+		t.Fatalf("expected user:Corp.ERP-1 explicit & domain-resolved IPs in conn_blocks.flat, got:\n%s", uFlat)
+	}
+}

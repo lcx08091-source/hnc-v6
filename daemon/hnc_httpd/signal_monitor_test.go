@@ -565,3 +565,169 @@ func TestSignalInterferenceSourcesZeroFakePercentages(t *testing.T) {
 	}
 }
 
+func TestRC7Signal5GSAKeyValuePlaceholderPCIIMSVoiceAndStaleHistory(t *testing.T) {
+	// 1. B031: accessNetworkTechnology=NR 后紧跟空格分隔键值(如 nsac=0 / rejectCause=0) + getRilDataRadioTechnology=20(NR_SA)
+	//    + 空占位 mPhysicalChannelConfigList PCI=0/Band=0/BW=0/ARFCN=0 跳过以保留 CellIdentityNr 真值 PCI=858
+	//    + IMS 语音专网口(PcscfAddresses 非空 / [ims])剔除 + 缺 mSubId 时优选 mDataConnectionState=2 槽位
+	//    + 单数 Local log: 截断
+	dumpSA := `
+mActiveDataSubId=2
+  Phone Id=0
+    mDataConnectionState=0
+    mServiceState={mOperatorAlphaLong=China Unicom, mOperatorNumeric=46001, accessNetworkTechnology=LTE, getRilDataRadioTechnology=14(LTE)}
+    mSignalStrength={mLte=CellSignalStrengthLte: rssi=-63 rsrp=-79 rsrq=-7 rssnr=24}
+    LinkProperties: {InterfaceName: rmnet_data0 LinkAddresses: [ 2408:8000::2/64 ] PcscfAddresses: [ 2408:8000::1 ]}
+  Phone Id=1
+    mDataConnectionState=2
+    mServiceState={mOperatorAlphaLong=China Mobile, mOperatorNumeric=46000, accessNetworkTechnology=NR nsac=0 rejectCause=0, getRilDataRadioTechnology=20(NR_SA), isEnDcAvailable=false}
+    CellIdentityNr:{ mPci = 858 mTac = 20481 mNrArfcn = 504990 mBands = [41] }
+    mSignalStrength={mNr=CellSignalStrengthNr:{ csiRsrp = -85 ssRsrp = -84 ssRsrq = -9 ssSinr = 19 level = 4 }}
+    mPhysicalChannelConfigList=[{mConnectionStatus=PrimaryServing,mNetworkType=NR,mBand=0,mDownlinkChannelNumber=0,mCellBandwidthDownlinkKhz=0,mPhysicalCellId=0}]
+    mPreciseDataConnectionStates={ApnSetting: [ims] LinkProperties: {InterfaceName: rmnet_data1 PcscfAddresses: [ 2409:8080::9 ]}, ApnSetting: [default,supl] LinkProperties: {InterfaceName: rmnet_data3 LinkAddresses: [ 10.66.77.88/24 ]}}
+Local log:
+  Phone Id=1 mDataConnectionState=2 ssRsrp=-135 accessNetworkTechnology=LTE
+`
+	if !puIsLocalLogsHeader("Local log:") || !puIsLocalLogsHeader("  local logs:") {
+		t.Fatal("puIsLocalLogsHeader must recognize both singular 'Local log:' and plural 'local logs:'")
+	}
+	stSA := parseTelephonyRegistryDump(dumpSA, "", 1800100000)
+	if !stSA.Available || stSA.Slot != 2 {
+		t.Fatalf("expected active data Phone Id=1 (Slot=2 via mDataConnectionState=2), got avail=%v slot=%d", stSA.Available, stSA.Slot)
+	}
+	if stSA.RAT != "5G SA" {
+		t.Fatalf("expected RAT='5G SA' (must not swallow 'nsac=0' as NSA), got %q", stSA.RAT)
+	}
+	if !stSA.HasPCI || stSA.PCI != 858 || stSA.Band != "n41" {
+		t.Fatalf("empty placeholder PCI=0/Band=0/BW=0/ARFCN=0 must be skipped for CellIdentityNr PCI=858 n41, got pci=%d(%v) band=%q",
+			stSA.PCI, stSA.HasPCI, stSA.Band)
+	}
+	if stSA.UpstreamIface != "rmnet_data3" {
+		t.Fatalf("IMS Pcscf interface rmnet_data1 must be skipped in favor of default data rmnet_data3, got %q", stSA.UpstreamIface)
+	}
+	if stSA.RSRPdBm != -84 {
+		t.Fatalf("singular 'Local log:' tail must be truncated before ssRsrp=-135, got rsrp=%d", stSA.RSRPdBm)
+	}
+
+	// 验证显式 accessNetworkTechnology=NR_NSA 准确识别为 5G NSA
+	dumpExplicitNSA := strings.Replace(dumpSA, "accessNetworkTechnology=NR nsac=0 rejectCause=0, getRilDataRadioTechnology=20(NR_SA)", "accessNetworkTechnology=NR_NSA", 1)
+	if stNSA := parseTelephonyRegistryDump(dumpExplicitNSA, "rmnet_data3", 1800100010); stNSA.RAT != "5G NSA" {
+		t.Fatalf("expected explicit NR_NSA -> '5G NSA', got %q", stNSA.RAT)
+	}
+
+	// 2. B031: 环形历史剔除 Ts < UpdatedAt-600 的陈旧点(如息屏 27h 后唤醒), 且相邻间隔 >300s 的跨时段基站变更不计入乒乓切换
+	s, _, dir := newV6TestMux(t)
+	mon := newSignalMonitor(dir)
+	var cur hostSignalStatus
+	mon.sampleFn = func(_ *server) hostSignalStatus { return cur }
+
+	t0 := int64(1800200000)
+	cur = hostSignalStatus{
+		Available: true, Mode: "cellular", RAT: "5G SA", Band: "n41",
+		PCI: 101, HasPCI: true, RSRPdBm: -82, Bars: 4, Quality: "excellent", RFCeilingFactor: 1.0,
+		UpdatedAt: t0,
+	}
+	_ = mon.Refresh(s)
+
+	// 27 小时(97200s > 600s)后在新基站唤醒采样: 旧点必须被剔除, 且间隔 >300s 绝不计为近期基站切换
+	cur.PCI = 309
+	cur.Band = "n78"
+	cur.RSRPdBm = -95
+	cur.UpdatedAt = t0 + 97200
+	afterSleep := mon.Refresh(s)
+	if len(afterSleep.History) != 1 || afterSleep.History[0].Ts != t0+97200 {
+		t.Fatalf("expected 27h stale sample evicted leaving 1 fresh point, got len=%d hist=%+v", len(afterSleep.History), afterSleep.History)
+	}
+	if afterSleep.HandoverCount != 0 {
+		t.Fatalf("cell change across >300s sleep gap must NOT increment HandoverCount, got %d", afterSleep.HandoverCount)
+	}
+	if afterSleep.JitterdB != 0 {
+		t.Fatalf("stale pre-sleep RSRP must not pollute current JitterdB, got %d", afterSleep.JitterdB)
+	}
+}
+
+func TestSignalRealDeviceMAccessTechnologyZeroCellIdAndStaleGet(t *testing.T) {
+	// 1. 真机 mAccessTechnology = NR (末尾带空格, 无 NSA 指示) + 尾随全零占位 CellIdentityNr / CellIdentityLte 不覆写有效 Fallback*
+	dumpRealSA := `
+mActiveDataSubId = 1
+  Phone Id = 0
+    mSubId = 1
+    mDataConnectionState = 2
+    mServiceState={mOperatorAlphaLong = China Mobile, mOperatorNumeric = 46000, mAccessTechnology = NR , isEnDcAvailable = false}
+    CellIdentityNr:{ mPci = 412 mTac = 20481 mNrArfcn = 504990 mBands = [41] }
+    CellIdentityNr:{ mPci = 0 mTac = 0 mNrArfcn = 0 mBands = [] }
+    CellIdentityLte:{ mPci = 188 mEarfcn = 1650 mBands = [3] mBandwidth = 20000 }
+    CellIdentityLte:{ mPci = 0 mEarfcn = 0 mBands = [] mBandwidth = 0 }
+    mSignalStrength={mNr=CellSignalStrengthNr:{ csiRsrp = -81 ssRsrp = -80 ssRsrq = -8 ssSinr = 21 level = 4 }}
+    mPreciseDataConnectionStates={InterfaceName: rmnet_data2}
+`
+	st1 := parseTelephonyRegistryDump(dumpRealSA, "rmnet_data2", 1800300000)
+	if !st1.Available || st1.RAT != "5G SA" {
+		t.Fatalf("expected real-device 'mAccessTechnology = NR ' -> RAT='5G SA', got avail=%v rat=%q", st1.Available, st1.RAT)
+	}
+	if !st1.HasPCI || st1.PCI != 412 || st1.Band != "n41" || st1.ARFCN != 504990 {
+		t.Fatalf("all-zero CellIdentityNr placeholder must not overwrite FallbackNR*, got pci=%d(%v) band=%q arfcn=%d",
+			st1.PCI, st1.HasPCI, st1.Band, st1.ARFCN)
+	}
+
+	// 2. 真机 mAccessTechnology = NR_SA + mRilDataRadioTechnology = 20(NR_SA) 及 LTE 全零占位不覆写 FallbackLTE*
+	dumpSAExplicit := `
+mActiveDataSubId = 1
+  Phone Id = 0
+    mSubId = 1
+    mServiceState={mOperatorAlphaLong = China Telecom, mOperatorNumeric = 46011, mAccessTechnology = NR_SA, mRilDataRadioTechnology = 20(NR_SA)}
+    CellIdentityNr:{ mPci = 616 mNrArfcn = 633984 mBands = [78] }
+    mSignalStrength={mNr=CellSignalStrengthNr:{ ssRsrp = -85 ssRsrq = -9 ssSinr = 18 level = 4 }}
+    mPreciseDataConnectionStates={InterfaceName: rmnet_data0}
+`
+	st2 := parseTelephonyRegistryDump(dumpSAExplicit, "rmnet_data0", 1800300010)
+	if !st2.Available || st2.RAT != "5G SA" || st2.PCI != 616 || st2.Band != "n78" {
+		t.Fatalf("expected 'mAccessTechnology = NR_SA' + mRilDataRadioTechnology -> '5G SA' PCI=616 n78, got rat=%q pci=%d band=%q",
+			st2.RAT, st2.PCI, st2.Band)
+	}
+
+	dumpLTEZero := `
+mActiveDataSubId = 1
+  Phone Id = 0
+    mSubId = 1
+    mServiceState={mOperatorAlphaLong = China Unicom, mOperatorNumeric = 46001, mAccessTechnology = LTE }
+    CellIdentityLte:{ mPci = 222 mEarfcn = 1650 mBands = [3] mBandwidth = 20000 }
+    CellIdentityLte:{ mPci = 0 mEarfcn = 0 mBands = [] mBandwidth = 0 }
+    mSignalStrength={mLte=CellSignalStrengthLte: rssi=-62 rsrp=-83 rsrq=-8 rssnr=19}
+    mPreciseDataConnectionStates={InterfaceName: rmnet_data0}
+`
+	stLTE := parseTelephonyRegistryDump(dumpLTEZero, "rmnet_data0", 1800300020)
+	if !stLTE.Available || stLTE.RAT != "4G LTE" || !stLTE.HasPCI || stLTE.PCI != 222 || stLTE.Band != "B3" || stLTE.BandwidthMHz != 20 {
+		t.Fatalf("all-zero CellIdentityLte placeholder must not overwrite FallbackLTE*, got rat=%q pci=%d(%v) band=%q bw=%d",
+			stLTE.RAT, stLTE.PCI, stLTE.HasPCI, stLTE.Band, stLTE.BandwidthMHz)
+	}
+
+	// 3. Get() 当 now - cp.UpdatedAt > 600 时归零过期快照的 HandoverCount 与 JitterdB
+	s, _, dir := newV6TestMux(t)
+	mon := newSignalMonitor(dir)
+	mon.mu.Lock()
+	mon.last = hostSignalStatus{
+		Available:       true,
+		Mode:            "cellular",
+		RAT:             "5G SA",
+		Band:            "n41",
+		RSRPdBm:         -85,
+		SINRdB:          18,
+		HasSINR:         true,
+		Bars:            4,
+		Quality:         "excellent",
+		RFCeilingFactor: 1.0,
+		HandoverCount:   4,
+		JitterdB:        11,
+		UpdatedAt:       time.Now().Unix() - 605,
+	}
+	mon.lastAt = time.Now() // 避免异步触发采样干扰断言
+	mon.mu.Unlock()
+
+	gotStale := mon.Get(s)
+	if gotStale.HandoverCount != 0 || gotStale.JitterdB != 0 {
+		t.Fatalf("expected Get() to zero HandoverCount and JitterdB when UpdatedAt >600s old, got ho=%d jitter=%d",
+			gotStale.HandoverCount, gotStale.JitterdB)
+	}
+}
+
+

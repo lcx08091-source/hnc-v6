@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -240,6 +241,15 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	if fi, err := os.Stat(devicesPath); err == nil {
 		lastMod = fi.ModTime().UnixNano()
 	}
+	statePath := filepath.Join(s.hncDir, "run", "hnc_state")
+	readStateToken := func() string {
+		b, err := os.ReadFile(statePath)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
+	lastState := readStateToken()
 
 	// v5.22: 基准 1.5s; 热点未开时 5s(设备表几乎不变, power_sched.go sse_poll)
 	pollEvery, _ := powerInterval("sse_poll", activityNow(), loopFlags{})
@@ -267,15 +277,19 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			fi, err := os.Stat(devicesPath)
-			if err != nil {
-				continue
-			}
-			m := fi.ModTime().UnixNano()
-			if m != lastMod {
-				lastMod = m
-				if !write("event: changed\ndata: {\"reason\":\"devices\"}\n\n") {
+			if curState := readStateToken(); curState != lastState {
+				lastState = curState
+				if !write("event: changed\ndata: {\"reason\":\"state\"}\n\n") {
 					return
+				}
+			}
+			if fi, err := os.Stat(devicesPath); err == nil {
+				m := fi.ModTime().UnixNano()
+				if m != lastMod {
+					lastMod = m
+					if !write("event: changed\ndata: {\"reason\":\"devices\"}\n\n") {
+						return
+					}
 				}
 			}
 		}

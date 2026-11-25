@@ -1552,7 +1552,17 @@ func (t *dnsTakeover) tickLocked() {
 	t.refreshBlocklist(now)
 	fwd.maybeCheckNetSig(now)
 
-	// 2. 上游: 没选过 / 切网触发了 onFlush 重置 / 非 tether 每分钟重探(优先回到 tether)
+	// 2. fail-open 冷却中(前置判定: 避免冷却期内每轮重探上游令退避指数翻倍或瞬断误清缓存)
+	t.mu.Lock()
+	cooling := now.Before(t.retryAt)
+	active := t.active
+	t.mu.Unlock()
+	if cooling && !active {
+		t.setState("failopen", t.lastErrSnapshot())
+		return
+	}
+
+	// 3. 上游: 没选过 / 切网触发了 onFlush 重置 / 非 tether 每分钟重探(优先回到 tether)
 	t.mu.Lock()
 	up, kind, checked := t.upstream, t.upstreamKind, t.upCheckedAt
 	t.mu.Unlock()
@@ -1572,16 +1582,6 @@ func (t *dnsTakeover) tickLocked() {
 	}
 	if up == "" {
 		t.failOpenLocked("no_upstream", true)
-		return
-	}
-
-	// 3. fail-open 冷却中
-	t.mu.Lock()
-	cooling := now.Before(t.retryAt)
-	active := t.active
-	t.mu.Unlock()
-	if cooling && !active {
-		t.setState("failopen", t.lastErrSnapshot())
 		return
 	}
 

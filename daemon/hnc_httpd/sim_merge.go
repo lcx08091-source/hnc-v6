@@ -73,6 +73,7 @@ func simDeviceMap(v *simView, now int64) map[string]interface{} {
 		"loss_pct":      d.LossPct,
 		"delay_enabled": d.DelayMs > 0 || d.JitterMs > 0 || d.LossPct > 0,
 		"sqm_enabled":   d.SQM,
+		"app_qos":       d.AppQoS,
 		"whitelist":     d.Whitelist,
 		"rx_bps":        v.Rx,
 		"tx_bps":        v.Tx,
@@ -111,7 +112,7 @@ func simDeviceMap(v *simView, now int64) map[string]interface{} {
 			"count": 20 + int(v.Down/(1<<20))%500, "last_seen": lastSeen,
 		}}
 	}
-	if bps := v.Rx + v.Tx; d.AppID != "" && bps >= liveAppMinBps {
+	if bps := v.Rx + v.Tx; d.AppID != "" && bps >= liveAppMinBps/8 {
 		m["live_apps"] = []map[string]interface{}{{
 			"id": id, "name": name, "bps": bps, "category": cat, "share": 1.0, "system": appTier(cat) == tierSystem,
 		}}
@@ -281,7 +282,7 @@ func (s *server) simConnections(mac string) (map[string]interface{}, bool) {
 				dnB, upB = uint64(200+c.sport%800), uint64(80+c.sport%300)
 			}
 			item := map[string]interface{}{
-				"proto": c.proto, "dst": c.ip, "dport": c.dport, "sport": c.sport,
+				"proto": c.proto, "src": d.IP, "dst": c.ip, "dport": c.dport, "sport": c.sport,
 				"up_bytes": upB, "down_bytes": dnB, "up_bps": up, "down_bps": dn,
 				"v6": false, "name": c.host, "name_src": c.nameSrc, "sim": true,
 			}
@@ -362,6 +363,36 @@ func (s *server) simMergeConnCounts(counts map[string]map[string]interface{}) {
 		n := len(simConnsFor(v, seed, lib))
 		counts[v.D.MAC] = map[string]interface{}{"n": n, "bps": float64(v.Rx + v.Tx), "sim": true}
 	}
+}
+
+// simActiveConnCount 汇总当前在线未拉黑模拟设备的活跃连接总数; 关闭模拟时单次原子读即返 0(零开销)。
+func (s *server) simActiveConnCount(now time.Time) uint32 {
+	if s == nil || !s.simActive() {
+		return 0
+	}
+	views, seed := s.simViews(now)
+	if len(views) == 0 {
+		return 0
+	}
+	lib := func(id string) (simApp, bool) { return simFindApp(s.hncDir, id) }
+	var total uint32
+	for i := range views {
+		v := &views[i]
+		if v.D.Blocked || v.D.Offline {
+			continue
+		}
+		total += uint32(len(simConnsFor(v, seed, lib)))
+	}
+	return total
+}
+
+// liveFlowCountsWithSim 在真实双域连接计数之上无重复合并模拟连接数; 关闭模拟时零额外开销。
+func (s *server) liveFlowCountsWithSim(active bool, online int) (uint32, uint32) {
+	hs, hf := scalpelLiveFlowCounts(s, active, online)
+	if s != nil && s.simActive() && active && online > 0 && hs == 0 {
+		hs = s.simActiveConnCount(time.Now())
+	}
+	return hs, hf
 }
 
 // ─── 统计类 ───────────────────────────────────────────────────────────

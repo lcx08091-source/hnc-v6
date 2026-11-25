@@ -769,3 +769,192 @@ func TestSelfFirewallReloadFromDiskWithUIDRulesNoDeadlock(t *testing.T) {
 		t.Fatalf("expected self_capture_enabled=true in guardianVectorSyncSummary with active engine, got %+v", vsSumEngOn)
 	}
 }
+
+func TestRC7SelfFirewallAllowBlockTargetsGuardrailsSyntheticPkgAndCellularVPN(t *testing.T) {
+	s, mux, dir := newV6TestMux(t)
+	mux.HandleFunc("/api/action", s.handleAction)
+	sf := s.v6State().selfFirewall
+
+	pkgListPath := filepath.Join(dir, "packages.list")
+	if err := os.WriteFile(pkgListPath, []byte(strings.Join([]string{
+		"com.example.news 10150 0 /data/user/0/com.example.news default:targetSdkVersion=34 none 0 1",
+		"com.example.video 10188 0 /data/user/0/com.example.video default:targetSdkVersion=34 none 0 1",
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "app_labels_live.json"), []byte(`{"com.example.news":"澎湃早报","com.example.video":"极速影视"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var dpMu sync.Mutex
+	var v4Payloads []string
+	cellVPNActive := false
+	sf.mu.Lock()
+	sf.packagesListPath = pkgListPath
+	sf.forceDataplane = true
+	sf.cellularVPNHook = func() bool {
+		dpMu.Lock()
+		defer dpMu.Unlock()
+		return cellVPNActive
+	}
+	sf.restoreExec = func(isIPv6 bool, payload string) error {
+		if !isIPv6 {
+			dpMu.Lock()
+			v4Payloads = append(v4Payloads, payload)
+			dpMu.Unlock()
+		}
+		return nil
+	}
+	sf.iptExec = func(_ bool, _ ...string) (string, error) { return "", nil }
+	sf.mu.Unlock()
+
+	// 1. B026: 拒绝隔离进程 UID (appId >= 90000) 返回 HTTP 400 protected_uid; 剥离 uid:<id>/isolated:<id> 合成包名并反查中文 display_name
+	for _, isoUID := range []string{"90000", "99001", "1099001"} {
+		recIso := doSelfFWAction(t, mux, "self_firewall_set", map[string]string{
+			"uid":  isoUID,
+			"pkg":  "isolated:99001",
+			"mode": "block_all",
+		})
+		if recIso.Code != http.StatusBadRequest || !strings.Contains(recIso.Body.String(), "protected_uid") {
+			t.Fatalf("expected 400 protected_uid for isolated uid=%s, got %d %s", isoUID, recIso.Code, recIso.Body.String())
+		}
+	}
+
+	// 2. B007 & B027: mode="allow" + 非空 block_targets 独立生效 + 剥离合成包名 uid:10150 并补齐中文名
+	recAllowTgt := doSelfFWAction(t, mux, "self_firewall_set", map[string]string{
+		"uid":           "10150",
+		"pkg":           "uid:10150",
+		"mode":          "allow",
+		"block_targets": "203.0.113.88",
+	})
+	if recAllowTgt.Code != http.StatusOK {
+		t.Fatalf("mode=allow with block_targets failed: %d %s", recAllowTgt.Code, recAllowTgt.Body.String())
+	}
+	if !sf.IsHostEventBlocked(10150, "", "203.0.113.88", 80, "tcp") {
+		t.Fatal("expected mode=allow + block_targets=[203.0.113.88] to block 203.0.113.88")
+	}
+	if sf.IsHostEventBlocked(10150, "", "198.51.100.77", 80, "tcp") {
+		t.Fatal("mode=allow must NOT block other IPs")
+	}
+
+	// 切换模式但不传 block_targets 参数时必须自动继承已有 block_targets
+	recSwitchMode := doSelfFWAction(t, mux, "self_firewall_set", map[string]string{
+		"uid":  "10150",
+		"mode": "block_cleartext",
+	})
+	if recSwitchMode.Code != http.StatusOK || !sf.IsHostEventBlocked(10150, "", "203.0.113.88", 443, "tcp") {
+		t.Fatalf("switching mode without block_targets must inherit existing block_targets: %d %s",
+			recSwitchMode.Code, recSwitchMode.Body.String())
+	}
+	recBackAllow := doSelfFWAction(t, mux, "self_firewall_set", map[string]string{
+		"uid":  "10150",
+		"mode": "allow",
+	})
+	if recBackAllow.Code != http.StatusOK || !sf.IsHostEventBlocked(10150, "", "203.0.113.88", 443, "tcp") {
+		t.Fatalf("switching back to mode=allow without block_targets must retain inherited block_targets: %d %s",
+			recBackAllow.Code, recBackAllow.Body.String())
+	}
+
+	getSnap := doGuardJSONReq(t, mux, http.MethodGet, "/api/local_apps/firewall", "")
+	if !strings.Contains(getSnap.Body.String(), `"pkg":"com.example.news"`) ||
+		!strings.Contains(getSnap.Body.String(), `"display_name":"澎湃早报"`) ||
+		!strings.Contains(getSnap.Body.String(), `"203.0.113.88"`) {
+		t.Fatalf("GET /api/local_apps/firewall missing resolved pkg/display_name/block_targets: %s", getSnap.Body.String())
+	}
+
+	// 显式传空 block_targets:"" 且 mode="allow" 时彻底移除该 UID 规则
+	recClearAllow := doSelfFWAction(t, mux, "self_firewall_set", map[string]string{
+		"uid":           "10150",
+		"mode":          "allow",
+		"block_targets": "",
+	})
+	if recClearAllow.Code != http.StatusOK || sf.IsHostEventBlocked(10150, "", "203.0.113.88", 80, "tcp") {
+		t.Fatalf("explicit empty block_targets with mode=allow failed to remove rule: %d %s",
+			recClearAllow.Code, recClearAllow.Body.String())
+	}
+
+	// 3. block_targets 严禁代理 Fake-IP (198.18.0.0/15)、DNS/DoT (:53/:853)、公共 DNS 与共享 CDN IP
+	for _, badTgt := range []string{
+		"198.18.0.2",
+		"198.19.255.10:443",
+		"203.0.113.88:53",
+		"203.0.113.88:853",
+		"223.5.5.5",
+		"104.16.132.229",
+	} {
+		if _, err := parseAndValidateSelfBlockTarget(badTgt); err == nil {
+			t.Fatalf("expected forbidden block_target %q to be rejected", badTgt)
+		}
+	}
+
+	// 4. B027: 动态识别纯蜂窝上游 + VPN 活跃态 (避免 VPN 穿透蜂窝禁网，且绝不误杀 Wi-Fi + VPN)
+	cellOnlyRoutes := strings.Join([]string{
+		"0.0.0.0/1 dev Meta proto kernel scope link",
+		"128.0.0.0/1 dev Meta proto kernel scope link",
+		"default via 10.64.0.1 dev rmnet_data2 proto static metric 100",
+		"192.168.43.0/24 dev wlan2 proto kernel scope link src 192.168.43.1",
+	}, "\n")
+	wifiPlusVPNRoutes := cellOnlyRoutes + "\ndefault via 192.168.1.1 dev wlan0 proto dhcp metric 200\n"
+
+	if !evalCellularOnlyVPNFromRoutes([]string{"Meta", "rmnet_data2", "wlan2"}, nil, "wlan2") {
+		t.Fatal("expected evalCellularOnlyVPNFromRoutes=true when VPN + cellular rmnet_data2 active and wlan2 is hotspot AP")
+	}
+	if evalCellularOnlyVPNFromRoutes([]string{"Meta", "rmnet_data2", "wlan0"}, nil, "wlan2") {
+		t.Fatal("expected evalCellularOnlyVPNFromRoutes=false when Wi-Fi STA wlan0 default route is active")
+	}
+
+	dpMu.Lock()
+	cellVPNActive = true
+	dpMu.Unlock()
+	if _, _, err := sf.SetUIDRule(10188, SelfFirewallModeBlockCellular, "isolated:99002", "", nil); err != nil {
+		t.Fatalf("SetUIDRule block_cellular failed: %v", err)
+	}
+	dpMu.Lock()
+	lastV4CellVPN := v4Payloads[len(v4Payloads)-1]
+	dpMu.Unlock()
+	for _, vpnIfc := range []string{"tun+", "Meta", "wg+", "utun+", "sing_tun+"} {
+		if !strings.Contains(lastV4CellVPN, fmt.Sprintf("-A HNC_SELF_UID -o %s -m owner --uid-owner 10188 -j REJECT", vpnIfc)) {
+			t.Fatalf("missing VPN tunnel cellular block rule for %s:\n%s", vpnIfc, lastV4CellVPN)
+		}
+	}
+
+	// 验证 self_firewall_sync.sh 在纯蜂窝+VPN 与 Wi-Fi+VPN 两种路由下的同步一致性 (同时含 allow+block_targets)
+	if _, _, err := sf.AddUIDBlockTarget(10150, "203.0.113.88", "", ""); err != nil {
+		t.Fatalf("AddUIDBlockTarget failed: %v", err)
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "self_firewall_sync.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cmdCellVPN := exec.Command("sh", scriptPath, "apply", "--dry-run")
+	cmdCellVPN.Env = append(hubSanitizedAndroidEnv(),
+		"HNC_DIR="+dir,
+		"HNC_TEST_MODE=1",
+		"HNC_SELF_FW_ROUTES_TEXT="+cellOnlyRoutes,
+	)
+	outCellVPNBytes, err := cmdCellVPN.CombinedOutput()
+	if err != nil {
+		t.Fatalf("self_firewall_sync.sh cellular+VPN dry-run failed: %v\n%s", err, string(outCellVPNBytes))
+	}
+	outCellVPN := string(outCellVPNBytes)
+	if !strings.Contains(outCellVPN, "-A HNC_SELF_UID -d 203.0.113.88 -m owner --uid-owner 10150 -j REJECT") ||
+		!strings.Contains(outCellVPN, "-A HNC_SELF_UID -o Meta -m owner --uid-owner 10188 -j REJECT") {
+		t.Fatalf("self_firewall_sync.sh missing allow+block_targets or Meta VPN rule:\n%s", outCellVPN)
+	}
+
+	cmdWifiVPN := exec.Command("sh", scriptPath, "apply", "--dry-run")
+	cmdWifiVPN.Env = append(hubSanitizedAndroidEnv(),
+		"HNC_DIR="+dir,
+		"HNC_TEST_MODE=1",
+		"HNC_SELF_FW_ROUTES_TEXT="+wifiPlusVPNRoutes,
+	)
+	outWifiVPNBytes, err := cmdWifiVPN.CombinedOutput()
+	if err != nil {
+		t.Fatalf("self_firewall_sync.sh wifi+VPN dry-run failed: %v\n%s", err, string(outWifiVPNBytes))
+	}
+	if strings.Contains(string(outWifiVPNBytes), "-o Meta -m owner --uid-owner 10188") {
+		t.Fatalf("self_firewall_sync.sh must NOT block VPN tunnel when Wi-Fi STA default route is active:\n%s", string(outWifiVPNBytes))
+	}
+}
+

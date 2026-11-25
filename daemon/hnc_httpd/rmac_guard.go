@@ -388,6 +388,7 @@ func (s *server) rmacReconcile(now time.Time) {
 			oldName := macDisplayName(names, mf, best.OldMAC)
 
 			s.actionMu.Lock()
+			polLatest := loadRMACPolicy(s.hncDir)
 			macMergeMu.Lock()
 			mfLatest := loadMacMergeFile(s.hncDir)
 			_, disNow := mfLatest.Dismissed[macMergeDismissKey(newMAC, best.OldMAC)]
@@ -398,7 +399,7 @@ func (s *server) rmacReconcile(now time.Time) {
 			_, oldGone := alLatest[best.OldMAC]
 
 			var err error
-			if disNow || apartNow || newGone || oldGone {
+			if !polLatest.AutoInherit || best.Score < polLatest.AutoInheritScore || disNow || apartNow || newGone || oldGone {
 				err = errors.New("stale auto-inherit candidate")
 			} else {
 				_, err = s.deviceMerge(best.OldMAC, newMAC, true, now)

@@ -40,7 +40,8 @@ type shIssue struct {
 // shInput 纯函数输入(测试直接构造)
 type shInput struct {
 	CtActive     bool
-	CtAcct       int // -1 未知, 0 关, 1 开
+	CtSleeping   bool // 热点关闭待机态主动休眠 Netlink 订阅
+	CtAcct       int  // -1 未知, 0 关, 1 开
 	CtLostRecent bool
 	IptChecked   bool // iptables 能跑
 	IptJump      bool // FORWARD 里挂着 HNC_STATS
@@ -80,15 +81,15 @@ func shIssues(in shInput) []shIssue {
 	if !in.ClockSane {
 		add("error", "clock_insane", "系统时钟不可信(未同步或刚跳变), 流量统计暂停记账, 等时间同步后自动恢复")
 	}
-	if in.IptChecked && !in.IptJump {
+	if in.IptChecked && !in.IptJump && !in.CtSleeping && in.HotspotUp {
 		add("error", "iptables_chain_missing", "iptables 计数链 HNC_STATS 不存在或没挂到 FORWARD, 设备流量统计不会增长(重启热点或在设置里修复规则)")
 	}
 	if in.IptStalled {
 		add("warn", "iptables_stalled", "热点口有流量但 HNC_STATS 计数不增长: 转发被分流绕过了 iptables, 或计数规则被清空")
 	}
-	if !in.CtActive {
+	if !in.CtActive && !in.CtSleeping {
 		add("warn", "ct_events_off", "conntrack 连接销毁事件未订阅(内核不支持或被拒), 按应用流量退回 10 秒轮询, 短连接会少算")
-	} else if in.CtLostRecent {
+	} else if in.CtActive && in.CtLostRecent {
 		add("info", "ct_events_lost", "conntrack 事件曾溢出丢失, 最近的按应用流量可能略偏小")
 	}
 	if in.CtAcct == 0 {
@@ -192,6 +193,7 @@ type shEnv struct {
 	iptForward   func() (string, error)
 	ip6tForward  func() (string, error)
 	ctAcct       func() int
+	ctSleeping   func() bool
 }
 
 func (s *server) shEnvDefault() shEnv {
@@ -204,7 +206,8 @@ func (s *server) shEnvDefault() shEnv {
 		ip6tForward: func() (string, error) {
 			return calRunCmd(5*time.Second, "ip6tables", "-w", "2", "-t", "mangle", "-L", "FORWARD", "-nvx")
 		},
-		ctAcct: func() int { return shReadInt("/proc/sys/net/netfilter/nf_conntrack_acct") },
+		ctAcct:     func() int { return shReadInt("/proc/sys/net/netfilter/nf_conntrack_acct") },
+		ctSleeping: s.netlinkShouldSleep,
 	}
 }
 
@@ -215,6 +218,10 @@ func statsHealth(hncDir string, env shEnv, st *shState, now time.Time) map[strin
 	ctActive, ctErr := ctEvents.active, ctEvents.lastErr
 	cur.CtRecv, cur.CtLost = ctEvents.received, ctEvents.lostN
 	ctEvents.mu.Unlock()
+	ctSleeping := false
+	if env.ctSleeping != nil {
+		ctSleeping = env.ctSleeping()
+	}
 	acct := -1
 	if env.ctAcct != nil {
 		acct = env.ctAcct()
@@ -314,7 +321,7 @@ func statsHealth(hncDir string, env shEnv, st *shState, now time.Time) map[strin
 	if c := calGet(hncDir); c != nil {
 		cal = c.result()
 	}
-	in := shInput{CtActive: ctActive, CtAcct: acct, CtLostRecent: lostRecent,
+	in := shInput{CtActive: ctActive, CtSleeping: ctSleeping, CtAcct: acct, CtLostRecent: lostRecent,
 		IptChecked: iptChecked, IptJump: iptJump, IptStalled: stalled,
 		HotspotUp: hs != "", HsActive: hsActive, SampleAge: age,
 		ClockSane: clockSane(hncDir, now), GuardKnown: guard != nil, GuardActive: guardActive,
@@ -341,10 +348,11 @@ func statsHealth(hncDir string, env shEnv, st *shState, now time.Time) map[strin
 		"checked_at":                now.Unix(),
 		"precise_mode":              ctActive && acct == 1,
 		"ct_events_active":          ctActive,
+		"ct_events_sleeping":        ctSleeping,
 		"ct_acct":                   acct,
 		"ct_destroy_events_per_min": ctRate,
-		"ct_poll_fallback":          !ctActive || lostRecent,
-		"iptables_stats_ok":         iptChecked && iptJump && !stalled,
+		"ct_poll_fallback":          (!ctActive && !ctSleeping) || lostRecent,
+		"iptables_stats_ok":         iptChecked && (iptJump || ctSleeping || hs == "") && !stalled,
 		"iptables_checked":          iptChecked,
 		"iptables_stalled":          stalled,
 		"hotspot_iface":             hs,
@@ -362,7 +370,7 @@ func statsHealth(hncDir string, env shEnv, st *shState, now time.Time) map[strin
 		"hnc_vs_netstats_pct":       in.DriftPct,
 		"issues":                    shIssues(in),
 	}
-	if ctErr != "" && !ctActive {
+	if ctErr != "" && !ctActive && !ctSleeping {
 		out["ct_events_error"] = ctErr
 	}
 	return out

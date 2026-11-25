@@ -1003,7 +1003,7 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 	// 旁路供电保护: 仅真实快充/满电插电豁免二阶温控; 旁路供电不误判为大电流快充自发热, 但有外部供电时不触发低电量巡航
 	chargingExempt := !rd.IsBypassSupply && (rd.IsCharging || strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full"))
 	externalPower := chargingExempt || (rd.IsBypassSupply && rd.ChargerOnline)
-	lowBatActive := cfg.Enabled && rd.Available && rd.CapacityPct >= 0 &&
+	lowBatActive := cfg.Enabled && rd.Available && rd.CapacityPct > 0 &&
 		rd.CapacityPct <= cfg.LowBatPct && !externalPower
 
 	rawStage := e.rawThermalStage

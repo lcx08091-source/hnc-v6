@@ -28,11 +28,9 @@ const (
 )
 
 var (
-	phoneKeyRe        = regexp.MustCompile(`(?i)(phone|mobile|tel|msisdn|user_?phone)`)
 	phoneValRe        = regexp.MustCompile(`^(?:\+?86[- ]?)?(1[3-9]\d{9})$`)
 	macTokenRe        = regexp.MustCompile(`(?i)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}`)
 	coordValRe        = regexp.MustCompile(`^[+-]?\d{1,3}\.\d{4,12}$`)
-	credExactKeyRe    = regexp.MustCompile(`(?i)^(password|passwd|pwd|access_token|refresh_token|auth_token|api_key|apikey|app_secret|client_secret|session_id|sid)$`)
 	jwtTokenRe        = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}`)
 	idCardKeyRe       = regexp.MustCompile(`(?i)(id_?card|id_?no|cert_?no|sfz|identity)`)
 	idCardCandidateRe = regexp.MustCompile(`[1-9]\d{16}[0-9Xx]`)
@@ -48,6 +46,7 @@ type PacketInput struct {
 	ClientMAC  string
 	ClientIP   string
 	DstIP      string
+	SrcPort    uint16
 	DstPort    uint16
 	Method     string
 	Path       string
@@ -65,6 +64,7 @@ type packetJob struct {
 	clientMAC string
 	clientIP  string
 	dstIP     string
+	srcPort   uint16
 	dstPort   uint16
 	method    string
 	path      string
@@ -152,6 +152,15 @@ func (e *Engine) SetAlertHook(fn func(LeakEvent)) {
 		return
 	}
 	e.onAlert.Store(&fn)
+}
+
+// SetConduitCheck registers an optional callback identifying local VPN/proxy conduit apps
+// so <5s cross-interface host duplicates merge cleanly onto real business apps.
+func (e *Engine) SetConduitCheck(fn func(uid int, pkg string) bool) {
+	if e == nil || e.ring == nil {
+		return
+	}
+	e.ring.SetConduitCheck(fn)
 }
 
 // SetIdleCheck registers an optional callback reporting whether LeakGuard can
@@ -369,6 +378,7 @@ func (e *Engine) Submit(in PacketInput) bool {
 	job.clientMAC = in.ClientMAC
 	job.clientIP = in.ClientIP
 	job.dstIP = in.DstIP
+	job.srcPort = in.SrcPort
 	job.dstPort = in.DstPort
 	job.method = in.Method
 	job.path = in.Path
@@ -469,6 +479,7 @@ func (e *Engine) processJob(job *packetJob) (newAlert bool, dirty bool) {
 		ClientMAC:  job.clientMAC,
 		ClientIP:   job.clientIP,
 		DstIP:      job.dstIP,
+		SrcPort:    job.srcPort,
 		DstPort:    job.dstPort,
 		Method:     job.method,
 		Path:       job.path,
@@ -1050,10 +1061,11 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 			UID:        in.UID,
 			Pkg:        normPkg,
 			AppName:    normAppName,
-			MAC:        strings.ToLower(strings.TrimSpace(in.ClientMAC)),
+			MAC:        pktKnownMAC,
 			ClientIP:   in.ClientIP,
 			SrcIP:      in.ClientIP,
 			DstIP:      in.DstIP,
+			SrcPort:    in.SrcPort,
 			DstPort:    in.DstPort,
 			DstHost:    dstHost,
 			Proto:      "http",
@@ -1069,22 +1081,22 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 		})
 	}
 
-	inspectKV := func(key, val, rawHint string) {
+	inspectKV := func(key, val, rawHint string, inCookie bool) {
 		keyTrim := strings.TrimSpace(key)
 		valTrim := strings.TrimSpace(val)
 		if valTrim == "" {
 			return
 		}
 
-		// 1. PHONE: key matches (?i)(phone|mobile|tel|msisdn|user_?phone) and 1[3-9]\d{9}.
+		// 1. PHONE: key word-tokens match phone/mobile/tel/msisdn/user_phone and 1[3-9]\d{9}.
 		if keyTrim != "" && isPhoneKey(keyTrim) {
 			if m := phoneValRe.FindStringSubmatch(valTrim); len(m) == 2 {
 				addHit(TypePhone, keyTrim, m[1], rawHint)
 			}
 		}
 
-		// 2. DEVICE_ID: (?i)(imei|imsi|meid|oaid|android_?id|idfa|idfv), 8..40 chars,
-		// with mandatory Luhn validation on 15-digit numeric IMEI.
+		// 2. DEVICE_ID: strict per-kind validation (IMEI 15d+Luhn, IMEISV 16d, IMSI 14-15d,
+		// MEID 14h/18d, ANDROID_ID 16h excluding 9774d56d682e549c, OAID/IDFA/IDFV UUID or 16-64h).
 		if keyTrim != "" {
 			if idKind := classifyDeviceIDKey(keyTrim); idKind != "" {
 				if okDeviceIDValue(idKind, valTrim) {
@@ -1124,8 +1136,9 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 			}
 		})
 
-		// 5. CREDENTIAL: exact credential/token/session parameter names or standard 3-part JWT.
-		if keyTrim != "" && credExactKeyRe.MatchString(keyTrim) && !isTrivialCredentialPlaceholder(valTrim) {
+		// 5. CREDENTIAL: context-aware credential/token/session parameters (sid restricted to Cookie)
+		// with length/entropy/anti-placeholder checks, or standard 3-part JWT.
+		if keyTrim != "" && isValidCredentialKV(keyTrim, valTrim, inCookie) {
 			addHit(TypeCredential, keyTrim, valTrim, rawHint)
 		}
 		scanJWTTokens(valTrim, func(jwt string) {
@@ -1143,11 +1156,11 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 	}
 
 	scanFormEncoded(hp.rawQuery, func(k, v, rawSeg string) {
-		inspectKV(k, v, rawSeg)
+		inspectKV(k, v, rawSeg, false)
 		vt := strings.TrimSpace(v)
 		if len(vt) >= 2 && (vt[0] == '{' || vt[0] == '[') {
 			ScanJSON([]byte(vt), func(jk, jv string) {
-				inspectKV(jk, jv, rawSeg)
+				inspectKV(jk, jv, rawSeg, false)
 			})
 		}
 	})
@@ -1189,13 +1202,13 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 				if eq > 0 {
 					ck := PercentDecode(strings.TrimSpace(part[:eq]), false)
 					cv := PercentDecode(strings.TrimSpace(part[eq+1:]), false)
-					inspectKV(ck, cv, strings.TrimSpace(part))
+					inspectKV(ck, cv, strings.TrimSpace(part), true)
 				}
 			}
 			continue
 		}
 		decHV := PercentDecode(hv, false)
-		inspectKV(hk, decHV, hv)
+		inspectKV(hk, decHV, hv, false)
 	}
 
 	if len(bodyPlain) > 0 {
@@ -1203,15 +1216,15 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 		if len(trimmedBody) >= 2 && (trimmedBody[0] == '{' || trimmedBody[0] == '[') {
 			ScanJSON(trimmedBody, func(jk, jv string) {
 				decV := PercentDecode(jv, false)
-				inspectKV(jk, decV, jv)
+				inspectKV(jk, decV, jv, false)
 			})
 		} else if strings.Contains(hp.contentType, "urlencoded") || looksLikeFormBody(trimmedBody) {
 			scanFormEncoded(string(trimmedBody), func(k, v, rawSeg string) {
-				inspectKV(k, v, rawSeg)
+				inspectKV(k, v, rawSeg, false)
 				vt := strings.TrimSpace(v)
 				if len(vt) >= 2 && (vt[0] == '{' || vt[0] == '[') {
 					ScanJSON([]byte(vt), func(jk, jv string) {
-						inspectKV(jk, jv, rawSeg)
+						inspectKV(jk, jv, rawSeg, false)
 					})
 				}
 			})
@@ -1288,14 +1301,14 @@ func looksLikeFormBody(b []byte) bool {
 }
 
 func isPhoneKey(k string) bool {
-	if !phoneKeyRe.MatchString(k) {
-		return false
+	for _, rawW := range splitKeyWords(k) {
+		switch stripTrailingDigits(rawW) {
+		case "phone", "userphone", "mobile", "mobilephone", "mobilenum",
+			"cellphone", "phonenumber", "tel", "telephone", "telno", "telnum", "msisdn":
+			return true
+		}
 	}
-	low := strings.ToLower(k)
-	if strings.Contains(low, "telemetry") || strings.Contains(low, "hotel") || strings.Contains(low, "intel") {
-		return false
-	}
-	return true
+	return false
 }
 
 func splitKeyWords(k string) []string {
@@ -1338,7 +1351,12 @@ func classifyDeviceIDKey(k string) string {
 	for i, rawW := range words {
 		w := stripTrailingDigits(rawW)
 		switch w {
-		case "imei", "imeisv":
+		case "imeisv":
+			return "imeisv"
+		case "imei":
+			if i+1 < len(words) && stripTrailingDigits(words[i+1]) == "sv" {
+				return "imeisv"
+			}
 			return "imei"
 		case "imsi":
 			return "imsi"
@@ -1361,48 +1379,111 @@ func classifyDeviceIDKey(k string) string {
 	return ""
 }
 
-func okDeviceIDValue(idKind, v string) bool {
-	if len(v) < 8 || len(v) > 40 {
+func isAllDigitsASCII(s string) bool {
+	if len(s) == 0 {
 		return false
 	}
-	low := strings.ToLower(v)
-	switch low {
-	case "null", "undefined", "unknown", "none", "default", "unavailable", "00000000-0000-0000-0000-000000000000":
-		return false
-	}
-	allZeroOrSep := true
-	allDigits := true
-	for i := 0; i < len(v); i++ {
-		c := v[i]
-		isDigit := c >= '0' && c <= '9'
-		isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-		if !isDigit && !isAlpha && c != '-' && c != '_' && c != ':' {
-			return false
-		}
-		if !isDigit {
-			allDigits = false
-		}
-		if c != '0' && c != '-' && c != '_' && c != ':' {
-			allZeroOrSep = false
-		}
-	}
-	if allZeroOrSep {
-		return false
-	}
-
-	if idKind == "imei" {
-		if allDigits {
-			if len(v) != 15 {
-				return false
-			}
-			return ValidLuhn(v)
-		}
-	} else if len(v) == 15 && allDigits && idKind != "imsi" {
-		if !ValidLuhn(v) {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}
 	return true
+}
+
+func isAllHexASCII(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllSameChar(s string) bool {
+	if len(s) == 0 {
+		return true
+	}
+	first := s[0]
+	for i := 1; i < len(s); i++ {
+		if s[i] != first {
+			return false
+		}
+	}
+	return true
+}
+
+func isStandardUUIDHex(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		switch i {
+		case 8, 13, 18, 23:
+			if s[i] != '-' {
+				return false
+			}
+		default:
+			c := s[i]
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func okDeviceIDValue(idKind, v string) bool {
+	if len(v) < 14 || len(v) > 64 {
+		return false
+	}
+	var compact strings.Builder
+	compact.Grow(len(v))
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == '-' {
+			continue
+		}
+		if c >= '0' && c <= '9' {
+			compact.WriteByte(c)
+			continue
+		}
+		if c >= 'a' && c <= 'f' {
+			compact.WriteByte(c)
+			continue
+		}
+		if c >= 'A' && c <= 'F' {
+			compact.WriteByte(c + ('a' - 'A'))
+			continue
+		}
+		// Rejects '_', ':', whitespace, and [g-zG-Z] (e.g. "permission_denied", "unavailable", "unknown").
+		return false
+	}
+	comp := compact.String()
+	if len(comp) == 0 || isAllSameChar(comp) || comp == "9774d56d682e549c" {
+		return false
+	}
+
+	switch idKind {
+	case "imei":
+		return len(v) == 15 && isAllDigitsASCII(v) && ValidLuhn(v)
+	case "imeisv":
+		return len(v) == 16 && isAllDigitsASCII(v)
+	case "imsi":
+		return (len(v) == 14 || len(v) == 15) && isAllDigitsASCII(v)
+	case "meid":
+		return (len(v) == 14 && isAllHexASCII(v)) || (len(v) == 18 && isAllDigitsASCII(v))
+	case "android_id":
+		return len(v) == 16 && isAllHexASCII(v)
+	case "oaid", "idfa", "idfv":
+		return isStandardUUIDHex(v) || (len(v) >= 16 && len(v) <= 64 && isAllHexASCII(v))
+	default:
+		return false
+	}
 }
 
 func classifyGPSKey(k string) string {
@@ -1530,24 +1611,32 @@ func normalizeValidMAC(s string) string {
 	if sep != ':' && sep != '-' {
 		return ""
 	}
-	for i := 0; i < 17; i++ {
-		switch i {
-		case 2, 5, 8, 11, 14:
-			if s[i] != sep {
-				return ""
-			}
-		default:
-			c := s[i]
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-				return ""
-			}
+	var b [6]byte
+	for idx := 0; idx < 6; idx++ {
+		pos := idx * 3
+		if idx > 0 && s[pos-1] != sep {
+			return ""
 		}
+		hi, ok1 := hexNibble(s[pos])
+		lo, ok2 := hexNibble(s[pos+1])
+		if !ok1 || !ok2 {
+			return ""
+		}
+		b[idx] = (hi << 4) | lo
 	}
-	norm := strings.ReplaceAll(s, "-", ":")
-	if norm == "00:00:00:00:00:00" || norm == "ff:ff:ff:ff:ff:ff" {
+	// Reject all-same-byte MACs (including 00:00:00:00:00:00 and ff:ff:ff:ff:ff:ff).
+	if b[0] == b[1] && b[1] == b[2] && b[2] == b[3] && b[3] == b[4] && b[4] == b[5] {
 		return ""
 	}
-	return norm
+	// Reject multicast/broadcast MACs (IEEE 802 I/G bit == 1).
+	if b[0]&0x01 != 0 {
+		return ""
+	}
+	// Reject Android 6.0+ privacy placeholder MAC 02:00:00:00:00:00 (while allowing 02:00:00:00:00:01 etc.).
+	if b == [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x00} {
+		return ""
+	}
+	return strings.ReplaceAll(s, "-", ":")
 }
 
 var cnProvinceCodes = [100]bool{
@@ -1577,6 +1666,131 @@ func isTrivialCredentialPlaceholder(v string) bool {
 	}
 }
 
+func isAllAsterisksOrSpace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '*' && s[i] != ' ' && s[i] != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+func hasControlOrSpaceASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] <= 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func isSnakeVersionConstant(s string) bool {
+	hasDigit := false
+	hasLower := false
+	hasUpper := false
+	hasOther := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c >= 'a' && c <= 'z':
+			hasLower = true
+		case c >= 'A' && c <= 'Z':
+			hasUpper = true
+		case c == '_' || c == '-':
+		default:
+			hasOther = true
+		}
+	}
+	// Pure single-case snake/kebab identifier without digits (e.g. "default_session_token").
+	if !hasDigit && !hasOther && !(hasLower && hasUpper) {
+		return true
+	}
+	if strings.ContainsRune(s, '_') {
+		parts := strings.Split(s, "_")
+		if len(parts) >= 3 {
+			maxSeg := 0
+			for _, p := range parts {
+				if len(p) > maxSeg {
+					maxSeg = len(p)
+				}
+			}
+			// Multi-segment snake-case tag/version without any >=8-char secret segment (e.g. "da_wr_v13_g1").
+			if maxSeg < 8 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func charDiversityAndEntropy(s string) (distinct int, entropy float64) {
+	n := len(s)
+	if n == 0 {
+		return 0, 0
+	}
+	var counts [256]int
+	for i := 0; i < n; i++ {
+		b := s[i]
+		if counts[b] == 0 {
+			distinct++
+		}
+		counts[b]++
+	}
+	invN := 1.0 / float64(n)
+	for _, c := range counts {
+		if c > 0 {
+			p := float64(c) * invN
+			entropy -= p * math.Log2(p)
+		}
+	}
+	return distinct, entropy
+}
+
+func okTokenOrSessionValue(val string, minLen int) bool {
+	if len(val) < minLen || len(val) > 2048 {
+		return false
+	}
+	if isTrivialCredentialPlaceholder(val) || hasControlOrSpaceASCII(val) || isAllDigitsASCII(val) || isAllSameChar(val) {
+		return false
+	}
+	if isSnakeVersionConstant(val) {
+		return false
+	}
+	distinct, entropy := charDiversityAndEntropy(val)
+	return distinct >= 8 && entropy >= 3.3
+}
+
+func isValidCredentialKV(key, val string, inCookie bool) bool {
+	lowKey := strings.ToLower(strings.TrimSpace(key))
+	switch lowKey {
+	case "password", "passwd", "pwd":
+		if len(val) < 6 || len(val) > 128 {
+			return false
+		}
+		if isTrivialCredentialPlaceholder(val) || isAllSameChar(val) || isAllAsterisksOrSpace(val) {
+			return false
+		}
+		return true
+	case "sid":
+		if !inCookie {
+			return false
+		}
+		return okTokenOrSessionValue(val, 16)
+	case "session_id":
+		minLen := 20
+		if inCookie {
+			minLen = 16
+		}
+		return okTokenOrSessionValue(val, minLen)
+	case "access_token", "refresh_token", "auth_token", "api_key", "apikey", "app_secret", "client_secret":
+		return okTokenOrSessionValue(val, 16)
+	default:
+		return false
+	}
+}
+
 func extractAuthHeaderCredential(hv string) (string, bool) {
 	v := strings.TrimSpace(hv)
 	if v == "" {
@@ -1591,7 +1805,7 @@ func extractAuthHeaderCredential(hv string) (string, bool) {
 		return "", false
 	}
 	cred := strings.TrimSpace(v[sp+1:])
-	if len(cred) < 8 || isTrivialCredentialPlaceholder(cred) {
+	if len(cred) < 8 || isTrivialCredentialPlaceholder(cred) || isAllSameChar(cred) || isAllAsterisksOrSpace(cred) {
 		return "", false
 	}
 	return v, true

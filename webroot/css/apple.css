@@ -125,10 +125,11 @@
 [data-style="apple"] .hbtn{background:none;border:0;box-shadow:none;color:var(--blue);width:36px;height:36px}
 [data-style="apple"] .hbtn svg{width:22px;height:22px}
 /* 弹层: 底部贴边、上方圆角, 与 iOS sheet 一致 */
-[data-style="apple"] .sheet{bottom:0;width:min(640px,100%);border:0;border-radius:14px 14px 0 0;padding:10px 16px calc(env(safe-area-inset-bottom,0px) + 20px);max-height:92vh}
+[data-style="apple"] .sheet{bottom:0;width:min(640px,100%);border:0;border-radius:14px 14px 0 0;padding:10px 16px calc(env(safe-area-inset-bottom,0px) + 20px);max-height:92vh;overflow:hidden!important;display:flex;flex-direction:column}
+[data-style="apple"] #sheet-body{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 [data-style="apple"] .sheet h3{font-size:22px;font-weight:600}
 [data-style="apple"] .sheet .sub{font-size:13px}
-[data-style="apple"] .sheet .grab{width:36px;background:var(--text-4);margin:0 auto 14px}
+[data-style="apple"] .sheet .grab{flex:none;width:36px;background:var(--text-4);margin:0 auto 14px}
 [data-style="apple"] .toast{border:0;font-weight:600;font-size:15px}
 [data-style="apple"] .theme-pick button{border:0;background:var(--input);box-shadow:0 0 0 2px transparent;font-weight:400}
 [data-style="apple"] .theme-pick button.on{box-shadow:0 0 0 2px var(--blue);color:var(--text-1)}
@@ -869,6 +870,8 @@
   background: var(--card);
 }
 [data-style="apple"] .v6-drawer {
+  position: fixed !important;
+  z-index: 81;
   bottom: 0;
   width: min(760px, 100%);
   border: 0;

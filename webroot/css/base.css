@@ -369,7 +369,7 @@ button.row:active{background:var(--input)}
 .chart-h h3{margin:0;font-size:15px;font-weight:800}
 .bars{position:relative;display:flex;align-items:flex-end;gap:3px;height:150px;padding-left:30px}
 .gridl{position:absolute;left:30px;right:0;border-top:1px dashed var(--stroke-2);pointer-events:none}
-.gridt{position:absolute;left:0;font:600 9.5px var(--mono);color:var(--text-3)}
+.gridt{position:absolute;left:0;font:600 10.5px var(--mono);color:var(--text-2)}
 .bcol{flex:1;height:100%;display:flex;flex-direction:column;justify-content:flex-end;gap:2px;cursor:pointer;position:relative;z-index:1;transition:opacity .2s}
 .bars.picking .bcol{opacity:.4}
 .bars.picking .bcol.pk{opacity:1}
@@ -377,7 +377,7 @@ button.row:active{background:var(--input)}
 .bar.rx{background:var(--rx);background:linear-gradient(180deg,var(--rx),color-mix(in srgb,var(--rx) 45%,transparent))}
 .bar.tx{background:var(--tx);background:linear-gradient(180deg,var(--tx),color-mix(in srgb,var(--tx) 45%,transparent))}
 @keyframes barRise{from{transform:scaleY(0)}to{transform:none}}
-.axis{display:flex;gap:3px;padding-left:30px;margin-top:6px;font:600 9.5px var(--mono);color:var(--text-3)}
+.axis{display:flex;gap:3px;padding-left:30px;margin-top:6px;font:600 10.5px var(--mono);color:var(--text-2)}
 .axis span{flex:1;text-align:left;white-space:nowrap;overflow:visible;width:0}
 .legend{display:flex;gap:14px;margin-top:12px;font-size:12px;font-weight:600;color:var(--text-2)}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
@@ -459,15 +459,17 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
 ::view-transition-new(root){z-index:2}
 
 /* ── 弹层 / Toast ── */
-.scrim{position:fixed;top:0;right:0;bottom:0;left:0;inset:0;z-index:88;background:var(--scrim);opacity:0;pointer-events:none;transition:opacity .35s}
+.scrim{position:fixed;top:0;right:0;bottom:0;left:0;inset:0;z-index:82;background:var(--scrim);opacity:0;pointer-events:none;transition:opacity .35s}
 .scrim.show{opacity:1;pointer-events:auto}
-.sheet{position:fixed;z-index:89;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 12px);width:min(460px,calc(100% - 20px));max-height:84vh;overflow:auto;
+.sheet{position:fixed;z-index:83;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 12px);width:min(460px,calc(100% - 20px));max-height:84vh;overflow:hidden!important;display:flex;flex-direction:column;
   padding:18px;border-radius:28px;background:var(--card-solid);border:1px solid var(--stroke);box-shadow:var(--shadow-3);
   transform:translate(-50%,calc(100% + 60px));visibility:hidden;transition:transform .7s var(--q), visibility 0s .7s}
 .sheet.show{transform:translate(-50%,0);visibility:visible;transition:transform .7s var(--q), visibility 0s}
+#sheet-body{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .sheet h3{margin:0 0 4px;font-size:18px;font-weight:800;text-align:center}
 .sheet .sub{text-align:center;font-size:13px;color:var(--text-3);margin-bottom:14px}
-.sheet .grab{width:38px;height:5px;border-radius:3px;background:var(--text-4);margin:-6px auto 12px}
+.sheet .grab{flex:none;width:38px;height:5px;border-radius:3px;background:var(--text-4);margin:-6px auto 12px}
+.sheet .al-foot-btns{position:sticky;bottom:0;z-index:4;margin-top:12px;padding:10px 0 2px;background:var(--card-solid);border-top:1px solid var(--divider)}
 .code{font:700 44px/1 var(--mono);letter-spacing:.12em;text-align:center;padding:10px 0}
 .al{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:10px 2px}
 .al+.al{border-top:1px solid var(--divider)}
@@ -507,7 +509,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 @keyframes skel{to{transform:translateX(100%)}}
 .mini-bars{display:flex;align-items:flex-end;gap:2px;height:64px;margin-top:6px}
 .mini-bars i{flex:1;background:var(--rx);background:linear-gradient(180deg,var(--rx),color-mix(in srgb,var(--rx) 40%,transparent));border-radius:2px 2px 0 0;min-height:1px;transform-origin:bottom;animation:barRise .7s var(--q) both}
-.mini-axis{display:flex;justify-content:space-between;font:600 9.5px var(--mono);color:var(--text-3);margin-top:3px}
+.mini-axis{display:flex;justify-content:space-between;font:600 10.5px var(--mono);color:var(--text-2);margin-top:3px}
 .hbar{display:grid;grid-template-columns:minmax(70px,120px) 1fr auto;gap:10px;align-items:center;padding:7px 0;font-size:13px}
 .hbar+.hbar{border-top:1px solid var(--divider)}
 .hbar .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
@@ -647,7 +649,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 .stk .c{flex:1;min-width:0;height:100%;display:flex;flex-direction:column-reverse}
 .stk .c i{display:block;width:100%;min-height:0}
 .stk .c i:last-child{border-radius:2px 2px 0 0}
-.stk-ax{display:flex;justify-content:space-between;font:600 9.5px var(--mono);color:var(--text-3);margin-top:3px}
+.stk-ax{display:flex;justify-content:space-between;font:600 10.5px var(--mono);color:var(--text-2);margin-top:3px}
 .pu-set{border-top:1px solid var(--divider);padding-top:10px}
 .unk2 .top .nm{font-family:var(--mono);font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .simdev{display:flex;align-items:center;gap:10px;padding:8px 0}
@@ -703,7 +705,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 .fgtl{display:grid;gap:6px}
 .fgtl .bar{position:relative;height:18px;border-radius:6px;background:var(--input);overflow:hidden}
 .fgtl .bar i{position:absolute;top:0;bottom:0;border-radius:3px;opacity:.85}
-.fgtl .ax{display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-3);font-family:var(--mono)}
+.fgtl .ax{display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-2);font-family:var(--mono)}
 .more-in>.ctrl,[data-style] .more-in>.ctrl{background:none;border:0;border-radius:0;padding:10px 0 0;box-shadow:none}
 .more-in>.ctrl+.ctrl{border-top:1px solid var(--divider)}
 #pu-body{transition:opacity .2s}
@@ -720,8 +722,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
  * ========================================================================== */
 .btns{flex-wrap:wrap}
 /* 保证 #sheet 确认弹层始终位于连接抽屉之上，绝不发生模态遮挡倒挂 */
-#scrim{z-index:88}
-#sheet{z-index:89;max-height:88vh;max-height:min(88dvh,calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 20px))}
+#scrim{z-index:82}
+#sheet{z-index:83;overflow:hidden!important;display:flex;flex-direction:column;max-height:88vh;max-height:min(88dvh,calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 20px))}
 
 /* 已读水位状态：隐私安检已读后顶栏角标退去刺眼红底，转为柔和中性计数 */
 .hbtn #lgd-badge.is-read{
@@ -1120,12 +1122,12 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 
 /* ── FlowScalpel 活跃连接管理与异常断流抽屉 ── */
 .v6-drawer-scrim{
-  position:fixed;top:0;right:0;bottom:0;left:0;inset:0;z-index:80;background:var(--scrim);
+  position:fixed!important;top:0;right:0;bottom:0;left:0;inset:0;z-index:80;background:var(--scrim);
   opacity:0;pointer-events:none;transition:opacity .22s ease;
 }
 .v6-drawer-scrim.show{opacity:1;pointer-events:auto}
-.v6-drawer{
-  position:fixed;z-index:81;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 10px);
+.v6-drawer,#v6-scalpel-drawer{
+  position:fixed!important;z-index:81;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 10px);
   width:min(760px,calc(100% - 16px));
   max-height:86vh;
   max-height:min(86dvh,calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 24px));

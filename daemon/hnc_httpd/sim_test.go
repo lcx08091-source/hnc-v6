@@ -516,3 +516,87 @@ func TestSimAppLibraryFromRules(t *testing.T) {
 		}
 	}
 }
+
+func TestSimRC7VectorSyncWhitelistAppQoSAndScalpelIsolation(t *testing.T) {
+	s, marker := simTestEnv(t)
+
+	// 1. idle 预设默认全在线 + CoreHub /api/vector_sync 实时合并在线数/速率/连接数且不写 devices.json
+	mustOK(t, dispatchAction(s, "sim_preset", map[string]string{"preset": "idle"}, false), "idle preset")
+	ws := s.CoreHub().RefreshSnapshotNow()
+	if !ws.Live.Sim || !ws.Live.HotspotActive || ws.Live.Online != 4 || ws.Live.Total != 4 || ws.Live.HotspotFlows == 0 {
+		t.Fatalf("expected 4 online sim devices and >0 flows in CoreHub live snapshot, got %+v", ws.Live)
+	}
+	if _, err := os.Stat(filepath.Join(s.hncDir, "data", "devices.json")); err == nil {
+		t.Fatal("CoreHub sim merge must never create or write data/devices.json")
+	}
+
+	// 2. 11~32 个汉字中文改名通过, 33 个汉字被拒
+	mac := ws.Live.Devices[0].MAC
+	zh32 := strings.Repeat("模", 32)
+	zh33 := strings.Repeat("模", 33)
+	mustOK(t, dispatchAction(s, "device_rename", map[string]string{"mac": mac, "name": zh32}, false), "32 Chinese chars rename")
+	if r := dispatchAction(s, "device_rename", map[string]string{"mac": mac, "name": zh33}, false); r.OK {
+		t.Fatal("33 Chinese chars rename must be rejected")
+	}
+	mustOK(t, dispatchAction(s, "device_rename", map[string]string{"mac": "aa:bb:cc:dd:ee:09", "name": strings.Repeat("真", 20)}, false), "real 20 Chinese chars rename")
+
+	// 3. app_qos_set 与 delay_set 双向互斥及 simDeviceMap 回读
+	mustOK(t, dispatchAction(s, "app_qos_set", map[string]string{"mac": mac, "enabled": "true"}, false), "sim app_qos_set on")
+	if r := dispatchAction(s, "delay_set", map[string]string{"mac": mac, "delay_ms": "50", "jitter_ms": "0", "loss_pct": "0"}, false); r.OK || r.Error != "conflict" {
+		t.Fatalf("expected delay_set conflict while app_qos=true, got %+v", r)
+	}
+	_, devPayload := s.buildDevicesPayload()
+	foundAppQoS := false
+	for _, dm := range devPayload["devices"].([]map[string]interface{}) {
+		if dm["mac"] == mac && dm["app_qos"] == true {
+			foundAppQoS = true
+		}
+	}
+	if !foundAppQoS {
+		t.Fatal("simDeviceMap did not expose app_qos=true")
+	}
+	mustOK(t, dispatchAction(s, "app_qos_set", map[string]string{"mac": mac, "enabled": "false"}, false), "sim app_qos_set off")
+	mustOK(t, dispatchAction(s, "delay_set", map[string]string{"mac": mac, "delay_ms": "50", "jitter_ms": "0", "loss_pct": "0"}, false), "sim delay_set on")
+	if r := dispatchAction(s, "app_qos_set", map[string]string{"mac": mac, "enabled": "true"}, false); r.OK || r.Error != "conflict" {
+		t.Fatalf("expected app_qos_set conflict while delay>0, got %+v", r)
+	}
+
+	// 4. P0 防断网: 仅勾选模拟设备白名单时严禁开启全局 whitelist_mode
+	_ = os.Remove(marker)
+	mustOK(t, dispatchAction(s, "device_whitelist_set", map[string]string{"mac": mac, "enabled": "true"}, false), "sim whitelist")
+	if r := dispatchAction(s, "whitelist_set", map[string]string{"enabled": "true"}, false); r.OK || r.Error != "empty whitelist" {
+		t.Fatalf("expected global whitelist_set(true) rejected without real whitelisted device, got %+v", r)
+	}
+	if l := execLog(marker); l != "" {
+		t.Fatalf("blocked whitelist_set executed script: %q", l)
+	}
+	if err := os.WriteFile(filepath.Join(s.hncDir, "data", "rules.json"),
+		[]byte(`{"devices":{"aa:bb:cc:dd:ee:09":{"whitelist":true}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, dispatchAction(s, "whitelist_set", map[string]string{"enabled": "true"}, false), "whitelist_set with real device")
+	_ = os.Remove(marker)
+
+	// 5. apiScalpelCut 对模拟 MAC 纯内存执行, 零 netlink / 零 iptables / 零脚本; 198.18.0.0/15 Fake-IP 拒绝 freeze_15m
+	eng := s.v6State().scalpel
+	ctCalled, iptCalled := false, false
+	eng.ctDelRunner = func(ScalpelTuple, uint32) error { ctCalled = true; return nil }
+	eng.iptRunner = func(int, string) error { iptCalled = true; return nil }
+
+	cutReq := httptest.NewRequest(http.MethodPost, "/api/v6/scalpel/cut", strings.NewReader(
+		`{"mode":"cut_freeze_15m","scope":"hotspot","mac":"`+mac+`","proto":"tcp","src_ip":"192.168.43.105","sport":45000,"dst_ip":"203.0.113.55","dport":443}`))
+	cutRec := httptest.NewRecorder()
+	s.apiScalpelCut(cutRec, cutReq)
+	if cutRec.Code != http.StatusOK || ctCalled || iptCalled || execLog(marker) != "" {
+		t.Fatalf("sim scalpel cut leaked to system or failed: code=%d ct=%v ipt=%v exec=%q body=%s",
+			cutRec.Code, ctCalled, iptCalled, execLog(marker), cutRec.Body.String())
+	}
+
+	fakeIPGuard := evaluateScalpelFreezeGuard(s, ScalpelTuple{
+		Proto: "tcp", SrcIP: "198.18.0.1", Sport: 51234, DstIP: "198.18.0.25", Dport: 443,
+	})
+	if fakeIPGuard == nil || fakeIPGuard.ReasonCode != "fake_ip_freeze_blocked" {
+		t.Fatalf("expected 198.18.0.0/15 Fake-IP freeze blocked, got %+v", fakeIPGuard)
+	}
+}
+

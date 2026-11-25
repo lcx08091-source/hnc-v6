@@ -371,9 +371,11 @@ func actionConnBlockDel(s *server, p map[string]string) actionResp {
 
 // connBlocksFor 某台设备的封锁项(给 /api/connections 与设备卡用)
 func connBlocksFor(hncDir, mac string) []connBlock {
+	mac = strings.ToLower(strings.TrimSpace(mac))
 	var out []connBlock
 	for _, it := range readConnBlocks(hncDir).Items {
-		if it.MAC == mac {
+		if strings.ToLower(strings.TrimSpace(it.MAC)) == mac {
+			it.MAC = mac
 			out = append(out, it)
 		}
 	}

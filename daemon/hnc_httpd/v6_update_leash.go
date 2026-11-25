@@ -482,7 +482,7 @@ func (e *updateLeashEngine) collectLiveFlows() []UpdateFlowInput {
 	names := e.srv.loadIPNames()
 	apps := e.srv.loadIPApps()
 
-	var out []UpdateFlowInput
+	out := []UpdateFlowInput{}
 	for _, ent := range sn.entries {
 		mac := owner[ent.Src]
 		if mac == "" || isPrivateIP(ent.Dst) {
@@ -508,7 +508,7 @@ func (e *updateLeashEngine) collectLiveFlows() []UpdateFlowInput {
 			Proto:     ent.Proto,
 			UpBytes:   ent.UpB,
 			DownBytes: ent.DnB,
-			DownBps:   int64(sn.dnBps[k]),
+			DownBps:   int64(sn.dnBps[k] / 8),
 		})
 	}
 	return out
@@ -610,7 +610,7 @@ func (e *updateLeashEngine) ObserveFlows(now time.Time, flows []UpdateFlowInput)
 	idleExp := e.effectiveIdleExpire()
 
 	// 清理超期空闲会话并刷新全部会话状态
-	var leashedList []UpdateLeashSession
+	leashedList := []UpdateLeashSession{}
 	var leashedCnt int64
 	for skey, sess := range e.sessions {
 		expired := false
@@ -1046,14 +1046,15 @@ func (e *updateLeashEngine) snapshot(refreshLive bool) map[string]any {
 func (e *updateLeashEngine) summary() map[string]any {
 	e.mu.Lock()
 	cfg := e.cfg
-	sessCnt := len(e.sessions)
+	sessions := e.sortedSessionsLocked()
 	e.mu.Unlock()
 	return map[string]any{
 		"enabled":         cfg.Enabled,
 		"grace_mb":        cfg.GraceMB,
 		"leash_kbps":      cfg.LeashKbps,
-		"active_sessions": sessCnt,
+		"active_sessions": len(sessions),
 		"leashed_count":   e.leashedCount.Load(),
+		"sessions":        sessions,
 	}
 }
 

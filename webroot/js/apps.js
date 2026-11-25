@@ -28,9 +28,10 @@ function loadApps() {
           auto_promote_enabled: r.capture.auto_promote_enabled !== false
         };
         if (Array.isArray(r.capture.active_ifaces) && r.capture.active_ifaces.length) {
+          var hsAct = S.hotspot && S.hotspot.active === true && S.hotspot.iface && !/^(vgate|veth|tun|ppp|dummy|lo)/i.test(S.hotspot.iface);
           S.selfIfaces = {
             enabled: r.capture.enabled !== false,
-            ap_iface: (S.hotspot && S.hotspot.iface) || 'wlan2',
+            ap_iface: hsAct ? S.hotspot.iface : '',
             ifaces: r.capture.active_ifaces.map(function (x) { return { name: x.name, rx_bytes: num(x.rx_bytes), eligible: true }; })
           };
         }
@@ -121,7 +122,15 @@ function selfStudioCardHtml() {
 
 function rulesPendingCount() {
   var discN = S.disc && Array.isArray(S.disc.groups) ? S.disc.groups.length : 0;
-  var candN = S.self ? num(S.self.candidate_high) : 0;
+  var candN = 0;
+  if (S.self) {
+    if (Array.isArray(S.self.candidate_samples) && S.self.candidate_samples.length > 0) {
+      var unprom = S.self.candidate_samples.filter(function (c) { return c && !c.promoted && c.tier !== 'shared'; }).length;
+      candN = unprom > 0 ? Math.max(unprom, num(S.self.candidate_high)) : 0;
+    } else {
+      candN = num(S.self.candidate_high);
+    }
+  }
   return discN + candN;
 }
 
@@ -129,11 +138,16 @@ function appsPendingSig() {
   var cnt = rulesPendingCount();
   if (cnt <= 0) return '';
   var g0 = S.disc && Array.isArray(S.disc.groups) && S.disc.groups[0] ? (S.disc.groups[0].key || S.disc.groups[0].suffix || '') : '';
-  return cnt + ':' + g0;
+  var c0 = '';
+  if (S.self && Array.isArray(S.self.candidate_samples)) {
+    var firstUnp = S.self.candidate_samples.filter(function (c) { return c && !c.promoted && c.tier !== 'shared'; })[0];
+    if (firstUnp) c0 = firstUnp.apex || '';
+  }
+  return cnt + ':' + g0 + ':' + c0;
 }
 function paintAppsDot() {
   var sig = appsPendingSig();
-  if (S.page === 'apps' && S.appsSub === 'rules' && sig) LS.set('hnc6.apps_seen_sig', sig);
+  if (S.page === 'apps' && sig) LS.set('hnc6.apps_seen_sig', sig);
   var seen = LS.get('hnc6.apps_seen_sig', '');
   var on = !!sig && sig !== seen;
   $$('.tab[data-tab="apps"] .dot').forEach(function (d) { d.hidden = !on; });
@@ -151,7 +165,19 @@ function renderApps(anim1) {
   var au = S.appUsage && S.appUsage[1] && S.appUsage[1].d;
   var hsAppCnt = au && Array.isArray(au.by_app) ? au.by_app.filter(function (a) { return a.id && a.id.charAt(0) !== '_'; }).length : 0;
   var pend = rulesPendingCount();
-  var st = !self ? ['待连接', 'var(--text-3)'] : self.enabled ? ['采集中', 'var(--badge-ok)'] : ['休眠中', 'var(--accent, var(--blue))'];
+  var dpiAlive = typeof isDpiEngineAlive === 'function' ? isDpiEngineAlive() : !!(S.dpi && S.dpi.available && S.dpi.state);
+  var stMode = typeof studioCurMode === 'function' ? studioCurMode() : (self && self.enabled ? 'smart_screen' : 'off');
+  var capObj = (S.studio && S.studio.capture) || {};
+  var capNow = dpiAlive && (capObj.capturing_now != null ? !!capObj.capturing_now : !!(self && self.enabled));
+  var st = !dpiAlive
+    ? (S.hotspot && S.hotspot.active === false && stMode === 'off' ? ['待机静默', 'var(--text-3)'] : ['引擎待机', 'var(--text-3)'])
+    : !self
+      ? ['待连接', 'var(--text-3)']
+      : capNow
+        ? ['采集中', 'var(--badge-ok)']
+        : stMode === 'off'
+          ? ['已关闭', 'var(--text-3)']
+          : ['休眠中', 'var(--accent, var(--blue))'];
   var foot = '热点今日识别 ' + hsAppCnt + ' 个应用 · 本机活跃 ' + active + ' 个应用 · 自训工作台已整合至「分析 → DPI 与自训」';
 
   var h = '<div class="wrap">' +
@@ -160,14 +186,14 @@ function renderApps(anim1) {
       '<div class="press" data-apps-host-jump="live" role="button" tabindex="0" title="点击打开本机守护实时管控" style="cursor:pointer"><div class="l">本机活跃应用</div><div class="v num">' + active + (rows.length > active ? '<small style="font-size:12px;color:var(--text-3)"> / ' + rows.length + '</small>' : '') + '</div></div><div class="hero-div"></div>' +
       '<div><div class="l">待确认新规则</div><div class="v num" style="color:' + (pend ? 'var(--orange)' : 'var(--text-1)') + '">' + pend + '</div></div><div class="hero-div"></div>' +
       '<div class="press" data-apps-host-jump="live" role="button" tabindex="0" title="实时网速 · 后台耗电耗流 · 本机防火墙" style="cursor:pointer"><div class="l">本机归因</div><div class="v" style="color:' + st[1] + '">' + st[0] + '</div></div></div>' +
-      '<div class="foot2"><span class="breathe' + (self && self.enabled ? '' : ' off') + '"></span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + foot + '</span></div></div>' +
+      '<div class="foot2"><span class="breathe' + (capNow ? '' : ' off') + '"></span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + foot + '</span></div></div>' +
     seg('apps-sub', [['active', '活跃应用'], ['rules', '应用规则中心' + (pend ? ' · ' + pend : '')]], S.appsSub) +
     '<div class="subview" id="apps-sub">' + appsSub() + '</div></div>';
 
   var p = $('#p-apps'); if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h; placeSegs(p);
   if (anim1) stagger($('.wrap', p));
+  paintAppsDot();
   if (S.appsSub === 'rules') {
-    paintAppsDot();
     if (typeof paintUnknown === 'function') paintUnknown();
     if (S.open.fpl && typeof loadFP === 'function') loadFP();
     if (S.open.rpack && typeof loadRulepack === 'function') loadRulepack();
@@ -177,7 +203,10 @@ function renderApps(anim1) {
 function ifaceChips() {
   var d = S.selfIfaces; if (!d || !d.ifaces) return '';
   var out = [];
-  if (d.ap_iface) out.push('<span class="chip" title="热点接口 · HNC 主路径已在抓">' + esc(d.ap_iface) + ' · 热点</span>');
+  var hsAct = S.hotspot && S.hotspot.active === true;
+  if (hsAct && d.ap_iface && !/^(vgate|veth|tun|ppp|dummy|lo)/i.test(d.ap_iface)) {
+    out.push('<span class="chip" title="热点接口 · HNC 主路径已在抓">' + esc(d.ap_iface) + ' · 热点</span>');
+  }
   d.ifaces.filter(function (x) { return x.eligible; }).slice(0, 6).forEach(function (x) {
     var k = /^(rmnet|ccmni)/.test(x.name) ? ' · 移动网络' : /^wlan/.test(x.name) ? ' · WiFi' : /^eth/.test(x.name) ? ' · 以太网' : '';
     out.push('<span class="chip on" title="已抓取 ' + bytes(x.rx_bytes) + '">' + esc(x.name) + k + '</span>');
@@ -238,10 +267,23 @@ function appsSub() {
       '<span class="tx"><div class="t" style="font-size:13.5px;font-weight:650">本机守护中心</div><div class="s">实时网速 · 后台耗电耗流 · 本机防火墙</div></span>' +
       '<span class="hint-a" style="display:inline-flex;align-items:center;gap:2px">前往' + ico('right', 'chev') + '</span></button>';
 
+    var dpiAlive2 = typeof isDpiEngineAlive === 'function' ? isDpiEngineAlive() : !!(S.dpi && S.dpi.available && S.dpi.state);
+    var stMode2 = typeof studioCurMode === 'function' ? studioCurMode() : (self && self.enabled ? 'smart_screen' : 'off');
+    var emptyMsg = qStr && allRows.length
+      ? '未找到匹配「' + esc(qStr) + '」的本机应用'
+      : !dpiAlive2
+        ? (S.hotspot && S.hotspot.active === false ? '热点未开启 · DPI 引擎待机零耗电，可前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 开启本机采样' : 'DPI 引擎暂未运行 · 可前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 查看状态')
+        : stMode2 === 'off'
+          ? '本机自训采样已关闭 · 可前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 开启'
+          : !self
+            ? 'DPI 引擎运行中 · 暂未上报本机归因数据'
+            : !self.enabled
+              ? '本机采样休眠中 · 亮屏后自动恢复，或前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 切换'
+              : '采样器已就绪 · 等待首批连接…';
     var hostHtml = '<div class="sec"><span>热点手机本机应用 <small>UID 级真实套接字归因 · 点开可排除代理</small></span><button class="linkish" data-act="self-conns">此刻连接明细</button></div>' +
       hostGuardEntryHtml +
       (!rows.length
-        ? '<div class="glass empty">' + (qStr && allRows.length ? '未找到匹配「' + esc(qStr) + '」的本机应用' : !self ? 'dpid 暂未上报本机数据' : !self.enabled ? '本机采样休眠中 · 亮屏后自动恢复，或前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 切换' : '采样器刚就绪 · 等待首批连接…') + '</div>'
+        ? '<div class="glass empty">' + emptyMsg + '</div>'
         : '<div class="glass rows">' + usr.slice(0, 50).map(function (r) { return appRow(r, mx); }).join('') + '</div>' +
           (sys.length ? '<div class="glass' + (S.open.sysapps ? ' open' : '') + '" data-foldkey="sysapps"><button class="card-h" data-act="fold" data-key="sysapps">' + gi('gray', 'cpu') + '<span class="tx"><div class="t">本机系统与组件应用</div><div class="s">' + sys.length + ' 个 · 默认收起不污染规则库</div></span>' + ico('chev', 'chev') + '</button>' +
             '<div class="fold"><div><div class="fold-in rows" style="border-top:1px solid var(--divider)">' + sys.slice(0, 80).map(function (r) { return appRow(r, mx); }).join('') + '</div></div></div></div>' : ''));

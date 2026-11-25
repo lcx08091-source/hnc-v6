@@ -140,8 +140,9 @@ type dnsForwarder struct {
 	lat         [dnsLatRing]float64
 	latN        int
 	latPos      int
-	closeCtx    context.Context
-	closeCancel context.CancelFunc
+	closeCtx     context.Context
+	closeCancel  context.CancelFunc
+	lastUpstream string
 }
 
 func newDNSForwarder() *dnsForwarder {
@@ -185,7 +186,15 @@ func (f *dnsForwarder) SetUpstream(addr string) {
 		return
 	}
 	f.upstream.Store(addr)
-	if prev != "" || f.cache.Len() > 0 {
+	if addr == "" {
+		// 弱网瞬断无可用上游时保留 180s Serve-Stale 保活缓存, 不主动清空
+		return
+	}
+	f.mu.Lock()
+	prevNonEmpty := f.lastUpstream
+	f.lastUpstream = addr
+	f.mu.Unlock()
+	if prevNonEmpty != "" && prevNonEmpty != addr {
 		f.FlushCache()
 	}
 }

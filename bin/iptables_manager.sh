@@ -365,13 +365,13 @@ _heal_postrouting_before_save() {
     fi
 }
 
-# 检测是否存在活跃 VPN 口(tun+/wg+/utun+/sing_tun+)且系统或该接口显式设了 disable_ipv6=1
+# 检测是否存在活跃 VPN 口(tun+/wg+/utun+/sing_tun+/Meta)且系统或该接口显式设了 disable_ipv6=1
 _vpn_ipv6_disabled() {
     local _sys_net="${HNC_SYS_NET:-/sys/class/net}"
     local _proc_v6="${HNC_PROC_IPV6_CONF:-/proc/sys/net/ipv6/conf}"
     local _d _ifn _oper _flags _dis_all _dis_if
     _dis_all=$(cat "$_proc_v6/all/disable_ipv6" 2>/dev/null | tr -d ' \t\r\n')
-    for _d in "$_sys_net"/tun* "$_sys_net"/wg* "$_sys_net"/utun* "$_sys_net"/sing_tun*; do
+    for _d in "$_sys_net"/tun* "$_sys_net"/wg* "$_sys_net"/utun* "$_sys_net"/sing_tun* "$_sys_net"/Meta; do
         [ -e "$_d" ] || continue
         _ifn=${_d##*/}
         _oper=$(cat "$_d/operstate" 2>/dev/null | tr -d ' \t\r\n')
@@ -482,7 +482,7 @@ init_chains() {
 
     # ── HNC_EGRESS_FIX (mangle/POSTROUTING tail): 修复 bw_mangle 冲刷并保护多蜂窝/VPN 出向 mark ──
     _ensure_chain mangle HNC_EGRESS_FIX
-    for _eg_if in ccmni+ sipa_eth+ seth_+ gti+ wwan+ v4-+ clat+ tun+ wg+ tailscale+ utun+; do
+    for _eg_if in ccmni+ sipa_eth+ seth_+ gti+ wwan+ v4-+ clat+ tun+ wg+ tailscale+ utun+ sing_tun+ Meta; do
         ipt_dual -t mangle -A HNC_EGRESS_FIX -o "$_eg_if" -j RETURN
     done
     ipt_dual -t mangle -A HNC_EGRESS_FIX \

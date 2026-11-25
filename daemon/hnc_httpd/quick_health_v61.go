@@ -610,9 +610,16 @@ func (s *server) evalShapingOffloadCard(hncDir string, hotspotActive bool) Quick
 			} else if st := asString(og["state"]); st != "" {
 				offloadState = st
 			}
-			fb, _ := toInt64(og["fallback"])
+			fbActive := dpJSONBool(og["fallback_active"]) || dpJSONBool(og["fallback"])
+			if !fbActive {
+				if fbInt, ok := toInt64(og["fallback_active"]); ok && fbInt > 0 {
+					fbActive = true
+				} else if fbInt, ok := toInt64(og["fallback"]); ok && fbInt > 0 {
+					fbActive = true
+				}
+			}
 			// 硬件卸载处于 ACTIVE 且用户把兜底强制关成 off 时, 限速会被硬件直通绕过
-			if offloadState == "ACTIVE" && clsactMode == "off" && fb == 0 && (controlledDevices > 0 || appLimitsCount > 0 || globalShaper) {
+			if offloadState == "ACTIVE" && clsactMode == "off" && !fbActive && (controlledDevices > 0 || appLimitsCount > 0 || globalShaper) {
 				offloadBypass = true
 			}
 		}

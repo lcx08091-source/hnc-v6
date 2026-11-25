@@ -47,11 +47,14 @@ func (s *server) autoPromoteFlagPath() string {
 // apiSelf returns just the `self` block from dpi_state.json. Cheaper
 // than the full /api/dpi_state for WebUI tabs that only need self.
 func (s *server) apiSelf(w http.ResponseWriter, r *http.Request) {
+	_, selfErr := os.Stat(s.selfFlagPath())
+	selfEnabled := selfErr == nil
 	path := filepath.Join(s.hncDir, "run", "dpi_state.json")
 	raw, err := readJSON(path)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"available": false,
+			"enabled":   selfEnabled,
 			"error":     err.Error(),
 		})
 		return
@@ -60,6 +63,7 @@ func (s *server) apiSelf(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"available": false,
+			"enabled":   selfEnabled,
 			"error":     "dpi_state.json: top-level not an object",
 		})
 		return
@@ -74,6 +78,7 @@ func (s *server) apiSelf(w http.ResponseWriter, r *http.Request) {
 	autoPromoteEnabled := apErr == nil
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"available":            true,
+		"enabled":              selfEnabled,
 		"self":                 selfBlock, // may be nil if disabled / not yet populated
 		"auto_expand_enabled":  autoExpandEnabled,
 		"auto_promote_enabled": autoPromoteEnabled,
@@ -140,8 +145,18 @@ func (s *server) apiSelfToggle(w http.ResponseWriter, r *http.Request) {
 	mode := "off"
 	if *body.Enabled {
 		mode = "smart_screen"
+		studioMu.Lock()
+		ensureStudioPolicyLocked(s)
+		if studioPolicy.Mode == "lease_15m" {
+			mode = "lease_15m"
+		}
+		studioMu.Unlock()
+		if mode == "smart_screen" {
+			_ = actionSelfStudioStart(s, map[string]string{"mode": mode})
+		}
+	} else {
+		_ = actionSelfStudioStart(s, map[string]string{"mode": "off"})
 	}
-	_ = actionSelfStudioStart(s, map[string]string{"mode": mode})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "ok",
 		"enabled": *body.Enabled,
@@ -184,6 +199,12 @@ var selfPositive = []*regexp.Regexp{
 	hncCellIfaceRE,
 	regexp.MustCompile(`^wlan0$`),
 	regexp.MustCompile(`^eth\d+$`),
+	regexp.MustCompile(`^tun\d+$`),
+	regexp.MustCompile(`(?i)^meta\d*$`),
+	regexp.MustCompile(`^vpn\d+$`),
+	regexp.MustCompile(`^wg\d+$`),
+	regexp.MustCompile(`^tailscale\d+$`),
+	regexp.MustCompile(`^utun\d+$`),
 }
 var selfNegative = []*regexp.Regexp{
 	regexp.MustCompile(`^lo$`),

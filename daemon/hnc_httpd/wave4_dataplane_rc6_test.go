@@ -581,3 +581,137 @@ func TestWave4BackupGuardsAndTun0Execution(t *testing.T) {
 			err, chainExists, fwdLinked, preLinked, liveRules)
 	}
 }
+
+func TestRC7W06DeadlockOffloadAndSubtreeFixes(t *testing.T) {
+	// 1. B022: 验证持 nativeDPLockMu 时调 resolveActiveVectorExpressParamsFull 并发 Actor.Do 绝不发生 AB-BA 死锁
+	dir := setupNativeTierTestEnv(t, "wlan2")
+	_ = DefaultDataplaneActor() // 确保 defaultDPActorReady == true
+	s := newServer(dir)
+
+	doneCh := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 40; i++ {
+				unlock, err := acquireNativeDataplaneLock(dir, "test_lock_order")
+				if err == nil {
+					_, _, _, _ = resolveActiveVectorExpressParamsFull(s, dir)
+					unlock()
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 40; i++ {
+				_ = DefaultDataplaneActor().Do("test_actor_lock_order", func(a *DataplaneActor) error {
+					unlock, err := acquireNativeDataplaneLock(dir, "actor_inner")
+					if err == nil {
+						a.expressSpec = v6ExpressDesiredState{
+							active:       true,
+							gameMark:     0x02000000,
+							bgCeilKbps:   120000,
+							upBgCeilKbps: 24000,
+						}
+						a.publishSnapshotLocked()
+						unlock()
+					}
+					return nil
+				})
+			}
+		}()
+		wg.Wait()
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("AB-BA deadlock detected between nativeDPLockMu and DefaultDataplaneActor().Do")
+	}
+
+	act, gm, bgDn, bgUp := resolveActiveVectorExpressParamsFull(s, dir)
+	if !act || gm != 0x02000000 || bgDn != 120000 || bgUp != 24000 {
+		t.Fatalf("lock-free express snapshot mismatch: act=%v gm=%#x bgDn=%d bgUp=%d", act, gm, bgDn, bgUp)
+	}
+	_ = DefaultDataplaneActor().Do("reset_test_express", func(a *DataplaneActor) error {
+		a.expressSpec = v6ExpressDesiredState{}
+		a.publishSnapshotLocked()
+		return nil
+	})
+
+	// 2. B022: filter/FORWARD HNC_QUIC_APPLIM 错位排在 HNC_WHITELIST 之前时自动摘除并重插到锚点之后
+	origRunner := nativeIptCmdRunner
+	var quicCmds []string
+	quicMisordered := true
+	nativeIptCmdRunner = func(_ string, args ...string) (string, error) {
+		cmdStr := strings.Join(args, " ")
+		quicCmds = append(quicCmds, cmdStr)
+		switch {
+		case strings.Contains(cmdStr, "-t mangle -C FORWARD -j HNC_APP_LIMIT_UP"):
+			return "", nil
+		case strings.Contains(cmdStr, "-t filter -C FORWARD -j HNC_QUIC_APPLIM"):
+			if quicMisordered {
+				return "", nil
+			}
+			return "", errors.New("deleted")
+		case strings.Contains(cmdStr, "-t filter -D FORWARD -j HNC_QUIC_APPLIM"):
+			quicMisordered = false
+			return "", nil
+		case strings.Contains(cmdStr, "-t filter -L FORWARD -n --line-numbers"):
+			if quicMisordered {
+				return "Chain FORWARD (policy ACCEPT)\n1    HNC_QUIC_APPLIM  all  --  0.0.0.0/0  0.0.0.0/0\n2    HNC_CTRL         all  --  0.0.0.0/0  0.0.0.0/0\n3    HNC_WHITELIST    all  --  0.0.0.0/0  0.0.0.0/0\n", nil
+			}
+			return "Chain FORWARD (policy ACCEPT)\n1    HNC_CTRL       all  --  0.0.0.0/0  0.0.0.0/0\n2    HNC_WHITELIST  all  --  0.0.0.0/0  0.0.0.0/0\n", nil
+		case strings.Contains(cmdStr, "-t mangle -C POSTROUTING -j HNC_APP_LIMIT_DOWN"):
+			return "", nil
+		}
+		return "", nil
+	}
+	ensureAppLimitTopHooksOnBin("/system/bin/iptables")
+	nativeIptCmdRunner = origRunner
+	joinedQuic := strings.Join(quicCmds, "\n")
+	if !strings.Contains(joinedQuic, "-t filter -D FORWARD -j HNC_QUIC_APPLIM") ||
+		!strings.Contains(joinedQuic, "-t filter -I FORWARD 3 -j HNC_QUIC_APPLIM") {
+		t.Fatalf("expected HNC_QUIC_APPLIM relocated after HNC_WHITELIST (pos 3), got:\n%s", joinedQuic)
+	}
+
+	// 3. B018/B019: /api/dpi_probe 结合热点活跃态与 offload_guard.json 动态修正 offload_hint
+	probeSrv, mux, probeDir := newV6TestMux(t)
+	mux.HandleFunc("/api/dpi_probe", probeSrv.apiDPIProbe)
+	_ = os.WriteFile(filepath.Join(probeDir, "run", "dpid.probe.json"), []byte(`{"af_packet_available":true,"offload_hint":true,"offload_evidence":["tethering"]}`), 0o644)
+	_ = os.Remove(filepath.Join(probeDir, "run", "hnc_state"))
+
+	// (a) 热点关闭 -> offload_hint 必须为 false
+	rOff := doV6JSONReq(t, mux, http.MethodGet, "/api/dpi_probe", "")
+	if !strings.Contains(rOff.Body.String(), `"offload_hint":false`) {
+		t.Fatalf("expected offload_hint:false when hotspot off, got %s", rOff.Body.String())
+	}
+	// (b) 热点开启 + fallback_active:true -> offload_hint 必须为 false
+	_ = os.WriteFile(filepath.Join(probeDir, "run", "hnc_state"), []byte("ACTIVE:wlan2\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(probeDir, "run", "offload_guard.json"), []byte(`{"mode":"auto","offload_state":"CAPABLE","fallback_active":true,"slowpath":"ok"}`), 0o644)
+	rGuarded := doV6JSONReq(t, mux, http.MethodGet, "/api/dpi_probe", "")
+	if !strings.Contains(rGuarded.Body.String(), `"offload_hint":false`) {
+		t.Fatalf("expected offload_hint:false when fallback_active=true, got %s", rGuarded.Body.String())
+	}
+	// (c) 热点开启 + ACTIVE 且未压制 -> offload_hint 为 true
+	_ = os.WriteFile(filepath.Join(probeDir, "run", "offload_guard.json"), []byte(`{"mode":"off","offload_state":"ACTIVE","fallback_active":false,"slowpath":"n/a"}`), 0o644)
+	rActive := doV6JSONReq(t, mux, http.MethodGet, "/api/dpi_probe", "")
+	if !strings.Contains(rActive.Body.String(), `"offload_hint":true`) {
+		t.Fatalf("expected offload_hint:true when ACTIVE and unguarded, got %s", rActive.Body.String())
+	}
+
+	// 4. B020: dpInspectOffloadGuard 补齐 Mode 字段并准确识别 slowpath="ok" vs "unavailable|error"
+	env := &dpVerifyEnv{HNCDir: probeDir, ReadFile: os.ReadFile}
+	_ = os.WriteFile(filepath.Join(probeDir, "run", "offload_guard.json"), []byte(`{"mode":"auto","offload_state":"ACTIVE","fallback_active":true,"slowpath":"ok"}`), 0o644)
+	ogOK, _ := dpInspectOffloadGuard(env)
+	if ogOK.Mode != "auto" || !ogOK.SlowpathActive {
+		t.Fatalf("expected Mode=auto SlowpathActive=true for slowpath=ok, got %+v", ogOK)
+	}
+	_ = os.WriteFile(filepath.Join(probeDir, "run", "offload_guard.json"), []byte(`{"mode":"on","offload_state":"ACTIVE","fallback_active":true,"slowpath":"unavailable"}`), 0o644)
+	ogUnavail, _ := dpInspectOffloadGuard(env)
+	if ogUnavail.Mode != "on" || ogUnavail.SlowpathActive {
+		t.Fatalf("expected Mode=on SlowpathActive=false for slowpath=unavailable, got %+v", ogUnavail)
+	}
+}

@@ -1749,6 +1749,65 @@ func (c *scCtx) isIpacmRunning() bool {
 	return ok && strings.TrimSpace(out) != ""
 }
 
+func scHasActiveControlPolicy(c *scCtx) bool {
+	if raw := c.readTrim(c.hnc("data", "app_limits.flat")); raw != "" {
+		for _, ln := range strings.Split(raw, "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln != "" && !strings.HasPrefix(ln, "#") {
+				return true
+			}
+		}
+	}
+	if al := c.readJSON(c.hnc("data", "app_limits.json")); al != nil {
+		if items, ok := al["items"].([]interface{}); ok && len(items) > 0 {
+			return true
+		}
+	}
+	m := c.readJSON(c.hnc("data", "rules.json"))
+	if m == nil {
+		return false
+	}
+	for _, k := range []string{"global_shaper_enabled", "quic_block", "client_isolation_enabled", "whitelist_mode"} {
+		if b, ok := m[k].(bool); ok && b {
+			return true
+		}
+	}
+	if bl, ok := m["blacklist"].([]interface{}); ok && len(bl) > 0 {
+		return true
+	}
+	if devs, ok := m["devices"].(map[string]interface{}); ok {
+		for _, dv := range devs {
+			dm, ok2 := dv.(map[string]interface{})
+			if !ok2 {
+				continue
+			}
+			for _, k := range []string{"limit_enabled", "delay_enabled", "sqm_enabled", "app_qos"} {
+				if b, ok3 := dm[k].(bool); ok3 && b {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func scGuardFallbackFailed(g map[string]interface{}) bool {
+	switch strings.ToLower(strings.TrimSpace(asString(g["slowpath"]))) {
+	case "unavailable", "error", "failed":
+		return true
+	}
+	if rc := strings.ToLower(strings.TrimSpace(asString(g["reason_code"]))); rc != "" && rc != "ok" {
+		return true
+	}
+	det := asString(g["detail"])
+	for _, kw := range []string{"不可达", "未能", "无法", "失败", "正在旁路限速"} {
+		if strings.Contains(det, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func scSectionOffload(c *scCtx) []scItem {
 	var items []scItem
 	g := c.readJSON(c.hnc("run", "offload_guard.json"))
@@ -1777,6 +1836,8 @@ func scSectionOffload(c *scCtx) []scItem {
 			git.Detail += fmt.Sprintf("; %s前采样", scDur(c.env.Now().Unix()-lc))
 		}
 		switch {
+		case state == "ACTIVE" && !fb && mode == "auto" && !scHasActiveControlPolicy(c) && !scGuardFallbackFailed(g):
+			git.Status = scOK
 		case state == "ACTIVE" && !fb:
 			git.Status = scWarn
 			git.Fix = "offload 正在旁路限速, 把设置里的 offload 兜底改为 auto 或 on"
@@ -1834,7 +1895,7 @@ func scSectionOffload(c *scCtx) []scItem {
 			Value: "可能存在",
 			Detail: "检测到 IPA + " + strings.Join(agg, ",") + ": 硬件/聚合快速路径转发的热点流量可能不经过热点口的内核计数" +
 				"(/proc/net/dev、iptables、tc 统计), 热点用量与限速统计可能偏小; 本项只是提示, 未实测",
-			Fix: "对比系统「数据使用」里的热点用量; 偏差明显时使用统计校准功能(开发中)"})
+			Fix: "对比系统「数据使用」里的热点用量; 偏差明显时使用统计校准功能"})
 	}
 
 	var md []string

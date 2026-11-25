@@ -167,10 +167,71 @@ _sync_tree() {
     done
 }
 
+D_MOD="$MODDIR/bin/hnc_dpid"
+D_RUN="$HNC_DIR/bin/hnc_dpid"
+_need_dpid_restart=0
+if [ -f "$D_MOD" ] && { [ ! -s "$D_RUN" ] || ! _files_same "$D_MOD" "$D_RUN"; }; then
+    _need_dpid_restart=1
+fi
+
 _sync_tree "$MODDIR/bin" "$HNC_DIR/bin" 755
 _sync_tree "$MODDIR/webroot" "$HNC_DIR/webroot" 644
 if [ -f "$MODDIR/module.prop" ]; then
     _sync_file "$MODDIR/module.prop" "$HNC_DIR/module.prop" 644
+fi
+
+if [ "$_need_dpid_restart" = "1" ] && [ -s "$D_RUN" ] && _files_same "$D_MOD" "$D_RUN"; then
+    _dp_proot="${HNC_PROC_ROOT:-/proc}"
+    _is_real_dpid_pid() {
+        _idp="$1"
+        case "$_idp" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$_idp" = "$$" ] && return 1
+        [ -n "${PPID:-}" ] && [ "$_idp" = "$PPID" ] && return 1
+        [ -r "$_dp_proot/$_idp/cmdline" ] || return 1
+        if [ -r "$_dp_proot/$_idp/comm" ]; then
+            _idc=$(tr -d '\r\n' < "$_dp_proot/$_idp/comm" 2>/dev/null)
+            [ "$_idc" = "hnc_dpid" ] || return 1
+        fi
+        _ida0=$(tr '\000' '\n' < "$_dp_proot/$_idp/cmdline" 2>/dev/null | head -n 1)
+        [ "${_ida0##*/}" = "hnc_dpid" ]
+    }
+    _dpid_pids=""
+    for _dpf in "$RUN/dpid.child.pid" "$RUN/dpid.pid"; do
+        [ -f "$_dpf" ] || continue
+        _cand_dp=$(tr -d ' \r\n' < "$_dpf" 2>/dev/null)
+        if _is_real_dpid_pid "$_cand_dp"; then
+            case " $_dpid_pids " in *" $_cand_dp "*) ;; *) _dpid_pids="$_dpid_pids $_cand_dp" ;; esac
+        fi
+    done
+    if [ "$_dp_proot" != "/proc" ] || { [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+        for _pd in "$_dp_proot"/[0-9]*; do
+            [ -r "$_pd/cmdline" ] || continue
+            _pp=${_pd##*/}
+            if _is_real_dpid_pid "$_pp"; then
+                case " $_dpid_pids " in *" $_pp "*) ;; *) _dpid_pids="$_dpid_pids $_pp" ;; esac
+            fi
+        done
+        if [ "$_dp_proot" = "/proc" ]; then
+            for _pp in $(pidof hnc_dpid 2>/dev/null); do
+                _is_real_dpid_pid "$_pp" || continue
+                case " $_dpid_pids " in *" $_pp "*) ;; *) _dpid_pids="$_dpid_pids $_pp" ;; esac
+            done
+        fi
+    fi
+    if [ -n "$_dpid_pids" ]; then
+        for _p in $_dpid_pids; do
+            [ -n "$_p" ] && kill "$_p" 2>/dev/null || true
+        done
+        sleep 0.2 2>/dev/null || sleep 1
+        for _p in $_dpid_pids; do
+            [ -z "$_p" ] && continue
+            if kill -0 "$_p" 2>/dev/null; then
+                kill -9 "$_p" 2>/dev/null || true
+            fi
+            echo "runtime sync: stopped old hnc_dpid pid=$_p for refreshed binary"
+        done
+        rm -f "$RUN/dpid.pid" "$RUN/dpid.child.pid" 2>/dev/null || true
+    fi
 fi
 
 H_MOD="$MODDIR/daemon/hnc_httpd/hnc_httpd"

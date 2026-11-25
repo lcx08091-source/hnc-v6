@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"sort"
@@ -125,6 +126,7 @@ type flowScalpelEngine struct {
 	standaloneTimer   *time.Timer
 	rules             []ScalpelActiveRule
 	hostRules         []ScalpelActiveRule
+	simRules          []ScalpelActiveRule
 	hookEnsuredV4     bool
 	hookEnsuredV6     bool
 	hostHookEnsuredV4 bool
@@ -335,6 +337,16 @@ func isScalpelProtectedCorePort(port int) bool {
 	}
 }
 
+var scalpelFakeIPPrefix = netip.MustParsePrefix("198.18.0.0/15")
+
+func isScalpelFakeIP(ipStr string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil {
+		return false
+	}
+	return scalpelFakeIPPrefix.Contains(addr.Unmap())
+}
+
 func evaluateScalpelFreezeGuard(s *server, norm ScalpelTuple) *scalpelFreezeGuardError {
 	if isScalpelProtectedCorePort(norm.Dport) || isScalpelProtectedCorePort(norm.Sport) {
 		corePort := norm.Dport
@@ -345,6 +357,17 @@ func evaluateScalpelFreezeGuard(s *server, norm ScalpelTuple) *scalpelFreezeGuar
 			ReasonCode: "core_port_freeze_blocked",
 			Vendor:     "Core Network Port",
 			Detail:     fmt.Sprintf("目标端口 %d 属于核心网络基础设施（DNS/DoT/NTP），已拒绝 15 分钟端点冻结以防设备断网；仅允许使用 cut_once 执行一次性单流秒斩", corePort),
+		}
+	}
+	if isScalpelFakeIP(norm.DstIP) || isScalpelFakeIP(norm.SrcIP) {
+		hitIP := norm.DstIP
+		if !isScalpelFakeIP(hitIP) {
+			hitIP = norm.SrcIP
+		}
+		return &scalpelFreezeGuardError{
+			ReasonCode: "fake_ip_freeze_blocked",
+			Vendor:     "TUN Fake-IP Pool",
+			Detail:     fmt.Sprintf("目标地址 %s 属于代理 TUN 虚拟 Fake-IP 地址池（198.18.0.0/15），池内地址会被多个域名动态复用，已拒绝 15 分钟端点冻结以防误伤其他应用；仅允许使用 cut_once 执行一次性单流秒斩", hitIP),
 		}
 	}
 	if shared, vendor := detectSharedInfraIP(s, norm.DstIP); shared {
@@ -927,6 +950,7 @@ func (e *flowScalpelEngine) CutHost(now time.Time, tuple ScalpelTuple, mode stri
 		allowedMode := ""
 		if guardErr.ReasonCode == "core_port_freeze_blocked" ||
 			guardErr.ReasonCode == "shared_cdn_freeze_blocked" ||
+			guardErr.ReasonCode == "fake_ip_freeze_blocked" ||
 			guardErr.ReasonCode == "host_uid_required_for_freeze" {
 			allowedMode = scalpelModeCutOnce
 		}
@@ -1081,6 +1105,9 @@ func (e *flowScalpelEngine) CutHost(now time.Time, tuple ScalpelTuple, mode stri
 		}
 	}()
 
+	if iptErr == nil {
+		hostConnInvalidateProcCache()
+	}
 	e.cutTotal.Add(1)
 	e.hostCutTotal.Add(1)
 	e.notifyRuleAdded()
@@ -1587,6 +1614,7 @@ func (e *flowScalpelEngine) runLoop(stop <-chan struct{}) {
 // ── HTTP: GET /api/v6/scalpel/flows & POST /api/v6/scalpel/cut ───────────────
 
 func scalpelFlowToRowMap(fl scalpelClassifiedFlow) map[string]any {
+	// 注: fl.UpBps/fl.DownBps 已在 v6_host_conns.go 输出侧统一 / 8 转为 bytes/s, 此处严禁重复除两次
 	row := map[string]any{
 		"scope":       fl.Scope,
 		"flow_key":    fl.FlowKey,
@@ -1633,6 +1661,138 @@ func scalpelFlowToRowMap(fl scalpelClassifiedFlow) map[string]any {
 	return row
 }
 
+func (e *flowScalpelEngine) cutSimHotspot(now time.Time, tuple ScalpelTuple, mode, simMAC string) (map[string]any, error) {
+	norm, _, isV6, err := validateScalpelTuple(tuple)
+	if err != nil {
+		return nil, err
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = scalpelModeCutOnce
+	}
+	if mode != scalpelModeCutOnce && mode != scalpelModeFreeze15m {
+		return nil, errors.New("mode must be cut_once or cut_freeze_15m")
+	}
+	if mode == scalpelModeFreeze15m {
+		if guardErr := evaluateScalpelFreezeGuard(e.srv, norm); guardErr != nil {
+			e.guardBlocked.Add(1)
+			resp := map[string]any{
+				"ok":            false,
+				"sim":           true,
+				"scope":         scalpelHostScopeHotspot,
+				"guard_blocked": true,
+				"reason_code":   guardErr.ReasonCode,
+				"allowed_mode":  scalpelModeCutOnce,
+				"vendor":        guardErr.Vendor,
+				"tuple":         norm,
+				"error":         "freeze_guard_blocked",
+				"detail":        guardErr.Detail,
+			}
+			return resp, guardErr
+		}
+	}
+
+	seq := uint32(e.seqGen.Add(1))
+	e.mu.Lock()
+	kept := e.simRules[:0]
+	for _, r := range e.simRules {
+		if now.Before(r.ExpiresAt) {
+			kept = append(kept, r)
+		}
+	}
+	e.simRules = kept
+
+	resetDur := e.resetDuration
+	if resetDur <= 0 {
+		resetDur = scalpelResetTTL
+	}
+	if norm.Proto == "udp" && resetDur > scalpelUDPResetTTL {
+		resetDur = scalpelUDPResetTTL
+	}
+	freezeDur := e.freezeDur
+	if freezeDur <= 0 {
+		freezeDur = scalpelFreezeTTL
+	}
+
+	expReset := now.Add(resetDur)
+	e.simRules = append(e.simRules, ScalpelActiveRule{
+		ID:          fmt.Sprintf("sc_sim_%d_rst", seq),
+		Scope:       scalpelHostScopeHotspot,
+		Mode:        "reset_5s",
+		IsIPv6:      isV6,
+		Tuple:       norm,
+		ClientMAC:   simMAC,
+		MatchSport:  true,
+		CreatedAt:   now.Unix(),
+		ExpiresAt:   expReset,
+		ExpiresUnix: expReset.Unix(),
+	})
+
+	var expFreeze time.Time
+	if mode == scalpelModeFreeze15m {
+		expFreeze = now.Add(freezeDur)
+		e.simRules = append(e.simRules, ScalpelActiveRule{
+			ID:          fmt.Sprintf("sc_sim_%d_frz", seq),
+			Scope:       scalpelHostScopeHotspot,
+			Mode:        "freeze_15m",
+			IsIPv6:      isV6,
+			Tuple:       norm,
+			ClientMAC:   simMAC,
+			MatchSport:  false,
+			CreatedAt:   now.Unix(),
+			ExpiresAt:   expFreeze,
+			ExpiresUnix: expFreeze.Unix(),
+		})
+	}
+	if len(e.simRules) > scalpelMaxActiveRules {
+		e.simRules = e.simRules[len(e.simRules)-scalpelMaxActiveRules:]
+	}
+	activeCnt := len(e.simRules)
+	e.mu.Unlock()
+
+	cleanupSec := int(resetDur / time.Second)
+	if cleanupSec <= 0 && resetDur > 0 {
+		cleanupSec = 0
+	}
+	resp := map[string]any{
+		"ok":                   true,
+		"sim":                  true,
+		"scope":                scalpelHostScopeHotspot,
+		"mode":                 mode,
+		"tuple":                norm,
+		"v6":                   isV6,
+		"client_mac":           simMAC,
+		"conntrack_deleted":    true,
+		"reverse_tuple_tried":  false,
+		"reset_cleanup_in_sec": cleanupSec,
+		"active_scalpel_rules": activeCnt,
+	}
+	if mode == scalpelModeFreeze15m {
+		resp["frozen_until"] = expFreeze.Unix()
+	}
+	return resp, nil
+}
+
+func (s *server) resolveSimScalpelMAC(rawMAC string, norm ScalpelTuple) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	mac := simNormMAC(rawMAC)
+	if isSimMAC(mac) {
+		return mac, true
+	}
+	if rawMAC == "" && s.simActive() {
+		views, _ := s.simViews(time.Now())
+		for i := range views {
+			ip := strings.TrimSpace(views[i].D.IP)
+			if ip != "" && (ip == norm.SrcIP || ip == norm.DstIP) {
+				return views[i].D.MAC, true
+			}
+		}
+	}
+	return "", false
+}
+
 func (s *server) apiScalpelFlows(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "GET only"})
@@ -1675,9 +1835,10 @@ func (s *server) apiScalpelFlows(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	simOn := s.simActive()
 	eng := s.v6State().scalpel
 	eng.mu.Lock()
-	activeHotspotRules := make([]ScalpelActiveRule, 0, len(eng.rules))
+	activeHotspotRules := make([]ScalpelActiveRule, 0, len(eng.rules)+len(eng.simRules))
 	for _, rr := range eng.rules {
 		if now.Before(rr.ExpiresAt) {
 			cp := rr
@@ -1686,6 +1847,26 @@ func (s *server) apiScalpelFlows(w http.ResponseWriter, r *http.Request) {
 			}
 			activeHotspotRules = append(activeHotspotRules, cp)
 		}
+	}
+	var activeSimCutOnce []ScalpelActiveRule
+	if simOn && len(eng.simRules) > 0 {
+		keptSim := eng.simRules[:0]
+		for _, rr := range eng.simRules {
+			if now.Before(rr.ExpiresAt) {
+				keptSim = append(keptSim, rr)
+				cp := rr
+				if cp.Scope == "" {
+					cp.Scope = scalpelHostScopeHotspot
+				}
+				activeHotspotRules = append(activeHotspotRules, cp)
+				if cp.MatchSport {
+					activeSimCutOnce = append(activeSimCutOnce, cp)
+				}
+			}
+		}
+		eng.simRules = keptSim
+	} else if !simOn && len(eng.simRules) > 0 {
+		eng.simRules = nil
 	}
 	activeHostRules := make([]ScalpelActiveRule, 0, len(eng.hostRules))
 	for _, rr := range eng.hostRules {
@@ -1732,6 +1913,19 @@ func (s *server) apiScalpelFlows(w http.ResponseWriter, r *http.Request) {
 		allowHotspotRows := dual.HotspotFlows > 0 || qMAC != "" || qIP != ""
 		if allowHotspotRows {
 			for _, fl := range dual.HotspotList {
+				if len(activeSimCutOnce) > 0 && isSimMAC(fl.MAC) {
+					cand := ScalpelTuple{Proto: fl.Proto, SrcIP: fl.SrcIP, Sport: fl.Sport, DstIP: fl.DstIP, Dport: fl.Dport}
+					cutHit := false
+					for _, sr := range activeSimCutOnce {
+						if scalpelSameBidirectionalTuple(sr.Tuple, cand) {
+							cutHit = true
+							break
+						}
+					}
+					if cutHit {
+						continue
+					}
+				}
 				if qMAC != "" && fl.MAC != qMAC && !macFilterIPs[fl.SrcIP] {
 					continue
 				}
@@ -1826,6 +2020,37 @@ func (s *server) apiScalpelCut(w http.ResponseWriter, r *http.Request) {
 	if valErr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": valErr.Error()})
 		return
+	}
+
+	// 模拟设备物理隔离闸: 遇到 02:5e:00:* 模拟 MAC 纯内存处理, 严禁触碰 netlink/iptables!
+	if simMAC, ok := s.resolveSimScalpelMAC(req.MAC, norm); ok {
+		st := simFor(s.hncDir)
+		st.mu.Lock()
+		found := st.findLocked(simMAC) != nil
+		enabled := st.f.Enabled
+		st.mu.Unlock()
+		if !found && enabled {
+			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "not found", "detail": "sim device not found: " + simMAC})
+			return
+		}
+		if found {
+			resp, err := s.v6State().scalpel.cutSimHotspot(time.Now(), norm, req.Mode, simMAC)
+			if err != nil {
+				if resp == nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": err.Error()})
+					return
+				}
+				var guardErr *scalpelFreezeGuardError
+				if errors.As(err, &guardErr) {
+					writeJSON(w, http.StatusConflict, resp)
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, resp)
+				return
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
 	}
 
 	hasUID := req.UID != nil

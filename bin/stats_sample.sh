@@ -48,10 +48,61 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [STATS] $*" >> "$LOG" 2>/dev/null || true
 }
 
-mkdir -p "$(dirname "$RAW_FILE")" 2>/dev/null
+mkdir -p "$(dirname "$RAW_FILE")" "$HNC_DIR/run" 2>/dev/null
 
 # ═══════════════════════════════════════════════════════════════
-# 0. 对齐 HNC_STATS 的 per-IP 计数规则(rc46)
+# 0a. 时钟可信闸门前置(不可信时严禁写采样或写 stats_last_date, 保 test_hnc_clock.sh:67)
+# ═══════════════════════════════════════════════════════════════
+ts=""
+CLOCK_JUMPED=""
+if [ -f "$HNC_DIR/bin/hnc_clock.sh" ]; then
+    . "$HNC_DIR/bin/hnc_clock.sh"
+    ts=$(hnc_clock_now)
+    [ -z "$ts" ] && { log "WARN: date +%s failed"; exit 1; }
+    if ! hnc_clock_sane "$ts"; then
+        log "WARN: clock not trustworthy (ts=$ts high_water=$(hnc_clock_hwm)), sample skipped"
+        exit 0
+    fi
+    if _jd=$(hnc_clock_jump stats_sample "$ts"); then
+        CLOCK_JUMPED=$_jd
+        log "clock jumped ${_jd}s vs uptime since last sample"
+    fi
+    hnc_clock_note "$ts"
+else
+    ts=$(date +%s 2>/dev/null)
+    [ -z "$ts" ] && { log "WARN: date +%s failed"; exit 1; }
+fi
+
+MARKER="$HNC_DIR/run/stats_last_date"
+
+# _check_daily_rollup <write_if_missing>:
+# 空载退出前($1=0)若存在昨日 stats_last_date 且已跨零点, 照常触发 stats_rollup.sh 防止昨日柱图归零;
+# 有实际采样落盘后($1=1)同时在首次运行时初始化 stats_last_date。
+_check_daily_rollup() {
+    local _init_marker="${1:-0}" today last_date _update_marker=0 _rrc
+    today=$(date -d "@$ts" +%Y-%m-%d 2>/dev/null)
+    [ -z "$today" ] && today=$(date +%Y-%m-%d 2>/dev/null)
+    last_date=$(cat "$MARKER" 2>/dev/null)
+    if [ -n "$today" ] && [ -n "$last_date" ] && [ "$today" != "$last_date" ]; then
+        [ -n "$CLOCK_JUMPED" ] && log "note: date change coincides with a clock jump (${CLOCK_JUMPED}s)"
+        log "date changed: $last_date -> $today, triggering rollup"
+        if sh "$HNC_DIR/bin/stats_rollup.sh" "$last_date" >> "$LOG" 2>&1; then
+            _update_marker=1
+        else
+            _rrc=$?
+            _update_marker=0
+            log "WARN: rollup failed (rc=$_rrc), keeping stats_last_date=$last_date for retry"
+        fi
+    elif [ "$_init_marker" = "1" ]; then
+        _update_marker=1
+    fi
+    if [ "$_update_marker" = "1" ] && [ -n "$today" ]; then
+        echo "$today" > "$MARKER" 2>/dev/null
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# 0b. 对齐 HNC_STATS 的 per-IP 计数规则(rc46)
 # ═══════════════════════════════════════════════════════════════
 if [ -z "$HNC_TEST_MODE" ] && [ -x "$IPT_MGR" ]; then
     sh "$IPT_MGR" ensure_stats_online >/dev/null 2>&1 || true
@@ -62,6 +113,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 stats_out=$(_run_stats_all 2>/dev/null)
 if [ -z "$stats_out" ]; then
+    _check_daily_rollup 0
     exit 0
 fi
 
@@ -70,6 +122,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 if [ ! -s "$DEVICES_FLAT" ] && [ ! -f "$DEVICES_FILE" ]; then
     log "WARN: devices.flat and devices.json missing, sample skipped"
+    _check_daily_rollup 0
     exit 0
 fi
 
@@ -106,29 +159,13 @@ else
 fi
 
 if [ -z "$ip_to_mac" ]; then
+    _check_daily_rollup 0
     exit 0
 fi
 
 # ═══════════════════════════════════════════════════════════════
 # 3. 按 MAC 聚合(同一 MAC 多个 IP 的字节相加)
 # ═══════════════════════════════════════════════════════════════
-ts=$(date +%s 2>/dev/null)
-[ -z "$ts" ] && { log "WARN: date +%s failed"; exit 1; }
-
-CLOCK_JUMPED=""
-if [ -f "$HNC_DIR/bin/hnc_clock.sh" ]; then
-    . "$HNC_DIR/bin/hnc_clock.sh"
-    if ! hnc_clock_sane "$ts"; then
-        log "WARN: clock not trustworthy (ts=$ts high_water=$(hnc_clock_hwm)), sample skipped"
-        exit 0
-    fi
-    if _jd=$(hnc_clock_jump stats_sample "$ts"); then
-        CLOCK_JUMPED=$_jd
-        log "clock jumped ${_jd}s vs uptime since last sample"
-    fi
-    hnc_clock_note "$ts"
-fi
-
 MAP_TMP="$HNC_DIR/run/stats_map.$$"
 printf '%s\n' "$ip_to_mac" > "$MAP_TMP"
 trap 'rm -f "$MAP_TMP" 2>/dev/null' EXIT INT TERM
@@ -158,7 +195,8 @@ rm -f "$MAP_TMP" 2>/dev/null
 
 if [ -z "$aggregated" ]; then
     # 所有 IP 都没在 devices.json 找到 MAC,或者所有字节都是 0
-    # 不写空采样,直接退出
+    # 不写空采样,但检查跨零点归档后退出
+    _check_daily_rollup 0
     exit 0
 fi
 
@@ -182,26 +220,6 @@ fi
 # ═══════════════════════════════════════════════════════════════
 # 5. 检测日期变化 → 触发 rollup(昨日 raw → daily)
 # ═══════════════════════════════════════════════════════════════
-# 跨日标志文件记录上次采样的日期。首次启动时没文件,跳过 rollup。
-
-MARKER="$HNC_DIR/run/stats_last_date"
-today=$(date +%Y-%m-%d 2>/dev/null)
-last_date=$(cat "$MARKER" 2>/dev/null)
-
-_update_marker=1
-if [ -n "$today" ] && [ -n "$last_date" ] && [ "$today" != "$last_date" ]; then
-    [ -n "$CLOCK_JUMPED" ] && log "note: date change coincides with a clock jump (${CLOCK_JUMPED}s)"
-    log "date changed: $last_date -> $today, triggering rollup"
-    if sh "$HNC_DIR/bin/stats_rollup.sh" "$last_date" >> "$LOG" 2>&1; then
-        _update_marker=1
-    else
-        _rrc=$?
-        _update_marker=0
-        log "WARN: rollup failed (rc=$_rrc), keeping stats_last_date=$last_date for retry"
-    fi
-fi
-if [ "$_update_marker" = "1" ] && [ -n "$today" ]; then
-    echo "$today" > "$MARKER" 2>/dev/null
-fi
+_check_daily_rollup 1
 
 exit 0

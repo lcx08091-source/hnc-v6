@@ -162,6 +162,47 @@ if [ "$MODE" = counters ]; then
     exit 0
 fi
 
+# ── 跨进程目录互斥锁(防止 watchdog 与 httpd 并发拆链/建链踩踏) ──────
+ENCDNS_LOCK="$HNC_DIR/run/encdns_sync.lock"
+encdns_lock() {
+    [ "$DRY" = 1 ] && return 0
+    mkdir -p "$HNC_DIR/run" 2>/dev/null
+    local _n=0 _lp _ts _now
+    while ! mkdir "$ENCDNS_LOCK" 2>/dev/null; do
+        _lp=$(cat "$ENCDNS_LOCK/pid" 2>/dev/null)
+        _ts=$(cat "$ENCDNS_LOCK/ts" 2>/dev/null)
+        _now=$(date +%s 2>/dev/null || echo 0)
+        if [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; then
+            rm -rf "$ENCDNS_LOCK" 2>/dev/null
+            continue
+        fi
+        case "$_ts:$_now" in
+            *[!0-9:]*|:*) ;;
+            *) [ "$_ts" -gt 0 ] && [ $((_now - _ts)) -ge 25 ] && rm -rf "$ENCDNS_LOCK" 2>/dev/null && continue ;;
+        esac
+        _n=$((_n + 1))
+        [ "$_n" -ge 50 ] && return 1
+        usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
+    done
+    echo "$$" > "$ENCDNS_LOCK/pid" 2>/dev/null
+    date +%s > "$ENCDNS_LOCK/ts" 2>/dev/null
+    return 0
+}
+encdns_unlock() {
+    [ "$DRY" = 1 ] && return 0
+    [ "$(cat "$ENCDNS_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$ENCDNS_LOCK" 2>/dev/null
+}
+if [ "$DRY" != 1 ]; then
+    if ! encdns_lock; then
+        log "WARN: encdns_sync.lock busy, aborting concurrent sync"
+        echo "ENCDNS=busy"
+        exit 1
+    fi
+    trap 'encdns_unlock' EXIT
+    trap 'encdns_unlock; trap - EXIT; exit 143' TERM
+    trap 'encdns_unlock; trap - EXIT; exit 130' INT
+fi
+
 # ── 拆链(幂等)────────────────────────────────────────────────────────
 for T in "$IPT" "$([ "$v6" = 1 ] && echo "$IP6T")"; do
     [ -n "$T" ] || continue

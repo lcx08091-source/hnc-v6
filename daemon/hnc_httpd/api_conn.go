@@ -867,6 +867,14 @@ func (s *server) deviceIPsByMAC() map[string][]string {
 			}
 		}
 	}
+	if s.simActive() {
+		views, _ := s.simViews(time.Now())
+		for i := range views {
+			if !views[i].D.Offline {
+				add(views[i].D.MAC, views[i].D.IP)
+			}
+		}
+	}
 	return out
 }
 
@@ -977,7 +985,7 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 	noteConnectionsPanelTouch()
 
 	hsActive, onlineCnt, _, _ := scalpelHotspotOnlineState(s)
-	hsFlows, hostFlows := scalpelLiveFlowCounts(s, hsActive, onlineCnt)
+	hsFlows, hostFlows := s.liveFlowCountsWithSim(hsActive, onlineCnt)
 	if !hsActive || onlineCnt == 0 {
 		hsFlows = 0
 	}
@@ -1046,7 +1054,7 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 			}
 			c["n"] = c["n"].(int) + 1
 			k := e.key()
-			c["bps"] = c["bps"].(float64) + sn.upBps[k] + sn.dnBps[k]
+			c["bps"] = c["bps"].(float64) + (sn.upBps[k]+sn.dnBps[k])/8
 		}
 		s.simMergeConnCounts(counts) // 模拟环境; 关闭时不动
 		base["counts"] = counts
@@ -1067,6 +1075,7 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 			var totUp, totDn uint64
 			var totBps float64
 
+			// 注: dualSnap 产出的 scalpelClassifiedFlow.UpBps/DownBps 已在 v6_host_conns.go 转为 bytes/s, 严禁重复除 8
 			appendClassified := func(list []scalpelClassifiedFlow) {
 				for _, fl := range list {
 					item, label := scalpelClassifiedFlowToConnItem(fl)
@@ -1196,9 +1205,9 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		k := e.key()
-		up, dn := sn.upBps[k], sn.dnBps[k]
+		up, dn := sn.upBps[k]/8, sn.dnBps[k]/8
 		item := map[string]interface{}{
-			"proto": e.Proto, "dst": e.Dst, "dport": e.Dport, "sport": e.Sport,
+			"proto": e.Proto, "src": e.Src, "dst": e.Dst, "dport": e.Dport, "sport": e.Sport,
 			"up_bytes": e.UpB, "down_bytes": e.DnB, "up_bps": int64(up), "down_bps": int64(dn),
 			"v6": e.Family == "ipv6", "ttl": e.TTL,
 		}
@@ -1639,7 +1648,7 @@ func (s *server) liveAppsByMAC() map[string][]map[string]interface{} {
 				continue // 有真应用时不显示系统服务
 			}
 			items = append(items, map[string]interface{}{
-				"id": acc.id, "name": acc.name, "bps": int64(acc.ewma), "category": acc.cat,
+				"id": acc.id, "name": acc.name, "bps": int64(acc.ewma / 8), "category": acc.cat,
 				"share": math.Round(acc.ewma/total*100) / 100, "system": acc.tier == tierSystem,
 			})
 			if len(items) >= liveAppMax {
@@ -1752,7 +1761,7 @@ func liveCallsByMAC() map[string]map[string]interface{} {
 		if c.last.Sub(c.since) < 8*time.Second {
 			continue
 		}
-		out[mac] = map[string]interface{}{"label": c.label, "kind": c.kind, "bps": int64(c.bps), "since": c.since.Unix()}
+		out[mac] = map[string]interface{}{"label": c.label, "kind": c.kind, "bps": int64(c.bps / 8), "since": c.since.Unix()}
 	}
 	return out
 }

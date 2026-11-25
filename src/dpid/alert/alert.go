@@ -823,6 +823,175 @@ func MarkSeen(cfg Config, ids []string) error {
 	return writeFileAtomic(path, b)
 }
 
+func alertsPathFromCfg(cfg Config) string {
+	if p := strings.TrimSpace(cfg.AlertsJSONLPath); p != "" {
+		return p
+	}
+	if d := strings.TrimSpace(cfg.HNCDir); d != "" {
+		return filepath.Join(d, "run", "alerts.jsonl")
+	}
+	return ""
+}
+
+func seenPathFromCfg(cfg Config) string {
+	if d := strings.TrimSpace(cfg.HNCDir); d != "" {
+		return filepath.Join(d, "run", "alerts_seen.json")
+	}
+	if p := strings.TrimSpace(cfg.AlertsJSONLPath); p != "" {
+		return filepath.Join(filepath.Dir(p), "alerts_seen.json")
+	}
+	return ""
+}
+
+func withAlertsFileFlockLocked(alertsPath string, fn func() error) error {
+	if alertsPath == "" {
+		return fn()
+	}
+	if err := os.MkdirAll(filepath.Dir(alertsPath), 0o755); err != nil {
+		return err
+	}
+	lockPath := alertsPath + ".lock"
+	lf, lerr := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if lerr != nil {
+		return fn()
+	}
+	defer lf.Close()
+	if ferr := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); ferr != nil {
+		return fn()
+	}
+	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+// Clear atomically truncates run/alerts.jsonl and resets run/alerts_seen.json
+// under alertsAppendMu + seenMu + cross-process flock(LOCK_EX).
+func Clear(cfg Config) error {
+	alertsPath := alertsPathFromCfg(cfg)
+	seenPath := seenPathFromCfg(cfg)
+
+	alertsAppendMu.Lock()
+	defer alertsAppendMu.Unlock()
+	seenMu.Lock()
+	defer seenMu.Unlock()
+
+	return withAlertsFileFlockLocked(alertsPath, func() error {
+		if alertsPath != "" {
+			if err := writeFileAtomic(alertsPath, []byte{}); err != nil {
+				return err
+			}
+		}
+		if seenPath != "" {
+			if err := os.MkdirAll(filepath.Dir(seenPath), 0o755); err != nil {
+				return err
+			}
+			b, _ := json.Marshal(SeenFile{IDs: []string{}})
+			if err := writeFileAtomic(seenPath, b); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// PurgeLeakGuard rewrites run/alerts.jsonl under alertsAppendMu + seenMu + flock(LOCK_EX),
+// keeping all non-leakguard alerts intact and filtering kind=="leakguard" alerts via keepFn.
+// When keepFn is nil, all kind=="leakguard" alerts are removed.
+func PurgeLeakGuard(cfg Config, keepFn func(Alert) bool) error {
+	alertsPath := alertsPathFromCfg(cfg)
+	if alertsPath == "" {
+		return nil
+	}
+	seenPath := seenPathFromCfg(cfg)
+
+	alertsAppendMu.Lock()
+	defer alertsAppendMu.Unlock()
+	seenMu.Lock()
+	defer seenMu.Unlock()
+
+	return withAlertsFileFlockLocked(alertsPath, func() error {
+		raw, err := os.ReadFile(alertsPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if len(raw) == 0 {
+			return nil
+		}
+
+		kept := make([]byte, 0, len(raw))
+		removedIDs := make(map[string]struct{})
+		mutated := false
+
+		start := 0
+		for start < len(raw) {
+			nl := -1
+			for j := start; j < len(raw); j++ {
+				if raw[j] == '\n' {
+					nl = j
+					break
+				}
+			}
+			if nl < 0 {
+				nl = len(raw)
+			}
+			line := raw[start:nl]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			start = nl + 1
+			if len(line) == 0 {
+				continue
+			}
+			var a Alert
+			if uerr := json.Unmarshal(line, &a); uerr != nil {
+				mutated = true
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(a.Kind), "leakguard") {
+				if keepFn == nil || !keepFn(a) {
+					mutated = true
+					if a.ID != "" {
+						removedIDs[a.ID] = struct{}{}
+					}
+					continue
+				}
+			}
+			kept = append(kept, line...)
+			kept = append(kept, '\n')
+		}
+
+		if !mutated {
+			return nil
+		}
+		if err := writeFileAtomic(alertsPath, kept); err != nil {
+			return err
+		}
+		if len(removedIDs) > 0 && seenPath != "" {
+			if sb, serr := os.ReadFile(seenPath); serr == nil && len(sb) > 0 {
+				var sf SeenFile
+				if json.Unmarshal(sb, &sf) == nil && len(sf.IDs) > 0 {
+					nextIDs := make([]string, 0, len(sf.IDs))
+					seenChanged := false
+					for _, id := range sf.IDs {
+						if _, dropped := removedIDs[id]; dropped {
+							seenChanged = true
+							continue
+						}
+						nextIDs = append(nextIDs, id)
+					}
+					if seenChanged {
+						outBytes, _ := json.Marshal(SeenFile{IDs: nextIDs})
+						_ = writeFileAtomic(seenPath, outBytes)
+					}
+				}
+			}
+		}
+		return nil
+	})
+}
+
 var alertAtomicSeq atomic.Uint64
 
 // writeFileAtomic v5.12: 写同目录临时文件 → fsync → rename, 读者要么看到旧

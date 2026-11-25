@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -574,3 +575,121 @@ func TestWave4RC6_RMACPolicyClientIsolationErrorAndSerialAsyncWake(t *testing.T)
 		}
 	})
 }
+
+func TestRC7StudioLeaseScreenOffConduitPurgeAndBackupMACAliasFlush(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{"data/self_studio", "run", "bin"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := newServer(dir)
+
+	resetStudio := func() {
+		studioMu.Lock()
+		if studioStopTimer != nil {
+			studioStopTimer.Stop()
+			studioStopTimer = nil
+		}
+		if studioQuietTimer != nil {
+			studioQuietTimer.Stop()
+			studioQuietTimer = nil
+		}
+		studioLoadedDir = ""
+		studioPolicy = selfStudioPolicy{}
+		studioDistilling = false
+		studioMu.Unlock()
+	}
+	resetStudio()
+	t.Cleanup(resetStudio)
+
+	// 1. B034: lease_15m 租约期内即使熄屏(ScreenOn=false)也必须保持 captureActive=true 不中断自训抓包
+	prevAct := actState.cur.Load()
+	t.Cleanup(func() { actState.cur.Store(prevAct) })
+	actState.cur.Store(&Activity{Known: true, ScreenKnown: true, ScreenOn: false})
+
+	if r := actionSelfStudioStart(s, map[string]string{"mode": "lease_15m", "auto_stop_min": "15"}); !r.OK {
+		t.Fatalf("start lease_15m failed: %+v", r)
+	}
+	studioMu.Lock()
+	capOn, scrOn, rem := reconcileStudioFlagsLocked(s, time.Now())
+	studioMu.Unlock()
+	if scrOn {
+		t.Fatal("expected mocked screenOn=false")
+	}
+	if !capOn || rem <= 0 {
+		t.Fatalf("lease_15m must keep captureActive=true even when screen is off, got capOn=%v rem=%d", capOn, rem)
+	}
+	if _, err := os.Stat(s.selfFlagPath()); err != nil {
+		t.Fatalf("expected self_capture.enabled present during screen-off lease_15m: %v", err)
+	}
+
+	// 验证 apiSelf 顶层返回 enabled 字段, 且 selfPositive 识别 Meta / tun0 / utun0 等虚拟接口
+	recSelf := httptest.NewRecorder()
+	s.apiSelf(recSelf, httptest.NewRequest(http.MethodGet, "/api/self", nil))
+	var selfResp map[string]interface{}
+	if err := json.Unmarshal(recSelf.Body.Bytes(), &selfResp); err != nil {
+		t.Fatalf("apiSelf bad json: %v", err)
+	}
+	if en, hasEn := selfResp["enabled"].(bool); !hasEn || !en {
+		t.Fatalf("apiSelf must expose top-level enabled=true, got %+v", selfResp)
+	}
+	for _, ifn := range []string{"tun0", "Meta", "wg0", "utun1"} {
+		if !matchAnyRE(selfPositive, ifn) || matchAnyRE(selfNegative, ifn) {
+			t.Fatalf("expected virtual/TUN iface %q accepted by selfPositive and not rejected by selfNegative", ifn)
+		}
+	}
+
+	// 2. B034: 蒸馏前剔除动态 VPN 导管 UID(dpi_state.json 中 flywheel_excluded=true)代发污染样本
+	dpiStateJSON := `{"self":{"apps_by_uid":{
+		"10399":{"uid":10399,"pkg":"com.stealth.forkvpn","flywheel_excluded":true},
+		"10201":{"uid":10201,"pkg":"com.clean.realapp","flywheel_excluded":false}
+	}}}`
+	if err := os.WriteFile(filepath.Join(dir, "run", "dpi_state.json"), []byte(dpiStateJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	samplePath := filepath.Join(dir, "data", "self_studio", "label_samples.20261125.jsonl")
+	sampleBody := strings.Join([]string{
+		`{"ts":1800000001,"uid":10399,"pkg":"com.stealth.forkvpn","sni":"api.clean.example","ja4":"t13d1516h2_aaaa_bbbb"}`,
+		`{"ts":1800000002,"uid":10201,"pkg":"com.clean.realapp","sni":"api.clean.example","ja4":"t13d1516h2_aaaa_bbbb"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(samplePath, []byte(sampleBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	purged := purgeDynamicVPNConduitSamples(dir)
+	if purged != 1 {
+		t.Fatalf("expected 1 dynamic VPN conduit sample purged, got %d", purged)
+	}
+	afterSample, _ := os.ReadFile(samplePath)
+	if strings.Contains(string(afterSample), "10399") || !strings.Contains(string(afterSample), "10201") {
+		t.Fatalf("unexpected sample file after conduit purge:\n%s", string(afterSample))
+	}
+
+	// 3. B028: RestoreBackupBundle 在外层锁释放后通过叶子锁 macAliasMu 清空 macAliasCache
+	aliasA := `{"02:11:22:33:44:01":"aa:bb:cc:dd:ee:01"}` + "\n"
+	if err := os.WriteFile(macAliasesPath(dir), []byte(aliasA), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "rules.json"), []byte(`{"devices":{}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := ExportBackupBundle(dir)
+	if err != nil {
+		t.Fatalf("ExportBackupBundle failed: %v", err)
+	}
+	// 先改写为等长不同映射并预热 macAliasCache
+	aliasB := `{"02:11:22:33:44:01":"aa:bb:cc:dd:ee:02"}` + "\n"
+	if err := os.WriteFile(macAliasesPath(dir), []byte(aliasB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadMACAliases(dir)["02:11:22:33:44:01"]; got != "aa:bb:cc:dd:ee:02" {
+		t.Fatalf("expected warm alias ee:02, got %q", got)
+	}
+	if _, err := RestoreBackupBundle(dir, bundle); err != nil {
+		t.Fatalf("RestoreBackupBundle failed: %v", err)
+	}
+	if got := loadMACAliases(dir)["02:11:22:33:44:01"]; got != "aa:bb:cc:dd:ee:01" {
+		t.Fatalf("RestoreBackupBundle must invalidate macAliasCache and reload ee:01, got %q", got)
+	}
+}
+

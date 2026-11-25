@@ -71,7 +71,17 @@ func loadMACAliasesLocked(hncDir string) map[string]string {
 }
 
 func invalidateMACAliasCacheLocked() {
+	macAliasCache.path = ""
+	macAliasCache.mtime = time.Time{}
+	macAliasCache.size = 0
 	macAliasCache.m = nil
+}
+
+// invalidateMACAliasCache 在外层不持任何锁的前提下独立短持叶子锁 macAliasMu 清空别名缓存(严守叶子锁序)。
+func invalidateMACAliasCache() {
+	macAliasMu.Lock()
+	invalidateMACAliasCacheLocked()
+	macAliasMu.Unlock()
 }
 
 // loadMACAliases 读别名表(按 mtime+size 缓存)。返回独立副本, 并发安全。

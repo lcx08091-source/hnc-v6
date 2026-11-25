@@ -100,12 +100,13 @@ type LabelSample struct {
 
 // LabelSamplesStats 是写入器的计数快照(评估页 / 日志用)。
 type LabelSamplesStats struct {
-	Written       int64 // 实际落盘条数
-	Deduped       int64 // 去重窗口内被合并的条数
-	Dropped       int64 // 队列满被丢弃的条数
-	SkippedSystem int64 // uid < 10000 被跳过的条数
-	SkippedEmpty  int64 // pkg 或 SNI 为空被跳过的条数
-	Capped        bool  // 当天是否已触到 4 MiB 硬上限
+	Written         int64 // 实际落盘条数
+	Deduped         int64 // 去重窗口内被合并的条数
+	Dropped         int64 // 队列满被丢弃的条数
+	SkippedSystem   int64 // uid < 10000 被跳过的条数
+	SkippedEmpty    int64 // pkg 或 SNI 为空被跳过的条数
+	SkippedExcluded int64 // VPN / 代理导管应用被跳过的条数
+	Capped          bool  // 当天是否已触到 4 MiB 硬上限
 }
 
 // LabelSamplesWriter 带缓冲的本机样本写入器。零值不可用, 用 NewLabelSamplesWriter。
@@ -182,6 +183,10 @@ func (w *LabelSamplesWriter) Observe(in LabelSampleInput) {
 	case in.UID < labelSamplesMinUID:
 		// 系统 UID 的流量不是「某个 App 的标准答案」, 只计数不采集。
 		w.bump(func(s *LabelSamplesStats) { s.SkippedSystem++ })
+		return
+	case isExcludedFromLabelSamples(in.UID, in.Pkg):
+		// B028: 静态/用户配置或动态 TUN OwnerUid 识别出的 VPN 代理导管重发其它应用流量, 严禁污染本机样本库。
+		w.bump(func(s *LabelSamplesStats) { s.SkippedExcluded++ })
 		return
 	}
 	ts := in.Time.Unix()
@@ -270,15 +275,16 @@ func (w *LabelSamplesWriter) reopenIfRemoved() {
 // labelSamplesStatsJSON 是 run/label_samples.stats.json 的内容(v5.24 T4 评估页读取)。
 // 计数从本次写入器启动(since)起累计, dpid 重启或开关重开后归零。
 type labelSamplesStatsJSON struct {
-	Ts            int64  `json:"ts"`
-	Since         int64  `json:"since"`
-	Day           string `json:"day,omitempty"`
-	Written       int64  `json:"written"`
-	Deduped       int64  `json:"deduped"`
-	Dropped       int64  `json:"dropped"`
-	SkippedSystem int64  `json:"skipped_system"`
-	SkippedEmpty  int64  `json:"skipped_empty"`
-	Capped        bool   `json:"capped"`
+	Ts              int64  `json:"ts"`
+	Since           int64  `json:"since"`
+	Day             string `json:"day,omitempty"`
+	Written         int64  `json:"written"`
+	Deduped         int64  `json:"deduped"`
+	Dropped         int64  `json:"dropped"`
+	SkippedSystem   int64  `json:"skipped_system"`
+	SkippedEmpty    int64  `json:"skipped_empty"`
+	SkippedExcluded int64  `json:"skipped_excluded,omitempty"`
+	Capped          bool   `json:"capped"`
 }
 
 // writeStats 把计数快照原子写到 run/label_samples.stats.json; 目录不在就算了。
@@ -286,7 +292,7 @@ func (w *LabelSamplesWriter) writeStats() {
 	st := w.Stats()
 	b, err := json.Marshal(labelSamplesStatsJSON{Ts: w.now().Unix(), Since: w.started, Day: w.curDay,
 		Written: st.Written, Deduped: st.Deduped, Dropped: st.Dropped,
-		SkippedSystem: st.SkippedSystem, SkippedEmpty: st.SkippedEmpty, Capped: st.Capped})
+		SkippedSystem: st.SkippedSystem, SkippedEmpty: st.SkippedEmpty, SkippedExcluded: st.SkippedExcluded, Capped: st.Capped})
 	if err != nil {
 		return
 	}

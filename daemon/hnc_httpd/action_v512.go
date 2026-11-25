@@ -65,31 +65,53 @@ func actionStaleTTLSet(hncDir string, p map[string]string) actionResp {
 // ── /api/usage_month ─────────────────────────────────────────
 
 type usageCacheT struct {
-	mu  sync.Mutex
-	at  time.Time
-	out map[string]interface{}
+	mu         sync.Mutex
+	at         time.Time
+	hncDir     string
+	billingDay int
+	periodUnix int64
+	out        map[string]interface{}
 }
 
 var usageCache usageCacheT
+
+func invalidateUsageCache() {
+	usageCache.mu.Lock()
+	usageCache.out = nil
+	usageCache.at = time.Time{}
+	usageCache.billingDay = 0
+	usageCache.periodUnix = 0
+	usageCache.mu.Unlock()
+}
 
 // apiUsageMonth 汇总本计费月每台设备 rx/tx。
 // v5.26 T4: 数据源改为 limitCtl.MonthUsage(与设备配额进度条、全局月度
 // 配额告警同一口径 —— max(防火墙计数器累加, DPI 历史下限)), 周期随
 // 计费日; 顶层新增 period_start。limitCtl 尚无数据(刚安装, DPI 下限
 // 还没算过)的设备回退到直接扫 run/stats.YYYYMMDD.jsonl 的旧路径。
-// 结果缓存 60 秒。
+// 结果缓存 60 秒; 一旦计费日(billing_day)或周期起点变化立即清空缓存重算。
 func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 	s.limitCtl.NoteUsageMonthRequest() // 5 分钟内 tick 会算 DPI 下限
+	now := time.Now()
+	billingDay, _, _ := readBillingDayCached(s.hncDir, nil)
+	start := billingPeriodStart(now, billingDay)
+
 	usageCache.mu.Lock()
 	defer usageCache.mu.Unlock()
+	if usageCache.out != nil && (usageCache.hncDir != s.hncDir || usageCache.billingDay != billingDay || usageCache.periodUnix != start.Unix()) {
+		usageCache.out = nil
+		usageCache.at = time.Time{}
+		invalidateJSONCaches(puConfigPath(s.hncDir))
+		s.limitCtl.Poke()
+	}
 	if usageCache.out != nil && time.Since(usageCache.at) < 60*time.Second {
 		writeJSON(w, http.StatusOK, s.simMergeUsageMonth(usageCache.out)) // 模拟环境; 关闭时原样
 		return
 	}
-	now := time.Now()
+
 	// 权威口径: limitCtl(计费月)
 	devices, periodStart, oldest, ok := s.limitCtl.MonthUsageSplit()
-	if ok {
+	if ok && periodStart.Unix() == start.Unix() {
 		out := map[string]interface{}{
 			"month":        now.Format("2006-01"),
 			"since":        periodStart.Unix(),
@@ -98,13 +120,12 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 			"devices":      devices,
 		}
 		usageCache.out, usageCache.at = out, now
+		usageCache.hncDir, usageCache.billingDay, usageCache.periodUnix = s.hncDir, billingDay, periodStart.Unix()
 		writeJSON(w, http.StatusOK, s.simMergeUsageMonth(out))
 		return
 	}
-	// 回退: limitCtl 本计费月的 DPI 下限还没算过(刚安装 / 刚请求), 直接扫 DPI 合计。
-	// 周期同样按计费日起算 —— 回退只换数据源, 不换口径(否则同一张卡忽而自然月忽而计费月)。
-	_, billingDay, _ := readObserved(s.hncDir)
-	start := billingPeriodStart(now, billingDay)
+	// 回退: limitCtl 本计费月的 DPI 下限还没算过(刚安装 / 刚改计费日), 直接扫 DPI 合计。
+	// 周期同样按最新计费日起算 —— 回退只换数据源, 不换口径(否则同一张卡忽而自然月忽而计费月)。
 	type acc struct {
 		RX uint64 `json:"rx"`
 		TX uint64 `json:"tx"`
@@ -155,6 +176,5 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 		"oldest_data":  oldest,       // 若明显晚于 since, 说明月初的数据已被清理(前端据此提示"不完整")
 		"devices":      per,
 	}
-	usageCache.out, usageCache.at = out, now
 	writeJSON(w, http.StatusOK, s.simMergeUsageMonth(out))
 }

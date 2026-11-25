@@ -309,6 +309,8 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		case resp.Error == "unknown action",
 			resp.Error == "bad params",
 			resp.Error == "protected mac",
+			resp.Error == "protected_uid",
+			resp.Error == "protected_package",
 			isBadParamErr(resp.Error):
 			status = http.StatusBadRequest
 		case resp.Error == "forbidden":
@@ -515,6 +517,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionAlertMarkKnown(hncDir, p)
 	case "alert_dismiss_all":
 		return actionAlertDismissAll(hncDir, p)
+	case "alert_clear":
+		return actionAlertClear(hncDir, p)
 	case "app_limit_set":
 		return actionAppLimitSet(hncDir, p)
 	case "app_limit_clear":

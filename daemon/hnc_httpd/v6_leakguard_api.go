@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -205,6 +206,7 @@ type LeakEvent struct {
 	DeviceName string `json:"device_name"`
 	DstHost    string `json:"dst_host"`
 	DstIP      string `json:"dst_ip,omitempty"`
+	SrcPort    uint16 `json:"src_port,omitempty"`
 	DstPort    int    `json:"dst_port,omitempty"`
 	Proto      string `json:"proto,omitempty"`
 	Method     string `json:"method,omitempty"`
@@ -215,6 +217,7 @@ type LeakEvent struct {
 	RawSnippet string `json:"raw_snippet"`
 	HitCount   int64  `json:"hit_count,omitempty"`
 	IsBlocked  bool   `json:"is_blocked"`
+	fieldKey   string `json:"-"`
 }
 
 // LeakBlockUndoEntry 最近 10 条封禁一键撤销栈记录（支持热点/本机/双域回滚）。
@@ -223,6 +226,7 @@ type LeakBlockUndoEntry struct {
 	DstHost     string   `json:"dst_host"`
 	Kind        string   `json:"kind"`                   // "domain" | "ip"
 	TargetScope string   `json:"target_scope,omitempty"` // "hotspot" | "host" | "both" (空默认 "hotspot")
+	UID         int      `json:"uid,omitempty"`          // 本机按应用 UID 封禁公网 IP 时的目标 UID
 	AlsoIP      string   `json:"also_ip,omitempty"`      // 同次连带封锁的独立 IP（若命中共享 CDN IP 自动跳过则为空）
 	MACs        []string `json:"macs,omitempty"`         // 本次封禁实际作用的设备 MAC 列表
 	CreatedAt   int64    `json:"created_at"`
@@ -273,6 +277,7 @@ type leakGuardEngine struct {
 	lastEventsSize    int64
 	events            []LeakEvent // 按时间升序存储, 容量受 cfg.Capacity 约束
 	seenIDs           map[string]int64
+	mergedAliasIDs    map[string]string
 	ignoredSeenIDs    map[string]int64
 	cooldownLedger    map[string]int64
 	blockedTargets    map[string]bool
@@ -331,6 +336,7 @@ func newLeakGuardEngine(s *server) *leakGuardEngine {
 		srv:            s,
 		cfg:            defaultLeakGuardConfig(),
 		seenIDs:        make(map[string]int64),
+		mergedAliasIDs: make(map[string]string),
 		ignoredSeenIDs: make(map[string]int64),
 		cooldownLedger: make(map[string]int64),
 		blockedTargets: make(map[string]bool),
@@ -343,6 +349,7 @@ func newLeakGuardEngine(s *server) *leakGuardEngine {
 		pollInterval:   leakDefaultPollInterval,
 	}
 	eng.loadPersistedLocked()
+	eng.purgeAlertsMatching(nil, eng.ignoreRules, true)
 	return eng
 }
 
@@ -616,16 +623,20 @@ func (e *leakGuardEngine) ReloadFromDisk() {
 	e.tombstoneAt = make(map[string]int64)
 	e.ignoreRules = nil
 	e.undoStack = nil
+	e.mergedAliasIDs = make(map[string]string)
 	e.ignoredSeenIDs = make(map[string]int64)
 	e.hasEventsStat = false
 	e.loadPersistedLocked()
 	if len(e.events) > e.cfg.Capacity {
 		e.events = append([]LeakEvent(nil), e.events[len(e.events)-e.cfg.Capacity:]...)
 	}
-	_ = e.purgeIgnoredEventsLocked()
+	_, purgedIDs := e.purgeIgnoredEventsWithIDsLocked()
+	rulesSnap := make([]dpidlg.IgnoreRule, len(e.ignoreRules))
+	copy(rulesSnap, e.ignoreRules)
 	e.recomputeEventsBlockedLocked(cbNow)
 	_ = e.writeCtrlFileLocked(time.Now().Unix())
 	e.mu.Unlock()
+	e.purgeAlertsMatching(purgedIDs, rulesSnap, true)
 	e.notifySSEChanged()
 }
 
@@ -875,6 +886,10 @@ func parseFlexibleLeakEvent(m map[string]any) (LeakEvent, bool) {
 		}
 		return 0
 	}
+	var srcPort uint16
+	if sp := i64("src_port", "sport", "local_port"); sp > 0 && sp <= 65535 {
+		srcPort = uint16(sp)
+	}
 	ev := LeakEvent{
 		ID:         str("id", "event_id"),
 		Ts:         i64("ts", "timestamp", "time"),
@@ -887,6 +902,7 @@ func parseFlexibleLeakEvent(m map[string]any) (LeakEvent, bool) {
 		DeviceName: str("device_name", "hostname", "device"),
 		DstHost:    strings.ToLower(str("dst_host", "host", "domain", "dst")),
 		DstIP:      str("dst_ip", "dst"),
+		SrcPort:    srcPort,
 		DstPort:    int(i64("dst_port", "dport", "port")),
 		Proto:      strings.ToLower(str("proto", "protocol")),
 		Method:     strings.ToUpper(str("method", "http_method")),
@@ -896,6 +912,7 @@ func parseFlexibleLeakEvent(m map[string]any) (LeakEvent, bool) {
 		RawValue:   str("raw_value", "value", "secret"),
 		RawSnippet: str("raw_snippet", "snippet", "payload"),
 		HitCount:   i64("hit_count", "hits"),
+		fieldKey:   str("field_key"),
 	}
 	if b, ok := m["is_blocked"].(bool); ok {
 		ev.IsBlocked = b
@@ -968,6 +985,345 @@ func decodeLeakEventsPayload(raw []byte) []LeakEvent {
 		}
 	}
 	return out
+}
+
+func hexNibbleByte(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func percentDecodeLeakValue(s string) string {
+	if !strings.ContainsRune(s, '%') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			hi, ok1 := hexNibbleByte(s[i+1])
+			lo, ok2 := hexNibbleByte(s[i+2])
+			if ok1 && ok2 {
+				b.WriteByte((hi << 4) | lo)
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func normalizeValidLeakMAC(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if len(s) != 17 {
+		return ""
+	}
+	sep := s[2]
+	if sep != ':' && sep != '-' {
+		return ""
+	}
+	var b [6]byte
+	for idx := 0; idx < 6; idx++ {
+		pos := idx * 3
+		if idx > 0 && s[pos-1] != sep {
+			return ""
+		}
+		hi, ok1 := hexNibbleByte(s[pos])
+		lo, ok2 := hexNibbleByte(s[pos+1])
+		if !ok1 || !ok2 {
+			return ""
+		}
+		b[idx] = (hi << 4) | lo
+	}
+	if b[0] == b[1] && b[1] == b[2] && b[2] == b[3] && b[3] == b[4] && b[4] == b[5] {
+		return ""
+	}
+	if b[0]&0x01 != 0 {
+		return ""
+	}
+	if b == [6]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x00} {
+		return ""
+	}
+	return strings.ReplaceAll(s, "-", ":")
+}
+
+func isAllSameASCII(s string) bool {
+	if len(s) == 0 {
+		return true
+	}
+	c0 := s[0]
+	for i := 1; i < len(s); i++ {
+		if s[i] != c0 {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllDigitsStr(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validLeakLuhnDigits(digits string) bool {
+	if !isAllDigitsStr(digits) || isAllSameASCII(digits) {
+		return false
+	}
+	sum := 0
+	parity := len(digits) % 2
+	for i := 0; i < len(digits); i++ {
+		d := int(digits[i] - '0')
+		if i%2 == parity {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+	}
+	return sum%10 == 0
+}
+
+func isLeakSnakeVersionTag(s string) bool {
+	hasDigit, hasLower, hasUpper, hasOther := false, false, false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c >= 'a' && c <= 'z':
+			hasLower = true
+		case c >= 'A' && c <= 'Z':
+			hasUpper = true
+		case c == '_' || c == '-':
+		default:
+			hasOther = true
+		}
+	}
+	if !hasDigit && !hasOther && !(hasLower && hasUpper) {
+		return true
+	}
+	if strings.ContainsRune(s, '_') {
+		parts := strings.Split(s, "_")
+		if len(parts) >= 3 {
+			maxSeg := 0
+			for _, p := range parts {
+				if len(p) > maxSeg {
+					maxSeg = len(p)
+				}
+			}
+			if maxSeg < 8 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func leakValueDiversityEntropy(s string) (int, float64) {
+	n := len(s)
+	if n == 0 {
+		return 0, 0
+	}
+	var counts [256]int
+	distinct := 0
+	for i := 0; i < n; i++ {
+		b := s[i]
+		if counts[b] == 0 {
+			distinct++
+		}
+		counts[b]++
+	}
+	invN := 1.0 / float64(n)
+	entropy := 0.0
+	for _, c := range counts {
+		if c > 0 {
+			p := float64(c) * invN
+			entropy -= p * math.Log2(p)
+		}
+	}
+	return distinct, entropy
+}
+
+// isStaleDirtyLeakEvent 过滤磁盘历史遗留的假阳性脏事件（如 02:00:00:00:00:00 占位 MAC、
+// 组播/全同字节 MAC、9774d56d682e549c / permission_denied 占位设备号、非 Cookie/低熵 sid）。
+func isStaleDirtyLeakEvent(ev LeakEvent) bool {
+	lt := strings.ToLower(strings.TrimSpace(ev.LeakType))
+	rawVal := strings.TrimSpace(percentDecodeLeakValue(ev.RawValue))
+	fk := strings.ToLower(strings.TrimSpace(ev.fieldKey))
+
+	switch lt {
+	case "mac_addr", "macaddr", "mac", "bssid", "wifi_mac":
+		return normalizeValidLeakMAC(rawVal) == ""
+
+	case "device_id", "deviceid", "imei", "imeisv", "imsi", "meid", "oaid", "android_id", "androidid", "idfa", "idfv":
+		if len(rawVal) < 14 || len(rawVal) > 64 {
+			return true
+		}
+		var comp strings.Builder
+		comp.Grow(len(rawVal))
+		for i := 0; i < len(rawVal); i++ {
+			c := rawVal[i]
+			switch {
+			case c == '-':
+			case c >= '0' && c <= '9':
+				comp.WriteByte(c)
+			case c >= 'a' && c <= 'f':
+				comp.WriteByte(c)
+			case c >= 'A' && c <= 'F':
+				comp.WriteByte(c + ('a' - 'A'))
+			default:
+				return true
+			}
+		}
+		cs := comp.String()
+		if len(cs) == 0 || isAllSameASCII(cs) || cs == "9774d56d682e549c" {
+			return true
+		}
+		if lt == "imei" || fk == "imei" {
+			return len(rawVal) != 15 || !validLeakLuhnDigits(rawVal)
+		}
+		return false
+
+	case "credential", "credentials":
+		if rawVal == "" {
+			return true
+		}
+		switch strings.ToLower(rawVal) {
+		case "true", "false", "null", "undefined", "nil", "none", "unknown", "permission_denied":
+			return true
+		}
+		if sp := strings.IndexAny(rawVal, " \t"); sp > 0 {
+			scheme := rawVal[:sp]
+			cred := strings.TrimSpace(rawVal[sp+1:])
+			if (strings.EqualFold(scheme, "bearer") || strings.EqualFold(scheme, "basic")) && len(cred) >= 8 && !isAllSameASCII(cred) {
+				return false
+			}
+		}
+		if strings.HasPrefix(rawVal, "eyJ") && strings.Count(rawVal, ".") == 2 && len(rawVal) >= 16 {
+			return false
+		}
+		if fk == "password" || fk == "passwd" || fk == "pwd" {
+			return len(rawVal) < 6 || len(rawVal) > 128 || isAllSameASCII(rawVal)
+		}
+		lowSnip := strings.ToLower(ev.RawSnippet)
+		lowPath := strings.ToLower(ev.Path)
+		inCookie := strings.Contains(lowSnip, "cookie:")
+		if fk == "sid" && !inCookie {
+			return true
+		}
+		if fk == "" && !inCookie &&
+			(strings.Contains(lowSnip, "sid=") || strings.Contains(lowSnip, `"sid"`) || strings.Contains(lowPath, "sid=")) {
+			return true
+		}
+		if len(rawVal) < 16 || len(rawVal) > 2048 || isAllDigitsStr(rawVal) || isAllSameASCII(rawVal) || isLeakSnakeVersionTag(rawVal) {
+			return true
+		}
+		distinct, entropy := leakValueDiversityEntropy(rawVal)
+		return distinct < 8 || entropy < 3.3
+	}
+	return false
+}
+
+func alertToDPIDLeakEvent(a alert.Alert) dpidlg.LeakEvent {
+	var origin, dstHost, leakType, pkg, srcIP string
+	var uid int
+	if a.Extra != nil {
+		origin = strings.TrimSpace(asString(a.Extra["origin"]))
+		dstHost = strings.TrimSpace(asString(a.Extra["dst_host"]))
+		leakType = strings.TrimSpace(asString(a.Extra["leak_type"]))
+		pkg = strings.TrimSpace(asString(a.Extra["pkg"]))
+		srcIP = strings.TrimSpace(asString(a.Extra["src_ip"]))
+		if u64, ok := toInt64(a.Extra["uid"]); ok && u64 > 0 {
+			uid = int(u64)
+		}
+	}
+	if srcIP == "" {
+		srcIP = strings.TrimSpace(a.IP)
+	}
+	return dpidlg.LeakEvent{
+		Origin:   origin,
+		UID:      uid,
+		Pkg:      pkg,
+		MAC:      strings.ToLower(strings.TrimSpace(a.MAC)),
+		SrcIP:    srcIP,
+		ClientIP: srcIP,
+		DstHost:  dstHost,
+		LeakType: leakType,
+	}
+}
+
+func isDirtyLeakGuardAlert(a alert.Alert) bool {
+	if a.Kind != "leakguard" {
+		return false
+	}
+	lowDetail := strings.ToLower(percentDecodeLeakValue(a.Detail))
+	for _, marker := range []string{
+		"02:00:00:00:00:00",
+		"00:00:00:00:00:00",
+		"ff:ff:ff:ff:ff:ff",
+		"9774d56d682e549c",
+		"permission_denied",
+		"00000000-0000-0000-0000-000000000000",
+	} {
+		if strings.Contains(lowDetail, marker) {
+			return true
+		}
+	}
+	if a.Extra != nil {
+		if rv := strings.TrimSpace(asString(a.Extra["raw_value"])); rv != "" {
+			lt := strings.TrimSpace(asString(a.Extra["leak_type"]))
+			if isStaleDirtyLeakEvent(LeakEvent{LeakType: lt, RawValue: rv}) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *leakGuardEngine) purgeAlertsMatching(dropIDs map[string]bool, rules []dpidlg.IgnoreRule, dropDirty bool) {
+	if e == nil || e.srv == nil || e.srv.hncDir == "" {
+		return
+	}
+	if len(dropIDs) == 0 && len(rules) == 0 && !dropDirty {
+		return
+	}
+	acfg := alert.NewConfig(e.srv.hncDir)
+	if st, err := os.Stat(acfg.AlertsJSONLPath); err != nil || st.IsDir() {
+		return
+	}
+	_ = alert.PurgeLeakGuard(acfg, func(a alert.Alert) bool {
+		if len(dropIDs) > 0 && dropIDs[a.ID] {
+			return false
+		}
+		if dropDirty && isDirtyLeakGuardAlert(a) {
+			return false
+		}
+		if len(rules) > 0 {
+			dev := alertToDPIDLeakEvent(a)
+			for i := range rules {
+				if rules[i].MatchesEvent(dev) {
+					return false
+				}
+			}
+		}
+		return true
+	})
 }
 
 // buildDeviceDirectory 实时关联 s.hncDir 下的 device_names.json / devices.json / dpi_devid.json。
@@ -1116,6 +1472,9 @@ func matchBlockedHost(hostOrIP string, mac string, cb connBlockFile, lgBlocked m
 
 func toDPIDLeakEventForMatch(ev LeakEvent) dpidlg.LeakEvent {
 	return dpidlg.LeakEvent{
+		Origin:   ev.Origin,
+		UID:      ev.UID,
+		Pkg:      ev.Pkg,
 		MAC:      ev.MAC,
 		SrcIP:    ev.SrcIP,
 		ClientIP: ev.SrcIP,
@@ -1176,13 +1535,19 @@ func parseLeakTargetScope(raw string) (string, bool) {
 }
 
 func (e *leakGuardEngine) purgeIgnoredEventsLocked() int {
+	n, _ := e.purgeIgnoredEventsWithIDsLocked()
+	return n
+}
+
+func (e *leakGuardEngine) purgeIgnoredEventsWithIDsLocked() (int, map[string]bool) {
 	if len(e.events) == 0 || len(e.ignoreRules) == 0 {
-		return 0
+		return 0, nil
 	}
 	if e.ignoredSeenIDs == nil {
 		e.ignoredSeenIDs = make(map[string]int64)
 	}
 	kept := make([]LeakEvent, 0, len(e.events))
+	var purgedIDs map[string]bool
 	purged := 0
 	var removedHits, removedHostHits, removedHotspotHits int64
 	var keptHostCnt, keptHotspotCnt int64
@@ -1190,6 +1555,10 @@ func (e *leakGuardEngine) purgeIgnoredEventsLocked() int {
 		isHost := normalizeLeakOrigin(ev.Origin) == leakOriginHost
 		if e.matchesIgnoreRuleLocked(ev) {
 			purged++
+			if purgedIDs == nil {
+				purgedIDs = make(map[string]bool)
+			}
+			purgedIDs[ev.ID] = true
 			hc := ev.HitCount
 			if hc <= 0 {
 				hc = 1
@@ -1201,6 +1570,13 @@ func (e *leakGuardEngine) purgeIgnoredEventsLocked() int {
 				removedHotspotHits += hc
 			}
 			delete(e.seenIDs, ev.ID)
+			for aliasID, canonID := range e.mergedAliasIDs {
+				if canonID == ev.ID {
+					purgedIDs[aliasID] = true
+					delete(e.seenIDs, aliasID)
+					delete(e.mergedAliasIDs, aliasID)
+				}
+			}
 			e.ignoredSeenIDs[ev.ID] = hc
 			e.ignoredHits.Add(hc)
 			continue
@@ -1236,7 +1612,7 @@ func (e *leakGuardEngine) purgeIgnoredEventsLocked() int {
 			e.hotspotHits.Store(np)
 		}
 	}
-	return purged
+	return purged, purgedIDs
 }
 
 func (e *leakGuardEngine) recomputeEventsBlockedLocked(cb connBlockFile) {
@@ -1275,6 +1651,7 @@ func (e *leakGuardEngine) pushUndoLocked(entry LeakBlockUndoEntry) {
 	for _, cur := range e.undoStack {
 		if cur.Kind == entry.Kind &&
 			cur.DstHost == entry.DstHost &&
+			cur.UID == entry.UID &&
 			cur.AlsoIP == entry.AlsoIP &&
 			effectiveUndoTargetScope(cur.TargetScope) == entryScope &&
 			sameSortedMACs(cur.MACs, entry.MACs) {
@@ -1289,7 +1666,7 @@ func (e *leakGuardEngine) pushUndoLocked(entry LeakBlockUndoEntry) {
 	e.undoStack = filtered
 }
 
-func (e *leakGuardEngine) pruneUndoOnUnblockLocked(kind, normVal string, unblockedMACs []string, unblockedScope string) {
+func (e *leakGuardEngine) pruneUndoOnUnblockLocked(kind, normVal string, unblockedMACs []string, unblockedScope string, unblockedUID int) {
 	if len(e.undoStack) == 0 {
 		return
 	}
@@ -1311,8 +1688,11 @@ func (e *leakGuardEngine) pruneUndoOnUnblockLocked(kind, normVal string, unblock
 		hasHotspot := curScope == leakTargetScopeHotspot || curScope == leakTargetScopeBoth
 		hasHost := curScope == leakTargetScopeHost || curScope == leakTargetScopeBoth
 
-		if unblockHost {
-			hasHost = false
+		if unblockHost && hasHost {
+			if cur.Kind != "ip" || unblockedUID <= 0 || cur.UID == 0 || cur.UID == unblockedUID {
+				hasHost = false
+				cur.UID = 0
+			}
 		}
 		if unblockHotspot && hasHotspot {
 			if len(cur.MACs) == 0 || len(unblkSet) == 0 {
@@ -1338,6 +1718,7 @@ func (e *leakGuardEngine) pruneUndoOnUnblockLocked(kind, normVal string, unblock
 			kept = append(kept, cur)
 		case hasHotspot:
 			cur.TargetScope = leakTargetScopeHotspot
+			cur.UID = 0
 			kept = append(kept, cur)
 		case hasHost:
 			cur.TargetScope = leakTargetScopeHost
@@ -1356,7 +1737,21 @@ func (e *leakGuardEngine) hasHostDomainInUndoLocked(normDomain string) bool {
 	}
 	for _, cur := range e.undoStack {
 		sc := effectiveUndoTargetScope(cur.TargetScope)
-		if (sc == leakTargetScopeHost || sc == leakTargetScopeBoth) && strings.EqualFold(cur.DstHost, normDomain) {
+		if cur.Kind == "domain" && (sc == leakTargetScopeHost || sc == leakTargetScopeBoth) && strings.EqualFold(cur.DstHost, normDomain) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *leakGuardEngine) hasHostIPInUndoLocked(uid int, normIP string) bool {
+	normIP = strings.ToLower(strings.TrimSpace(normIP))
+	if uid <= 0 || normIP == "" {
+		return false
+	}
+	for _, cur := range e.undoStack {
+		sc := effectiveUndoTargetScope(cur.TargetScope)
+		if cur.Kind == "ip" && cur.UID == uid && (sc == leakTargetScopeHost || sc == leakTargetScopeBoth) && strings.EqualFold(cur.DstHost, normIP) {
 			return true
 		}
 	}
@@ -1400,13 +1795,134 @@ func (e *leakGuardEngine) syncFromDisk() []LeakEvent {
 	e.hasEventsStat = true
 	e.lastEventsMtimeNs = mtimeNs
 	e.lastEventsSize = sz
+	rulesSnap := make([]dpidlg.IgnoreRule, len(e.ignoreRules))
+	copy(rulesSnap, e.ignoreRules)
 	e.mu.Unlock()
 
-	parsed := decodeLeakEventsPayload(raw)
+	parsedAll := decodeLeakEventsPayload(raw)
+	if len(parsedAll) == 0 {
+		return nil
+	}
+	var parsed []LeakEvent
+	var dirtyIDs map[string]bool
+	for _, ev := range parsedAll {
+		if isStaleDirtyLeakEvent(ev) {
+			if dirtyIDs == nil {
+				dirtyIDs = make(map[string]bool)
+			}
+			dirtyIDs[ev.ID] = true
+			continue
+		}
+		parsed = append(parsed, ev)
+	}
+	if len(dirtyIDs) > 0 {
+		if cleanDoc, merr := json.Marshal(map[string]any{"events": parsed}); merr == nil {
+			cleanDoc = append(cleanDoc, '\n')
+			if writeLeakGuardAtomic0600(epath, cleanDoc) == nil {
+				if stAfter, serr := os.Stat(epath); serr == nil {
+					e.mu.Lock()
+					e.hasEventsStat = true
+					e.lastEventsMtimeNs = stAfter.ModTime().UnixNano()
+					e.lastEventsSize = stAfter.Size()
+					e.mu.Unlock()
+				}
+			}
+		}
+		e.purgeAlertsMatching(dirtyIDs, rulesSnap, true)
+	}
 	if len(parsed) == 0 {
 		return nil
 	}
 	return e.IngestEvents(parsed)
+}
+
+func isLeakFakeIPStr(ipStr string) bool {
+	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	if ip == nil {
+		return false
+	}
+	v4 := ip.To4()
+	return v4 != nil && v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)
+}
+
+func canonLeakTypeForDedup(raw string) string {
+	if c, ok := dpidlg.CanonicalIgnoreLeakType(raw); ok {
+		return c
+	}
+	return strings.ToUpper(strings.TrimSpace(raw))
+}
+
+func sameLeakRawValForDedup(leakType, a, b string) bool {
+	if a == b {
+		return true
+	}
+	switch canonLeakTypeForDedup(leakType) {
+	case "MAC_ADDR":
+		ma := normalizeValidLeakMAC(percentDecodeLeakValue(a))
+		mb := normalizeValidLeakMAC(percentDecodeLeakValue(b))
+		if ma != "" && ma == mb {
+			return true
+		}
+		return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+	case "DEVICE_ID", "ID_CARD":
+		return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+	default:
+		return strings.TrimSpace(a) == strings.TrimSpace(b)
+	}
+}
+
+func sameLeakTargetAndSecret(a, b LeakEvent) bool {
+	if !strings.EqualFold(strings.TrimSpace(a.DstHost), strings.TrimSpace(b.DstHost)) {
+		return false
+	}
+	if canonLeakTypeForDedup(a.LeakType) != canonLeakTypeForDedup(b.LeakType) {
+		return false
+	}
+	return sameLeakRawValForDedup(a.LeakType, a.RawValue, b.RawValue)
+}
+
+// hostEventAttributionRank 评估本机事件归属质量:
+//   2 = 真实业务 App (UID > 0 且非 VPN/代理导管)
+//   1 = VPN/代理导管 App (UID > 0 且命中导管包名/UID 集合, 如 FlClash)
+//   0 = 未归属/内核转发态 (UID <= 0)
+func hostEventAttributionRank(ev LeakEvent, conduitPkgs map[string]bool, conduitUIDs map[int]bool) int {
+	if ev.UID <= 0 {
+		return 0
+	}
+	if conduitUIDs[ev.UID] {
+		return 1
+	}
+	if p := strings.ToLower(strings.TrimSpace(ev.Pkg)); p != "" && conduitPkgs[p] {
+		return 1
+	}
+	return 2
+}
+
+func loadFastVPNConduitSets(hncDir string) (map[string]bool, map[int]bool) {
+	pkgs := buildConduitPkgSet(hncDir)
+	uids := make(map[int]bool)
+	if hncDir == "" {
+		return pkgs, uids
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "vpn_conduit_uids.json")); err == nil && len(b) > 0 && len(b) < 64<<10 {
+		var extra struct {
+			UIDs []int    `json:"uids"`
+			Pkgs []string `json:"pkgs"`
+		}
+		if json.Unmarshal(b, &extra) == nil {
+			for _, u := range extra.UIDs {
+				if u >= 10000 {
+					uids[u] = true
+				}
+			}
+			for _, p := range extra.Pkgs {
+				if np := strings.ToLower(strings.TrimSpace(p)); np != "" {
+					pkgs[np] = true
+				}
+			}
+		}
+	}
+	return pkgs, uids
 }
 
 // IngestEvents 线程安全地摄入一批 LeakEvent（支持单测直接喂入或从 run/leakguard_events.json 合并）。
@@ -1418,21 +1934,30 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 	cb := readConnBlocks(e.srvHncDirSafe())
 	sf := e.peerSelfFirewall()
 
-	// 先在锁外补齐本机应用包名与显示名元数据（避免锁内文件 IO）
+	// 先在锁外补齐本机应用包名与显示名元数据及 VPN/代理导管名单（避免锁内文件 IO）
 	prepared := make([]LeakEvent, len(incoming))
 	copy(prepared, incoming)
+	hasAnyHost := false
 	for i := range prepared {
 		prepared[i].Origin = normalizeLeakOrigin(prepared[i].Origin)
-		if prepared[i].Origin == leakOriginHost && sf != nil && prepared[i].UID >= selfFirewallMinAppUID &&
-			(prepared[i].Pkg == "" || prepared[i].AppName == "") {
-			pkg, appName, _ := sf.resolveLocalAppMetadata(prepared[i].UID, prepared[i].Pkg, prepared[i].AppName)
-			if prepared[i].Pkg == "" {
-				prepared[i].Pkg = pkg
-			}
-			if prepared[i].AppName == "" {
-				prepared[i].AppName = appName
+		if prepared[i].Origin == leakOriginHost {
+			hasAnyHost = true
+			if sf != nil && prepared[i].UID >= selfFirewallMinAppUID &&
+				(prepared[i].Pkg == "" || prepared[i].AppName == "") {
+				pkg, appName, _ := sf.resolveLocalAppMetadata(prepared[i].UID, prepared[i].Pkg, prepared[i].AppName)
+				if prepared[i].Pkg == "" {
+					prepared[i].Pkg = pkg
+				}
+				if prepared[i].AppName == "" {
+					prepared[i].AppName = appName
+				}
 			}
 		}
+	}
+	var conduitPkgs map[string]bool
+	var conduitUIDs map[int]bool
+	if hasAnyHost {
+		conduitPkgs, conduitUIDs = loadFastVPNConduitSets(e.srvHncDirSafe())
 	}
 
 	e.mu.Lock()
@@ -1441,8 +1966,12 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 	if e.ignoredSeenIDs == nil {
 		e.ignoredSeenIDs = make(map[string]int64)
 	}
+	if e.mergedAliasIDs == nil {
+		e.mergedAliasIDs = make(map[string]string)
+	}
 	var added []LeakEvent
 	var toNotify []LeakEvent
+	var staleAlertIDs map[string]bool
 
 	for _, ev := range prepared {
 		if ev.Ts <= 0 {
@@ -1519,9 +2048,16 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 			ev.IsBlocked = blocked
 		}
 
+		if canonID, aliased := e.mergedAliasIDs[ev.ID]; aliased && canonID != "" {
+			continue
+		}
+
 		if _, dup := e.seenIDs[ev.ID]; dup {
 			for idx := len(e.events) - 1; idx >= 0; idx-- {
 				if e.events[idx].ID == ev.ID {
+					if e.events[idx].SrcPort == 0 && ev.SrcPort != 0 {
+						e.events[idx].SrcPort = ev.SrcPort
+					}
 					if ev.HitCount > e.events[idx].HitCount {
 						delta := ev.HitCount - e.events[idx].HitCount
 						e.events[idx].HitCount = ev.HitCount
@@ -1539,6 +2075,134 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 			}
 			continue
 		}
+
+		// B005: 本机跨网卡 <5s 双抓包去重合并（物理口 wlan/rmnet + TUN/Meta 导管口同时捕获同一请求）
+		if isHost && ev.MAC == "" {
+			mergedCrossIface := false
+			evRank := hostEventAttributionRank(ev, conduitPkgs, conduitUIDs)
+			for idx := len(e.events) - 1; idx >= 0; idx-- {
+				cur := &e.events[idx]
+				if normalizeLeakOrigin(cur.Origin) != leakOriginHost || cur.MAC != "" {
+					continue
+				}
+				dt := ev.Ts - cur.Ts
+				if dt <= -5 || dt >= 5 {
+					continue
+				}
+				if !sameLeakTargetAndSecret(*cur, ev) {
+					continue
+				}
+				curRank := hostEventAttributionRank(*cur, conduitPkgs, conduitUIDs)
+				sameSubj := cur.UID == ev.UID && cur.Pkg == ev.Pkg
+				shouldMerge := (!sameSubj && (curRank < 2 || evRank < 2)) ||
+					(sameSubj && curRank < 2 && cur.SrcIP != "" && ev.SrcIP != "" && cur.SrcIP != ev.SrcIP)
+				if !shouldMerge {
+					continue
+				}
+
+				if evRank <= curRank {
+					if evRank == curRank {
+						if cur.UID <= 0 && ev.UID > 0 {
+							cur.UID = ev.UID
+						}
+						if cur.Pkg == "" && ev.Pkg != "" {
+							cur.Pkg = ev.Pkg
+						}
+						if cur.AppName == "" && ev.AppName != "" {
+							cur.AppName = ev.AppName
+							cur.DeviceName = ev.DeviceName
+						}
+					}
+					if cur.SrcPort == 0 && ev.SrcPort != 0 {
+						cur.SrcPort = ev.SrcPort
+					}
+					if ev.DstIP != "" && (cur.DstIP == "" || (isLeakFakeIPStr(cur.DstIP) && !isLeakFakeIPStr(ev.DstIP))) {
+						cur.DstIP = ev.DstIP
+					}
+					if ev.Ts > cur.Ts {
+						cur.Ts = ev.Ts
+					}
+					if ev.IsBlocked {
+						cur.IsBlocked = true
+					}
+					e.seenIDs[ev.ID] = ev.Ts
+					e.mergedAliasIDs[ev.ID] = cur.ID
+					for ai := range added {
+						if added[ai].ID == cur.ID {
+							added[ai] = *cur
+						}
+					}
+					for ni := range toNotify {
+						if toNotify[ni].ID == cur.ID {
+							toNotify[ni] = *cur
+						}
+					}
+				} else {
+					oldID := cur.ID
+					oldHit := cur.HitCount
+					cur.ID = ev.ID
+					cur.UID = ev.UID
+					cur.Pkg = ev.Pkg
+					cur.AppName = ev.AppName
+					cur.DeviceName = ev.DeviceName
+					cur.IsBlocked = ev.IsBlocked
+					if ev.SrcIP != "" {
+						cur.SrcIP = ev.SrcIP
+					}
+					if ev.SrcPort != 0 {
+						cur.SrcPort = ev.SrcPort
+					}
+					if ev.DstIP != "" && (cur.DstIP == "" || !isLeakFakeIPStr(ev.DstIP)) {
+						cur.DstIP = ev.DstIP
+					}
+					if ev.Ts > cur.Ts {
+						cur.Ts = ev.Ts
+					}
+					if ev.HitCount > oldHit {
+						delta := ev.HitCount - oldHit
+						cur.HitCount = ev.HitCount
+						e.totalHits.Add(delta)
+						e.hostHits.Add(delta)
+					}
+					e.seenIDs[ev.ID] = cur.Ts
+					e.mergedAliasIDs[oldID] = cur.ID
+					for k, v := range e.mergedAliasIDs {
+						if v == oldID {
+							e.mergedAliasIDs[k] = cur.ID
+						}
+					}
+					newCdKey := fmt.Sprintf("host:%d:%s|%s|%s", cur.UID, cur.Pkg, strings.ToLower(cur.DstHost), strings.ToLower(cur.LeakType))
+					e.cooldownLedger[newCdKey] = cur.Ts
+
+					replacedInBatch := false
+					for ai := range added {
+						if added[ai].ID == oldID {
+							added[ai] = *cur
+							replacedInBatch = true
+						}
+					}
+					for ni := range toNotify {
+						if toNotify[ni].ID == oldID {
+							toNotify[ni] = *cur
+							replacedInBatch = true
+						}
+					}
+					if !replacedInBatch {
+						if staleAlertIDs == nil {
+							staleAlertIDs = make(map[string]bool)
+						}
+						staleAlertIDs[oldID] = true
+						toNotify = append(toNotify, *cur)
+					}
+				}
+				mergedCrossIface = true
+				break
+			}
+			if mergedCrossIface {
+				continue
+			}
+		}
+
 		e.seenIDs[ev.ID] = ev.Ts
 		e.events = append(e.events, ev)
 		e.totalHits.Add(ev.HitCount)
@@ -1582,6 +2246,19 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 		}
 		e.seenIDs = keep
 	}
+	if len(e.mergedAliasIDs) > seenLimit {
+		live := make(map[string]bool, len(e.events))
+		for _, it := range e.events {
+			live[it.ID] = true
+		}
+		nextAliases := make(map[string]string)
+		for k, v := range e.mergedAliasIDs {
+			if live[v] {
+				nextAliases[k] = v
+			}
+		}
+		e.mergedAliasIDs = nextAliases
+	}
 	if len(e.ignoredSeenIDs) > seenLimit {
 		e.ignoredSeenIDs = make(map[string]int64)
 	}
@@ -1601,6 +2278,10 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 	}
 	e.mu.Unlock()
 
+	if len(staleAlertIDs) > 0 {
+		e.purgeAlertsMatching(staleAlertIDs, nil, false)
+	}
+
 	for _, ev := range added {
 		for _, ch := range subs {
 			select {
@@ -1617,7 +2298,11 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 				"dst_host":  ev.DstHost,
 				"leak_type": ev.LeakType,
 			}
+			alertMAC := ev.MAC
+			alertIP := ev.SrcIP
 			if ev.Origin == leakOriginHost {
+				alertMAC = ""
+				alertIP = ""
 				extra["uid"] = ev.UID
 				if ev.Pkg != "" {
 					extra["pkg"] = ev.Pkg
@@ -1625,13 +2310,16 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 				if ev.AppName != "" {
 					extra["app_name"] = ev.AppName
 				}
+				if ev.SrcIP != "" {
+					extra["src_ip"] = ev.SrcIP
+				}
 			}
 			_ = alert.Append(acfg.AlertsJSONLPath, alert.Alert{
 				ID:     ev.ID,
 				Ts:     ev.Ts,
 				Kind:   "leakguard",
-				MAC:    ev.MAC,
-				IP:     ev.SrcIP,
+				MAC:    alertMAC,
+				IP:     alertIP,
 				Detail: fmt.Sprintf("%s 向 %s 明文传输 %s", ev.DeviceName, ev.DstHost, ev.LeakLabel),
 				Extra:  extra,
 			})
@@ -1800,39 +2488,85 @@ func (e *leakGuardEngine) snapshotPayloadFiltered(scopeFilter string) map[string
 }
 
 func (e *leakGuardEngine) summary() map[string]any {
+	_, macByIP := e.srv.buildDeviceDirectory()
+	cb := readConnBlocks(e.srvHncDirSafe())
+
 	e.mu.Lock()
 	cfg := e.cfg
 	cnt := len(e.events)
-	blockedCnt := len(e.blockedTargets)
+	lgBlocked := make(map[string]bool, len(e.blockedTargets))
+	for k, v := range e.blockedTargets {
+		if v {
+			lgBlocked[k] = true
+		}
+	}
 	ignoreCnt := len(e.ignoreRules)
 	undoCnt := len(e.undoStack)
+	list := make([]LeakEvent, len(e.events))
+	copy(list, e.events)
+	e.mu.Unlock()
+
+	devSet := make(map[string]bool)
 	appSet := make(map[string]bool)
-	for _, ev := range e.events {
+	blockedHostSet := make(map[string]bool)
+	for k := range lgBlocked {
+		blockedHostSet[k] = true
+	}
+	for _, it := range cb.Items {
+		if strings.HasPrefix(it.Label, "LeakGuard") {
+			blockedHostSet[strings.ToLower(it.Value)] = true
+		}
+	}
+	for _, ev := range list {
 		if normalizeLeakOrigin(ev.Origin) == leakOriginHost {
 			if ak := hostAppIdentityKey(ev); ak != "" {
 				appSet[ak] = true
 			}
+			continue
+		}
+		mac := ev.MAC
+		if mac == "" && ev.SrcIP != "" {
+			mac = macByIP[ev.SrcIP]
+		}
+		if mac != "" {
+			devSet[mac] = true
+		} else if ev.SrcIP != "" {
+			devSet[ev.SrcIP] = true
+		}
+		blocked := matchBlockedHost(ev.DstHost, mac, cb, lgBlocked)
+		if !blocked && ev.DstIP != "" {
+			blocked = matchBlockedHost(ev.DstIP, mac, cb, lgBlocked)
+		}
+		if blocked && ev.DstHost != "" {
+			blockedHostSet[strings.ToLower(ev.DstHost)] = true
 		}
 	}
-	e.mu.Unlock()
 
 	selfBlockedCnt := 0
 	if sf := e.peerSelfFirewall(); sf != nil {
 		selfBlockedCnt = sf.BlockedDomainCount()
 	}
 
+	totalHits := e.totalHits.Load()
+	if int64(cnt) > totalHits {
+		totalHits = int64(cnt)
+	}
+
 	return map[string]any{
-		"total_hits":           e.totalHits.Load(),
+		"total_hits":           totalHits,
 		"host_hits":            e.hostHits.Load(),
 		"hotspot_hits":         e.hotspotHits.Load(),
 		"ignored_hits":         e.ignoredHits.Load(),
 		"guard_blocks":         e.guardBlocks.Load(),
 		"buffered_events":      cnt,
+		"affected_devices":     len(devSet),
 		"affected_apps":        len(appSet),
-		"blocked_domains":      blockedCnt,
+		"blocked_domains":      len(blockedHostSet),
 		"self_blocked_domains": selfBlockedCnt,
 		"ignore_rules_cnt":     ignoreCnt,
 		"undo_count":           undoCnt,
+		"capacity":             cfg.Capacity,
+		"cooldown_sec":         cfg.CooldownSec,
 		"notify_enabled":       cfg.NotifyEnabled,
 		"lockscreen_mask":      cfg.LockscreenMask,
 	}
@@ -2108,6 +2842,7 @@ func (s *server) apiLeakGuardClear(w http.ResponseWriter, r *http.Request) {
 	}
 	eng.events = nil
 	eng.seenIDs = make(map[string]int64)
+	eng.mergedAliasIDs = make(map[string]string)
 	eng.ignoredSeenIDs = make(map[string]int64)
 	eng.cooldownLedger = make(map[string]int64)
 	eng.hasEventsStat = false
@@ -2126,6 +2861,13 @@ func (s *server) apiLeakGuardClear(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write ctrl failed", "detail": err.Error()})
 		return
 	}
+	if s.hncDir != "" {
+		acfg := alert.NewConfig(s.hncDir)
+		if st, serr := os.Stat(acfg.AlertsJSONLPath); serr == nil && !st.IsDir() {
+			_ = alert.PurgeLeakGuard(acfg, nil)
+		}
+	}
+	eng.notifySSEChanged()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
 		"clear_seq":  seq,
@@ -2193,8 +2935,25 @@ func (s *server) apiLeakGuardConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func sanitizeLeakAppIdentityParams(uid int, pkg string) (int, string) {
+	p := strings.TrimSpace(pkg)
+	low := strings.ToLower(p)
+	if strings.HasPrefix(low, "uid:") {
+		if uid == 0 {
+			if n, err := strconv.Atoi(strings.TrimSpace(low[4:])); err == nil && n > 0 {
+				uid = n
+			}
+		}
+		return uid, ""
+	}
+	if strings.HasPrefix(low, "isolated:") {
+		return uid, ""
+	}
+	return uid, p
+}
+
 // apiLeakGuardWhitelist POST /api/leakguard/whitelist
-// 支持 action: "add" | "remove" | "clear", 三级作用域 "host_type" | "host" | "device_host_type", 硬上限 200 条。
+// 支持 action: "add" | "remove" | "clear", 四级作用域 "host_type" | "host" | "device_host_type" | "app_host_type", 硬上限 200 条。
 func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action   string `json:"action"`
@@ -2203,6 +2962,8 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 		DstHost  string `json:"dst_host"`
 		LeakType string `json:"leak_type"`
 		MAC      string `json:"mac"`
+		UID      int    `json:"uid"`
+		Pkg      string `json:"pkg"`
 		Note     string `json:"note"`
 	}
 	dec := json.NewDecoder(r.Body)
@@ -2216,6 +2977,7 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 	if act == "" {
 		act = "add"
 	}
+	normUID, normPkg := sanitizeLeakAppIdentityParams(req.UID, req.Pkg)
 	eng := s.v6State().leakGuard
 
 	switch act {
@@ -2225,6 +2987,8 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 			DstHost:  req.DstHost,
 			LeakType: req.LeakType,
 			MAC:      req.MAC,
+			UID:      normUID,
+			Pkg:      normPkg,
 			Note:     req.Note,
 		})
 		if err != nil {
@@ -2258,7 +3022,7 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 			}
 			rule = eng.ignoreRules[existsIdx]
 		}
-		purged := eng.purgeIgnoredEventsLocked()
+		purged, purgedIDs := eng.purgeIgnoredEventsWithIDsLocked()
 		rulesOut := make([]dpidlg.IgnoreRule, len(eng.ignoreRules))
 		copy(rulesOut, eng.ignoreRules)
 		saveErr := eng.saveStateLocked()
@@ -2267,6 +3031,8 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write whitelist failed", "detail": saveErr.Error()})
 			return
 		}
+		eng.purgeAlertsMatching(purgedIDs, rulesOut, false)
+		eng.notifySSEChanged()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":            true,
 			"action":        "add",
@@ -2288,6 +3054,8 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 				DstHost:  req.DstHost,
 				LeakType: req.LeakType,
 				MAC:      req.MAC,
+				UID:      normUID,
+				Pkg:      normPkg,
 			}); err == nil {
 				targetKey = nr.UniqueKey()
 			} else {
@@ -2436,7 +3204,7 @@ func applyConnBlockActionTrackMACs(s *server, act, kind, normVal string, targetM
 
 // apiLeakGuardBlockDomain POST /api/leakguard/block-domain
 // 支持 action: "block" | "unblock", target_scope: "hotspot" | "host" | "both",
-// 集成三级共享基础设施防误杀守卫、空 MAC 爆炸半径防呆、also_ip 共享 IP 剥离、本机 HNC_SELF_DNS 联动与 10 条撤销栈。
+// 集成三级共享基础设施防误杀守卫、空 MAC 爆炸半径防呆、also_ip 共享 IP 剥离、本机 HNC_SELF_DNS / 按应用 UID 公网 IP 封禁联动与 10 条撤销栈。
 func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action      string `json:"action"`
@@ -2444,6 +3212,9 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 		TargetScope string `json:"target_scope"`
 		DstHost     string `json:"dst_host"`
 		MAC         string `json:"mac"`
+		UID         int    `json:"uid"`
+		Pkg         string `json:"pkg"`
+		AppName     string `json:"app_name"`
 		Force       bool   `json:"force"`
 		AlsoIP      string `json:"also_ip"`
 	}
@@ -2475,6 +3246,7 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	reqMAC := strings.ToLower(strings.TrimSpace(req.MAC))
+	reqUID, reqPkg := sanitizeLeakAppIdentityParams(req.UID, req.Pkg)
 
 	if targetScope == leakTargetScopeHotspot {
 		// 空 MAC 爆炸半径防呆: 纯热点非显式全局封禁(scope != "global")时严禁因空 MAC 退化为全热点所有设备集体封禁!
@@ -2514,20 +3286,31 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": "invalid dst_host (domain or public IP required)"})
 		return
 	}
-	if targetScope == leakTargetScopeHost && kind != "domain" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"ok":     false,
-			"error":  "bad params",
-			"detail": "target_scope=host (HNC_SELF_DNS) requires a domain name",
-		})
-		return
-	}
 	if doHost && kind == "domain" {
 		if nd, derr := normalizeSelfDNSBlockDomain(normVal); derr != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": derr.Error()})
 			return
 		} else {
 			normVal = nd
+		}
+	}
+	if doHost && kind == "ip" {
+		if targetScope == leakTargetScopeHost && reqUID <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":          false,
+				"error":       "bad params",
+				"reason_code": "missing_uid",
+				"detail":      "本机公网 IP 封禁必须指定有效的目标应用 uid",
+			})
+			return
+		}
+		if reqUID > 0 && (isProtectedSelfFirewallSystemUID(reqUID) || reqUID > selfFirewallMaxAppUID) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":     false,
+				"error":  "protected_uid",
+				"detail": fmt.Sprintf("禁止对系统/隔离进程 UID=%d 执行本机公网 IP 封禁", reqUID),
+			})
+			return
 		}
 	}
 
@@ -2538,6 +3321,11 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 	var guardDecision leakBlockGuardDecision
 	if act == "block" {
 		guardDecision = evaluateScopedLeakBlockGuard(s, kind, normVal, targetScope)
+		if targetScope == leakTargetScopeBoth && kind == "ip" && reqUID > 0 && guardDecision.Level != leakGuardLevelHardBlock {
+			if hostGuard := evaluateScopedLeakBlockGuard(s, "ip", normVal, leakTargetScopeHost); hostGuard.Level == leakGuardLevelHardBlock {
+				guardDecision = hostGuard
+			}
+		}
 		if guardDecision.Level == leakGuardLevelHardBlock {
 			eng.guardBlocks.Add(1)
 			writeJSON(w, http.StatusConflict, map[string]any{
@@ -2564,6 +3352,16 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 				"category":         guardDecision.Category,
 				"dst_host":         normVal,
 				"detail":           guardDecision.Detail,
+			})
+			return
+		}
+	}
+	if doHost && kind == "ip" && reqUID > 0 {
+		if _, perr := parseAndValidateSelfBlockTarget(normVal); perr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":     false,
+				"error":  "bad params",
+				"detail": perr.Error(),
 			})
 			return
 		}
@@ -2763,6 +3561,68 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	hostUndoUID := 0
+	if doHost && kind == "ip" && reqUID > 0 && sf != nil {
+		if act == "block" {
+			if _, _, herr := sf.AddUIDBlockTarget(reqUID, normVal, reqPkg, req.AppName); herr != nil {
+				if doHotspot {
+					if len(mutatedMainMACs) > 0 {
+						_, _, _ = applyConnBlockActionForMACs(s, "unblock", kind, normVal, mutatedMainMACs, hotspotScriptExists)
+					}
+					s.refreshDNSTKBlocklist(time.Now())
+				}
+				errCode := "self_uid_block_failed"
+				errDetail := herr.Error()
+				var verr *selfFirewallValidationError
+				if errors.As(herr, &verr) && verr != nil {
+					errCode = verr.Code
+					errDetail = verr.Detail
+				}
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"ok":     false,
+					"error":  errCode,
+					"detail": errDetail,
+				})
+				return
+			}
+			hostUndoUID = reqUID
+			applied++
+			if lastDetail == "" {
+				lastDetail = fmt.Sprintf("self uid(%d) ip blocked: %s", reqUID, normVal)
+			} else {
+				lastDetail = fmt.Sprintf("%s; self uid(%d) ip blocked: %s", lastDetail, reqUID, normVal)
+			}
+		} else {
+			if _, herr := sf.RemoveUIDBlockTarget(reqUID, normVal); herr != nil {
+				if doHotspot {
+					if len(mutatedMainMACs) > 0 {
+						_, _, _ = applyConnBlockActionForMACs(s, "block", kind, normVal, mutatedMainMACs, hotspotScriptExists)
+					}
+					s.refreshDNSTKBlocklist(time.Now())
+				}
+				errCode := "self_uid_unblock_failed"
+				errDetail := herr.Error()
+				var verr *selfFirewallValidationError
+				if errors.As(herr, &verr) && verr != nil {
+					errCode = verr.Code
+					errDetail = verr.Detail
+				}
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"ok":     false,
+					"error":  errCode,
+					"detail": errDetail,
+				})
+				return
+			}
+			applied++
+			if lastDetail == "" {
+				lastDetail = fmt.Sprintf("self uid(%d) ip unblocked: %s", reqUID, normVal)
+			} else {
+				lastDetail = fmt.Sprintf("%s; self uid(%d) ip unblocked: %s", lastDetail, reqUID, normVal)
+			}
+		}
+	}
+
 	cbNow := readConnBlocks(s.hncDir)
 	now := time.Now().Unix()
 	var undoID string
@@ -2778,16 +3638,17 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		effectiveUndoScope := targetScope
-		if targetScope == leakTargetScopeBoth && kind != "domain" {
+		if targetScope == leakTargetScopeBoth && kind != "domain" && hostUndoUID == 0 {
 			effectiveUndoScope = leakTargetScopeHotspot
 		}
-		sum := sha1.Sum([]byte(fmt.Sprintf("%d|%s|%s|%s|%s", time.Now().UnixNano(), effectiveUndoScope, kind, normVal, strings.Join(targetMACs, ","))))
+		sum := sha1.Sum([]byte(fmt.Sprintf("%d|%s|%s|%s|%d|%s", time.Now().UnixNano(), effectiveUndoScope, kind, normVal, hostUndoUID, strings.Join(targetMACs, ","))))
 		undoID = "ub_" + hex.EncodeToString(sum[:6])
 		eng.pushUndoLocked(LeakBlockUndoEntry{
 			ID:          undoID,
 			DstHost:     normVal,
 			Kind:        kind,
 			TargetScope: effectiveUndoScope,
+			UID:         hostUndoUID,
 			AlsoIP:      blockedAlsoIP,
 			MACs:        append([]string(nil), targetMACs...),
 			CreatedAt:   now,
@@ -2805,7 +3666,7 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 				}
 			}
 		}
-		eng.pruneUndoOnUnblockLocked(kind, normVal, targetMACs, targetScope)
+		eng.pruneUndoOnUnblockLocked(kind, normVal, targetMACs, targetScope, reqUID)
 	}
 	eng.recomputeEventsBlockedLocked(cbNow)
 	undoCnt := len(eng.undoStack)
@@ -2817,7 +3678,14 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 	}
 	eng.notifySSEChanged()
 
-	selfBlockedNow := sf != nil && kind == "domain" && sf.IsDomainBlocked(normVal)
+	selfBlockedNow := false
+	if sf != nil {
+		if kind == "domain" {
+			selfBlockedNow = sf.IsDomainBlocked(normVal)
+		} else if kind == "ip" && reqUID > 0 {
+			selfBlockedNow = sf.IsHostEventBlocked(reqUID, "", normVal, 80, "tcp")
+		}
+	}
 	respBody := map[string]any{
 		"ok":                true,
 		"action":            act,
@@ -2831,6 +3699,9 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 		"skipped_shared_ip": skippedSharedIP,
 		"undo_count":        undoCnt,
 		"detail":            lastDetail,
+	}
+	if reqUID > 0 {
+		respBody["uid"] = reqUID
 	}
 	if undoID != "" {
 		respBody["undo_id"] = undoID
@@ -2952,6 +3823,7 @@ func (s *server) apiLeakGuardUndoBlock(w http.ResponseWriter, r *http.Request) {
 		undoHost = true
 		executedScope = leakTargetScopeHost
 		eng.undoStack[pickIdx].TargetScope = leakTargetScopeHotspot
+		eng.undoStack[pickIdx].UID = 0
 	} else if reqTargetScopeRaw == leakTargetScopeHotspot && origScope == leakTargetScopeBoth {
 		undoHotspot = true
 		undoHost = false
@@ -2963,6 +3835,7 @@ func (s *server) apiLeakGuardUndoBlock(w http.ResponseWriter, r *http.Request) {
 		eng.undoStack = append(eng.undoStack[:pickIdx], eng.undoStack[pickIdx+1:]...)
 	}
 	stillHasHostRef := eng.hasHostDomainInUndoLocked(entry.DstHost)
+	stillHasHostIPRef := eng.hasHostIPInUndoLocked(entry.UID, entry.DstHost)
 	eng.mu.Unlock()
 
 	var (
@@ -3051,6 +3924,19 @@ func (s *server) apiLeakGuardUndoBlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if errResp == nil && undoHost && entry.Kind == "ip" && entry.UID > 0 && sf != nil && !stillHasHostIPRef {
+		if _, herr := sf.RemoveUIDBlockTarget(entry.UID, entry.DstHost); herr != nil {
+			errResp = &actionResp{OK: false, Error: "self_uid_unblock_failed", Detail: herr.Error()}
+		} else {
+			applied++
+			if lastDetail == "" {
+				lastDetail = fmt.Sprintf("self uid(%d) ip unblocked: %s", entry.UID, entry.DstHost)
+			} else {
+				lastDetail = fmt.Sprintf("%s; self uid(%d) ip unblocked: %s", lastDetail, entry.UID, entry.DstHost)
+			}
+		}
+	}
+
 	if errResp != nil {
 		// 底层解封失败: 完整恢复撤销栈快照并持久化, 绝不吞错丢记录!
 		eng.mu.Lock()
@@ -3116,7 +4002,14 @@ func (s *server) apiLeakGuardUndoBlock(w http.ResponseWriter, r *http.Request) {
 
 	undoneOut := entry
 	undoneOut.TargetScope = executedScope
-	selfBlockedNow := sf != nil && entry.Kind == "domain" && sf.IsDomainBlocked(entry.DstHost)
+	selfBlockedNow := false
+	if sf != nil {
+		if entry.Kind == "domain" {
+			selfBlockedNow = sf.IsDomainBlocked(entry.DstHost)
+		} else if entry.Kind == "ip" && entry.UID > 0 {
+			selfBlockedNow = sf.IsHostEventBlocked(entry.UID, "", entry.DstHost, 80, "tcp")
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":             true,
@@ -3126,6 +4019,7 @@ func (s *server) apiLeakGuardUndoBlock(w http.ResponseWriter, r *http.Request) {
 		"undone":         undoneOut,
 		"dst_host":       entry.DstHost,
 		"kind":           entry.Kind,
+		"uid":            entry.UID,
 		"also_ip":        entry.AlsoIP,
 		"macs":           macsToUnblock,
 		"applied_cnt":    applied,

@@ -37,11 +37,7 @@ func (s *server) apiAppsOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dpiRaw, _ := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_state.json"))
-	rulesRaw := readJSONMap(filepath.Join(s.hncDir, "data", "rules.json"))
-	var fwExcl interface{}
-	if rulesRaw != nil {
-		fwExcl = rulesRaw["flywheel_exclude_user"]
-	}
+	fwExcl := loadFlywheelExcludeUser(s.hncDir)
 	usageToday := captureGETHandlerJSON(s.apiAppUsage, "/api/app_usage?days=1")
 	disc := captureGETHandlerJSON(s.apiDiscover, "/api/discover")
 	pending := 0

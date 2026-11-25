@@ -3139,11 +3139,12 @@ func tryNativeBlacklistSet(hncDir, mac string, blocked bool) bool {
 	}
 	if blocked && validStrictIPv4(ip) {
 		_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", ip)
-	} else if !blocked {
-		_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", "")
 	}
 	if err := pipeNativeFirewallOnly(hncDir, readHotspotIfaceName(hncDir), mac, ip, mid, keepMark, blocked); err != nil {
 		return false
+	}
+	if !blocked {
+		_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", "")
 	}
 	return true
 }

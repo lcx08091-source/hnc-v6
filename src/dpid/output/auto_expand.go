@@ -427,10 +427,10 @@ func evaluateCandidate(sni string, uidSet map[int]struct{}, rules []l3Rule, bloc
 	var bestUID int
 	for _, r := range apexRules {
 		for uid := range uidSet {
-			// v5.7.0-rc33: don't expand subdomains under a VPN/proxy uid — its
-			// socket-owned traffic is other apps' (proxied), so attributing the
+			// v5.7.0-rc33 + B028: don't expand subdomains under a VPN/proxy or conduit uid —
+			// its socket-owned traffic is other apps' (proxied), so attributing the
 			// subdomain to it would be wrong (same root cause as 走法2).
-			if a.IsFlywheelExcludedUID(uid) {
+			if a.IsFlywheelExcludedUID(uid) || a.IsConduitUID(uid) {
 				continue
 			}
 			h := a.HitCount(uid, r.ID)

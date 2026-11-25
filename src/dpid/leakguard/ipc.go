@@ -25,6 +25,7 @@ const (
 	ScopeHostType       = "host_type"
 	ScopeHost           = "host"
 	ScopeDeviceHostType = "device_host_type"
+	ScopeAppHostType    = "app_host_type"
 	MaxIgnoreRules      = 200
 )
 
@@ -35,10 +36,12 @@ var ctrlUpdateMu sync.Mutex
 // daemon/hnc_httpd and dpid's LeakGuard Engine.
 type IgnoreRule struct {
 	ID        string `json:"id"`
-	Scope     string `json:"scope"`               // "host_type" | "host" | "device_host_type"
+	Scope     string `json:"scope"`               // "host_type" | "host" | "device_host_type" | "app_host_type"
 	DstHost   string `json:"dst_host"`            // validated ASCII domain (>=2 labels; >=3 for 2LD public suffixes) or public single IP
 	LeakType  string `json:"leak_type,omitempty"` // canonical leak type (e.g. "PHONE", "DEVICE_ID", "GPS", "MAC_ADDR")
 	MAC       string `json:"mac,omitempty"`       // lowercase colon-separated MAC (only for device_host_type)
+	UID       int    `json:"uid,omitempty"`       // app UID (>0, only for app_host_type)
+	Pkg       string `json:"pkg,omitempty"`       // lowercase Android package name (only for app_host_type)
 	Note      string `json:"note,omitempty"`
 	CreatedAt int64  `json:"created_at"`
 }
@@ -92,6 +95,29 @@ func CanonicalIgnoreLeakType(raw string) (string, bool) {
 	default:
 		return strings.ToUpper(low), true
 	}
+}
+
+func normalizeIgnorePkg(raw string) (string, bool) {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return "", true
+	}
+	if len(s) > 128 || strings.HasPrefix(s, ".") || strings.HasSuffix(s, ".") || strings.Contains(s, "..") {
+		return "", false
+	}
+	hasAlpha := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' {
+			hasAlpha = true
+			continue
+		}
+		if (c >= '0' && c <= '9') || c == '_' || c == '.' {
+			continue
+		}
+		return "", false
+	}
+	return s, hasAlpha
 }
 
 // ValidateIgnoreTarget strictly validates a whitelist dst_host (ASCII domain or public single IP, 1..253 bytes).
@@ -207,18 +233,21 @@ func NormalizeIgnoreRule(in IgnoreRule) (IgnoreRule, error) {
 	scope := strings.ToLower(strings.TrimSpace(in.Scope))
 	if scope == "" {
 		hasMAC := strings.TrimSpace(in.MAC) != ""
+		hasApp := in.UID > 0 || strings.TrimSpace(in.Pkg) != ""
 		hasType := strings.TrimSpace(in.LeakType) != ""
 		switch {
 		case hasMAC && hasType:
 			scope = ScopeDeviceHostType
+		case hasApp && hasType:
+			scope = ScopeAppHostType
 		case hasType:
 			scope = ScopeHostType
 		default:
 			scope = ScopeHost
 		}
 	}
-	if scope != ScopeHostType && scope != ScopeHost && scope != ScopeDeviceHostType {
-		return IgnoreRule{}, errors.New("scope must be host_type|host|device_host_type")
+	if scope != ScopeHostType && scope != ScopeHost && scope != ScopeDeviceHostType && scope != ScopeAppHostType {
+		return IgnoreRule{}, errors.New("scope must be host_type|host|device_host_type|app_host_type")
 	}
 
 	_, normHost, err := ValidateIgnoreTarget(in.DstHost)
@@ -226,8 +255,12 @@ func NormalizeIgnoreRule(in IgnoreRule) (IgnoreRule, error) {
 		return IgnoreRule{}, err
 	}
 
-	var normType string
-	var normMAC string
+	var (
+		normType string
+		normMAC  string
+		normUID  int
+		normPkg  string
+	)
 	switch scope {
 	case ScopeHost:
 		normType = ""
@@ -250,6 +283,24 @@ func NormalizeIgnoreRule(in IgnoreRule) (IgnoreRule, error) {
 		}
 		normType = lt
 		normMAC = m
+	case ScopeAppHostType:
+		lt, ok := CanonicalIgnoreLeakType(in.LeakType)
+		if !ok {
+			return IgnoreRule{}, errors.New("valid leak_type is required for scope=app_host_type")
+		}
+		if in.UID < 0 {
+			return IgnoreRule{}, errors.New("uid must not be negative for scope=app_host_type")
+		}
+		p, pkgOK := normalizeIgnorePkg(in.Pkg)
+		if !pkgOK {
+			return IgnoreRule{}, errors.New("invalid pkg format for scope=app_host_type")
+		}
+		if in.UID == 0 && p == "" {
+			return IgnoreRule{}, errors.New("valid uid or pkg is required for scope=app_host_type")
+		}
+		normType = lt
+		normUID = in.UID
+		normPkg = p
 	}
 
 	note := strings.TrimSpace(in.Note)
@@ -260,24 +311,29 @@ func NormalizeIgnoreRule(in IgnoreRule) (IgnoreRule, error) {
 	if createdAt <= 0 {
 		createdAt = time.Now().Unix()
 	}
-	sum := sha1.Sum([]byte(scope + "|" + normMAC + "|" + normHost + "|" + normType))
-	id := strings.TrimSpace(in.ID)
-	if id == "" {
-		id = "ig_" + hex.EncodeToString(sum[:8])
-	}
-	return IgnoreRule{
-		ID:        id,
+	out := IgnoreRule{
+		ID:        strings.TrimSpace(in.ID),
 		Scope:     scope,
 		DstHost:   normHost,
 		LeakType:  normType,
 		MAC:       normMAC,
+		UID:       normUID,
+		Pkg:       normPkg,
 		Note:      note,
 		CreatedAt: createdAt,
-	}, nil
+	}
+	if out.ID == "" {
+		sum := sha1.Sum([]byte(out.UniqueKey()))
+		out.ID = "ig_" + hex.EncodeToString(sum[:8])
+	}
+	return out, nil
 }
 
 // UniqueKey returns the canonical deduplication key for r.
 func (r IgnoreRule) UniqueKey() string {
+	if r.Scope == ScopeAppHostType {
+		return fmt.Sprintf("%s|%d|%s|%s|%s", r.Scope, r.UID, strings.ToLower(strings.TrimSpace(r.Pkg)), r.DstHost, r.LeakType)
+	}
 	return r.Scope + "|" + r.MAC + "|" + r.DstHost + "|" + r.LeakType
 }
 
@@ -291,7 +347,42 @@ func (r IgnoreRule) MatchesEvent(ev LeakEvent) bool {
 			return false
 		}
 	}
-	if r.Scope == ScopeHostType || r.Scope == ScopeDeviceHostType {
+	if r.Scope == ScopeAppHostType {
+		if normalizeValidMAC(ev.MAC) != "" || strings.EqualFold(strings.TrimSpace(ev.Origin), OriginHotspot) {
+			return false
+		}
+		evPkg := strings.ToLower(strings.TrimSpace(ev.Pkg))
+		if r.UID <= 0 && r.Pkg == "" {
+			return false
+		}
+		switch {
+		case r.UID > 0 && r.Pkg != "":
+			if ev.UID > 0 && evPkg != "" {
+				if ev.UID != r.UID || evPkg != r.Pkg {
+					return false
+				}
+			} else if evPkg != "" {
+				if evPkg != r.Pkg {
+					return false
+				}
+			} else if ev.UID > 0 {
+				if ev.UID != r.UID {
+					return false
+				}
+			} else {
+				return false
+			}
+		case r.Pkg != "":
+			if evPkg == "" || evPkg != r.Pkg {
+				return false
+			}
+		case r.UID > 0:
+			if ev.UID <= 0 || ev.UID != r.UID {
+				return false
+			}
+		}
+	}
+	if r.Scope == ScopeHostType || r.Scope == ScopeDeviceHostType || r.Scope == ScopeAppHostType {
 		evCanon, ok := CanonicalIgnoreLeakType(ev.LeakType)
 		if !ok {
 			evCanon = strings.ToUpper(strings.TrimSpace(ev.LeakType))

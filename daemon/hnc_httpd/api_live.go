@@ -86,8 +86,18 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	if simLive {
 		active = true
 	}
+	if !active && !simLive {
+		online = 0
+		rxBps = 0
+		txBps = 0
+		for _, d := range devices {
+			d["online"] = false
+			d["rx_bps"] = int64(0)
+			d["tx_bps"] = int64(0)
+		}
+	}
 
-	hsFlows, hostFlows := scalpelLiveFlowCounts(s, active, online)
+	hsFlows, hostFlows := s.liveFlowCountsWithSim(active, online)
 	if !active || online == 0 {
 		hsFlows = 0
 	}
@@ -150,6 +160,14 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func isExplicitlyInactiveStateLine(line string) bool {
+	return strings.HasPrefix(line, "INACTIVE") ||
+		strings.HasPrefix(line, "OFF") ||
+		strings.HasPrefix(line, "DOWN") ||
+		strings.HasPrefix(line, "PENDING") ||
+		strings.HasPrefix(line, "IDLE")
+}
+
 func hotspotExplicitlyInactive(hncDir string) bool {
 	if hncDir == "" {
 		return false
@@ -159,7 +177,7 @@ func hotspotExplicitlyInactive(hncDir string) bool {
 		return false
 	}
 	line := strings.TrimSpace(string(b))
-	return strings.HasPrefix(line, "INACTIVE") || strings.HasPrefix(line, "OFF") || strings.HasPrefix(line, "DOWN")
+	return isExplicitlyInactiveStateLine(line)
 }
 
 // currentHotspotIface 走 s.jsonCache 读 rules.json 兜底 —— /api/live 每次轮询
@@ -263,7 +281,7 @@ func ifaceIPv4(iface string) string {
 func hotspotActiveFromState(hncDir, iface, ip string, online int) bool {
 	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state")); err == nil {
 		line := strings.TrimSpace(string(b))
-		if strings.HasPrefix(line, "INACTIVE") || strings.HasPrefix(line, "OFF") || strings.HasPrefix(line, "DOWN") {
+		if isExplicitlyInactiveStateLine(line) {
 			return false
 		}
 		if strings.HasPrefix(line, "ACTIVE") {
@@ -289,8 +307,8 @@ func liveDevicesSig(devices []map[string]interface{}, active bool, iface string)
 		if id, ok := d["ident"].(map[string]interface{}); ok {
 			idSig = fmt.Sprintf("%v/%v/%v/%v/%v", id["os"], id["os_ver"], id["brand"], id["type"], id["confidence"])
 		}
-		parts = append(parts, fmt.Sprintf("%s|hn=%s|sqm=%v|wl=%v|id=%s|ip=%s|on=%v|st=%s|lim=%v|del=%v|down=%v|up=%v|dms=%v|j=%v|loss=%v",
-			mac, asString(d["hostname"]), d["sqm_enabled"], d["whitelist"], idSig,
+		parts = append(parts, fmt.Sprintf("%s|hn=%s|sqm=%v|aq=%v|wl=%v|id=%s|ip=%s|on=%v|st=%s|lim=%v|del=%v|down=%v|up=%v|dms=%v|j=%v|loss=%v",
+			mac, asString(d["hostname"]), d["sqm_enabled"], d["app_qos"], d["whitelist"], idSig,
 			asString(d["ip"]),
 			d["online"],
 			asString(d["status"]),

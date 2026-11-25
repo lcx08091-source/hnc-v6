@@ -45,8 +45,7 @@ func readOffloadGuard(hncDir string) map[string]interface{} {
 	return m
 }
 
-// offloadGuardFreshState guard 在 maxAge 内采样过且结果是 check_offload 的
-// 四态之一时返回该状态词。
+// offloadGuardFreshState guard 在 maxAge 内采样过且结果是已知有效状态时返回该状态词。
 func offloadGuardFreshState(hncDir string, maxAge time.Duration) (string, bool) {
 	m := readOffloadGuard(hncDir)
 	if m == nil {
@@ -58,7 +57,7 @@ func offloadGuardFreshState(hncDir string, maxAge time.Duration) (string, bool) 
 	}
 	st, _ := m["offload_state"].(string)
 	switch st {
-	case "NOMAP", "IDLE", "CAPABLE", "ACTIVE":
+	case "NOMAP", "IDLE", "CAPABLE", "ACTIVE", "NOHOTSPOT", "SKIPPED":
 		return st, true
 	}
 	return "", false

@@ -27,6 +27,11 @@ var excludedPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^ifb\d*$`),
 	regexp.MustCompile(`^tun\d*$`),
 	regexp.MustCompile(`^vpn\d*$`),
+	regexp.MustCompile(`^vgate\d*$`),
+	regexp.MustCompile(`^veth.*$`),
+	regexp.MustCompile(`^(?i)meta\d*$`),
+	regexp.MustCompile(`^sing_tun\d*$`),
+	regexp.MustCompile(`^tailscale\d*$`),
 	regexp.MustCompile(`^rmnet.*$`),
 	regexp.MustCompile(`^r_rmnet.*$`),
 	regexp.MustCompile(`^ccmni\d*$`),
@@ -115,7 +120,7 @@ func filterAndSortAPCandidates(
 		isWifi := ifc.IsWireless
 		hasClients := arp[ifc.Name]
 
-		if !isHint && ipv4 == "" && nameRank < 0 && !hasClients {
+		if !isHint && !hasClients && nameRank < 0 {
 			continue
 		}
 

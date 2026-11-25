@@ -19,6 +19,16 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-1-0-rc-7" data-version="v6.1.0-rc.7" data-version-code="6009307">
+  <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v6.1.0-rc.7(准正式版): 96 路三波深审与真机打磨收口 · 隐私安检零误报与 FlClash 代理去重 · 护航弹窗白板与液态抽屉塌陷根治 · 壁纸 12 态高对比底色与 60fps 零闪烁模糊 · 双卡 5G SA 误判与 27h 旧干扰修复 · 数据面锁序与 8 倍速率校准 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-25 · versionCode 6009307</span></div>
+  <ul class="cl-list">
+    <li><b>隐私安检告别误报、代理虚拟网卡去重与连接归属校准</b>：不再把普通业务短会话号 <span class="mono">sid</span> 与 Android 系统默认假网卡地址 <span class="mono">02:00:00:00:00:00</span> 误报成隐私泄露；自动过滤 <span class="mono">FlClash</span> 等代理虚拟网卡回流造成的同一请求三重重复告警，并修复连接收尾（<span class="mono">TIME_WAIT</span>）阶段丢失应用归属后错标为系统 <span class="mono">UID 0</span> 的问题。</li>
+    <li><b>护航点击白板框根治、液态连接抽屉防塌陷与半屏排版净空</b>：修复在「护航 -> 实时联网」点击应用查看详情弹出空白板框的问题，补齐液态玻璃模式下连接抽屉的底板高度与折射层级防止塌陷；清除半屏弹窗内外双标题重影与底部按钮被导航栏遮挡问题，同时修复真机模拟模式与离线预览中示例设备全部离线的问题。</li>
+    <li><b>自定义壁纸 12 态高对比底色与 60fps 离屏零闪烁实时模糊</b>：重构浅深色、玻璃浓度与明暗壁纸组合下的 12 态高对比度光学底色，无论换多亮的风景图或多暗的壁纸文字都清晰护眼；壁纸模糊改用离屏小画布渲染，切换档位与翻页全程 <span class="mono">60fps</span> 顺滑无闪烁。</li>
+    <li><b>双卡 5G SA 识别校准、过期干扰淘汰与四态加速展示理顺</b>：修复双卡真机驻留 5G SA 独立组网却被误判成 NSA 的问题，自动淘汰超过有效期的隔天（如 27 小时前）旧信号样本，不再误报假「强干扰」；理顺内核 L3 <span class="mono">eBPF clsact</span> 软件加速与系统热点硬件加速的四态清晰展示，不再相互混淆。</li>
+    <li><b>原生数据面防死锁、连接速率 8 倍单位校准与诊断修复</b>：统一原生数据面单向加锁顺序根除并发死锁隐患，修正连接实时速率字节与比特换算导致的 8 倍显示错位；修复 <span class="mono">/api/json_health</span> 诊断数据超长截断与后台哨兵脚本 <span class="mono">awk</span> 正则告警，全仓 34 个规则分包与指纹库同步升至 <span class="mono">v6.1.0-rc.7</span>，自动更新通道继续锁定稳定版 <span class="mono">v6.0.1</span>。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v6-1-0-rc-6" data-version="v6.1.0-rc.6" data-version-code="6009306">
   <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v6.1.0-rc.6(准正式版): 96 路跨层联动深审收口 · 待机零唤醒探活隔离 · 双卡信号消灭幽灵卡 3 · 看门狗防 PID 复用误杀 · 解封孤儿 IP 黑洞修复 · 支付宝防连坐独立拆分 · 本机防火墙公网收紧与限速模板修复 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-24 · versionCode 6009306</span></div>
   <ul class="cl-list">

@@ -753,3 +753,132 @@ func TestLocalAppsPrivacyAuditL1ZeroCaptureRules(t *testing.T) {
 		t.Fatalf("v6 privacy_audit alias failed: code=%d resp=%v", codeV6, respV6)
 	}
 }
+
+func TestRC7GuardianLiveLabelsOrphanTCPFakeIPAndVPNConduitRateDedup(t *testing.T) {
+	s, h, dir := newGuardianTestEnv(t)
+	e := s.guardianEngine()
+
+	// 1) B004: data/app_labels_live.json 优先于 run/app_labels_live.json, 且缺省回退 run/
+	pkgListPath := filepath.Join(dir, "packages.list")
+	_ = os.WriteFile(pkgListPath, []byte(strings.Join([]string{
+		"com.custom.note 10311 0 /data/user/0/com.custom.note default:targetSdkVersion=34 3003",
+		"com.follow.clash 10350 0 /data/user/0/com.follow.clash default:targetSdkVersion=34 3003",
+	}, "\n")+"\n"), 0o644)
+	e.packagesListPath = pkgListPath
+
+	_ = os.WriteFile(filepath.Join(dir, "run", "app_labels_live.json"), []byte(`{"com.custom.note":"旧版运行态名"}`), 0o644)
+	e.pkgLoadedMonoNs = 0
+	if mRun := e.resolveAppMeta(10311); mRun.AppName != "旧版运行态名" {
+		t.Fatalf("expected fallback to run/app_labels_live.json, got %+v", mRun)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "data", "app_labels_live.json"), []byte(`{"com.custom.note":"云端笔记","com.follow.clash":"FlClash"}`), 0o644)
+	e.pkgLoadedMonoNs = 0
+	if mData := e.resolveAppMeta(10311); mData.AppName != "云端笔记" {
+		t.Fatalf("expected data/app_labels_live.json priority over run/, got %+v", mData)
+	}
+
+	// 2) B026: uid%100000 >= 90000 隔离进程标记为系统组件
+	for _, isoUID := range []int{90000, 99015, 99999015} {
+		if !guardianIsSystemAppID(isoUID) {
+			t.Fatalf("expected isolated UID %d marked as system app ID", isoUID)
+		}
+		metaIso := e.resolveAppMeta(isoUID)
+		if !metaIso.IsSystem || !strings.HasPrefix(metaIso.Package, "isolated:") {
+			t.Fatalf("unexpected isolated UID %d meta: %+v", isoUID, metaIso)
+		}
+	}
+
+	// 3) B004 & B026: 过滤 /proc/net/tcp* 04/05/06/07/0B/0C 下 uid==0 或 inode==0 孤儿行, 且豁免 Fake-IP :53 dns_direct
+	procDir := filepath.Join(dir, "proc_net")
+	_ = os.MkdirAll(procDir, 0o755)
+	e.procNetDir = procDir
+	tcpLines := []string{
+		"  sl  local_address rem_address   st tx_queue:rx_queue tr:tm->when retrnsmt   uid  timeout inode",
+		fmt.Sprintf("   0: %s %s 04 00000000:00000000 00:00000000 00000000     0        0 0",
+			encodeProcIPv4AddrPort("10.0.0.2", 42001), encodeProcIPv4AddrPort("203.0.113.10", 80)),
+		fmt.Sprintf("   1: %s %s 05 00000000:00000000 00:00000000 00000000     0        0 999",
+			encodeProcIPv4AddrPort("10.0.0.2", 42002), encodeProcIPv4AddrPort("203.0.113.10", 80)),
+		fmt.Sprintf("   2: %s %s 05 00000000:00000000 00:00000000 00000000 10311        0 0",
+			encodeProcIPv4AddrPort("10.0.0.2", 42003), encodeProcIPv4AddrPort("203.0.113.10", 80)),
+	}
+	_ = os.WriteFile(filepath.Join(procDir, "tcp"), []byte(strings.Join(tcpLines, "\n")+"\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(procDir, "tcp6"), []byte("  sl  local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode\n"), 0o644)
+
+	udpLines := []string{
+		"  sl  local_address rem_address   st tx_queue:rx_queue tr:tm->when retrnsmt   uid  timeout inode ref pointer drops",
+		// Fake-IP 198.18.0.2:53 -> 豁免 dns_direct
+		fmt.Sprintf("   0: %s %s 01 00000000:00000000 00:00000000 00000000 10311        0 50001 2 00000000 0",
+			encodeProcIPv4AddrPort("10.0.0.2", 53101), encodeProcIPv4AddrPort("198.18.0.2", 53)),
+		// 真直连 8.8.8.8:53 -> 仍正常报 dns_direct
+		fmt.Sprintf("   1: %s %s 01 00000000:00000000 00:00000000 00000000 10311        0 50002 2 00000000 0",
+			encodeProcIPv4AddrPort("10.0.0.2", 53102), encodeProcIPv4AddrPort("8.8.8.8", 53)),
+	}
+	_ = os.WriteFile(filepath.Join(procDir, "udp"), []byte(strings.Join(udpLines, "\n")+"\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(procDir, "udp6"), []byte("  sl  local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ref pointer drops\n"), 0o644)
+
+	socks, ok := guardianScanProcSocketsDir(procDir)
+	if !ok || len(socks) != 2 {
+		t.Fatalf("expected 3 orphan TCP close rows filtered out leaving only 2 UDP sockets, got %d: %+v", len(socks), socks)
+	}
+
+	codePA, respPA := doGuardianGET(t, h, dir, "/api/local_apps/privacy_audit?include_system=1")
+	if codePA != http.StatusOK {
+		t.Fatalf("privacy_audit failed: %d", codePA)
+	}
+	paSum := respPA["summary"].(map[string]any)
+	if int(paSum["cleartext_http_conns"].(float64)) != 0 {
+		t.Fatalf("orphan FIN_WAIT rows must not trigger cleartext_http_conns, got %v", paSum["cleartext_http_conns"])
+	}
+	if int(paSum["direct_dns_conns"].(float64)) != 1 {
+		t.Fatalf("expected Fake-IP 198.18.0.2:53 exempted and 8.8.8.8:53 reported (count=1), got %v", paSum["direct_dns_conns"])
+	}
+
+	// 4) B026: VPN 活跃时整机总速率剔除 VPN 导管 UID (com.follow.clash=10350), 防双倍计速
+	e.vpnActiveFn = func() bool { return true }
+	e.leaseTTL = 200 * time.Millisecond
+	e.tickInterval = 20 * time.Millisecond
+	fakeBPF := &fakeGuardianBPFSampler{}
+	fakeBPF.setSnap(&bytestats.NetdDetailSnapshot{
+		ByUID: map[int]bytestats.NetdUIDDetail{
+			10311: {Total: bytestats.ByteCounts{RxBytes: 100_000, TxBytes: 50_000}},
+			10350: {Total: bytestats.ByteCounts{RxBytes: 100_000, TxBytes: 50_000}},
+		},
+	})
+	e.bpfSamplerFactory = func() (guardianBPFSampler, error) { return fakeBPF, nil }
+	e.netstatsStreamFn = func(_ context.Context, _ bool) (io.ReadCloser, error) {
+		return nil, errors.New("netstats disabled in unit test")
+	}
+
+	_, _ = doGuardianGET(t, h, dir, "/api/local_apps/traffic")
+	fakeBPF.setSnap(&bytestats.NetdDetailSnapshot{
+		ByUID: map[int]bytestats.NetdUIDDetail{
+			10311: {Total: bytestats.ByteCounts{RxBytes: 140_000, TxBytes: 70_000}},
+			10350: {Total: bytestats.ByteCounts{RxBytes: 140_000, TxBytes: 70_000}},
+		},
+	})
+	waitEngineCond(t, time.Second, "BPF rate tick with active VPN conduit", func() bool {
+		return !e.rateWarmingUp.Load()
+	})
+
+	codeTr, respTr := doGuardianGET(t, h, dir, "/api/local_apps/traffic")
+	if codeTr != http.StatusOK || respTr["available"] != true {
+		t.Fatalf("traffic failed: code=%d resp=%v", codeTr, respTr)
+	}
+	trApps := respTr["apps"].([]any)
+	if len(trApps) != 2 {
+		t.Fatalf("expected both app and FlClash rows visible (2), got %d", len(trApps))
+	}
+	var appRx int64
+	for _, raw := range trApps {
+		rm := raw.(map[string]any)
+		if int(rm["uid"].(float64)) == 10311 {
+			appRx = int64(rm["rx_bps"].(float64))
+		}
+	}
+	trSum := respTr["summary"].(map[string]any)
+	totRx := int64(trSum["total_rx_bps"].(float64))
+	if appRx <= 0 || totRx != appRx || e.totalRxBpsSnap.Load() != appRx {
+		t.Fatalf("expected summary total_rx_bps (%d) and snap (%d) to exclude FlClash double count and match appRx (%d)",
+			totRx, e.totalRxBpsSnap.Load(), appRx)
+	}
+}

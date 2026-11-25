@@ -278,7 +278,9 @@ func ownerPredict(rip string) (id, name string) {
 func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	enabled := selfFGEnabled(hncDir)
 	if !enabled {
-		return emptyEvalResult(days, false, "需要在设置里开启本机流量归因, 才会采集样本并评估", now)
+		res := emptyEvalResult(days, false, "需要在设置里开启本机流量归因, 才会采集样本并评估", now)
+		res.LANSelfConsistency = evalLANSelfConsistency(hncDir, now)
+		return res
 	}
 
 	pmap := pkgAppMap(hncDir)

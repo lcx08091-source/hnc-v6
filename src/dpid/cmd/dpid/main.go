@@ -671,7 +671,15 @@ func main() {
 		}
 		shmTracker.notifyPoke()
 	}
-	startHotspotHintInotifyWithShm(ctx, cfg.RunDir, wakeStandbyLoops, shmTracker.notifyPoke)
+	wakeSelfAndAppMeta := func() {
+		for _, ch := range []chan struct{}{wakeSelfCh, wakeAppMetaCh} {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	}
+	startHotspotHintInotifyFull(ctx, cfg.RunDir, wakeStandbyLoops, shmTracker.notifyPoke, wakeSelfAndAppMeta)
 
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -874,11 +882,25 @@ func main() {
 	}
 	selfAttrib := output.NewSelfAttribAggregator(selfStudioDir)
 
+	var explicitSelfCapture atomic.Bool
+	hasExplicitSelfCaptureFlag := func() bool {
+		if _, err := os.Stat(selfAttribFlag); err == nil {
+			return true
+		}
+		if _, err := os.Stat(selfAttribAltFlag); err == nil {
+			return true
+		}
+		return false
+	}
+	explicitSelfCapture.Store(hasExplicitSelfCaptureFlag())
+
 	appLabelsOverride := "/data/local/hnc/etc/app_labels.json"
 	appResolver := appmeta.NewResolver(appLabelsOverride)
 	dexPath := resolveAppLabelDex()
 	appResolver.EnableLiveLabels(dexPath, filepath.Join(dataDir, "app_labels_live.json"))
-	appResolver.SetIdleHook(func() bool { return actReader.Get().HotspotOff() }, wakeAppMetaCh)
+	appResolver.SetIdleHook(func() bool {
+		return actReader.Get().HotspotOff() && !explicitSelfCapture.Load()
+	}, wakeAppMetaCh)
 	appResolver.StartLiveRefresh(ctx)
 	selfAttrib.SetAppMetaResolver(appResolver)
 	curated, overridden := appResolver.LabelCount()
@@ -896,6 +918,7 @@ func main() {
 				}
 			}
 			selfCaptureOn.Store(captureEnabled)
+			explicitSelfCapture.Store(explicitEnabled)
 			if captureEnabled {
 				selfAttrib.SetEnabled(true, "")
 			} else {
@@ -939,6 +962,7 @@ func main() {
 		_, explicitInit := checkFlags()
 		actInit := actReader.Get()
 		wasOff := actInit.OK && !actInit.Hotspot
+		wasExplicit := explicitInit
 		cur := selfAttribTickEvery(actInit, explicitInit)
 		reconcileSampler(!explicitInit && wasOff)
 		tk := time.NewTicker(cur)
@@ -951,7 +975,14 @@ func main() {
 			if wasOff && !off {
 				wakeStandbyLoops()
 			}
+			if !wasExplicit && explicit {
+				select {
+				case wakeAppMetaCh <- struct{}{}:
+				default:
+				}
+			}
 			wasOff = off
+			wasExplicit = explicit
 			reconcileSampler(!explicit && off)
 			if want := selfAttribTickEvery(s, explicit); want != cur {
 				cur = want
@@ -1325,6 +1356,9 @@ func runCapture(
 		} else if iface != "" && !isIfaceAliveUp(iface) {
 			iface = ""
 		}
+		if iface != "" && !isHotspotActiveOrUnknown(cfg.RunDir) && !isIfaceAliveUp(iface) {
+			iface = ""
+		}
 
 		if iface == "" {
 			refreshHotspotContext("")
@@ -1582,18 +1616,19 @@ func runCapture(
 					if dstHost == "" {
 						dstHost = remoteIP
 					}
-					leakEngine.SubmitPacket(
-						clientMAC,
-						clientIP,
-						remoteIP,
-						ev.DstPort,
-						ev.HTTP.Method,
-						ev.HTTP.Path,
-						dstHost,
-						ev.HTTP.UserAgent,
-						ev.HTTP.RawPayload,
-						ev.Time,
-					)
+					leakEngine.Submit(leakguard.PacketInput{
+						Time:       ev.Time,
+						ClientMAC:  clientMAC,
+						ClientIP:   clientIP,
+						DstIP:      remoteIP,
+						SrcPort:    ev.SrcPort,
+						DstPort:    ev.DstPort,
+						Method:     ev.HTTP.Method,
+						Path:       ev.HTTP.Path,
+						DstHost:    dstHost,
+						UserAgent:  ev.HTTP.UserAgent,
+						RawPayload: ev.HTTP.RawPayload,
+					})
 				}
 			case capture.EventDevHint:
 				if ev.Dev != nil {
@@ -1839,10 +1874,14 @@ func isHotspotActiveOrUnknown(runDir string) bool {
 }
 
 func startHotspotHintInotify(ctx context.Context, runDir string, onWake func()) {
-	startHotspotHintInotifyWithShm(ctx, runDir, onWake, nil)
+	startHotspotHintInotifyFull(ctx, runDir, onWake, nil, nil)
 }
 
 func startHotspotHintInotifyWithShm(ctx context.Context, runDir string, onWake func(), onShmWake func()) {
+	startHotspotHintInotifyFull(ctx, runDir, onWake, onShmWake, nil)
+}
+
+func startHotspotHintInotifyFull(ctx context.Context, runDir string, onWake func(), onShmWake func(), onSelfWake func()) {
 	if runDir == "" || onWake == nil {
 		return
 	}
@@ -1876,6 +1915,7 @@ func startHotspotHintInotifyWithShm(ctx context.Context, runDir string, onWake f
 			off := 0
 			woke := false
 			wokeShm := false
+			wokeSelf := false
 			for off+syscall.SizeofInotifyEvent <= n {
 				evMask := binary.LittleEndian.Uint32(buf[off+4 : off+8])
 				evLen := binary.LittleEndian.Uint32(buf[off+12 : off+16])
@@ -1892,6 +1932,8 @@ func startHotspotHintInotifyWithShm(ctx context.Context, runDir string, onWake f
 				switch string(raw[:end]) {
 				case "iface_detect.json", "hotspot_iface":
 					woke = true
+				case "self_capture.enabled", "self_attrib.enabled":
+					wokeSelf = true
 				case "activity.json":
 					if evMask&(syscall.IN_MOVED_TO|syscall.IN_CLOSE_WRITE) != 0 {
 						if actReader != nil {
@@ -1908,8 +1950,13 @@ func startHotspotHintInotifyWithShm(ctx context.Context, runDir string, onWake f
 			}
 			if woke {
 				onWake()
-			} else if wokeShm && onShmWake != nil {
-				onShmWake()
+			} else {
+				if wokeShm && onShmWake != nil {
+					onShmWake()
+				}
+				if wokeSelf && onSelfWake != nil {
+					onSelfWake()
+				}
 			}
 		}
 	}()

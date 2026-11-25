@@ -15,6 +15,7 @@ import (
 	"time"
 	"unsafe"
 
+	"hnc.io/dpid/alert"
 	dpidlg "hnc.io/dpid/leakguard"
 )
 
@@ -1280,6 +1281,209 @@ func TestLeakGuardDualDomainEventsTargetScopeAndSelfFirewallClosedLoop(t *testin
 		t.Fatalf("remaining hotspot undo failed: %d %s", undoRestHotspot.Code, undoRestHotspot.Body.String())
 	}
 }
+
+func TestRC7LeakGuardAlertsSyncDedupHostWhitelistSummaryAndHostIPBlock(t *testing.T) {
+	s, mux, dir := newV6TestMux(t)
+	mux.HandleFunc("/api/action", s.handleAction)
+	mux.HandleFunc("/api/alerts", s.apiAlerts)
+	lg := s.v6State().leakGuard
+	sf := s.v6State().selfFirewall
+	lg.notifyExec = func(context.Context, string, ...string) error { return nil }
+
+	acfg := alert.NewConfig(dir)
+	// 预置 1 条非 leakguard 告警 + 1 条历史脏 leakguard 告警
+	if err := alert.Append(acfg.AlertsJSONLPath, alert.Alert{
+		ID:     "blk_keep_1",
+		Ts:     1900000001,
+		Kind:   "block_hit",
+		MAC:    "aa:bb:cc:dd:ee:01",
+		IP:     "192.168.43.11",
+		Detail: "命中域名拦截",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := alert.Append(acfg.AlertsJSONLPath, alert.Alert{
+		ID:     "dirty_mac_ev",
+		Ts:     1900000002,
+		Kind:   "leakguard",
+		Detail: "某应用 向 sdk.bad.example 明文传输 02:00:00:00:00:00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. B009: 磁盘历史脏假阳性过滤 (02:00:00:00:00:00 / 组播 MAC / 9774d56d682e549c / permission_denied / 低熵及非 Cookie sid)
+	dirtyAndValidJSON := `{"events":[
+		{"id":"dirty_mac_ev","ts":1900000002,"origin":"host","uid":10301,"pkg":"com.demo.a","dst_host":"sdk.bad.example","leak_type":"MAC_ADDR","raw_value":"02:00:00:00:00:00"},
+		{"id":"dirty_mac_enc","ts":1900000003,"origin":"host","uid":10301,"pkg":"com.demo.a","dst_host":"sdk.bad.example","leak_type":"MAC_ADDR","raw_value":"02%3A00%3A00%3A00%3A00%3A00"},
+		{"id":"dirty_mcast","ts":1900000004,"origin":"host","uid":10301,"pkg":"com.demo.a","dst_host":"sdk.bad.example","leak_type":"MAC_ADDR","raw_value":"01:00:5e:00:00:fb"},
+		{"id":"dirty_aid","ts":1900000005,"origin":"host","uid":10301,"pkg":"com.demo.a","dst_host":"sdk.bad.example","leak_type":"DEVICE_ID","raw_value":"9774d56d682e549c"},
+		{"id":"dirty_perm","ts":1900000006,"origin":"host","uid":10301,"pkg":"com.demo.a","dst_host":"sdk.bad.example","leak_type":"DEVICE_ID","raw_value":"permission_denied"},
+		{"id":"dirty_sid_num","ts":1900000007,"origin":"host","uid":10301,"pkg":"com.demo.a","dst_host":"sdk.bad.example","leak_type":"CREDENTIAL","field_key":"sid","raw_value":"1920202470728","raw_snippet":"GET /v1?sid=1920202470728 HTTP/1.1"},
+		{"id":"dirty_sid_ver","ts":1900000008,"origin":"host","uid":10301,"pkg":"com.demo.a","dst_host":"sdk.bad.example","leak_type":"CREDENTIAL","field_key":"sid","raw_value":"da_wr_v13_g1","raw_snippet":"Cookie: sid=da_wr_v13_g1"},
+		{"id":"dirty_sid_short","ts":1900000009,"origin":"host","uid":10301,"pkg":"com.demo.a","dst_host":"sdk.bad.example","leak_type":"CREDENTIAL","field_key":"sid","raw_value":"rrBPjfmojvS0","raw_snippet":"Cookie: sid=rrBPjfmojvS0"},
+		{"ts":1900000010,"origin":"host","uid":10355,"pkg":"com.real.shop","app_name":"真机商城","src_ip":"198.18.0.1","src_port":54321,"dst_host":"203.0.113.188","dst_ip":"203.0.113.188","dst_port":80,"proto":"http","leak_type":"PHONE","raw_value":"13812345678"},
+		{"id":"valid_hs_ev","ts":1900000011,"origin":"hotspot","mac":"aa:bb:cc:dd:ee:01","src_ip":"192.168.43.21","dst_host":"hs-plain.ad.example","leak_type":"PHONE","raw_value":"13987654321"}
+	]}`
+	if err := os.WriteFile(filepath.Join(dir, "run", "leakguard_events.json"), []byte(dirtyAndValidJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lg.syncFromDisk()
+
+	// 验证仅保留 2 条合法事件, SrcPort 保留且不影响 computeLeakEventID 哈希
+	idNoPort := computeLeakEventID(LeakEvent{Origin: "host", Ts: 1900000010, UID: 10355, Pkg: "com.real.shop", SrcIP: "198.18.0.1", DstHost: "203.0.113.188", LeakType: "PHONE", RawValue: "13812345678"})
+	idWithPort := computeLeakEventID(LeakEvent{Origin: "host", Ts: 1900000010, UID: 10355, Pkg: "com.real.shop", SrcIP: "198.18.0.1", SrcPort: 54321, DstHost: "203.0.113.188", LeakType: "PHONE", RawValue: "13812345678"})
+	if idNoPort != idWithPort {
+		t.Fatalf("SrcPort MUST NOT participate in computeLeakEventID hash: %q vs %q", idNoPort, idWithPort)
+	}
+
+	evSnapRec := doGuardJSONReq(t, mux, http.MethodGet, "/api/leakguard/events", "")
+	var snap0 struct {
+		Events []LeakEvent `json:"events"`
+	}
+	if err := json.Unmarshal(evSnapRec.Body.Bytes(), &snap0); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap0.Events) != 2 {
+		t.Fatalf("expected 8 dirty events filtered leaving 2 valid events, got %d: %+v", len(snap0.Events), snap0.Events)
+	}
+	foundSrcPort := false
+	for _, ev := range snap0.Events {
+		if ev.Origin == "host" && ev.SrcPort == 54321 {
+			foundSrcPort = true
+		}
+	}
+	if !foundSrcPort {
+		t.Fatalf("expected SrcPort=54321 preserved in /api/leakguard/events: %+v", snap0.Events)
+	}
+
+	// 验证 alerts.jsonl: dirty_mac_ev 已被清理, 本机事件 Alert.IP 为空且 Extra["src_ip"]=="198.18.0.1", 热点事件保留 IP
+	rawAlerts0, err := os.ReadFile(acfg.AlertsJSONLPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alertsStr0 := string(rawAlerts0)
+	if strings.Contains(alertsStr0, "dirty_mac_ev") || strings.Contains(alertsStr0, "02:00:00:00:00:00") {
+		t.Fatalf("expected dirty leakguard alert purged on syncFromDisk, still present:\n%s", alertsStr0)
+	}
+	for _, ln := range strings.Split(strings.TrimSpace(alertsStr0), "\n") {
+		var a alert.Alert
+		if json.Unmarshal([]byte(ln), &a) != nil {
+			continue
+		}
+		if a.ID == idNoPort {
+			if a.IP != "" || a.MAC != "" || asString(a.Extra["src_ip"]) != "198.18.0.1" {
+				t.Fatalf("host LeakGuard alert must leave IP/MAC empty and place src_ip in Extra: %+v", a)
+			}
+		}
+		if a.ID == "valid_hs_ev" && a.IP != "192.168.43.21" {
+			t.Fatalf("hotspot LeakGuard alert must preserve client IP: %+v", a)
+		}
+	}
+
+	// 2. B005: <5s 本机跨网卡双抓包去重合并 (FlClash / UID=0 先到或后到均归并到真实业务 App, 不同真实 App 不误并)
+	lg.IngestEvents([]LeakEvent{
+		{Ts: 1900000050, Origin: "host", UID: 10299, Pkg: "com.follow.clash", AppName: "FlClash", SrcIP: "10.0.0.2", DstHost: "track.merge.example", DstIP: "203.0.113.50", LeakType: "PHONE", RawValue: "13700009999"},
+		{Ts: 1900000052, Origin: "host", UID: 10366, Pkg: "com.biz.reader", AppName: "精品阅读", SrcIP: "198.18.0.1", SrcPort: 49152, DstHost: "track.merge.example", DstIP: "198.18.0.88", LeakType: "PHONE", RawValue: "13700009999"},
+		{Ts: 1900000053, Origin: "host", UID: 0, Pkg: "", SrcIP: "10.0.0.2", DstHost: "track.merge.example", LeakType: "PHONE", RawValue: "13700009999"},
+		{Ts: 1900000054, Origin: "host", UID: 10377, Pkg: "com.biz.music", AppName: "云音乐", SrcIP: "198.18.0.1", DstHost: "track.merge.example", LeakType: "PHONE", RawValue: "13700009999"},
+	})
+	hostOnlyRec := doGuardJSONReq(t, mux, http.MethodGet, "/api/leakguard/events?scope=host", "")
+	var snapHost struct {
+		Events []LeakEvent `json:"events"`
+	}
+	_ = json.Unmarshal(hostOnlyRec.Body.Bytes(), &snapHost)
+	mergeMatches := 0
+	for _, ev := range snapHost.Events {
+		if ev.DstHost == "track.merge.example" {
+			mergeMatches++
+			if ev.Pkg == "com.follow.clash" || ev.UID == 0 {
+				t.Fatalf("conduit/UID=0 duplicate should have merged into real business app: %+v", ev)
+			}
+			if ev.UID == 10366 && (ev.HitCount != 1 || ev.DstIP != "203.0.113.50" || ev.SrcPort != 49152) {
+				t.Fatalf("merged real app event lost public DstIP/SrcPort or inflated HitCount: %+v", ev)
+			}
+		}
+	}
+	if mergeMatches != 2 {
+		t.Fatalf("expected exactly 2 distinct real business app events on track.merge.example, got %d: %+v", mergeMatches, snapHost.Events)
+	}
+
+	// 3. B007: target_scope="host" 按应用 UID 一键封禁公网 IP + 防护守卫 + 一键撤销回滚
+	noUIDRec := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain",
+		`{"action":"block","target_scope":"host","dst_host":"203.0.113.188"}`)
+	if noUIDRec.Code != http.StatusBadRequest || !strings.Contains(noUIDRec.Body.String(), `"reason_code":"missing_uid"`) {
+		t.Fatalf("expected 400 missing_uid for host IP block without uid, got %d %s", noUIDRec.Code, noUIDRec.Body.String())
+	}
+	cdnIPRec := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain",
+		`{"action":"block","target_scope":"host","dst_host":"104.16.132.229","uid":10355}`)
+	if cdnIPRec.Code != http.StatusConflict || !strings.Contains(cdnIPRec.Body.String(), `"guard_level":"hard_block"`) {
+		t.Fatalf("expected 409 hard_block for shared CDN IP on host, got %d %s", cdnIPRec.Code, cdnIPRec.Body.String())
+	}
+
+	blkHostIPRec := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain",
+		`{"action":"block","target_scope":"host","dst_host":"203.0.113.188","uid":10355,"pkg":"uid:10355","app_name":"真机商城"}`)
+	if blkHostIPRec.Code != http.StatusOK || !strings.Contains(blkHostIPRec.Body.String(), `"self_blocked":true`) {
+		t.Fatalf("host public IP block failed: %d %s", blkHostIPRec.Code, blkHostIPRec.Body.String())
+	}
+	if !sf.IsHostEventBlocked(10355, "203.0.113.188", "203.0.113.188", 80, "http") {
+		t.Fatal("expected SelfFirewall to block 203.0.113.188 for UID 10355")
+	}
+
+	undoHostIPRec := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/undo-block", `{}`)
+	if undoHostIPRec.Code != http.StatusOK || sf.IsHostEventBlocked(10355, "203.0.113.188", "203.0.113.188", 80, "http") {
+		t.Fatalf("undo host public IP block failed: %d %s", undoHostIPRec.Code, undoHostIPRec.Body.String())
+	}
+	if sfSnap := sf.snapshotPayload(); sfSnap["uid_rule_count"] != 0 {
+		t.Fatalf("expected UID 10355 allow-only rule removed when last block_target undone, got %+v", sfSnap)
+	}
+
+	// 4. B008 & B006: app_host_type 白名单 (兼容 uid/pkg) 同步清理事件与 alerts.jsonl + summary() 统计口径对齐 + clear / alert_clear
+	wlAppRec := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/whitelist",
+		`{"action":"add","scope":"app_host_type","uid":10366,"pkg":"com.biz.reader","dst_host":"track.merge.example","leak_type":"PHONE"}`)
+	if wlAppRec.Code != http.StatusOK || !strings.Contains(wlAppRec.Body.String(), `"purged_events":1`) {
+		t.Fatalf("scope=app_host_type whitelist add failed: %d %s", wlAppRec.Code, wlAppRec.Body.String())
+	}
+	rawAlertsAfterWL, _ := os.ReadFile(acfg.AlertsJSONLPath)
+	if strings.Contains(string(rawAlertsAfterWL), "精品阅读") {
+		t.Fatalf("expected app_host_type whitelist to purge matching alert from alerts.jsonl:\n%s", string(rawAlertsAfterWL))
+	}
+	if !strings.Contains(string(rawAlertsAfterWL), "云音乐") {
+		t.Fatalf("app_host_type whitelist for com.biz.reader must NOT purge com.biz.music alert:\n%s", string(rawAlertsAfterWL))
+	}
+
+	// 封禁 1 个热点域名后核验 summary() 与 snapshotPayloadFiltered 的 blocked_domains / affected_devices / capacity / cooldown_sec 完全一致
+	_ = doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/block-domain",
+		`{"action":"block","dst_host":"hs-plain.ad.example","mac":"aa:bb:cc:dd:ee:01"}`)
+	fullSnap := lg.snapshotPayload()
+	sumSnap := lg.summary()
+	if sumSnap["blocked_domains"] != fullSnap["blocked_domains"] ||
+		sumSnap["affected_devices"] != fullSnap["affected_devices"] ||
+		sumSnap["capacity"] != 300 || sumSnap["cooldown_sec"] != 300 {
+		t.Fatalf("summary() out of sync with snapshotPayload(): summary=%+v full.blocked=%v full.devs=%v",
+			sumSnap, fullSnap["blocked_domains"], fullSnap["affected_devices"])
+	}
+
+	// POST /api/leakguard/clear 必须清空全部 leakguard 告警但保留 block_hit 告警
+	clrLGRec := doGuardJSONReq(t, mux, http.MethodPost, "/api/leakguard/clear", `{}`)
+	if clrLGRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/leakguard/clear failed: %d %s", clrLGRec.Code, clrLGRec.Body.String())
+	}
+	rawAlertsAfterLGClr, _ := os.ReadFile(acfg.AlertsJSONLPath)
+	if strings.Contains(string(rawAlertsAfterLGClr), `"kind":"leakguard"`) || !strings.Contains(string(rawAlertsAfterLGClr), `"id":"blk_keep_1"`) {
+		t.Fatalf("apiLeakGuardClear must purge leakguard alerts while keeping block_hit:\n%s", string(rawAlertsAfterLGClr))
+	}
+
+	// POST /api/action {"action":"alert_clear"} 一键清空全部系统铃铛告警
+	clrAllAlertsRec := doGuardJSONReq(t, mux, http.MethodPost, "/api/action", `{"action":"alert_clear","params":{}}`)
+	if clrAllAlertsRec.Code != http.StatusOK {
+		t.Fatalf("action alert_clear failed: %d %s", clrAllAlertsRec.Code, clrAllAlertsRec.Body.String())
+	}
+	getAlertsRec := doGuardJSONReq(t, mux, http.MethodGet, "/api/alerts", "")
+	if !strings.Contains(getAlertsRec.Body.String(), `"alerts":[]`) {
+		t.Fatalf("expected empty /api/alerts after alert_clear, got %s", getAlertsRec.Body.String())
+	}
+}
+
 
 
 

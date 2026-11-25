@@ -3,15 +3,31 @@ package probe
 import (
 	"bufio"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
-	"syscall"
-
 	"hnc.io/dpid/capture"
+	"hnc.io/dpid/nlroute"
 	"hnc.io/dpid/output"
+)
+
+var (
+	staticOffloadProbeSpecs = []struct {
+		path string
+		tag  string
+	}{
+		{path: "/sys/fs/bpf/tethering", tag: "tethering_bpf_fs"},
+		{path: "/sys/fs/bpf/net_shared/prog_offload_schedcls_tether_upstream4_ether", tag: "tethering_bpf_prog_up4"},
+		{path: "/sys/fs/bpf/net_shared/prog_offload_schedcls_tether_downstream4_ether", tag: "tethering_bpf_prog_down4"},
+		{path: "/sys/kernel/debug/ipa", tag: "ipa_debugfs"},
+		{path: "/proc/hnat", tag: "mtk_hnat_proc"},
+	}
+	offloadGuardProbePath     = "/data/local/hnc/run/offload_guard.json"
+	offloadSuppressedFlagPath = "/data/local/hnc/run/orig_tether_offload_disabled"
 )
 
 type Result struct {
@@ -24,6 +40,7 @@ type Result struct {
 	APIfaceCandidates []capture.IfaceCandidate `json:"ap_iface_candidates"`
 	ConntrackReadable bool                     `json:"conntrack_readable"`
 	ConntrackPath     string                   `json:"conntrack_path,omitempty"`
+	OffloadSupported  bool                     `json:"offload_supported,omitempty"`
 	OffloadHint       bool                     `json:"offload_hint"`
 	OffloadEvidence   []string                 `json:"offload_evidence,omitempty"`
 	NetdLogReadable   bool                     `json:"netd_log_readable"`
@@ -83,9 +100,16 @@ func Run(opt Options) Result {
 		}
 	}
 
-	if ev := detectOffloadHints(); len(ev) > 0 {
+	staticEv := detectStaticOffloadSupport()
+	if len(staticEv) > 0 {
+		r.OffloadSupported = true
+	}
+	if activeEv := detectActiveOffload(r.APIface, cands); len(activeEv) > 0 {
 		r.OffloadHint = true
-		r.OffloadEvidence = ev
+		r.OffloadEvidence = activeEv
+	} else if len(staticEv) > 0 {
+		r.OffloadHint = false
+		r.OffloadEvidence = staticEv
 	}
 
 	for _, p := range []string{
@@ -126,21 +150,72 @@ func readKernel() string {
 	return string(b)
 }
 
-// detectOffloadHints is a static hint only. It must not change mode in rc1.2.
-func detectOffloadHints() []string {
+// detectStaticOffloadSupport checks static kernel/bpffs offload capability artifacts.
+// Static presence of /sys/fs/bpf/tethering only indicates kernel/Mainline capability,
+// never active tether offload bypass when hotspot is off or idle.
+func detectStaticOffloadSupport() []string {
 	var ev []string
-	for _, p := range []string{
-		"/sys/fs/bpf/tethering",
-		"/sys/fs/bpf/net_shared/prog_offload_schedcls_tether_upstream4_ether",
-		"/sys/fs/bpf/net_shared/prog_offload_schedcls_tether_downstream4_ether",
-		"/sys/kernel/debug/ipa",
-		"/proc/hnat",
-	} {
-		if _, err := os.Stat(p); err == nil {
-			ev = append(ev, filepath.Base(p))
+	for _, spec := range staticOffloadProbeSpecs {
+		if _, err := os.Stat(spec.path); err == nil {
+			ev = append(ev, spec.tag)
 		}
 	}
 	return ev
+}
+
+// detectActiveOffload reports evidence only when hotspot is active and hardware/BPF
+// tether offload is actively bypassing the software path (not suppressed and not idle).
+func detectActiveOffload(apIface string, cands []capture.IfaceCandidate) []string {
+	if apIface == "" {
+		return nil
+	}
+	if b, err := os.ReadFile(offloadGuardProbePath); err == nil {
+		var st struct {
+			OffloadState          string `json:"offload_state"`
+			FallbackActive        bool   `json:"fallback_active"`
+			TetherOffloadDisabled bool   `json:"tether_offload_disabled"`
+		}
+		if json.Unmarshal(b, &st) == nil {
+			if st.FallbackActive || st.TetherOffloadDisabled {
+				return nil
+			}
+			switch strings.ToUpper(strings.TrimSpace(st.OffloadState)) {
+			case "ACTIVE":
+				return []string{"offload_guard:ACTIVE"}
+			case "BYPASS_ACTIVE":
+				return []string{"offload_guard:BYPASS_ACTIVE"}
+			case "NOHOTSPOT", "IDLE", "CAPABLE", "NOMAP", "SKIPPED", "CLEAN":
+				return nil
+			}
+		}
+	}
+	if _, err := os.Stat(offloadSuppressedFlagPath); err == nil {
+		return nil
+	}
+	ifc, err := net.InterfaceByName(apIface)
+	if err != nil || ifc == nil || ifc.Flags&net.FlagUp == 0 {
+		return nil
+	}
+	hasClients := false
+	for _, c := range cands {
+		if c.Name == apIface && c.HasClients {
+			hasClients = true
+			break
+		}
+	}
+	if !hasClients {
+		return nil
+	}
+	fs, err := nlroute.FilterList(ifc.Index, nlroute.TC_H_CLSACT_INGRESS)
+	if err != nil {
+		return nil
+	}
+	for _, f := range fs {
+		if f.Kind == "bpf" && strings.Contains(strings.ToLower(f.BPFName), "tether") {
+			return []string{"tether_tc_bpf:" + apIface}
+		}
+	}
+	return nil
 }
 
 // detectIPv6Capture checks if the system has active IPv6 connections.

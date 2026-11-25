@@ -44,25 +44,28 @@ const (
 )
 
 // DataplaneTierStatus 暴露给 /api/vector_sync 与 /api/dataplane_verify 的零阻塞实时层级快照。
+// 铁律锁序: arb.mu(先释放) -> DefaultDataplaneActor().Do -> nativeDPLockMu, 严禁持 nativeDPLockMu 调用 Actor.Do!
 type DataplaneTierStatus struct {
-	ActiveTier        string `json:"active_tier"`
-	SavedForks        uint64 `json:"saved_forks"`
-	LastNetlinkUsec   int64  `json:"last_netlink_usec"`
-	NetlinkOpsTotal   uint64 `json:"netlink_ops_total"`
-	DedupHits         uint64 `json:"dedup_hits"`
-	Tier3BatchCommits uint64 `json:"tier3_batch_commits"`
-	Fallbacks         uint64 `json:"fallbacks"`
-	OffloadControlled bool   `json:"offload_controlled"`
-	ClsactBPFReady    bool   `json:"clsact_bpf_ready"`
-	SchFQAvailable    bool   `json:"sch_fq_available"`
-	RTNetlinkReady    bool   `json:"rtnetlink_ready"`
-	ExpressActive     bool   `json:"express_active"`
-	ExpressBgCeilKbps int    `json:"express_bg_ceil_kbps"`
-	UpdateLeashKbps   int    `json:"update_leash_kbps"`
-	GlobalDownKbps    int    `json:"global_down_kbps"`
-	GlobalUpKbps      int    `json:"global_up_kbps"`
-	ProbedIface       string `json:"probed_iface,omitempty"`
-	UpdatedAt         int64  `json:"updated_at"`
+	ActiveTier          string `json:"active_tier"`
+	SavedForks          uint64 `json:"saved_forks"`
+	LastNetlinkUsec     int64  `json:"last_netlink_usec"`
+	NetlinkOpsTotal     uint64 `json:"netlink_ops_total"`
+	DedupHits           uint64 `json:"dedup_hits"`
+	Tier3BatchCommits   uint64 `json:"tier3_batch_commits"`
+	Fallbacks           uint64 `json:"fallbacks"`
+	OffloadControlled   bool   `json:"offload_controlled"`
+	ClsactBPFReady      bool   `json:"clsact_bpf_ready"`
+	SchFQAvailable      bool   `json:"sch_fq_available"`
+	RTNetlinkReady      bool   `json:"rtnetlink_ready"`
+	ExpressActive       bool   `json:"express_active"`
+	ExpressGameMark     uint32 `json:"express_game_mark,omitempty"`
+	ExpressBgCeilKbps   int    `json:"express_bg_ceil_kbps"`
+	ExpressUpBgCeilKbps int    `json:"express_up_bg_ceil_kbps,omitempty"`
+	UpdateLeashKbps     int    `json:"update_leash_kbps"`
+	GlobalDownKbps      int    `json:"global_down_kbps"`
+	GlobalUpKbps        int    `json:"global_up_kbps"`
+	ProbedIface         string `json:"probed_iface,omitempty"`
+	UpdatedAt           int64  `json:"updated_at"`
 }
 
 type dataplaneProbeSnapshot struct {
@@ -519,28 +522,32 @@ func (a *DataplaneActor) publishSnapshotLocked() {
 		leashKbps = a.leashSpec.rateKbps
 	}
 	bgCeil := 0
+	upBgCeil := 0
 	if a.expressSpec.active {
 		bgCeil = a.expressSpec.bgCeilKbps
+		upBgCeil = a.expressSpec.upBgCeilKbps
 	}
 	snap := DataplaneTierStatus{
-		ActiveTier:        tier,
-		SavedForks:        a.savedForks.Load(),
-		LastNetlinkUsec:   a.lastApplyUsec.Load(),
-		NetlinkOpsTotal:   a.nlOpsTotal.Load(),
-		DedupHits:         a.dedupHits.Load(),
-		Tier3BatchCommits: a.tier3Batches.Load(),
-		Fallbacks:         a.nlFallbacks.Load(),
-		OffloadControlled: a.probeState.offloadControlled,
-		ClsactBPFReady:    a.probeState.clsactBPFReady,
-		SchFQAvailable:    a.probeState.schFQAvailable,
-		RTNetlinkReady:    a.probeState.rtnetlinkReady,
-		ExpressActive:     a.expressSpec.active,
-		ExpressBgCeilKbps: bgCeil,
-		UpdateLeashKbps:   leashKbps,
-		GlobalDownKbps:    a.shaperSpec.downKbps,
-		GlobalUpKbps:      a.shaperSpec.upKbps,
-		ProbedIface:       a.probeState.iface,
-		UpdatedAt:         now,
+		ActiveTier:          tier,
+		SavedForks:          a.savedForks.Load(),
+		LastNetlinkUsec:     a.lastApplyUsec.Load(),
+		NetlinkOpsTotal:     a.nlOpsTotal.Load(),
+		DedupHits:           a.dedupHits.Load(),
+		Tier3BatchCommits:   a.tier3Batches.Load(),
+		Fallbacks:           a.nlFallbacks.Load(),
+		OffloadControlled:   a.probeState.offloadControlled,
+		ClsactBPFReady:      a.probeState.clsactBPFReady,
+		SchFQAvailable:      a.probeState.schFQAvailable,
+		RTNetlinkReady:      a.probeState.rtnetlinkReady,
+		ExpressActive:       a.expressSpec.active,
+		ExpressGameMark:     a.expressSpec.gameMark,
+		ExpressBgCeilKbps:   bgCeil,
+		ExpressUpBgCeilKbps: upBgCeil,
+		UpdateLeashKbps:     leashKbps,
+		GlobalDownKbps:      a.shaperSpec.downKbps,
+		GlobalUpKbps:        a.shaperSpec.upKbps,
+		ProbedIface:         a.probeState.iface,
+		UpdatedAt:           now,
 	}
 	a.statusSnap.Store(snap)
 }
@@ -639,12 +646,48 @@ func probeDataplaneTierOnActor(actor *DataplaneActor, hncDir, iface string) stri
 	return selected
 }
 
+func parseOffloadControlledStateContent(raw string) bool {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" || strings.Contains(s, "bypass_uncontrolled") {
+		return false
+	}
+	hasKV := false
+	for _, ln := range strings.Split(s, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(ln, "="); ok {
+			hasKV = true
+			k = strings.TrimSpace(k)
+			v = strings.TrimSpace(v)
+			if (k == "fallback" || k == "active" || k == "fallback_active") && (v == "1" || v == "true") {
+				return true
+			}
+		}
+	}
+	if hasKV {
+		return false
+	}
+	return s != "0" && s != "false"
+}
+
 func defaultCheckOffloadControlled(hncDir, _ string) bool {
 	if hncDir != "" {
+		if og := readOffloadGuard(hncDir); og != nil {
+			if dpJSONBool(og["fallback_active"]) || dpJSONBool(og["fallback"]) {
+				return true
+			}
+			if strings.EqualFold(asString(og["hwnat"]), "detected_no_knob") {
+				return false
+			}
+			if strings.EqualFold(asString(og["offload_state"]), "ACTIVE") && strings.EqualFold(asString(og["mode"]), "off") {
+				return false
+			}
+		}
 		for _, rel := range []string{"run/offload_guard.state", "run/offload_slowpath.active"} {
 			if b, err := os.ReadFile(filepath.Join(hncDir, rel)); err == nil {
-				s := strings.ToLower(strings.TrimSpace(string(b)))
-				if s != "" && !strings.Contains(s, "bypass_uncontrolled") && s != "0" && s != "false" {
+				if parseOffloadControlledStateContent(string(b)) {
 					return true
 				}
 			}
@@ -1109,25 +1152,18 @@ func resolveActiveVectorExpressParamsFull(s *server, hncDir string) (active bool
 		if globalUpKbps <= 0 {
 			globalUpKbps = st.GlobalUpKbps
 		}
+		if st.ExpressGameMark != 0 {
+			gameMark = st.ExpressGameMark
+		}
 		if st.ExpressActive {
 			active = true
-			bgCeilKbps = st.ExpressBgCeilKbps
+			if st.ExpressBgCeilKbps > 0 {
+				bgCeilKbps = st.ExpressBgCeilKbps
+			}
+			if st.ExpressUpBgCeilKbps > 0 {
+				upBgCeilKbps = st.ExpressUpBgCeilKbps
+			}
 		}
-		_ = DefaultDataplaneActor().Do("read_express_spec", func(a *DataplaneActor) error {
-			if a.expressSpec.gameMark != 0 {
-				gameMark = a.expressSpec.gameMark
-			}
-			if a.expressSpec.active {
-				active = true
-				if a.expressSpec.bgCeilKbps > 0 {
-					bgCeilKbps = a.expressSpec.bgCeilKbps
-				}
-				if a.expressSpec.upBgCeilKbps > 0 {
-					upBgCeilKbps = a.expressSpec.upBgCeilKbps
-				}
-			}
-			return nil
-		})
 	}
 
 	bgPct := 0

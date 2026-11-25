@@ -249,31 +249,49 @@ function calFmtPct(p) { p = num(p); return (p > 0 ? '+' : p < 0 ? '−' : '±') 
 function statsHealthHtml() {
   var r = S.sh;
   if (!r) return sItem(['gray', 'heart'], '统计健康', '当前后端不支持（需要新版 hnc_httpd）', val('—'));
-  var is = r.issues || [], nE = is.filter(function (x) { return x.level === 'error'; }).length, nW = is.filter(function (x) { return x.level === 'warn'; }).length;
+  var hsIdle = S.hotspot.active === false || r.hotspot_up === false;
+  var rawIssues = Array.isArray(r.issues) ? r.issues : [];
+  var is = hsIdle ? rawIssues.map(function (x) {
+    if (x && (x.id === 'ct_events_off' || x.id === 'ct_acct_off' || x.id === 'iptables_chain_missing')) {
+      return { id: x.id, level: 'info', text_cn: '热点未开启 · 连接追踪与计数链处于待机省电休眠状态（开启热点后自动激活）' };
+    }
+    return x;
+  }) : rawIssues;
+  var nE = is.filter(function (x) { return x.level === 'error'; }).length, nW = is.filter(function (x) { return x.level === 'warn'; }).length;
   var lv = nE ? 'fail' : nW ? 'warn' : 'ok', gap = r.offload_gap_pct == null ? null : num(r.offload_gap_pct), age = r.last_stats_sample_age == null ? null : num(r.last_stats_sample_age, -1);
   var calS = { ok: '一致', drift: '有偏差', unavailable: '不可用' }[r.calibration_status] || r.calibration_status || '—';
   var rows = [
-    ['精确模式', r.precise_mode ? '开' : '关' + (r.ct_poll_fallback ? ' · 10 秒轮询' : '')],
-    ['连接销毁事件', r.ct_events_active ? Math.round(num(r.ct_destroy_events_per_min)) + ' 次/分' : '未订阅'],
-    ['连接字节计数', r.ct_acct === 1 ? '已开启' : r.ct_acct === 0 ? '未开启' : '未知'],
-    ['iptables 计数', r.iptables_stats_ok ? '正常' : r.iptables_stalled ? '停滞' : r.iptables_checked ? '异常' : '未检查'],
+    ['精确模式', r.precise_mode ? '开' : (hsIdle ? '待机按需唤醒' : '关' + (r.ct_poll_fallback ? ' · 10 秒轮询' : ''))],
+    ['连接销毁事件', r.ct_events_active ? Math.round(num(r.ct_destroy_events_per_min)) + ' 次/分' : (hsIdle ? '热点待机省电暂停' : '未订阅')],
+    ['连接字节计数', r.ct_acct === 1 ? '已开启' : r.ct_acct === 0 ? (hsIdle ? '热点待机按需开启' : '未开启') : '未知'],
+    ['iptables 计数', r.iptables_stats_ok ? '正常' : hsIdle ? '待机按需挂载' : r.iptables_stalled ? '停滞' : r.iptables_checked ? '异常' : '未检查'],
     ['设备流量采样', age == null || age < 0 ? '无记录' : age < 60 ? age + ' 秒前' : Math.round(age / 60) + ' 分钟前'],
     ['系统时钟', r.clock_sane === false ? '不可信' : '可信'],
     ['分流漏计', gap == null ? '—' : '≈ ' + Math.round(gap) + '%' + (OFFK_T[r.offload_kind] ? ' · ' + OFFK_T[r.offload_kind] : '')],
-    ['分流兜底', r.offload_guard_active ? '生效中' : (r.offload_guard_mode || '—')],
+    ['分流兜底', r.offload_guard_active ? '生效中' : (hsIdle ? '热点未开启 · 待命' : (r.offload_guard_mode || '—'))],
     ['系统统计对账', r.netstats_mode === 'off' ? '已关闭' : calS + (r.hnc_vs_netstats_pct != null ? ' · ' + calFmtPct(r.hnc_vs_netstats_pct) : '')]
   ];
   var body = (is.length ? '<div class="sc-items">' + is.map(function (x) { var st = SH_LV[x.level] || 'info'; return '<div class="sc-it ' + st + '" data-shid="' + esc(x.id || '') + '"><span class="sc-i">' + SC_ST[st][0] + '</span><div style="min-width:0"><div class="s" style="margin:0;color:var(--text-2);font-size:13px">' + esc(x.text_cn || x.id) + '</div></div></div>'; }).join('') + '</div>' : '<div class="note">' + uiSvg('check') + ' 没有发现问题</div>') +
     '<dl class="kv sh-kv">' + rows.map(function (x) { return '<dt>' + x[0] + '</dt><dd>' + esc(x[1]) + '</dd>'; }).join('') + '</dl>' +
     '<div class="note" style="margin-top:6px">精确模式 = conntrack 连接销毁事件 + 字节计数都在线，按应用流量不漏短连接。' + (r.checked_at ? ' · ' + ago(r.checked_at) + '检测' : '') + '</div>';
-  var sub = (r.precise_mode ? '精确模式' : '轮询模式') + (gap != null && gap >= 10 ? ' · 分流漏计 ≈ ' + Math.round(gap) + '%' : '') + ' · ' + (lv === 'ok' ? '各统计口径正常' : [nE ? nE + ' 个错误' : '', nW ? nW + ' 个警告' : ''].filter(Boolean).join(' · '));
+  var sub = (r.precise_mode ? '精确模式' : (hsIdle ? '待机省电模式' : '轮询模式')) + (gap != null && gap >= 10 ? ' · 分流漏计 ≈ ' + Math.round(gap) + '%' : '') + ' · ' + (lv === 'ok' ? '各统计口径正常' : [nE ? nE + ' 个错误' : '', nW ? nW + ' 个警告' : ''].filter(Boolean).join(' · '));
   return sFold('sh', [lv === 'fail' ? 'red' : lv === 'warn' ? 'orange' : 'green', 'heart'], '统计健康', sub, body, val(lv === 'ok' ? '正常' : lv === 'fail' ? nE + ' 项错误' : nW + ' 项警告', lv === 'ok' ? 'ok' : lv === 'fail' ? 'bad' : 'warn'));
 }
 
 /* ═════════════════════ 设置页(原版全部条目, 就地展开) ═════════════════════ */
 var LOG_FILES = ['combined', 'service', 'watchdog', 'hotspot', 'hotspotd', 'dpid', 'dpid_guard', 'httpd', 'tc', 'iptables', 'apply', 'detect', 'stats', 'audit'];
-var OG_T = { NOMAP: '本机没有系统热点加速，无需兜底', IDLE: '加速存在但没在转发流量，无需兜底', CAPABLE: '支持加速，目前没在转发，继续观察', ACTIVE: '加速正在转发流量', NOHOTSPOT: '热点未开启', UNKNOWN: '未知', SKIPPED: '已关闭' };
-var OFFLOAD_T = { ACTIVE: '正在接管转发', CAPABLE: '可接管（未激活）', IDLE: '空闲', NOMAP: '未发现 offload', PENDING: '检测中' };
+var OG_T = { NOMAP: '本机没有系统热点加速，无需兜底', IDLE: '自动按需待命：当前无硬件分流绕过，保持零损耗直通', CAPABLE: '自动按需待命：无活跃限速时保持硬件满速，设限速即刻接管', ACTIVE: '加速正在转发流量', NOHOTSPOT: '热点未开启 · 待机无需检测', UNKNOWN: '未知', SKIPPED: '已关闭' };
+var OFFLOAD_T = { ACTIVE: '正在接管转发', CAPABLE: '可接管（未激活）', IDLE: '空闲', NOMAP: '未发现 offload', PENDING: '检测中', NOHOTSPOT: '热点未开启' };
+function setHasActiveControlPolicy(cfg) {
+  var c = cfg || S.cfg || {};
+  var og = c.offload_guard || (S.offload && S.offload.guard) || null;
+  if (og && (og.policy_active === true || og.has_active_policy === true)) return true;
+  if (c.global_shaper_enabled === true || (c.autorate && c.autorate.enabled === true) || c.quic_block === true || c.whitelist_enabled === true) return true;
+  if ((S.appLimits || []).length > 0) return true;
+  if ((S.devices || []).some(function (d) { return !d.sim && (d.limitOn || d.hasDelay || d.blocked || d.sqm || d.appQos || !!d.quota || (d.cblocks && d.cblocks.length > 0)); })) return true;
+  if (S.live && S.live.active_limiter_reason && S.live.active_limiter_reason !== 'none') return true;
+  return false;
+}
 S.alertCfg = null; S.sla = null; S.metrics = null; S.tokens = null; S.runStatus = null; S.clsact = null; S.ifaceInfo = null; S.logText = '';
 function loadSettingsData() {
   return Promise.all([
@@ -287,7 +305,8 @@ function loadSettingsData() {
     loadCaps(),
     loadSelfcheck(),
     loadAppLimits(),
-    loadMacMerge(), loadEncdns(), loadStatsHealth(), loadWhoami(), dpvLoadSilent()   // v5.40
+    loadMacMerge(), loadEncdns(), loadStatsHealth(), loadWhoami(), dpvLoadSilent(),   // v5.40
+    loadDNS(), loadFgEngine()
   ]);
 }
 /* 模拟环境(调试) */
@@ -493,7 +512,7 @@ function renderSettings(anim1) {
       '<button class="btn pri press" data-act="sched-save">保存</button>') +
     sItem(['blue', 'wifi'], '热点接口', '当前热点使用的接口（实时）' + (lv.iface_method ? ' · 识别方式：' + esc(IFM_T[lv.iface_method] || lv.iface_method) : ''), val(esc(S.hotspot.iface || '—') + (S.hotspot.active === false ? ' · 未开启' : ''))) + tetherNote(lv) +
     sFold('iface', ['cyan', 'wifi'], '热点接口偏好', '默认自动识别；ColorOS 常见 wlan2', '<div style="display:flex;gap:8px">' + inp('iface-pref', c.hotspot_iface || 'auto', '', 'maxlength="15" placeholder="auto" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="iface-save">保存</button></div><div class="note">填 auto 让 HNC 自动识别；手动填接口名（如 wlan2 / ap0）用于识别不准的机型。</div>', val(esc(c.hotspot_iface || 'auto'))) +
-    sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val(esc(OFFLOAD_T[S.offload.detail] || S.offload.detail || '—') + (S.offload.guard && S.offload.guard.fallback_active ? ' · 已兜底' : ''), S.offload.detail === 'ACTIVE' && !(S.offload.guard && S.offload.guard.fallback_active) ? 'warn' : 'ok')) +
+    sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', S.hotspot.active === false ? val('热点未开启 · 待机', '') : val(esc(OFFLOAD_T[S.offload.detail] || S.offload.detail || '—') + (S.offload.guard && S.offload.guard.fallback_active ? ' · 已兜底' : ''), S.offload.detail === 'ACTIVE' && !(S.offload.guard && S.offload.guard.fallback_active) && setHasActiveControlPolicy(c) ? 'warn' : 'ok')) +
     sItem(['red', 'shield'], '网站封锁 · DNS 层', '封锁网站时顺带拦掉该设备对这个域名的 DNS 查询，第一次连接就拦住', val({ available: '可用', unavailable: '内核不支持（只按 IP 拦）', unknown: '首次封锁时检测' }[c.conn_block_dns_layer] || '—', c.conn_block_dns_layer === 'unavailable' ? 'warn' : 'ok'))]);
   groups.push(['设备', rmacPolicyHtml(c) + mergeSettingsHtml()]);   // 随机 MAC 无感继承 + 防绕过护栏 + 合并建议
   // 告警总开关 + 新设备接入提醒(后端早就有, 旧新界面都没做设置)
@@ -538,7 +557,7 @@ function renderSettings(anim1) {
     sItem(['cyan', 'link'], '活跃连接分流', '热点转发流与本机应用套接字正交分离（关热点不影响本机计数）', val(esc(flowSt.text), flowSt.hs > 0 || flowSt.host > 0 ? 'ok' : '')) +
     sItem(['orange', 'thermo'], '真实机身与电池温度', esc(tempSt.sub), val(esc(tempSt.label), tempSt.cls)) +
     (!S.runStatus ? sItem(['gray', 'cpu'], '守护进程运行态', '后端暂未提供 /api/run_status', val('—')) :
-      sItem(['green', 'cpu'], 'hotspotd 进程', rs.hotspotd_pid ? 'pid ' + rs.hotspotd_pid + (rs.hotspotd_rss_kb ? ' · ' + Math.round(rs.hotspotd_rss_kb / 1024) + ' MB' : '') : '未运行', val(rs.hotspotd === 'up' ? '运行中' : '未运行', rs.hotspotd === 'up' ? 'ok' : 'bad')) +
+      sItem(['green', 'cpu'], 'hotspotd 进程', rs.hotspotd_pid ? 'pid ' + rs.hotspotd_pid + (rs.hotspotd_rss_kb ? ' · ' + Math.round(rs.hotspotd_rss_kb / 1024) + ' MB' : '') : (S.hotspot.active === false ? '热点未开启 · 按需休眠零耗电' : '未运行'), val(rs.hotspotd === 'up' ? '运行中' : (S.hotspot.active === false ? '待机休眠' : '未运行'), rs.hotspotd === 'up' ? 'ok' : (S.hotspot.active === false ? '' : 'bad'))) +
       sItem(['purple', 'layers'], 'tc 规则数', 'qdisc + class（热点接口 + IFB）', val(num(rs.tc_rules))) +
       sItem(['orange', 'shield'], 'iptables 规则', 'mangle 表里 HNC 的 MARK 规则', val(num(rs.ipt_rules))) +
       sItem(['blue', 'heart'], '看门狗 watchdog', '规则巡检 / 进程保活 / 定时开关热点' + (rs.watchdog_pid ? ' · pid ' + rs.watchdog_pid : '') + (num(rs.watchdog_hb_age) > 120 ? ' · 心跳 ' + num(rs.watchdog_hb_age) + ' 秒未更新' : ''),
@@ -567,11 +586,21 @@ function renderSettings(anim1) {
     sBtn(['cyan', 'flask'], '应用识别学习与准确率自测', '利用本机日常联网自动学习新应用特征、查看识别准确率，已整合至「分析」页', 'go-dpi-studio', '前往')]);
   var cs = S.clsact;
   var gm = c.clsact_bpf_mode || 'auto', og = c.offload_guard || S.offload.guard || null;
-  var ogS = gm === 'off' ? '已关闭：不做任何处理' : !og ? '等待第一次检测（约 1 分钟）' : og.fallback_active ? '兜底生效中：已让系统加速退回常规转发' + (og.since ? '（' + ago(og.since) + '起）' : '') : (OG_T[og.offload_state] || og.offload_state || '—');
+  var ogS = gm === 'off'
+    ? '已关闭：不做任何处理'
+    : (S.hotspot.active === false && (!og || og.offload_state === 'NOHOTSPOT' || og.offload_state === 'UNKNOWN'))
+      ? '热点未开启 · 待机无需检测'
+      : !og
+        ? (gm === 'auto' && !setHasActiveControlPolicy(c) ? '自动按需待命：无活跃限速时保持硬件满速' : '等待首次检测（热点开启后自动执行）')
+        : og.fallback_active
+          ? '兜底生效中：已让系统加速退回常规转发' + (og.since ? '（' + ago(og.since) + '起）' : '')
+          : (gm === 'auto' && !setHasActiveControlPolicy(c) && og.offload_state !== 'NOMAP' && og.offload_state !== 'NOHOTSPOT')
+            ? '自动按需待命：无活跃限速时保持硬件满速，设限速即刻接管'
+            : (OG_T[og.offload_state] || og.offload_state || '—');
   groups.push(['硬件加速兜底', sItem(['orange', 'rocket'], '防止系统热点加速绕过限速', '自动：检测到加速正在转发流量时，才让它退回常规路径，保证限速 / 封锁 / 统计都生效', '') +
     '<div class="row" style="padding-top:0">' + seg('guard-mode', [['auto', '自动'], ['on', '始终'], ['off', '关闭']], gm, 'small') + '</div>' +
-    '<div class="row">' + gi(og && og.fallback_active ? 'green' : 'gray', 'layers') + '<span class="tx"><div class="t">当前状态</div><div class="s" id="guard-s">' + esc(ogS) + (og && og.detail && gm !== 'off' ? '<br>' + esc(og.detail) : '') + (og && og.last_check ? ' · ' + ago(og.last_check) + '检测' : '') + '</div></span></div>' +
-    (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? [['clsact', '队列挂点'], ['bpf_filter', '分流程序'], ['map', '状态表'], ['watchdog', '守护巡检']].map(function (it) { return it[1] + (cs[it[0]] ? ':正常' : ':异常'); }).join(' · ') : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
+    '<div class="row">' + gi(og && og.fallback_active ? 'green' : 'gray', 'layers') + '<span class="tx"><div class="t">当前状态</div><div class="s" id="guard-s">' + esc(ogS) + (og && og.detail && gm !== 'off' && S.hotspot.active !== false ? '<br>' + esc(og.detail) : '') + (og && og.last_check && S.hotspot.active !== false ? ' · ' + ago(og.last_check) + '检测' : '') + '</div></span></div>' +
+    (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? (S.hotspot.active === false ? '热点未开启 · 待机省电未挂载' : [['clsact', '队列挂点'], ['bpf_filter', '分流程序'], ['map', '状态表'], ['watchdog', '守护巡检']].map(function (it) { return it[1] + (cs[it[0]] ? ':正常' : ':异常'); }).join(' · ')) : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && S.hotspot.active !== false && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
   if (S.open.look === undefined) S.open.look = true;
   var curStyleKey = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : (S.style === 'cyber' ? 'cyber' : 'default');
   var curStyleName = { liquid: '液态玻璃 · 光学折射', frosted: '经典毛玻璃', cyber: '赛博机甲', default: '极简精密' }[curStyleKey] || '液态玻璃';
@@ -604,7 +633,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-rc.6', HNC_UI_VC = '6009306', HNC_UI_DATE = '2026-11-24';
+  var HNC_UI_VER = 'v6.1.0-rc.7', HNC_UI_VC = '6009307', HNC_UI_DATE = '2026-11-25';
   var bVer = cleanVer(l.backend_version, HNC_UI_VER);
   var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -659,7 +688,7 @@ function renderSettings(anim1) {
       gMap['全局带宽整形'] || ''),
     scard('scard-guard', ['orange', 'rocket'], '硬件加速兜底',
       esc(ogS),
-      '<span class="badge ' + (gm === 'off' ? 'b-gray' : 'b-ok') + '">' + ({ auto: '自动兜底', on: '始终开启', off: '已关闭' }[gm] || '自动') + '</span>',
+      '<span class="badge ' + (gm === 'off' || S.hotspot.active === false ? 'b-gray' : 'b-ok') + '">' + ({ auto: S.hotspot.active === false ? '待机就绪' : '自动兜底', on: S.hotspot.active === false ? '待机就绪' : '始终开启', off: '已关闭' }[gm] || '自动') + '</span>',
       gMap['硬件加速兜底'] || ''),
     scard('scard-devm', ['green', 'merge'], '随机 MAC 继承、隔离与合并',
       '高置信无感继承（新设备不默认限速）· 客户端隔离 · VPN 排除（' + fx.length + ' 个）',
@@ -668,29 +697,34 @@ function renderSettings(anim1) {
   ];
   var dpvNorm = typeof dpvNormalize === 'function' ? dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled) : null;
   var dpvIsUnavail = !!(dpvNorm && dpvNorm.sampled_ok && dpvNorm.is_unavailable);
-  var dpvIsBypass = !!(dpvNorm && dpvNorm.sampled_ok && dpvNorm.is_bypass);
-  var dpvHasErr = !!(dpvNorm && dpvNorm.sampled_ok && !dpvIsUnavail && (dpvIsBypass || (dpvNorm.summary && dpvNorm.summary.bypass_or_missing_count > 0)));
+  var dpvHsOff = !!(dpvNorm && dpvNorm.sampled_ok && !dpvIsUnavail && !dpvNorm.hotspot_active);
+  var dpvIsBypass = !!(dpvNorm && dpvNorm.sampled_ok && !dpvHsOff && dpvNorm.is_bypass);
+  var dpvHasErr = !!(dpvNorm && dpvNorm.sampled_ok && !dpvIsUnavail && !dpvHsOff && (dpvIsBypass || (dpvNorm.summary && dpvNorm.summary.bypass_or_missing_count > 0)));
   if (dpvHasErr && S.open['scard-dpv'] === undefined) S.open['scard-dpv'] = true;
   var dpvSubTxt = !dpvNorm || !dpvNorm.sampled_ok
     ? '检验给设备设的限速是否真正管用，有无被手机系统加速绕过'
     : dpvIsUnavail
       ? ('暂不可读 · ' + esc(dpvNorm.unavailable_reason || '未能读取内核队列状态'))
-      : dpvIsBypass
-        ? '检测到高通 tether_limit_map / 系统硬件加速绕过截流 · 点开一键兜底'
-        : dpvHasErr
-          ? ('发现 ' + dpvInt(dpvNorm.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
-          : ('已设限速 ' + dpvInt(dpvNorm.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dpvNorm.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
+      : dpvHsOff
+        ? '热点未开启 · 待机省电无需检验（开启热点后自动就绪）'
+        : dpvIsBypass
+          ? '检测到高通 tether_limit_map / 系统硬件加速绕过截流 · 点开一键兜底'
+          : dpvHasErr
+            ? ('发现 ' + dpvInt(dpvNorm.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
+            : ('已设限速 ' + dpvInt(dpvNorm.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dpvNorm.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
   var dpvBadgeHtml = !dpvNorm || !dpvNorm.sampled_ok
     ? '<span class="badge b-gray" id="dpv-scard-badge">点开检验</span>'
     : dpvIsUnavail
       ? '<span class="badge b-gray" id="dpv-scard-badge">暂不可读</span>'
-      : dpvIsBypass
-        ? '<span class="badge b-warn" id="dpv-scard-badge">硬件截流</span>'
-        : dpvHasErr
-          ? '<span class="badge b-warn" id="dpv-scard-badge">待修复</span>'
-          : (dpvNorm.summary.hitting_count > 0
-              ? '<span class="badge b-ok" id="dpv-scard-badge">真实生效</span>'
-              : '<span class="badge b-acc" id="dpv-scard-badge">待命就绪</span>');
+      : dpvHsOff
+        ? '<span class="badge b-gray" id="dpv-scard-badge">热点待机</span>'
+        : dpvIsBypass
+          ? '<span class="badge b-warn" id="dpv-scard-badge">硬件截流</span>'
+          : dpvHasErr
+            ? '<span class="badge b-warn" id="dpv-scard-badge">待修复</span>'
+            : (dpvNorm.summary.hitting_count > 0
+                ? '<span class="badge b-ok" id="dpv-scard-badge">真实生效</span>'
+                : '<span class="badge b-acc" id="dpv-scard-badge">待命就绪</span>');
   var diagCards = [
     (function () {
       var qh = S.quickHealth && !S.quickHealth._err ? S.quickHealth : null;
@@ -711,7 +745,7 @@ function renderSettings(anim1) {
       gMap['诊断'] || ''),
     scard('scard-stat', ['blue', 'heart'], '运行状态与统计健康',
       esc(flowSt.text) + (tempSt.hasTemp ? ' · ' + esc(tempSt.label) : '') + ' · tc ' + num(rs.tc_rules) + ' / ipt ' + num(rs.ipt_rules),
-      '<span class="badge ' + (rs.hotspotd === 'up' ? 'b-ok' : 'b-gray') + '">' + (rs.hotspotd === 'up' ? '运行正常' : '状态') + '</span>',
+      '<span class="badge ' + (rs.hotspotd === 'up' ? 'b-ok' : (S.hotspot.active === false && S.runStatus && num(rs.watchdog) > 0 ? 'b-ok' : 'b-gray')) + '">' + (rs.hotspotd === 'up' ? '运行正常' : (S.hotspot.active === false ? '待机省电' : '状态')) + '</span>',
       (gMap['运行状态'] || '') + (gMap['运行健康'] || '')),
     scard('scard-maint', ['orange', 'tool'], '维护、配置保险箱与功耗',
       '配置保险箱（快照导出/恢复）· 刷新模式（' + ({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode]) + '）· 诊断导出',
@@ -770,7 +804,10 @@ function paintPower() {
 function dnsSumTxt() {
   var r = S.dns; if (!r) return '默认关闭 · 由本机代答热点设备的域名解析，应用识别更早、网站封锁更彻底';
   if (!r.enabled) return '未开启 · 由本机代答热点设备的域名解析，应用识别更早、网站封锁更彻底';
-  return r.active && r.healthy ? '运行中 · 今天已解析 ' + num((r.stats || {}).queries) + ' 次' : '已开启 · 暂未生效（已自动放行直连）';
+  if (r.active && r.healthy) return '运行中 · 今天已解析 ' + num((r.stats || {}).queries) + ' 次';
+  if (r.state === 'waiting_hotspot' || (r.state !== 'failopen' && !r.active && S.hotspot.active === false)) return '已开启 · 热点未开启（开启热点后自动接管）';
+  if (r.state === 'yield_tproxy' || r.yield_tproxy) return '已开启 · 检测到透明代理（TPROXY），已自动让位协同';
+  return '已开启 · 暂未生效（已自动放行直连）';
 }
 function dnsTakeoverFold() {
   return sFold('dnst', ['blue', 'shield'], 'DNS 解析接管', '<span id="dns-sum">' + esc(dnsSumTxt()) + '</span>', '<div id="dns-body"><div class="note">展开后加载</div></div>',
@@ -779,7 +816,16 @@ function dnsTakeoverFold() {
 function loadDNS() {
   return api.get('/api/dns', null, { timeout: 8000 }).then(function (r) { S.dns = r; }).catch(function (e) { S.dns = { ok: false, err: errText(e) }; }).then(paintDNS);
 }
-var DNS_ST = { selftest: '自检没通过', upstream_errors: '上游 DNS 连续出错', dnat_path: '转发规则没生效', no_upstream: '找不到可用的上游 DNS' };
+var DNS_ST = {
+  selftest: '自检没通过',
+  upstream_errors: '上游 DNS 连续出错',
+  dnat_path: '转发规则没生效',
+  no_upstream: '找不到可用的上游 DNS',
+  waiting_hotspot: '热点未开启 · 待机等待热点拉起',
+  yield_tproxy: '检测到透明代理（TPROXY），已自动让位防冲突',
+  starting: '正在启动自检中',
+  idle: '待命就绪'
+};
 function paintDNS() {
   var el = $('#dns-body'), r = S.dns; if (!el || !r) return;
   el.setAttribute('data-keep', '');
@@ -788,7 +834,20 @@ function paintDNS() {
   if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持 DNS 解析接管）</div>'; return; }
   var st = r.stats || {}, fo = r.failopen || {}, h = '';
   if (r.enabled) {
-    h += '<dl class="kv"><dt>状态</dt><dd style="color:' + (r.active && r.healthy ? 'var(--badge-ok)' : 'var(--orange)') + '">' + (r.active && r.healthy ? '运行中' : '未生效 · ' + esc(DNS_ST[fo.reason] || fo.reason || r.last_error || r.state || '检测中')) + '</dd>' +
+    var isFailopen = r.state === 'failopen';
+    var isWaiting = r.state === 'waiting_hotspot' || (!isFailopen && !r.active && S.hotspot.active === false);
+    var isYield = r.state === 'yield_tproxy' || !!r.yield_tproxy;
+    var stColor = (r.active && r.healthy) || isYield ? 'var(--badge-ok)' : (isWaiting ? 'var(--text-2)' : (isFailopen || r.last_error ? 'var(--orange)' : 'var(--text-2)'));
+    var stText = (r.active && r.healthy)
+      ? '运行中'
+      : isWaiting
+        ? DNS_ST.waiting_hotspot
+        : isYield
+          ? DNS_ST.yield_tproxy + (r.yield_reason ? '（' + esc(r.yield_reason) + '）' : '')
+          : isFailopen
+            ? '未生效 · ' + esc(DNS_ST[fo.reason] || fo.reason || r.last_error || '已自动放行直连')
+            : '未生效 · ' + esc(DNS_ST[r.state] || r.last_error || r.state || '检测中');
+    h += '<dl class="kv"><dt>状态</dt><dd style="color:' + stColor + '">' + stText + '</dd>' +
       '<dt>上游</dt><dd class="mono">' + esc(r.upstream || '自动') + (r.upstream_kind ? ' · ' + esc(r.upstream_kind) : '') + '</dd>' +
       '<dt>今天</dt><dd>' + num(st.queries) + ' 次 · 缓存 ' + num(st.cached) + ' · 拦截 ' + num(st.blocked) + '</dd>' +
       '<dt>耗时</dt><dd class="num">平均约 ' + num(st.p50_ms) + 'ms · 慢查询 ' + num(st.p95_ms) + 'ms</dd>' +
@@ -1157,12 +1216,12 @@ function setToggleCfg(kind, el) {
   if (kind.indexOf('fx-') === 0) { FX[kind.slice(3)] = on; saveFx(); fxRefresh(); return; }
   switch (kind) {
     case 'motion': S.motion = on; LS.set('hnc6.motion', on ? '1' : '0'); fxRefresh(); return;
-    case 'hs-auto': run(api.action('hotspot_save', { autostart: on ? 'true' : 'false' }).then(done()));
+    case 'hs-auto': run(api.action('hotspot_save', { autostart: on ? 'true' : 'false' }).then(done()).then(function () { if (S.page === 'settings') renderSettings(false); }));
       var w = el.closest('[data-foldkey]'); if (on && w && !w.classList.contains('open')) foldToggle(w, 'hs'); return;
     case 'amaster': run(api.action('alert_config_set', { section: 'master', enabled: String(on) }).then(done()).then(reloadAlertCfg)); return;
     case 'ud': run(api.action('alert_config_set', udParams(on)).then(done()).then(reloadAlertCfg)); return;
-    case 'aq': run(api.action('alert_config_set', { section: 'monthly_quota', enabled: String(on), limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct').value, 80))) }).then(done())); return;
-    case 'aa': run(api.action('alert_config_set', { section: 'anomaly_traffic', enabled: String(on), ratio: String(num($('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb').value, 50))) }).then(done())); return;
+    case 'aq': run(api.action('alert_config_set', { section: 'monthly_quota', enabled: String(on), limit_gb: String(num($('#aq-gb') && $('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct') && $('#aq-pct').value, 80))) }).then(done()).then(reloadAlertCfg)); return;
+    case 'aa': run(api.action('alert_config_set', { section: 'anomaly_traffic', enabled: String(on), ratio: String(num($('#aa-ratio') && $('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb') && $('#aa-mb').value, 50))) }).then(done()).then(reloadAlertCfg)); return;
     case 'autorate':
       run(api.action('autorate_set', {
         autorate_enabled: String(on),
@@ -1176,7 +1235,7 @@ function setToggleCfg(kind, el) {
       run(api.action('client_isolation_set', { enabled: String(on) }).then(done(on ? '热点客户端互访隔离已开启' : '热点客户端互访隔离已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
     case 'gs':
       if (on) { var gw = el.closest('[data-foldkey]'); if (gw && !gw.classList.contains('open')) foldToggle(gw, 'gs'); el.setAttribute('aria-checked', 'false'); toast('填好上限后点「应用」启用'); return; }
-      run(api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭'))); return;
+      run(api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
     case 'remote': run(api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); })).then(function () { if (S.page === 'settings') renderSettings(false); }); return;
     case 'appshared': run(api.action('app_limit_shared_ips_set', { enabled: String(on) }).then(function () { S.appLimitShared = on; toast(on ? '已包含共享 IP · 共用同一云服务器的其他应用也可能一并被限速' : '已恢复默认：跳过与其他应用共用的服务器 IP，避免误伤'); return loadAppLimits(); })); return;
     case 'certprobe': run(api.action('discover_cert_probe_set', { enabled: String(on) }).then(done())); return;
@@ -1221,7 +1280,7 @@ function hsSave() {
 function gsApply(btn) {
   var d = num($('#gs-down').value), u = num($('#gs-up').value);
   if (!(d > 0) && !(u > 0)) { toast('至少填一个方向的上限', 'err'); return; }
-  var p = { enabled: 'true' }; if (d > 0) p.rate_down = fmtRate(d); if (u > 0) p.rate_up = fmtRate(u);
+  var p = { enabled: 'true', autorate_enabled: 'false' }; if (d > 0) p.rate_down = fmtRate(d); if (u > 0) p.rate_up = fmtRate(u);
   busyWhile(btn, api.action('global_shaper_set', p)).then(function (r) { toast('全局带宽整形已启用' + (r.detail ? ' · ' + String(r.detail).slice(0, 60) : '')); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); });
 }
 function exportRulesJson() {
@@ -1383,9 +1442,9 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.6';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.7';
     var fallback = '<div class="cl-section" id="cl-history">' +
-      '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
+      '<div class="cl-title">' + uiSvg('check') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
         '<li><b>按需远程加载</b>：已移除主文件内嵌的 378 KB 历史更新日志，改为由服务端按需注入 <code>changelog.html</code>，单文件体积直降 35%+。</li>' +
         '<li><b>iOS 27 光学液态玻璃</b>：新增状态驱动边缘导光、晶莹水滴开关拇指、分段滑块水银拉伸形变、顶栏滚动动态折射与深色黑曜石菲涅尔反射。</li>' +
@@ -2177,31 +2236,66 @@ function dpvRenderCardHtml(data, isBusy) {
   var low16Known = Boolean(d.netd_low16_known);
   var low16Protected = Boolean(d.netd_low16_protected);
 
+  var hsStandby = kpiReady && !d.hotspot_active;
+  var guardModeEff = off.mode || (typeof S === 'object' && S && S.cfg && S.cfg.clsact_bpf_mode) || 'auto';
+  var autoNoPolicyIdle = kpiReady && d.hotspot_active && guardModeEff === 'auto' && sum.controlled_devices === 0 && !setHasActiveControlPolicy() && !d.is_bypass;
+
   var hwnatLow = String(off.hwnat || '').toLowerCase();
   var hwnatSkipped = hwnatLow === 'skipped_qcom' || hwnatLow === 'skipped_not_mtk' || hwnatLow === 'n/a';
-  var offloadHealthy = kpiReady && !d.is_bypass && (off.tether_offload_disabled || off.slowpath_active || hwnatSkipped) &&
+  var offloadHealthy = kpiReady && !d.is_bypass && (hsStandby || autoNoPolicyIdle || off.tether_offload_disabled || off.slowpath_active || hwnatSkipped) &&
     off.hwnat !== 'detected_no_knob' && off.hwnat !== 'failed';
   var hwnatLabel = !kpiReady
     ? '系统加速接管状态：' + (d.is_unavailable ? '不可读' : '待检验')
-    : (d.is_bypass
-        ? '系统硬件加速正在绕过限速'
-        : (off.hwnat === 'none' || off.hwnat === 'disabled' || off.hwnat === 'suppressed'
-            ? '系统硬件加速已受控（不绕过限速）'
-            : hwnatSkipped
-              ? '当前平台无需额外内核卸载干预'
-              : '硬件加速状态：' + off.hwnat));
+    : hsStandby
+      ? '热点未开启 · 待机零唤醒'
+      : (d.is_bypass
+          ? '系统硬件加速正在绕过限速'
+          : autoNoPolicyIdle
+            ? '自动按需待命（无策略满速直通）'
+            : (off.hwnat === 'none' || off.hwnat === 'disabled' || off.hwnat === 'suppressed'
+                ? '系统硬件加速已受控（不绕过限速）'
+                : hwnatSkipped
+                  ? '当前平台无需额外内核卸载干预'
+                  : '硬件加速状态：' + off.hwnat));
 
-  var fwmarkBadgeCls = !kpiReady || !low16Known ? '' : (low16Protected ? 'dpv-chip-ok' : 'dpv-chip-warn');
+  var fwmarkBadgeCls = !kpiReady || !low16Known ? '' : (low16Protected ? 'dpv-chip-ok' : (hsStandby ? '' : 'dpv-chip-warn'));
   var fwmarkBadgeText = !kpiReady || !low16Known
-    ? '系统网络标记隔离（' + (d.is_unavailable ? '不可读' : '待检验') + '）'
+    ? '系统网络标记隔离（' + (d.is_unavailable ? '不可读' : (hsStandby ? '热点待机' : '待检验')) + '）'
     : (low16Protected
         ? '与系统路由互不冲突 (' + dpvEsc(d.fwmark_mask) + ')'
         : '存在标记冲突 (' + dpvEsc(markLayout || '未保护') + ')');
 
-  var hasAnomaly = kpiReady && (d.is_bypass || sum.bypass_or_missing_count > 0);
+  var hasAnomaly = kpiReady && !hsStandby && (d.is_bypass || sum.bypass_or_missing_count > 0);
   var repairBtnCls = hasAnomaly ? 'dpv-btn dpv-btn-warn press' : 'dpv-btn dpv-btn-secondary press';
   var runLabel = isBusy && !DPV_STATE.resyncing && !DPV_STATE.guardSwitching ? '正在检验限速通道…' : '立即重新检验';
   var repairLabel = isBusy && DPV_STATE.resyncing ? '正在修复限速规则…' : '一键修复限速';
+
+  var clsactCls = !kpiReady || hsStandby ? 'is-muted' : (bpf.clsact_attached || autoNoPolicyIdle ? 'is-ok' : 'is-warn');
+  var clsactTxt = !kpiReady
+    ? (d.is_unavailable ? '不可读' : '待采样')
+    : hsStandby
+      ? '热点未开启 · 待机省电'
+      : bpf.clsact_attached
+        ? '正常 · ' + dpvInt(bpf.mac_mark_entries) + ' 项'
+        : (autoNoPolicyIdle ? '自动按需待命' : '未挂载');
+
+  var ifbCls = !kpiReady || hsStandby ? 'is-muted' : (bpf.ifb_redirect_prio2 || autoNoPolicyIdle ? 'is-ok' : 'is-warn');
+  var ifbTxt = !kpiReady
+    ? (d.is_unavailable ? '不可读' : '待采样')
+    : hsStandby
+      ? '热点未开启 · 待机省电'
+      : bpf.ifb_redirect_prio2
+        ? '就绪 · ' + dpvInt(bpf.ip_mark_entries) + ' 项'
+        : (autoNoPolicyIdle ? '自动按需待命' : dpvInt(bpf.ip_mark_entries) + ' 项');
+
+  var tlCls = !kpiReady || hsStandby ? 'is-muted' : (bpf.tether_limit_zeroed || autoNoPolicyIdle ? 'is-ok' : 'is-warn');
+  var tlTxt = !kpiReady
+    ? (d.is_unavailable ? '不可读' : '待采样')
+    : hsStandby
+      ? '热点未开启 · 待机无需压制'
+      : bpf.tether_limit_zeroed
+        ? '已压制防绕过'
+        : (autoNoPolicyIdle ? '自动按需待命' : '未清零（存在截流风险）');
 
   return (
     '<div class="dpv-inline-wrap" id="dpv-settings-card" aria-label="限速真实生效检验">' +
@@ -2249,25 +2343,25 @@ function dpvRenderCardHtml(data, isBusy) {
     '      <div class="dpv-tag-strip">' +
     '        <span class="dpv-chip ' + (kpiReady ? 'dpv-chip-primary' : '') + '">' + dpvEsc(d.engine_label) + '</span>' +
     '        <span class="dpv-chip ' + fwmarkBadgeCls + '">' + DPV_ICONS.fwmark + '<span>' + fwmarkBadgeText + '</span></span>' +
-    '        <span class="dpv-chip ' + (!kpiReady ? '' : (offloadHealthy ? 'dpv-chip-ok' : 'dpv-chip-warn')) + '">' + dpvEsc(hwnatLabel) + '</span>' +
+    '        <span class="dpv-chip ' + (!kpiReady || hsStandby ? '' : (offloadHealthy ? 'dpv-chip-ok' : 'dpv-chip-warn')) + '">' + dpvEsc(hwnatLabel) + '</span>' +
     '      </div>' +
     '      <div class="dpv-bpf-grid" role="list" aria-label="底层模块状态">' +
     '        <div class="dpv-bpf-item" role="listitem">' +
     '          <span class="dpv-bpf-name">下行标记挂点 (clsact)</span>' +
-    '          <span class="dpv-bpf-val ' + (!kpiReady ? 'is-muted' : (bpf.clsact_attached ? 'is-ok' : 'is-warn')) + '">' +
-    (!kpiReady ? (d.is_unavailable ? '不可读' : '待采样') : (bpf.clsact_attached ? '正常 · ' + dpvInt(bpf.mac_mark_entries) + ' 项' : '未挂载')) +
+    '          <span class="dpv-bpf-val ' + clsactCls + '">' +
+    clsactTxt +
     '          </span>' +
     '        </div>' +
     '        <div class="dpv-bpf-item" role="listitem">' +
     '          <span class="dpv-bpf-name">上行重定向队列 (ifb0)</span>' +
-    '          <span class="dpv-bpf-val ' + (!kpiReady ? 'is-muted' : (bpf.ifb_redirect_prio2 ? 'is-ok' : 'is-warn')) + '">' +
-    (!kpiReady ? (d.is_unavailable ? '不可读' : '待采样') : (bpf.ifb_redirect_prio2 ? '就绪 · ' + dpvInt(bpf.ip_mark_entries) + ' 项' : dpvInt(bpf.ip_mark_entries) + ' 项')) +
+    '          <span class="dpv-bpf-val ' + ifbCls + '">' +
+    ifbTxt +
     '          </span>' +
     '        </div>' +
     '        <div class="dpv-bpf-item" role="listitem">' +
     '          <span class="dpv-bpf-name">防加速绕过开关 (tether_limit)</span>' +
-    '          <span class="dpv-bpf-val ' + (!kpiReady ? 'is-muted' : (bpf.tether_limit_zeroed ? 'is-ok' : 'is-warn')) + '">' +
-    (!kpiReady ? (d.is_unavailable ? '不可读' : '待采样') : (bpf.tether_limit_zeroed ? '已压制防绕过' : '未清零（存在截流风险）')) +
+    '          <span class="dpv-bpf-val ' + tlCls + '">' +
+    tlTxt +
     '          </span>' +
     '        </div>' +
     '      </div>' +
@@ -2514,6 +2608,7 @@ function dpvRenderSelfCheckSummaryHtml(data) {
   var d = dpvNormalize(data || DPV_STATE.lastData, DPV_STATE.leakEnabled);
   var sum = d.summary;
   var sampled = Boolean(d.sampled_ok);
+  var gm = (d.offload_guard && d.offload_guard.mode) || (typeof S === 'object' && S && S.cfg && S.cfg.clsact_bpf_mode) || 'auto';
   var maskTxt = !d.netd_low16_known
     ? '标记隔离待核验'
     : (d.netd_low16_protected
@@ -2523,16 +2618,20 @@ function dpvRenderSelfCheckSummaryHtml(data) {
     ? '限速真实生效检验：待检验'
     : (d.is_unavailable
         ? '限速真实生效检验：暂不可读'
-        : (d.is_bypass
-            ? '限速真实生效检验：检测到系统加速绕过截流'
-            : ('限速真实生效检验：' + dpvInt(sum.hitting_count) + ' / ' + dpvInt(sum.controlled_devices) + ' 台设备正在生效')));
+        : !d.hotspot_active
+          ? '限速真实生效检验：热点待机省电中'
+          : (d.is_bypass
+              ? '限速真实生效检验：检测到系统加速绕过截流'
+              : ('限速真实生效检验：' + dpvInt(sum.hitting_count) + ' / ' + dpvInt(sum.controlled_devices) + ' 台设备正在生效')));
   var subTxt = !sampled
     ? '点击右侧「核验明细」查看每台设备的限速过包情况'
     : (d.is_unavailable
         ? dpvEsc(d.unavailable_reason || '未能读取内核队列状态')
-        : (d.is_bypass
-            ? '高通 tether_limit_map / 热点硬件加速截流中 · 点击右侧查看双路径指引与一键兜底'
-            : (maskTxt + ' · ' + (d.bpf_maps.clsact_attached ? '底层分流已就绪' : '底层分流待挂载'))));
+        : !d.hotspot_active
+          ? '热点未开启 · 待机无需挂载内核限速队列'
+          : (d.is_bypass
+              ? '高通 tether_limit_map / 热点硬件加速截流中 · 点击右侧查看双路径指引与一键兜底'
+              : (maskTxt + ' · ' + (d.bpf_maps.clsact_attached ? '底层分流已就绪' : (gm === 'auto' && sum.controlled_devices === 0 && !setHasActiveControlPolicy() ? '自动按需待命' : '底层分流待挂载')))));
   return (
     '<div class="dpv-selfcheck-bar" data-dpv-selfcheck="1">' +
     '  <div class="dpv-selfcheck-left">' +
@@ -2562,19 +2661,21 @@ function dpvRefreshRenderedViews() {
       var dn = dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled);
       var subEl = scardEl.querySelector('.scard-h small');
       var bdgEl = document.getElementById('dpv-scard-badge');
-      var hasErr2 = !dn.is_unavailable && (dn.is_bypass || dn.summary.bypass_or_missing_count > 0);
+      var hasErr2 = !dn.is_unavailable && dn.hotspot_active && (dn.is_bypass || dn.summary.bypass_or_missing_count > 0);
       if (subEl) {
         subEl.textContent = dn.is_unavailable
           ? ('暂不可读 · ' + (dn.unavailable_reason || '未能读取内核队列状态'))
-          : dn.is_bypass
-            ? '检测到高通 tether_limit_map / 系统硬件加速绕过截流 · 点开一键兜底'
-            : hasErr2
-              ? ('发现 ' + dpvInt(dn.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
-              : ('已设限速 ' + dpvInt(dn.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dn.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
+          : !dn.hotspot_active
+            ? '热点未开启 · 待机省电无需检验（开启热点后自动就绪）'
+            : dn.is_bypass
+              ? '检测到高通 tether_limit_map / 系统硬件加速绕过截流 · 点开一键兜底'
+              : hasErr2
+                ? ('发现 ' + dpvInt(dn.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
+                : ('已设限速 ' + dpvInt(dn.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dn.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
       }
       if (bdgEl) {
-        bdgEl.className = 'badge ' + (dn.is_unavailable ? 'b-gray' : (hasErr2 ? 'b-warn' : (dn.summary.hitting_count > 0 ? 'b-ok' : 'b-acc')));
-        bdgEl.textContent = dn.is_unavailable ? '暂不可读' : (dn.is_bypass ? '硬件截流' : (hasErr2 ? '待修复' : (dn.summary.hitting_count > 0 ? '真实生效' : '待命就绪')));
+        bdgEl.className = 'badge ' + (dn.is_unavailable || !dn.hotspot_active ? 'b-gray' : (hasErr2 ? 'b-warn' : (dn.summary.hitting_count > 0 ? 'b-ok' : 'b-acc')));
+        bdgEl.textContent = dn.is_unavailable ? '暂不可读' : (!dn.hotspot_active ? '热点待机' : (dn.is_bypass ? '硬件截流' : (hasErr2 ? '待修复' : (dn.summary.hitting_count > 0 ? '真实生效' : '待命就绪'))));
       }
     }
   }
@@ -2616,7 +2717,6 @@ function dpvRefreshRenderedViews() {
 function dpvOpenSheet() {
   var title = '每台设备限速生效明细';
   var contentHtml = dpvRenderSheetContentHtml(DPV_STATE.lastData, DPV_STATE.loading);
-  DPV_STATE.sheetOpen = true;
   if (typeof sheet === 'function' && typeof document !== 'undefined' && document.getElementById('sheet')) {
     sheet(
       '<h3>' + dpvEsc(title) + '</h3>' +
@@ -2625,8 +2725,10 @@ function dpvOpenSheet() {
       '<button type="button" class="btn sec wide press" data-close style="margin-top:12px">关闭</button>',
       { tall: true, kind: 'dpv', onClose: function () { DPV_STATE.sheetOpen = false; } }
     );
+    DPV_STATE.sheetOpen = true;
     return;
   }
+  DPV_STATE.sheetOpen = true;
 }
 
 function dpvSetOffloadGuardAlways() {
@@ -2816,7 +2918,7 @@ function setVaultExport(btn) {
     if (!res || typeof res !== 'object' || res.ok === false || !res.files) {
       throw new Error((res && res.error) || '备份导出载荷无效');
     }
-    var verTag = String(res.module_version || 'v6.1.0-rc.6').replace(/[^a-zA-Z0-9._-]+/g, '-');
+    var verTag = String(res.module_version || 'v6.1.0-rc.7').replace(/[^a-zA-Z0-9._-]+/g, '-');
     var tsTag = Math.floor(Date.now() / 1000);
     var fn = 'hnc-backup-' + verTag + '-' + tsTag + '.json';
     var raw = JSON.stringify(res, null, 2);

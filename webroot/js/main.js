@@ -30,7 +30,12 @@ function markTabBtn(name) {
 function go(name) {
   if (ORDER.indexOf(name) < 0) return;
   markTabBtn(name);
-  if (name === S.page) { $('#p-' + name).scrollTo({ top: 0, behavior: motionOn() ? 'smooth' : 'auto' }); syncTab(name); return; }
+  if (name === S.page) {
+    $('#p-' + name).scrollTo({ top: 0, behavior: motionOn() ? 'smooth' : 'auto' });
+    syncTab(name);
+    if (name === 'apps' && typeof paintAppsDot === 'function') paintAppsDot();
+    return;
+  }
   var from = $('#p-' + S.page), to = $('#p-' + name);
   S.page = name; closeDD(); syncTab(name); LS.set('hnc6.page', name); navSync();
   to.classList.add('on'); from.classList.remove('on');
@@ -39,6 +44,7 @@ function go(name) {
   } else {
     placeSegs(to);
   }
+  if (name === 'apps' && typeof paintAppsDot === 'function') paintAppsDot();
   // v5.35 升级: 严禁对 .page 本身施加位移或半透明组隔离(彻底保护子层 .glass backdrop-filter 采样根与零水平漂移)
   if (typeof runPageEnterFx === 'function') runPageEnterFx(to);
   clearTimeout(enterT);
@@ -236,9 +242,9 @@ function ensureAboveTabbar(el) {
   setTimeout(function () {
     var pg = $('#p-' + S.page); if (!pg) return;
     var er = el.getBoundingClientRect(), br = bar.getBoundingClientRect();
-    if (er.top < 96) return; // 卡片顶部已在视口上半区时绝不向下拽走标题!
     var overlap = er.bottom - (br.top - 16);
-    if (overlap > 0) pg.scrollBy({ top: Math.min(overlap, 160), behavior: motionOn() ? 'smooth' : 'auto' });
+    var maxUp = Math.min(320, Math.max(0, er.top - 76));
+    if (overlap > 0 && maxUp > 0) pg.scrollBy({ top: Math.min(overlap, maxUp), behavior: motionOn() ? 'smooth' : 'auto' });
   }, waitMs);
 }
 
@@ -270,7 +276,7 @@ function clearSignalClientHistory() {
 window.clearSignalClientHistory = clearSignalClientHistory;
 
 function _sigCtxKeyOf(sig) {
-  var simFlag = Boolean((sig && sig.sim) || (S.live && S.live.sim_active) || (S.sim && S.sim.enabled));
+  var simFlag = Boolean((sig && sig.sim) || (S.live && (S.live.sim || S.live.sim_active)) || (S.sim && S.sim.enabled));
   var modeStr = sig && sig.mode ? String(sig.mode) : '';
   var slotStr = sig && sig.slot ? String(sig.slot) : '';
   return (simFlag ? 'sim' : 'real') + '|' + modeStr + '|' + slotStr;
@@ -360,6 +366,10 @@ function ingestSignalSample(sig) {
     if (curPt) map[curPt.ts] = curPt;
   }
   var keys = Object.keys(map).map(function (k) { return Number(k); }).filter(function (n) { return isFinite(n) && n > 0; }).sort(function (a, b) { return a - b; });
+  if (keys.length) {
+    var maxTs = keys[keys.length - 1];
+    keys = keys.filter(function (n) { return n >= maxTs - 600; });
+  }
   if (keys.length > 60) keys = keys.slice(keys.length - 60);
   _sigClientHist = keys.map(function (k) { return map[k]; });
   return _sigClientHist;
@@ -456,6 +466,7 @@ function _buildSigWaveCardHtml(sig, isWifi, curDbm, curSinr) {
     vDbm = isWifi ? (p.wifi_rssi_dbm || p.rsrp_dbm) : (p.rsrp_dbm || p.wifi_rssi_dbm);
     if (_sigValidDbm(vDbm)) {
       validPts.push({
+        ts: num(p.ts, 0),
         dbm: vDbm,
         sinr: p.sinr_db,
         has_sinr: Boolean(p.has_sinr),
@@ -467,6 +478,7 @@ function _buildSigWaveCardHtml(sig, isWifi, curDbm, curSinr) {
   }
   if (!validPts.length && _sigValidDbm(curDbm)) {
     validPts.push({
+      ts: Math.round(num(sig.updated_at, 0)),
       dbm: Math.round(Number(curDbm)),
       sinr: Math.round(num(curSinr, 0)),
       has_sinr: hasSinrNow,
@@ -487,9 +499,10 @@ function _buildSigWaveCardHtml(sig, isWifi, curDbm, curSinr) {
       sumDbm += dVal;
       if (i > 0) {
         var prev = validPts[i - 1], cur = validPts[i];
+        var withinGap = cur.ts > 0 && prev.ts > 0 && (cur.ts - prev.ts) <= 300;
         var pciChg = cur.has_pci && prev.has_pci && cur.pci !== prev.pci;
         var bandChg = cur.band && prev.band && cur.band !== prev.band;
-        if (pciChg || bandChg) detHandover++;
+        if (withinGap && (pciChg || bandChg)) detHandover++;
       }
     }
     avgDbm = Math.round(sumDbm / validPts.length);
@@ -557,7 +570,8 @@ function _buildSigWaveCardHtml(sig, isWifi, curDbm, curSinr) {
     rsrpCoords.push([cx, cy]);
     if (i > 0) {
       var pv = validPts[i - 1], cv = validPts[i];
-      if ((cv.has_pci && pv.has_pci && cv.pci !== pv.pci) || (cv.band && pv.band && cv.band !== pv.band)) {
+      var pvWithin = cv.ts > 0 && pv.ts > 0 && (cv.ts - pv.ts) <= 300;
+      if (pvWithin && ((cv.has_pci && pv.has_pci && cv.pci !== pv.pci) || (cv.band && pv.band && cv.band !== pv.band))) {
         handoverSvg += '<line x1="' + cx + '" y1="' + topY + '" x2="' + cx + '" y2="' + botY + '" stroke="#FF9500" stroke-width="1.25" stroke-dasharray="3 2" stroke-opacity="0.88"/>';
       }
     }
@@ -886,7 +900,6 @@ function _renderSignalSheetInPlace(sig, forceImmediate) {
     return;
   }
   if (_sigDeferT) { clearTimeout(_sigDeferT); _sigDeferT = 0; }
-  var prevShTop = sh.scrollTop || 0;
   var prevSbTop = sb.scrollTop || 0;
   var foldEl = $('#sig-tech-fold');
   if (foldEl) _sigTechFoldOpen = !!(foldEl.open || foldEl.classList.contains('open'));
@@ -898,7 +911,6 @@ function _renderSignalSheetInPlace(sig, forceImmediate) {
     nf.classList.toggle('open', !!_sigTechFoldOpen);
   }
   bindSignalSheetBtn();
-  sh.scrollTop = prevShTop;
   sb.scrollTop = prevSbTop;
 }
 var renderSignalSheet = _renderSignalSheetInPlace;
@@ -964,10 +976,18 @@ function setStyle(v, x, y) {
   if (S.page === 'settings' && typeof renderSettings === 'function') setTimeout(function () { renderSettings(false); }, 70);
   setTimeout(function () { placeSegs(); layoutLens(); syncTab(S.page, true); }, 60);
 }
+function syncLookCardSub() {
+  var subEl = $('#p-settings [data-foldkey="scard-look"] > .scard-h .tx small');
+  if (!subEl) return;
+  var sk = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : (S.style === 'cyber' ? 'cyber' : 'default');
+  var sn = { liquid: '液态玻璃 · 光学折射', frosted: '经典毛玻璃', cyber: '赛博机甲', default: '极简精密' }[sk] || '液态玻璃';
+  subEl.textContent = sn + ' · ' + ({ auto: '跟随系统', light: '浅色', dark: '深色' }[S.theme] || '浅色') + ' · 自定义壁纸与视觉引擎';
+}
 function setTheme(t, x, y) {
   S.theme = t; LS.set('hnc6.theme', t);
-  revealApply(applyTheme, x, y);
+  revealApply(function () { applyTheme(); syncLookCardSub(); }, x, y);
   $$('[data-theme-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-theme-pick') === t); });
+  syncLookCardSub();
 }
 // 圆形扩散切换(主题 / 界面风格共用; Cyber 采用极速战术快切)
 function revealApply(fn, x, y) {
@@ -1033,7 +1053,7 @@ document.addEventListener('click', function (e) {
     var sgd = ctxDev(q).d; if (sgd && S.busy[sgd.mac] && k !== 'delay-pre' && k !== 'q-act') { toast('这台设备还有操作在进行', 'warn'); return; }
     $$('button', sg).forEach(function (b) { b.classList.toggle('on', b === q); });
     sg.classList.remove('jelly'); placeSegs(sg.parentNode);
-    if (k === 'apps-sub') { S.appsSub = v; var bx = $('#apps-sub'); bx.innerHTML = appsSub(); placeSegs(bx); stagger(bx); if (v === 'rules') { if (typeof paintUnknown === 'function') paintUnknown(); if (S.open.fpl) loadFP(); if (S.open.rpack) loadRulepack(); } }
+    if (k === 'apps-sub') { S.appsSub = v; if (typeof paintAppsDot === 'function') paintAppsDot(); var bx = $('#apps-sub'); bx.innerHTML = appsSub(); placeSegs(bx); stagger(bx); if (v === 'rules') { if (typeof paintUnknown === 'function') paintUnknown(); if (S.open.fpl) loadFP(); if (S.open.rpack) loadRulepack(); } }
     else if (k === 'aseg') { S.aseg = v; var ab = $('#aseg-body'); ab.innerHTML = v === 'stats' ? statsBody() : dpiBody(); placeSegs(ab); stagger(ab); afterAseg(); }
     else if (k === 'range') { S.statsRange = v; refreshStats(); }
     else if (k === 'hist') { S.dpiDays = +v; paintDpiHist(); paintUnkTraffic(); Promise.all([loadDpiHist(S.dpiDays), loadAppUsage(S.dpiDays)]).then(paintDpiHist); loadDpiUnk(S.dpiDays).then(paintUnkTraffic); }
@@ -1155,8 +1175,8 @@ document.addEventListener('click', function (e) {
   if ((q = t.closest('[data-mm-open]'))) { var mmp = q.getAttribute('data-mm-open').split('|'); mergeSheet(mmp[0], mmp[1]); return; }
   if ((q = t.closest('[data-mm-unmerge]'))) { var mmu = q.getAttribute('data-mm-unmerge').split('|'); unmergeSheet(mmu[0], mmu[1] || ''); return; }
   // 模拟环境 / 应用限时 / 类别封锁
-  if ((q = t.closest('[data-sim-preset]'))) { var spk = q.getAttribute('data-sim-preset'); api.action('sim_preset', { preset: spk }).then(simAfter('已载入预设「' + ((SIM_P[spk] || [spk])[0]) + '」· 模拟环境已开启')).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
-  if ((q = t.closest('[data-sim-del]'))) { var sdm = q.getAttribute('data-sim-del'), sdn = q.getAttribute('data-name'); api.action('sim_device_del', { mac: sdm }).then(simAfter('已删除 ' + sdn)).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
+  if ((q = t.closest('[data-sim-preset]'))) { var spk = q.getAttribute('data-sim-preset'); api.action('sim_preset', { preset: spk }).then(simAfter('已载入预设「' + ((SIM_P[spk] || [spk])[0]) + '」· 模拟环境已开启')).then(function () { if (typeof pruneSimPicked === 'function') pruneSimPicked(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
+  if ((q = t.closest('[data-sim-del]'))) { var sdm = q.getAttribute('data-sim-del'), sdn = q.getAttribute('data-name'); if (S.picked && sdm) delete S.picked[String(sdm).toLowerCase()]; api.action('sim_device_del', { mac: sdm }).then(simAfter('已删除 ' + sdn)).then(function () { if (typeof pruneSimPicked === 'function') pruneSimPicked(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
   if ((q = t.closest('[data-atl]'))) { var atd = ctxDev(q).d; if (atd) appTimeSheet(atd, q.getAttribute('data-atl'), q.getAttribute('data-name') || q.getAttribute('data-atl')); return; }
   if ((q = t.closest('[data-cblk]'))) {
     var cbd = ctxDev(q).d; if (!cbd) return;
@@ -1257,12 +1277,12 @@ document.addEventListener('click', function (e) {
       if (!d || !box) break;
       (function () {
         var lv = [readNum(box, 'down'), readNum(box, 'up')];
-        var macL = d.mac, nmL = d.name, prevLimOn = d.limitOn, prevDn = d.down, prevUp = d.up;
+        var macL = d.mac, nmL = d.name, simL = d.sim, prevLimOn = d.limitOn, prevDn = d.down, prevUp = d.up;
         var newDn = mbsToMbps(lv[0]), newUp = mbsToMbps(lv[1]);
         devAct(macL, function () { return doLimit(d, newDn, newUp); }, lv[0] || lv[1] ? '已应用限速到 ' + nmL : '已清除 ' + nmL + ' 的限速', a, {
           undo: function () {
             return devAct(macL, function () {
-              var curD = devBy(macL) || { mac: macL };
+              var curD = devBy(macL) || { mac: macL, sim: simL };
               return prevLimOn && (prevDn > 0 || prevUp > 0) ? doLimit(curD, prevDn, prevUp) : api.action('rule_clear', { mac: macL });
             }, prevLimOn && (prevDn > 0 || prevUp > 0) ? '已恢复 ' + nmL + ' 原有限速' : '已撤销 ' + nmL + ' 的限速');
           }
@@ -1272,10 +1292,10 @@ document.addEventListener('click', function (e) {
     case 'clear-limit':
       if (!d || !box) break;
       (function () {
-        var macCL = d.mac, nmCL = d.name, hadLim = d.limitOn && (d.down > 0 || d.up > 0), prevDnCL = d.down, prevUpCL = d.up;
+        var macCL = d.mac, nmCL = d.name, simCL = d.sim, hadLim = d.limitOn && (d.down > 0 || d.up > 0), prevDnCL = d.down, prevUpCL = d.up;
         devAct(macCL, function () { return api.action('rule_clear', { mac: macCL }); }, '已清除 ' + nmCL + ' 的限速', a, hadLim ? {
           undo: function () {
-            return devAct(macCL, function () { return doLimit(devBy(macCL) || { mac: macCL }, prevDnCL, prevUpCL); }, '已恢复 ' + nmCL + ' 的限速');
+            return devAct(macCL, function () { return doLimit(devBy(macCL) || { mac: macCL, sim: simCL }, prevDnCL, prevUpCL); }, '已恢复 ' + nmCL + ' 的限速');
           }
         } : null);
       })();
@@ -1284,11 +1304,11 @@ document.addEventListener('click', function (e) {
       if (!d || !box) break;
       (function () {
         var dv = [readNum(box, 'delay'), readNum(box, 'jitter'), readNum(box, 'loss')];
-        var macD = d.mac, nmD = d.name, prevHasD = d.hasDelay, prevDly = d.delay, prevJit = d.jitter, prevLoss = d.loss;
+        var macD = d.mac, nmD = d.name, simD = d.sim, prevHasD = d.hasDelay, prevDly = d.delay, prevJit = d.jitter, prevLoss = d.loss;
         devAct(macD, function () { return doDelay(d, dv[0], dv[1], dv[2]); }, dv[0] || dv[1] || dv[2] ? '已对 ' + nmD + ' 注入延迟' : '已清除延迟', a, {
           undo: function () {
             return devAct(macD, function () {
-              var curD = devBy(macD) || { mac: macD };
+              var curD = devBy(macD) || { mac: macD, sim: simD };
               return prevHasD ? doDelay(curD, prevDly, prevJit, prevLoss) : api.action('delay_clear', { mac: macD });
             }, prevHasD ? '已恢复 ' + nmD + ' 原有延迟参数' : '已撤销 ' + nmD + ' 的延迟注入');
           }
@@ -1298,10 +1318,10 @@ document.addEventListener('click', function (e) {
     case 'clear-delay':
       if (!d || !box) break;
       (function () {
-        var macCD = d.mac, nmCD = d.name, hadDly = d.hasDelay, prevDlyCD = d.delay, prevJitCD = d.jitter, prevLossCD = d.loss;
+        var macCD = d.mac, nmCD = d.name, simCD = d.sim, hadDly = d.hasDelay, prevDlyCD = d.delay, prevJitCD = d.jitter, prevLossCD = d.loss;
         devAct(macCD, function () { return api.action('delay_clear', { mac: macCD }); }, '已清除 ' + nmCD + ' 的延迟', a, hadDly ? {
           undo: function () {
-            return devAct(macCD, function () { return doDelay(devBy(macCD) || { mac: macCD }, prevDlyCD, prevJitCD, prevLossCD); }, '已恢复 ' + nmCD + ' 的延迟参数');
+            return devAct(macCD, function () { return doDelay(devBy(macCD) || { mac: macCD, sim: simCD }, prevDlyCD, prevJitCD, prevLossCD); }, '已恢复 ' + nmCD + ' 的延迟参数');
           }
         } : null);
       })();
@@ -1368,7 +1388,7 @@ document.addEventListener('click', function (e) {
     case 'pu-save': puSave(); break;
     case 'sim-off': simSet(false).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'sim-add': simAddSheet(); break;
-    case 'sim-clear': confirmSheet('清空模拟设备？', '删除全部模拟设备（不影响真实设备）。', '清空').then(function (ok) { if (ok) api.action('sim_clear', {}).then(simAfter('已清空模拟设备')).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
+    case 'sim-clear': confirmSheet('清空模拟设备？', '删除全部模拟设备（不影响真实设备）。', '清空').then(function (ok) { if (ok) { if (typeof pruneSimPicked === 'function') pruneSimPicked(true); api.action('sim_clear', {}).then(simAfter('已清空模拟设备')).then(function () { if (typeof pruneSimPicked === 'function') pruneSimPicked(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); } }); break;
     case 'offload-dismiss': SS.set('hnc.hw-dismiss', S.offload.detail); renderOffloadBanner(); break;
     case 'bridge-retry': boot(true); break;
     case 'bridge-start': toast('正在拉起 HNC 服务…'); execRaw('nohup sh ' + MOD_DIR + '/service.sh >/dev/null 2>&1 &', 5000).then(function () { setTimeout(function () { boot(true); }, 6000); }); break;
@@ -1389,8 +1409,10 @@ document.addEventListener('click', function (e) {
     case 'hs-stop': confirmSheet('关闭热点？', '已连接的设备会立即断开。', '关闭').then(function (ok) { if (ok) api.action('hotspot_stop').then(function () { toast('已发出关热点命令'); setTimeout(globalRefresh, 2500); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'iface-save': var ifv = $('#iface-pref').value.trim(); if (ifv && ifv !== 'auto' && !/^[A-Za-z0-9_.-]{1,15}$/.test(ifv)) { toast('接口名不合法', 'err'); break; }
       busyWhile(a, api.action('hotspot_iface_set', { iface: ifv === 'auto' ? '' : ifv })).then(function () { toast('热点接口偏好：' + (ifv || 'auto')); return loadConfig(); }).then(function () { renderSettings(false); globalRefresh(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'ud-save': busyWhile(a, api.action('alert_config_set', udParams(true))).then(function () { toast('新设备提醒已保存'); return reloadAlertCfg(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'aq-save': busyWhile(a, api.action('alert_config_set', { section: 'monthly_quota', enabled: 'true', limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(clamp(Math.round(num($('#aq-pct').value, 80)), 1, 99)) })).then(function () { toast('月度配额已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'ud-save':
+      var udSw = $('[data-set="ud"]'), udOn = udSw ? udSw.getAttribute('aria-checked') === 'true' : !(S.alertCfg && S.alertCfg.unknown_device && S.alertCfg.unknown_device.enabled === false);
+      busyWhile(a, api.action('alert_config_set', udParams(udOn))).then(function () { toast('新设备提醒已保存'); return reloadAlertCfg(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'aq-save': busyWhile(a, api.action('alert_config_set', { section: 'monthly_quota', enabled: 'true', limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(clamp(Math.round(num($('#aq-pct').value, 80)), 1, 99)) })).then(function () { toast('月度配额已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; paintUsage(); renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'ar-save':
       var dMin = num($('#ar-dmin').value, 24), dMax = num($('#ar-dmax').value, 320), uMin = num($('#ar-umin').value, 8), uMax = num($('#ar-umax').value, 80), rDel = num($('#ar-delta').value, 25);
       if (dMax < dMin || uMax < uMin) { toast('峰值带宽不能低于保底带宽', 'err'); break; }
@@ -1414,6 +1436,7 @@ document.addEventListener('click', function (e) {
         S.puEditSlot = 0; S.pu = {};
         var st0 = $('#pu-set'); if (st0) st0._filled = false;
         toast('已保存卡' + sSlot + (pVal > 0 ? ' 套餐 ' + pVal + ' GB' : '（不设套餐上限）'));
+        if (typeof loadUsage === 'function') loadUsage().then(function () { var rk = $('#pu-dev-rank'); if (rk && typeof hsMonthRankHtml === 'function') rk.innerHTML = hsMonthRankHtml(); });
         return refreshPU(true);
       }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'go-rules-hub':
@@ -1537,8 +1560,12 @@ function syncWpNumericVars() {
 function setWpBlur(rawVal) {
   var v = clamp(Math.round(num(rawVal, 0)), 0, 24);
   S.wpBlur = v;
-  LS.set('hnc6.wp_blur', String(v));
   syncWpNumericVars();
+  clearTimeout(S._wpBlurT);
+  S._wpBlurT = setTimeout(function () { LS.set('hnc6.wp_blur', String(v)); }, 180);
+  if (typeof window !== 'undefined' && typeof window.__hncUpdateWpBlurTex === 'function') {
+    window.__hncUpdateWpBlurTex(v);
+  }
   var bv = $('#wp-blur-v');
   if (bv) bv.textContent = v + ' px';
   $$('#wp-blur [data-wp-blur]').forEach(function (b) {
@@ -1551,8 +1578,9 @@ function setWpBlur(rawVal) {
 function setWpDim(rawVal) {
   var v = clamp(Math.round(num(rawVal, 22)), 0, 75);
   S.wpDim = v;
-  LS.set('hnc6.wp_dim', String(v));
   syncWpNumericVars();
+  clearTimeout(S._wpDimT);
+  S._wpDimT = setTimeout(function () { LS.set('hnc6.wp_dim', String(v)); }, 180);
   var dv = $('#wp-dim-v');
   if (dv) dv.textContent = v + '%';
   $$('#wp-dim [data-wp-dim]').forEach(function (b) {
@@ -1569,12 +1597,13 @@ document.addEventListener('keydown', function (e) {
   var btn = ba && $('[data-act="' + ba + '"]', box); if (btn) { e.preventDefault(); btn.click(); }
 });
 /* 柱子点选气泡 */
-document.addEventListener('pointerdown', function (e) {
+document.addEventListener('click', function (e) {
   var bars = $('#bars'); if (!bars) return;
-  var col = e.target.closest('.bcol'), old = $('.btip', bars);
+  var t0 = evEl(e); if (!t0 || !t0.closest) return;
+  var col = t0.closest('.bcol'), old = $('.btip', bars);
   if (old) old.remove(); bars.classList.remove('picking'); $$('.bcol.pk', bars).forEach(function (c) { c.classList.remove('pk'); });
   // 柱子只有几像素宽, 手指很难点中 —— 点在图表区域内任意位置都选离得最近的柱子
-  if (!col && bars.contains(e.target)) {
+  if (!col && bars.contains(t0)) {
     var best = null, bd = 1e9;
     $$('.bcol', bars).forEach(function (c) { var r = c.getBoundingClientRect(), dx = Math.abs(r.left + r.width / 2 - e.clientX); if (dx < bd) { bd = dx; best = c; } });
     if (best && bd < 40) col = best;
@@ -1648,11 +1677,12 @@ function stopSSE() {
 }
 function pollDelay() {
   if (Date.now() < burstUntil) return 250;
-  var l = S.live || {}, m = S.refreshMode, on = num(l.online);
+  var l = S.live || {}, m = S.refreshMode, simAct = Boolean(l.sim || l.sim_active || (typeof simOn === 'function' && simOn()));
+  var on = num(l.online) || (simAct ? S.devices.filter(function (x) { return x.online; }).length : 0);
   if (!S.connected) return 4000;
-  if (S.sse && (S.page !== 'devices' || l.hotspot_active === false || !on)) return m === 'powersave' ? 30000 : 15000;
+  if (S.sse && (S.page !== 'devices' || (l.hotspot_active === false && !simAct) || !on)) return m === 'powersave' ? 30000 : 15000;
   if (S.page !== 'devices') return m === 'powersave' ? 15000 : 5000;
-  if (l.hotspot_active === false) return m === 'powersave' ? 15000 : 3000;
+  if (l.hotspot_active === false && !simAct) return m === 'powersave' ? 15000 : 3000;
   if (!on) return { realtime: 1500, balanced: 2000, powersave: 5000 }[m];
   return m === 'powersave' ? 3000 : 1000;
 }
@@ -1665,8 +1695,9 @@ function pollOnce() {
   pollBusy = true; tickN++;
   var pollGen = api.writeGen || 0;
   var prevSig = S.sig, prevShape = shapeOf(), wasOk = S.connected;
+  var hasAnyOn = num((S.live || {}).online) > 0 || S.devices.some(function (x) { return x.online; });
   // 设备页有在线设备时每轮都要刷新单台速率 → 直接用合并请求; 否则只拿汇总, 签名变了再补拉列表
-  var wantDev = !S.devLoaded || (S.page === 'devices' && num((S.live || {}).online) > 0 && (S.refreshMode === 'realtime' || tickN % 2 === 0));
+  var wantDev = !S.devLoaded || (S.page === 'devices' && hasAnyOn && (S.refreshMode === 'realtime' || tickN % 2 === 0));
   var syncedDevs = false;
   var syncOrLive = (S.vectorSyncState === 'supported' && typeof loadVectorSync === 'function')
     ? loadVectorSync(null, pollGen).then(function (sr) { syncedDevs = !!(sr && sr.got && sr.got.devices); return sr ? sr.live : (S.live || {}); }, function (err) {
@@ -1698,7 +1729,7 @@ function pollOnce() {
     if (!api.writeInFlight && typeof v6OnPollTick === 'function') v6OnPollTick(tickN);
     if (S.page === 'stats' && S.aseg === 'dpi' && tickN % 3 === 0) loadDpi(tickN % 12 === 0);
     // 设备页 —— 每 5 轮刷新各设备连接数; 展开着的在线设备卡每 3 轮刷新连接摘要(弹层开着时由弹层自己 2s 刷)
-    if (S.page === 'devices' && num((S.live || {}).online) > 0) {
+    if (S.page === 'devices' && (num((S.live || {}).online) > 0 || S.devices.some(function (x) { return x.online; }))) {
       if (tickN % 5 === 1) loadConnCounts();
       if (tickN % 3 === 0 && !S.connMac) S.devices.forEach(function (x) { if (x.online && (wide() ? S.sel === x.mac : S.open[x.mac])) refreshConnMini(x.mac); });
     }
@@ -1828,6 +1859,7 @@ var saved = LS.get('hnc6.page', 'devices');
 if (ORDER.indexOf(saved) >= 0) S.page = saved;
 $$('.page').forEach(function (p) { p.classList.toggle('on', p.getAttribute('data-page') === S.page); });
 RENDER[S.page](true);
+if (typeof navSync === 'function') navSync();
 layoutLens(); syncTab(S.page, true);
 // v5.36.0: #lens 作为 #tabbar 内部水滴光晕胶囊不再嵌套挂载二次 Hyalite，根治底栏白蛋与白色折射摩尔纹
 if (window.Hyalite && lens) { try { Hyalite.detach(lens); } catch (_) {} }
@@ -2093,7 +2125,7 @@ function showRollbackBanner(rb) {
   var _origApplyLive = window.applyLive;
   if (typeof _origApplyLive === 'function') {
     window.applyLive = function(l) {
-      var curSim = Boolean((l && l.sim_active) || (S.sim && S.sim.enabled));
+      var curSim = Boolean((l && (l.sim || l.sim_active)) || (S.sim && S.sim.enabled));
       if (_lastLiveSim !== null && _lastLiveSim !== curSim && typeof clearSignalClientHistory === 'function') {
         clearSignalClientHistory();
       }
@@ -2401,17 +2433,32 @@ function showRollbackBanner(rb) {
   S.hideSharedUnk = LS.get('hnc6.hide_shared_unk', '0') === '1';
 
   var PRESET_TONES = {
-    aurora: { tone: 'dark', top: 'dark', bot: 'dark' },
-    slate:  { tone: 'dark', top: 'dark', bot: 'dark' },
-    dusk:   { tone: 'dark', top: 'dark', bot: 'dark' },
-    prism:  { tone: 'light', top: 'light', bot: 'light' }
+    aurora: { tone: 'dark', top: 'dark', bot: 'dark', vivid: false },
+    slate:  { tone: 'dark', top: 'dark', bot: 'dark', vivid: false },
+    dusk:   { tone: 'dark', top: 'dark', bot: 'dark', vivid: true },
+    prism:  { tone: 'light', top: 'light', bot: 'light', vivid: false }
   };
 
   function escCssUrl(u) {
     return String(u == null ? '' : u).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, '');
   }
   function isBlockedWpUri(u) {
-    return /^\s*data:image\/svg\+xml/i.test(String(u == null ? '' : u));
+    var s = String(u == null ? '' : u);
+    return /^\s*(https?:\/\/|data:image\/svg\+xml)/i.test(s);
+  }
+  function extractUrlInner(cssUri) {
+    var m = /^url\(\s*["']?([\s\S]*?)["']?\s*\)$/.exec(String(cssUri || '').trim());
+    return m ? m[1] : '';
+  }
+
+  // 清理历史遗留违反 CSP (img-src 'self' data: blob:) 必白板的外链 http(s):// 壁纸配置
+  if (S.wpCustom && isBlockedWpUri(S.wpCustom)) {
+    S.wpCustom = '';
+    LS.del('hnc6.wp_custom');
+    if (S.wpId === 'custom') {
+      S.wpId = 'none';
+      LS.set('hnc6.wp_id', 'none');
+    }
   }
 
   if (typeof window !== 'undefined' && Array.isArray(window.__HNC_USER_WALLPAPERS)) {
@@ -2419,7 +2466,7 @@ function showRollbackBanner(rb) {
       if (!uw || !uw.id || !uw.src) return;
       var idStr = String(uw.id);
       var srcStr = String(uw.src).trim();
-      if (!srcStr || isBlockedWpUri(srcStr)) return;
+      if (!srcStr || /^\s*data:image\/svg\+xml/i.test(srcStr)) return;
       var safeCssUrl = escCssUrl(srcStr);
       WP_PRESETS[idStr] = {
         label: String(uw.label || idStr),
@@ -2443,104 +2490,416 @@ function showRollbackBanner(rb) {
     var topT = (tones && tones.top) || 'dark';
     var midT = (tones && tones.tone) || 'light';
     var botT = (tones && tones.bot) || 'dark';
+    var vivid = !!(tones && tones.vivid);
     r.setAttribute('data-wp-top', topT);
     r.setAttribute('data-wp-tone', midT);
     r.setAttribute('data-wp-bot', botT);
-    if (persist) try { LS.set('hnc6.wp_tones', topT + ',' + midT + ',' + botT); } catch (_) {}
+    if (vivid) r.setAttribute('data-wp-vivid', '1');
+    else r.removeAttribute('data-wp-vivid');
+    if (persist) {
+      try {
+        LS.set('hnc6.wp_tones', topT + ',' + midT + ',' + botT);
+        LS.set('hnc6.wp_vivid', vivid ? '1' : '0');
+      } catch (_) {}
+    }
   }
 
-  function detectWallpaperTone(rawSrc) {
-    if (S.wpId !== 'custom' && PRESET_TONES[S.wpId] && !rawSrc) {
-      setWpToneAttrs(PRESET_TONES[S.wpId], true);
+  function sampleImageTonesAndVivid(im) {
+    var W = 24, H = 36, cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    var ctx = cv.getContext('2d');
+    ctx.drawImage(im, 0, 0, W, H);
+    var d = ctx.getImageData(0, 0, W, H).data;
+    var sumMid = 0, nMid = 0, sumTop = 0, nTop = 0, sumBot = 0, nBot = 0;
+    var sumSat = 0, vividCnt = 0, totPx = W * H;
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        var idx = (y * W + x) * 4;
+        var r8 = d[idx], g8 = d[idx + 1], b8 = d[idx + 2];
+        var lum = 0.2126 * r8 + 0.7152 * g8 + 0.0722 * b8;
+        var mxC = Math.max(r8, g8, b8), mnC = Math.min(r8, g8, b8);
+        var sat = mxC > 12 ? (mxC - mnC) / mxC : 0;
+        sumSat += sat;
+        if (sat > 0.48 && mxC > 60 && lum > 25 && lum < 238) vividCnt++;
+        if (y < 9) { sumTop += lum; nTop++; }
+        else if (y < 27) { sumMid += lum; nMid++; }
+        else { sumBot += lum; nBot++; }
+      }
+    }
+    var avgSat = totPx ? (sumSat / totPx) : 0;
+    var vividRatio = totPx ? (vividCnt / totPx) : 0;
+    return {
+      top: (nTop ? sumTop / nTop : 110) < 118 ? 'dark' : 'light',
+      tone: (nMid ? sumMid / nMid : 128) < 108 ? 'dark' : 'light',
+      bot: (nBot ? sumBot / nBot : 110) < 108 ? 'dark' : 'light',
+      vivid: avgSat >= 0.36 || vividRatio >= 0.28
+    };
+  }
+
+  /* 4x4 物理像素探针：检测当前 Android WebView 2D Canvas ctx.filter 是否真实生效 */
+  var _wpCtxFilterOk = null;
+  function canUseCanvasFilter() {
+    if (_wpCtxFilterOk !== null) return _wpCtxFilterOk;
+    try {
+      var c = document.createElement('canvas');
+      c.width = 4; c.height = 4;
+      var ctx = c.getContext('2d');
+      if (!ctx || typeof ctx.filter !== 'string') { _wpCtxFilterOk = false; return false; }
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, 4, 4);
+      ctx.filter = 'blur(1px)';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(2, 0, 2, 4);
+      var px = ctx.getImageData(1, 2, 1, 1).data;
+      _wpCtxFilterOk = px[0] > 10 && px[0] < 245;
+    } catch (_) {
+      _wpCtxFilterOk = false;
+    }
+    return _wpCtxFilterOk;
+  }
+
+  /* 纯 JS 3 遍整数盒式模糊（StackBlur 近似，行主序滑动窗口 + 零 GC 缓冲复用，320x180 耗时 < 2ms） */
+  var _wpBlurWork = { tmp: null, rAcc: null, gAcc: null, bAcc: null };
+  function boxBlur3PassRGBA(data, w, h, rad) {
+    rad = clamp(rad | 0, 1, 32);
+    var len = w * h * 4;
+    var src = new Uint8Array(data.buffer, data.byteOffset, len);
+    if (!_wpBlurWork.tmp || _wpBlurWork.tmp.length < len) _wpBlurWork.tmp = new Uint8Array(len);
+    if (!_wpBlurWork.rAcc || _wpBlurWork.rAcc.length < w) {
+      _wpBlurWork.rAcc = new Int32Array(w);
+      _wpBlurWork.gAcc = new Int32Array(w);
+      _wpBlurWork.bAcc = new Int32Array(w);
+    }
+    var tmp = _wpBlurWork.tmp, rAcc = _wpBlurWork.rAcc, gAcc = _wpBlurWork.gAcc, bAcc = _wpBlurWork.bAcc;
+    var diam = rad * 2 + 1, inv = Math.round(65536 / diam);
+    for (var pass = 0; pass < 3; pass++) {
+      for (var y = 0; y < h; y++) {
+        var p0 = y * w * 4;
+        var rS = src[p0] * (rad + 1), gS = src[p0 + 1] * (rad + 1), bS = src[p0 + 2] * (rad + 1);
+        for (var i = 1; i <= rad; i++) {
+          var pi = p0 + (i < w ? i : w - 1) * 4;
+          rS += src[pi]; gS += src[pi + 1]; bS += src[pi + 2];
+        }
+        var po = p0;
+        for (var x = 0; x < w; x++, po += 4) {
+          tmp[po] = (rS * inv + 32768) >> 16;
+          tmp[po + 1] = (gS * inv + 32768) >> 16;
+          tmp[po + 2] = (bS * inv + 32768) >> 16;
+          tmp[po + 3] = 255;
+          var addX = x + rad + 1; if (addX >= w) addX = w - 1;
+          var subX = x - rad; if (subX < 0) subX = 0;
+          var pAdd = p0 + addX * 4, pSub = p0 + subX * 4;
+          rS += src[pAdd] - src[pSub];
+          gS += src[pAdd + 1] - src[pSub + 1];
+          bS += src[pAdd + 2] - src[pSub + 2];
+        }
+      }
+      for (var x0 = 0, pT = 0; x0 < w; x0++, pT += 4) {
+        rAcc[x0] = tmp[pT] * (rad + 1);
+        gAcc[x0] = tmp[pT + 1] * (rad + 1);
+        bAcc[x0] = tmp[pT + 2] * (rad + 1);
+      }
+      for (var j = 1; j <= rad; j++) {
+        var rOff = (j < h ? j : h - 1) * w * 4;
+        for (var x1 = 0; x1 < w; x1++, rOff += 4) {
+          rAcc[x1] += tmp[rOff]; gAcc[x1] += tmp[rOff + 1]; bAcc[x1] += tmp[rOff + 2];
+        }
+      }
+      for (var y2 = 0; y2 < h; y2++) {
+        var outOff = y2 * w * 4;
+        var addY = y2 + rad + 1; if (addY >= h) addY = h - 1;
+        var subY = y2 - rad; if (subY < 0) subY = 0;
+        var addOff = addY * w * 4, subOff = subY * w * 4;
+        for (var x2 = 0; x2 < w; x2++, outOff += 4, addOff += 4, subOff += 4) {
+          src[outOff] = (rAcc[x2] * inv + 32768) >> 16;
+          src[outOff + 1] = (gAcc[x2] * inv + 32768) >> 16;
+          src[outOff + 2] = (bAcc[x2] * inv + 32768) >> 16;
+          src[outOff + 3] = 255;
+          rAcc[x2] += tmp[addOff] - tmp[subOff];
+          gAcc[x2] += tmp[addOff + 1] - tmp[subOff + 1];
+          bAcc[x2] += tmp[addOff + 2] - tmp[subOff + 2];
+        }
+      }
+    }
+  }
+
+  /* 60fps 零透明闪烁双缓冲壁纸管线：
+   * 1) 原图内存解码后缓存 320px 离屏缩略源图，按当前模糊档位实时生成预模糊纹理（彻底告别全屏 CSS transition:filter 重算）；
+   * 2) A/B 双层 .wp-img 待新纹理 onload/decode() 真正就绪后在单帧切换 opacity 并置 :root[data-wp-ready="1"] 隐藏 .mesh，零透明白板帧！ */
+  var _wpLayers = null, _wpActiveIdx = 0, _wpHasReadyLayer = false, _wpWasActive = null;
+  var _wpLoadSeq = 0, _wpSwapSeq = 0, _wpCurKey = '', _wpCurRawSrc = '', _wpSourceReady = false, _wpTainted = false;
+  var _wpThumbCv = null, _wpOutCv = null, _wpThumbBaseBytes = null, _wpBlurCache = {};
+
+  function styleWpLayer(el, taintedFallback, blurPx) {
+    if (!el) return;
+    if (!taintedFallback) {
+      el.style.setProperty('top', '0', 'important');
+      el.style.setProperty('right', '0', 'important');
+      el.style.setProperty('bottom', '0', 'important');
+      el.style.setProperty('left', '0', 'important');
+      el.style.setProperty('inset', '0', 'important');
+      el.style.setProperty('filter', 'none', 'important');
+      el.style.setProperty('transform', 'translateZ(0)', 'important');
+      el.style.setProperty('transition', 'none', 'important');
+    } else {
+      var b = clamp(Math.round(num(blurPx, 0)), 0, 24);
+      var ins = b > 0 ? '-28px' : '0';
+      el.style.setProperty('top', ins, 'important');
+      el.style.setProperty('right', ins, 'important');
+      el.style.setProperty('bottom', ins, 'important');
+      el.style.setProperty('left', ins, 'important');
+      el.style.setProperty('inset', ins, 'important');
+      el.style.setProperty('filter', b > 0 ? ('blur(' + b + 'px)') : 'none', 'important');
+      el.style.setProperty('transform', b > 0 ? 'scale(1.04) translateZ(0)' : 'translateZ(0)', 'important');
+      el.style.setProperty('transition', 'none', 'important');
+    }
+  }
+
+  function ensureWpLayers() {
+    if (_wpLayers && _wpLayers.length === 2 && _wpLayers[0].isConnected && _wpLayers[1].isConnected) return _wpLayers;
+    var host = document.getElementById('hnc-wallpaper');
+    if (!host) return null;
+    var scrim = host.querySelector('.wp-scrim');
+    if (scrim) scrim.style.zIndex = '3';
+    var imgs = Array.prototype.slice.call(host.querySelectorAll('.wp-img'));
+    while (imgs.length < 2) {
+      var extra = document.createElement('div');
+      extra.className = 'wp-img';
+      if (scrim) host.insertBefore(extra, scrim);
+      else host.appendChild(extra);
+      imgs.push(extra);
+    }
+    imgs[0].classList.add('wp-layer-a');
+    imgs[1].classList.add('wp-layer-b');
+    for (var i = 0; i < 2; i++) {
+      styleWpLayer(imgs[i], false, 0);
+      if (!_wpHasReadyLayer) {
+        imgs[i].style.opacity = '0';
+        imgs[i].style.zIndex = i === 0 ? '2' : '1';
+      }
+    }
+    _wpLayers = [imgs[0], imgs[1]];
+    return _wpLayers;
+  }
+
+  function decodeImgSrc(srcUrl) {
+    return new Promise(function (resolve, reject) {
+      if (!srcUrl) { reject(new Error('empty wallpaper src')); return; }
+      var im = new Image();
+      if (/^https?:\/\//i.test(srcUrl)) im.crossOrigin = 'anonymous';
+      var settled = false;
+      var finishOk = function () { if (!settled) { settled = true; resolve(im); } };
+      var finishErr = function () { if (!settled) { settled = true; reject(new Error('wallpaper decode failed')); } };
+      im.onload = function () {
+        if (typeof im.decode === 'function') {
+          im.decode().then(finishOk, finishOk);
+        } else {
+          finishOk();
+        }
+      };
+      im.onerror = finishErr;
+      im.src = srcUrl;
+    });
+  }
+
+  function buildBlurredTexUrl(blurPx) {
+    var b = clamp(Math.round(num(blurPx, 0)), 0, 24);
+    if (b <= 0 || !_wpThumbCv || _wpTainted) return _wpCurRawSrc;
+    if (_wpBlurCache[b]) return _wpBlurCache[b];
+    var tw = _wpThumbCv.width, th = _wpThumbCv.height;
+    if (!_wpOutCv) _wpOutCv = document.createElement('canvas');
+    if (_wpOutCv.width !== tw || _wpOutCv.height !== th) {
+      _wpOutCv.width = tw; _wpOutCv.height = th;
+    }
+    var octx = _wpOutCv.getContext('2d', { alpha: false });
+    var rScaled = Math.max(1, b * (tw / 380));
+    try {
+      if (canUseCanvasFilter()) {
+        var pad = Math.max(2, Math.ceil(rScaled * 1.35));
+        octx.filter = 'none';
+        octx.drawImage(_wpThumbCv, 0, 0, tw, th);
+        octx.filter = 'blur(' + rScaled.toFixed(2) + 'px)';
+        octx.drawImage(_wpThumbCv, -pad, -pad, tw + pad * 2, th + pad * 2);
+        octx.filter = 'none';
+      } else {
+        if (!_wpThumbBaseBytes) {
+          var rawD = _wpThumbCv.getContext('2d').getImageData(0, 0, tw, th).data;
+          _wpThumbBaseBytes = new Uint8ClampedArray(rawD);
+        }
+        var workImg = octx.createImageData(tw, th);
+        workImg.data.set(_wpThumbBaseBytes);
+        boxBlur3PassRGBA(workImg.data, tw, th, Math.max(1, Math.round(rScaled * 0.85)));
+        octx.putImageData(workImg, 0, 0);
+      }
+      var outUrl = _wpOutCv.toDataURL('image/jpeg', 0.86);
+      _wpBlurCache[b] = outUrl;
+      return outUrl;
+    } catch (_) {
+      _wpTainted = true;
+      return _wpCurRawSrc;
+    }
+  }
+
+  function commitTextureToScreen(texRawSrc, skipPreDecode, blurPx) {
+    var swapSeq = ++_wpSwapSeq;
+    var p = skipPreDecode ? Promise.resolve() : decodeImgSrc(texRawSrc).catch(function () {});
+    return p.then(function () {
+      if (swapSeq !== _wpSwapSeq) return;
+      requestAnimationFrame(function () {
+        if (swapSeq !== _wpSwapSeq) return;
+        var layers = ensureWpLayers();
+        var r = document.documentElement;
+        if (!layers) return;
+        var nextIdx = _wpHasReadyLayer ? (1 - _wpActiveIdx) : 0;
+        var curIdx = 1 - nextIdx;
+        var nextLayer = layers[nextIdx], curLayer = layers[curIdx];
+        var cssUri = 'url("' + escCssUrl(texRawSrc) + '")';
+        styleWpLayer(nextLayer, _wpTainted, blurPx);
+        nextLayer.style.backgroundImage = cssUri;
+        nextLayer.style.zIndex = '2';
+        nextLayer.style.opacity = '1';
+        if (curLayer && curLayer !== nextLayer) {
+          curLayer.style.zIndex = '1';
+          curLayer.style.opacity = '0';
+        }
+        _wpActiveIdx = nextIdx;
+        _wpHasReadyLayer = true;
+        r.setAttribute('data-has-wp', '1');
+        r.setAttribute('data-has-wallpaper', '1');
+        r.classList.add('has-wallpaper');
+        r.setAttribute('data-wp-text', S.wpTextMode === 'capsule' ? 'capsule' : 'adaptive');
+        r.setAttribute('data-wp-ready', '1');
+        r.style.removeProperty('--wp-image');
+        if (_wpWasActive !== true) {
+          _wpWasActive = true;
+          if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets();
+        }
+      });
+    });
+  }
+
+  window.__hncUpdateWpBlurTex = function (blurVal) {
+    if (!_wpSourceReady || !_wpCurRawSrc) return;
+    var b = clamp(Math.round(num(blurVal, 0)), 0, 24);
+    if (_wpTainted) {
+      var layers = ensureWpLayers();
+      if (layers && layers[_wpActiveIdx]) styleWpLayer(layers[_wpActiveIdx], true, b);
       return;
     }
-    if (S.wpId !== 'custom' && PRESET_TONES[S.wpId]) {
-      setWpToneAttrs(PRESET_TONES[S.wpId], true);
-    } else {
-      var cached = String(LS.get('hnc6.wp_tones', '') || '').split(',');
-      if (cached.length === 3) setWpToneAttrs({ top: cached[0], tone: cached[1], bot: cached[2] }, false);
-      else setWpToneAttrs({ top: 'dark', tone: 'light', bot: 'dark' }, false);
+    var texUrl = buildBlurredTexUrl(b);
+    if (_wpTainted) {
+      var layers2 = ensureWpLayers();
+      if (layers2 && layers2[_wpActiveIdx]) styleWpLayer(layers2[_wpActiveIdx], true, b);
+      return;
     }
-    if (!rawSrc) return;
-    var im = new Image();
-    im.crossOrigin = 'anonymous';
-    im.onload = function() {
-      try {
-        var W = 24, H = 36, cv = document.createElement('canvas');
-        cv.width = W; cv.height = H;
-        var ctx = cv.getContext('2d');
-        ctx.drawImage(im, 0, 0, W, H);
-        var d = ctx.getImageData(0, 0, W, H).data;
-        var sumMid = 0, nMid = 0, sumTop = 0, nTop = 0, sumBot = 0, nBot = 0;
-        for (var y = 0; y < H; y++) {
-          for (var x = 0; x < W; x++) {
-            var idx = (y * W + x) * 4;
-            var lum = 0.2126 * d[idx] + 0.7152 * d[idx + 1] + 0.0722 * d[idx + 2];
-            if (y < 9) { sumTop += lum; nTop++; }
-            else if (y < 27) { sumMid += lum; nMid++; }
-            else { sumBot += lum; nBot++; }
-          }
-        }
-        setWpToneAttrs({
-          top: (nTop ? sumTop / nTop : 110) < 118 ? 'dark' : 'light',
-          tone: (nMid ? sumMid / nMid : 128) < 108 ? 'dark' : 'light',
-          bot: (nBot ? sumBot / nBot : 110) < 108 ? 'dark' : 'light'
-        }, true);
-      } catch (_) {}
-    };
-    im.src = rawSrc;
-  }
+    commitTextureToScreen(texUrl, b <= 0, b);
+  };
 
-  /* 120fps 壁纸引擎（CSP 严格兼容 img-src 'self' data:）：将大图直接挂载于独立合成层 .wp-img 而非 :root 继承变量，点按步进/档位零重算图片与 SVG 滤镜 */
-  var _wpAppliedUri = '', _wpToneKey = '', _wpWasActive = null;
   window.applyWallpaper = function() {
     var r = document.documentElement;
-    var wpImg = document.querySelector('#hnc-wallpaper .wp-img');
-    var uri = '', rawSrc = '';
-    if (S.wpId === 'custom' && S.wpCustom && !isBlockedWpUri(S.wpCustom)) {
-      rawSrc = S.wpCustom;
-      uri = 'url("' + escCssUrl(S.wpCustom) + '")';
-    } else if (WP_PRESETS[S.wpId] && WP_PRESETS[S.wpId].uri) {
-      uri = WP_PRESETS[S.wpId].uri;
-      rawSrc = WP_PRESETS[S.wpId].rawSrc || '';
+    if (S.wpCustom && isBlockedWpUri(S.wpCustom)) {
+      S.wpCustom = '';
+      LS.del('hnc6.wp_custom');
+      if (S.wpId === 'custom') { S.wpId = 'none'; LS.set('hnc6.wp_id', 'none'); }
     }
-    var activeNow = !!uri;
-    if (activeNow) {
-      r.setAttribute('data-has-wp', '1');
-      r.setAttribute('data-has-wallpaper', '1');
-      r.classList.add('has-wallpaper');
-      r.setAttribute('data-wp-text', S.wpTextMode === 'capsule' ? 'capsule' : 'adaptive');
-      r.style.removeProperty('--wp-image');
-      if (wpImg && _wpAppliedUri !== uri) {
-        _wpAppliedUri = uri;
-        wpImg.style.backgroundImage = uri;
-      }
-      syncWpNumericVars();
-      var toneKey = S.wpId + '|' + (rawSrc ? rawSrc.length + ':' + rawSrc.slice(0, 48) : '');
-      if (_wpToneKey !== toneKey) {
-        _wpToneKey = toneKey;
-        detectWallpaperTone(rawSrc);
-      }
-    } else {
+    var rawSrc = '';
+    if (S.wpId === 'custom' && S.wpCustom) {
+      rawSrc = S.wpCustom;
+    } else if (WP_PRESETS[S.wpId] && WP_PRESETS[S.wpId].uri) {
+      rawSrc = WP_PRESETS[S.wpId].rawSrc || extractUrlInner(WP_PRESETS[S.wpId].uri);
+    }
+    var activeNow = !!rawSrc;
+    if (!activeNow) {
+      ++_wpLoadSeq; ++_wpSwapSeq;
+      _wpCurKey = ''; _wpCurRawSrc = ''; _wpSourceReady = false; _wpTainted = false;
+      _wpHasReadyLayer = false; _wpBlurCache = {}; _wpThumbBaseBytes = null;
+      r.removeAttribute('data-wp-ready');
       r.removeAttribute('data-has-wp');
       r.removeAttribute('data-has-wallpaper');
       r.removeAttribute('data-wp-blurred');
+      r.removeAttribute('data-wp-vivid');
       r.classList.remove('has-wallpaper');
       r.removeAttribute('data-wp-text');
       r.removeAttribute('data-wp-tone');
       r.removeAttribute('data-wp-top');
       r.removeAttribute('data-wp-bot');
       r.style.removeProperty('--wp-image');
-      if (wpImg && _wpAppliedUri !== '') {
-        _wpAppliedUri = '';
-        wpImg.style.backgroundImage = 'none';
+      var ls0 = ensureWpLayers();
+      if (ls0) {
+        for (var k = 0; k < ls0.length; k++) {
+          ls0[k].style.opacity = '0';
+          ls0[k].style.backgroundImage = 'none';
+        }
       }
-      _wpToneKey = '';
+      if (_wpWasActive !== false) {
+        _wpWasActive = false;
+        if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets();
+      }
+      return;
     }
-    if (_wpWasActive !== activeNow) {
-      _wpWasActive = activeNow;
-      if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets();
+
+    syncWpNumericVars();
+    if (_wpHasReadyLayer) {
+      r.setAttribute('data-wp-text', S.wpTextMode === 'capsule' ? 'capsule' : 'adaptive');
+    } else {
+      // 首张壁纸尚未解码就绪前绝不置 data-wp-ready="1"，由底层 .mesh 平稳托底杜绝全透明白板帧
+      r.removeAttribute('data-wp-ready');
     }
+
+    if (S.wpId !== 'custom' && PRESET_TONES[S.wpId] && !WP_PRESETS[S.wpId].rawSrc) {
+      setWpToneAttrs(PRESET_TONES[S.wpId], true);
+    } else {
+      var cached = String(LS.get('hnc6.wp_tones', '') || '').split(',');
+      var cachedVivid = LS.get('hnc6.wp_vivid', '0') === '1';
+      if (cached.length === 3) setWpToneAttrs({ top: cached[0], tone: cached[1], bot: cached[2], vivid: cachedVivid }, false);
+      else if (PRESET_TONES[S.wpId]) setWpToneAttrs(PRESET_TONES[S.wpId], false);
+    }
+
+    var wpKey = S.wpId + '|' + rawSrc.length + ':' + rawSrc.slice(0, 64);
+    if (_wpCurKey === wpKey && _wpSourceReady) {
+      window.__hncUpdateWpBlurTex(S.wpBlur);
+      return;
+    }
+
+    var seq = ++_wpLoadSeq;
+    decodeImgSrc(rawSrc).then(function (im) {
+      if (seq !== _wpLoadSeq) return;
+      _wpCurKey = wpKey;
+      _wpCurRawSrc = rawSrc;
+      _wpBlurCache = {};
+      _wpThumbBaseBytes = null;
+      _wpTainted = false;
+
+      var nw = im.naturalWidth || im.width || 800, nh = im.naturalHeight || im.height || 600;
+      var tw = 320, th = clamp(Math.round(tw * nh / Math.max(1, nw)), 120, 720);
+      if (!_wpThumbCv) _wpThumbCv = document.createElement('canvas');
+      _wpThumbCv.width = tw; _wpThumbCv.height = th;
+      var tctx = _wpThumbCv.getContext('2d', { alpha: false });
+      tctx.drawImage(im, 0, 0, tw, th);
+
+      try {
+        if (S.wpId === 'custom' || (WP_PRESETS[S.wpId] && WP_PRESETS[S.wpId].rawSrc)) {
+          setWpToneAttrs(sampleImageTonesAndVivid(im), true);
+        } else {
+          // 检验内置预设画布可读性（同源 SVG DataURI 正常可读）
+          tctx.getImageData(0, 0, 1, 1);
+        }
+      } catch (_) {
+        _wpTainted = true;
+      }
+
+      _wpSourceReady = true;
+      var curB = clamp(Math.round(num(S.wpBlur, 0)), 0, 24);
+      var firstTex = (!_wpTainted && curB > 0) ? buildBlurredTexUrl(curB) : rawSrc;
+      commitTextureToScreen(firstTex, firstTex === rawSrc, curB);
+    }).catch(function () {
+      if (seq !== _wpLoadSeq) return;
+      toast('壁纸图片解码失败，已恢复默认背景', 'warn');
+      S.wpId = 'none';
+      LS.set('hnc6.wp_id', 'none');
+      window.applyWallpaper();
+      syncWpUi();
+    });
   };
 
   window.wpSettingsHtml = function() {
@@ -2560,9 +2919,8 @@ function showRollbackBanner(rb) {
       '<div class="wp-presets">' + preBtns + '</div>' +
       '<div class="wp-actions">' +
         '<input type="file" id="wp-file" accept="image/*" hidden>' +
-        '<button type="button" class="btn sec press" data-act="wp-upload">本地选图</button>' +
-        '<span class="box"><input id="wp-url-inp" type="url" placeholder="粘贴图片 https:// 直链…" value="' + (S.wpId === 'custom' && /^https?:\/\//.test(S.wpCustom) ? esc(S.wpCustom) : '') + '" style="font-size:12.5px"></span>' +
-        '<button type="button" class="btn sec press" data-act="wp-url-apply">应用链接</button>' +
+        '<button type="button" class="btn sec press" data-act="wp-upload">导入本地图片</button>' +
+        '<span class="note" style="margin:0;flex:1">本机离线压缩存储 · 零外链请求</span>' +
       '</div>' +
       '<div class="wp-sliders" id="wp-sliders"' + (hasWp ? '' : ' hidden') + '>' +
         '<div class="wp-mode-row"><span class="note" style="margin:0">标题与分组排版（无白边膏药感）</span>' +
@@ -2625,6 +2983,51 @@ function showRollbackBanner(rb) {
     }
   });
 
+  function encodeWpAtTier(img, maxSide, quality) {
+    var w = img.naturalWidth || img.width || 800, h = img.naturalHeight || img.height || 600;
+    if (w > maxSide || h > maxSide) {
+      var scale = maxSide / Math.max(w, h);
+      w = Math.max(1, Math.round(w * scale));
+      h = Math.max(1, Math.round(h * scale));
+    }
+    var cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    var ctx = cv.getContext('2d', { alpha: false });
+    ctx.drawImage(img, 0, 0, w, h);
+    var dataUrl = '';
+    try { dataUrl = cv.toDataURL('image/webp', quality); } catch (_) {}
+    if (!dataUrl || dataUrl.indexOf('data:image/webp') !== 0) {
+      dataUrl = cv.toDataURL('image/jpeg', Math.min(0.86, quality + 0.02));
+    }
+    return dataUrl;
+  }
+
+  function persistCustomWpWithQuotaRetry(img) {
+    var tiers = [[1280, 0.80], [960, 0.74], [720, 0.68], [540, 0.60]];
+    var chosenUrl = '', savedTier = -1;
+    for (var i = 0; i < tiers.length; i++) {
+      var candidate = encodeWpAtTier(img, tiers[i][0], tiers[i][1]);
+      if (!chosenUrl) chosenUrl = candidate;
+      try {
+        localStorage.setItem('hnc6.wp_custom', candidate);
+        localStorage.setItem('hnc6.wp_id', 'custom');
+        LS.set('hnc6.wp_custom', candidate);
+        LS.set('hnc6.wp_id', 'custom');
+        chosenUrl = candidate;
+        savedTier = i;
+        break;
+      } catch (_) {
+        chosenUrl = candidate;
+      }
+    }
+    if (savedTier < 0) {
+      // 极端存储配额已满：写入内存 LS 保证当前会话正常显示
+      LS.set('hnc6.wp_custom', chosenUrl);
+      LS.set('hnc6.wp_id', 'custom');
+    }
+    return { dataUrl: chosenUrl, tier: savedTier };
+  }
+
   document.addEventListener('change', function(e) {
     var t = e.target;
     if (!t || t.id !== 'wp-file' || !t.files || !t.files[0]) return;
@@ -2636,28 +3039,15 @@ function showRollbackBanner(rb) {
     }
     var finishDecode = function(img, cleanupUrl) {
       try {
-        var maxSide = 1280, w = img.naturalWidth || img.width || 800, h = img.naturalHeight || img.height || 600;
-        if (w > maxSide || h > maxSide) {
-          var scale = maxSide / Math.max(w, h);
-          w = Math.max(1, Math.round(w * scale));
-          h = Math.max(1, Math.round(h * scale));
-        }
-        var cv = document.createElement('canvas');
-        cv.width = w; cv.height = h;
-        var ctx = cv.getContext('2d', { alpha: false });
-        ctx.drawImage(img, 0, 0, w, h);
-        var dataUrl = '';
-        try { dataUrl = cv.toDataURL('image/webp', 0.80); } catch (_) {}
-        if (!dataUrl || dataUrl.indexOf('data:image/webp') !== 0) {
-          dataUrl = cv.toDataURL('image/jpeg', 0.82);
-        }
-        S.wpCustom = dataUrl;
+        var res = persistCustomWpWithQuotaRetry(img);
+        S.wpCustom = res.dataUrl;
         S.wpId = 'custom';
-        _wpToneKey = '';
-        try { LS.set('hnc6.wp_custom', dataUrl); LS.set('hnc6.wp_id', 'custom'); } catch (_) {}
+        _wpCurKey = '';
         applyWallpaper();
         syncWpUi();
-        toast('已应用自定义本地壁纸（已开启 120fps 显存优化）');
+        if (res.tier === 0) toast('已应用自定义本地壁纸');
+        else if (res.tier > 0) toast('本地存储空间较紧，已自动优化分辨率并保存壁纸');
+        else toast('本地存储空间已满，壁纸仅本次会话生效', 'warn');
       } finally {
         if (cleanupUrl) try { URL.revokeObjectURL(cleanupUrl); } catch (_) {}
       }
@@ -2817,31 +3207,6 @@ function showRollbackBanner(rb) {
     if (wpUp) {
       var wf = $('#wp-file');
       if (wf) wf.click();
-      return;
-    }
-    var wpUrlBtn = t3.closest('[data-act="wp-url-apply"]');
-    if (wpUrlBtn) {
-      var uInp = $('#wp-url-inp');
-      var urlVal = uInp ? uInp.value.trim() : '';
-      if (!urlVal) {
-        S.wpId = 'none';
-        LS.set('hnc6.wp_id', 'none');
-        applyWallpaper();
-        syncWpUi();
-        toast('已清除壁纸链接');
-        return;
-      }
-      if (!/^(https:\/\/|data:image\/)/i.test(urlVal) || isBlockedWpUri(urlVal)) {
-        toast('请输入以 https:// 开头的位图图片直链（不支持 SVG）', 'warn');
-        return;
-      }
-      S.wpCustom = urlVal;
-      S.wpId = 'custom';
-      LS.set('hnc6.wp_custom', urlVal);
-      LS.set('hnc6.wp_id', 'custom');
-      applyWallpaper();
-      syncWpUi();
-      toast('已应用自定义网络壁纸');
       return;
     }
     var qp = t3.closest('[data-qpill]');

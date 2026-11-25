@@ -22,6 +22,8 @@
 # HNC_PROC_ROOT 只为测试覆盖(默认 /proc)。sourced 时不要覆盖已有值。
 HNC_PROC_ROOT="${HNC_PROC_ROOT:-/proc}"
 
+_HNC_PROC_CR="$(printf '\r')"
+
 # proc_cmdline <pid>: 打印 /proc/<pid>/cmdline 的参数(NUL 换成空格)。空/失败 = 死进程。
 proc_cmdline() {
     [ -n "$1" ] || return 1
@@ -43,7 +45,10 @@ pid_matches() {
     [ -n "$_hp_kw" ] || return 1
     [ -r "$HNC_PROC_ROOT/$_hp_pid/cmdline" ] || return 1
     if [ -r "$HNC_PROC_ROOT/$_hp_pid/comm" ]; then
-        _hp_comm="$(tr -d '\r\n' < "$HNC_PROC_ROOT/$_hp_pid/comm" 2>/dev/null)"
+        [ -n "${_HNC_PROC_CR:-}" ] || _HNC_PROC_CR="$(printf '\r')"
+        _hp_comm=""
+        IFS= read -r _hp_comm < "$HNC_PROC_ROOT/$_hp_pid/comm" 2>/dev/null || true
+        _hp_comm="${_hp_comm%"$_HNC_PROC_CR"}"
         case "$_hp_comm" in
             sh|bash|mksh|ash|dash|zsh|toybox|busybox|toolbox) return 1 ;;
         esac

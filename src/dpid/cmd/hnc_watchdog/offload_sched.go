@@ -235,9 +235,25 @@ func startOffloadSched() {
 	go clsactLoop()
 }
 
+func sleepOffloadFirstDelay(d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	tmr := time.NewTimer(d)
+	defer tmr.Stop()
+	select {
+	case <-stopCh:
+		return false
+	case <-offloadWakeCh:
+		return true
+	case <-tmr.C:
+		return true
+	}
+}
+
 func offloadLoop() {
 	p := &offloadPlanner{}
-	if offloadFirstDelayDur > 0 && !sleepUntil(offloadFirstDelayDur) {
+	if offloadFirstDelayDur > 0 && !sleepOffloadFirstDelay(offloadFirstDelayDur) {
 		return
 	}
 	last := nowFn()

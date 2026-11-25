@@ -456,3 +456,69 @@ func TestOffloadIdleCleanupAndZeroWakePause(t *testing.T) {
 	<-doneOffload
 	<-doneClsact
 }
+
+func TestOffloadFirstDelayImmediateWakeOnHotspotStart(t *testing.T) {
+	tmp := t.TempDir()
+	oldRun, oldStatus, oldState := offloadRunDir, offloadGuardStatusPath, offloadStateFn
+	oldPlan, oldFirst, oldStop := runOffloadPlanFn, offloadFirstDelayDur, stopCh
+
+	offloadRunDir = tmp
+	offloadGuardStatusPath = filepath.Join(tmp, "offload_guard.json")
+	var stateAtomic atomic.Int32
+	stateAtomic.Store(int32(StateIdle))
+	offloadStateFn = func() wdState {
+		if stateKind(stateAtomic.Load()) == stateActive {
+			return wdState{kind: stateActive, iface: "wlan2"}
+		}
+		return wdState{kind: StateIdle}
+	}
+	offloadFirstDelayDur = 20 * time.Second
+	localStop := make(chan struct{})
+	stopCh = localStop
+
+	var planCount atomic.Int32
+	runOffloadPlanFn = func() string {
+		planCount.Add(1)
+		return "300 none"
+	}
+
+	t.Cleanup(func() {
+		offloadRunDir, offloadGuardStatusPath, offloadStateFn = oldRun, oldStatus, oldState
+		runOffloadPlanFn, offloadFirstDelayDur, stopCh = oldPlan, oldFirst, oldStop
+	})
+
+	select {
+	case <-offloadWakeCh:
+	default:
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		offloadLoop()
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	if got := planCount.Load(); got != 0 {
+		t.Fatalf("StateIdle during first delay must not call plan, got %d", got)
+	}
+
+	// Hotspot turns ACTIVE during the 20s first delay -> wakeOffloadSched must wake immediately!
+	wakeStart := time.Now()
+	stateAtomic.Store(int32(stateActive))
+	wakeOffloadSched()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && planCount.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if planCount.Load() == 0 {
+		t.Fatal("expected immediate wake from 20s first delay upon wakeOffloadSched")
+	}
+	if took := time.Since(wakeStart); took > 500*time.Millisecond {
+		t.Fatalf("expected sub-second wake from 20s first delay, took %v", took)
+	}
+
+	close(localStop)
+	<-done
+}

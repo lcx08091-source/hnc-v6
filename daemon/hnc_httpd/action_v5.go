@@ -527,7 +527,50 @@ func actionSetTopBool(hncDir, key string, p map[string]string, onDetail, offDeta
 	return actionResp{OK: true}
 }
 
+func hasRealWhitelistedDevice(hncDir string) bool {
+	raw, err := readJSON(hncDir + "/data/rules.json")
+	if err != nil || raw == nil {
+		return false
+	}
+	root, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	devs, ok := root["devices"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for rawMAC, item := range devs {
+		mac := normalizeMAC(rawMAC)
+		if mac == "" || isSimMAC(mac) {
+			continue
+		}
+		dm, ok := item.(map[string]interface{})
+		if !ok || dm == nil {
+			continue
+		}
+		switch wl := dm["whitelist"].(type) {
+		case bool:
+			if wl {
+				return true
+			}
+		case string:
+			if strings.EqualFold(strings.TrimSpace(wl), "true") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func actionWhitelistSet(hncDir string, p map[string]string) actionResp {
+	if p["enabled"] == "true" && !hasRealWhitelistedDevice(hncDir) {
+		return actionResp{
+			OK:     false,
+			Error:  "empty whitelist",
+			Detail: "请至少先将 1 台真实设备加入白名单后再开启全局白名单模式（模拟设备不计入真实放行白名单，直接开启会导致全部真机断网）",
+		}
+	}
 	r := actionSetTopBool(hncDir, "whitelist_mode", p, "", "")
 	if !r.OK {
 		return r

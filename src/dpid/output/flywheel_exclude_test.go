@@ -140,3 +140,127 @@ func TestClassifyTier(t *testing.T) {
 		t.Errorf("expected shared (SharedLearned), got %s", tier)
 	}
 }
+
+func TestDynamicVPNConduitTunIfindexGateAndUnpromotedHighCount(t *testing.T) {
+	oldNetDir := sysClassNetDir
+	oldDumpFn := runDumpsysVPNFn
+	oldAccum := candidateAccumFile
+	oldDec := candidateDecisionsFile
+	oldPromDir := candPromotedRulesDir
+	t.Cleanup(func() {
+		sysClassNetDir = oldNetDir
+		runDumpsysVPNFn = oldDumpFn
+		candidateAccumFile = oldAccum
+		candidateDecisionsFile = oldDec
+		candPromotedRulesDir = oldPromDir
+		resetDynamicVPNConduitCacheForTest()
+	})
+	resetDynamicVPNConduitCacheForTest()
+
+	fakeNet := t.TempDir()
+	sysClassNetDir = fakeNet
+
+	mkTun := func(name, ifidx, flags string) {
+		d := filepath.Join(fakeNet, name)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(filepath.Join(d, "tun_flags"), []byte("0x1001\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(d, "ifindex"), []byte(ifidx+"\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(d, "flags"), []byte(flags+"\n"), 0o644)
+	}
+
+	dumpCalls := 0
+	runDumpsysVPNFn = func() (string, error) {
+		dumpCalls++
+		return "VPN for user 0:\n  mPackage: com.stealth.rebrandedvpn\n  OwnerUid: 10888\n", nil
+	}
+
+	// 1. OEM vgate0 and clat4 must be ignored with zero dumpsys invocations.
+	mkTun("vgate0", "31", "0x1091")
+	mkTun("clat4", "32", "0x1091")
+	u0, _ := refreshDynamicVPNConduits()
+	if dumpCalls != 0 || len(u0) != 0 {
+		t.Fatalf("vgate0/clat4 must not trigger dumpsys: calls=%d uids=%v", dumpCalls, u0)
+	}
+
+	// 2. Active Meta TUN appears -> 1 dumpsys invocation, OwnerUid 10888 captured; repeated calls with unchanged ifindex = 0 new calls.
+	mkTun("Meta", "45", "0x1091")
+	u1, p1 := refreshDynamicVPNConduits()
+	_, hasU1 := u1[10888]
+	_, hasP1 := p1["com.stealth.rebrandedvpn"]
+	if dumpCalls != 1 || !hasU1 || !hasP1 {
+		t.Fatalf("expected 1 dumpsys call and uid 10888 excluded, got calls=%d uids=%v pkgs=%v", dumpCalls, u1, p1)
+	}
+	_, _ = refreshDynamicVPNConduits()
+	if dumpCalls != 1 {
+		t.Fatalf("unchanged TUN ifindex must not re-run dumpsys, calls=%d", dumpCalls)
+	}
+
+	a := NewSelfAttribAggregator("")
+	a.pkgCache = map[int]string{
+		10888: "com.stealth.rebrandedvpn",
+		10200: "com.real.gameapp",
+	}
+	if !a.IsFlywheelExcludedUID(10888) || !a.IsFlywheelExcludedPkg("com.stealth.rebrandedvpn") {
+		t.Fatal("dynamic VPN OwnerUid 10888 and package must be excluded")
+	}
+
+	// 3. Reconnecting VPN changes ifindex (45 -> 49) -> triggers exactly 1 refresh.
+	_ = os.WriteFile(filepath.Join(fakeNet, "Meta", "ifindex"), []byte("49\n"), 0o644)
+	_, _ = refreshDynamicVPNConduits()
+	if dumpCalls != 2 {
+		t.Fatalf("TUN ifindex change should trigger refresh once, calls=%d", dumpCalls)
+	}
+
+	// 4. B034: processCandidates must exclude dynamic VPN UID 10888 and count sum.high ONLY for unpromoted items.
+	tmpHNC := t.TempDir()
+	runDir := filepath.Join(tmpHNC, "run")
+	_ = os.MkdirAll(runDir, 0o755)
+	candidateAccumFile = filepath.Join(runDir, "candidate_accum.json")
+	candidateDecisionsFile = filepath.Join(tmpHNC, "decisions.json")
+	candPromotedRulesDir = filepath.Join(tmpHNC, "rules.d")
+
+	acc := newCandidateAccumulator()
+	promoted := map[string]autoExpandedRule{}
+	now := int64(1764000000)
+
+	// Accumulate 3 windows / 6 hits for real app (10200) and dynamic VPN (10888).
+	for w := 0; w < 3; w++ {
+		pending := map[string]map[int]struct{}{
+			"api.realgame-unique.jp": {10200: {}, 10888: {}},
+			"sub.onlyvpn-proxied.io": {10888: {}},
+		}
+		a.processCandidates(pending, acc, promoted, runDir, now+int64(w*60))
+		// Add extra hits so TotalHits >= 6
+		if c := acc.byApex["realgame-unique.jp"]; c != nil {
+			c.UIDs[10200] += 2
+			c.TotalHits += 2
+		}
+	}
+	// Shadow mode (auto_promote.enabled absent): realgame-unique.jp is unpromoted HIGH -> CandidateHigh == 1; VPN domain absent.
+	snapShadow := a.Snapshot()
+	if snapShadow.CandidateHigh != 1 || snapShadow.CandidatePromoted != 0 {
+		t.Fatalf("shadow mode want CandidateHigh=1 CandidatePromoted=0, got high=%d prom=%d", snapShadow.CandidateHigh, snapShadow.CandidatePromoted)
+	}
+	if _, leaked := acc.byApex["onlyvpn-proxied.io"]; leaked {
+		t.Fatal("dynamic VPN UID must never accumulate candidates")
+	}
+
+	// Enable auto_promote.enabled -> realgame-unique.jp auto-promotes, so CandidateHigh MUST drop to 0 (no false red dot!).
+	if err := os.WriteFile(filepath.Join(runDir, autoPromoteFlagFile), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.processCandidates(nil, acc, promoted, runDir, now+300)
+	snapProm := a.Snapshot()
+	if snapProm.CandidatePromoted != 1 || snapProm.CandidateHigh != 0 {
+		t.Fatalf("after auto-promotion want CandidatePromoted=1 CandidateHigh=0, got prom=%d high=%d", snapProm.CandidatePromoted, snapProm.CandidateHigh)
+	}
+
+	// 5. Removing TUN interface clears dynamic VPN exclusion with zero dumpsys calls.
+	_ = os.RemoveAll(filepath.Join(fakeNet, "Meta"))
+	uOff, _ := refreshDynamicVPNConduits()
+	if len(uOff) != 0 || dumpCalls != 2 {
+		t.Fatalf("removing TUN must clear dynamic VPN set without dumpsys, calls=%d uids=%v", dumpCalls, uOff)
+	}
+}

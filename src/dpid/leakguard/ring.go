@@ -2,16 +2,19 @@ package leakguard
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	DefaultCapacity    = 300
-	MinCapacity        = 10
-	MaxCapacity        = 2000
-	DefaultCooldownSec = 300
+	DefaultCapacity     = 300
+	MinCapacity         = 10
+	MaxCapacity         = 2000
+	DefaultCooldownSec  = 300
+	crossIfaceMergeSec  = 5
 
 	TypePhone      = "PHONE"
 	TypeDeviceID   = "DEVICE_ID"
@@ -23,6 +26,39 @@ const (
 	OriginHotspot = "hotspot"
 	OriginHost    = "host"
 )
+
+var builtinProxyConduitPkgs = map[string]struct{}{
+	"com.follow.clash":                     {},
+	"com.github.kr328.clash":               {},
+	"com.github.metacubex.clash.meta":      {},
+	"com.v2ray.ang":                        {},
+	"com.v2ray.actinium":                   {},
+	"io.nekohasekai.sfa":                   {},
+	"io.nekohasekai.sagernet":              {},
+	"moe.nb4a":                             {},
+	"moe.matsuri.lite":                     {},
+	"com.github.shadowsocks":               {},
+	"io.github.trojan_gfw.igniter":         {},
+	"com.getsurfboard":                     {},
+	"com.hiddify.hiddify":                  {},
+	"app.hiddify.com":                      {},
+	"com.wireguard.android":                {},
+	"net.openvpn.openvpn":                  {},
+	"de.blinkt.openvpn":                    {},
+	"org.torproject.android":               {},
+	"com.tailscale.ipn":                    {},
+	"net.mullvad.mullvadvpn":               {},
+	"org.outline.android.client":           {},
+	"ch.protonvpn.android":                 {},
+	"com.nordvpn.android":                  {},
+	"com.expressvpn.vpn":                   {},
+	"com.windscribe.vpn":                   {},
+	"com.surfshark.vpnclient.android":      {},
+	"com.cloudflare.onedotonedotonedotone": {},
+	"eu.faircode.netguard":                 {},
+	"com.celzero.bravedns":                 {},
+	"com.adguard.android":                  {},
+}
 
 // LeakEvent represents a single cleartext privacy leak event (or aggregated
 // cooldown burst). RawValue and RawSnippet preserve complete unmasked plaintext.
@@ -39,6 +75,7 @@ type LeakEvent struct {
 	ClientIP   string `json:"client_ip,omitempty"`
 	SrcIP      string `json:"src_ip,omitempty"`
 	DstIP      string `json:"dst_ip,omitempty"`
+	SrcPort    uint16 `json:"src_port,omitempty"`
 	DstPort    uint16 `json:"dst_port,omitempty"`
 	DstHost    string `json:"dst_host"`
 	Proto      string `json:"proto,omitempty"`
@@ -77,13 +114,14 @@ func defaultLabelForType(leakType string) string {
 // RingBuffer stores up to cap LeakEvents in memory with per-(mac, dst_host,
 // leak_type, raw_value) cooldown window deduplication and hit_count aggregation.
 type RingBuffer struct {
-	mu          sync.RWMutex
-	buf         []LeakEvent
-	head        int // index of oldest element when count > 0
-	count       int
-	cap         int
-	cooldownSec int
-	seq         uint64
+	mu           sync.RWMutex
+	buf          []LeakEvent
+	head         int // index of oldest element when count > 0
+	count        int
+	cap          int
+	cooldownSec  int
+	seq          uint64
+	conduitCheck atomic.Pointer[func(uid int, pkg string) bool]
 }
 
 // NewRingBuffer creates an in-memory LeakGuard ring buffer.
@@ -97,6 +135,19 @@ func NewRingBuffer(capacity, cooldownSec int) *RingBuffer {
 		cap:         capacity,
 		cooldownSec: cooldownSec,
 	}
+}
+
+// SetConduitCheck registers an optional callback reporting whether (uid, pkg)
+// belongs to a local VPN/proxy conduit app (e.g. user-configured flywheel_exclude.json).
+func (r *RingBuffer) SetConduitCheck(fn func(uid int, pkg string) bool) {
+	if r == nil {
+		return
+	}
+	if fn == nil {
+		r.conduitCheck.Store(nil)
+		return
+	}
+	r.conduitCheck.Store(&fn)
 }
 
 func clampCapacity(c int) int {
@@ -183,6 +234,10 @@ func canonicalOrigin(o string) string {
 	return OriginHotspot
 }
 
+func isHostNoMAC(e LeakEvent) bool {
+	return canonicalOrigin(e.Origin) == OriginHost && e.MAC == ""
+}
+
 func sameEventSubject(a, b LeakEvent) bool {
 	oa := canonicalOrigin(a.Origin)
 	ob := canonicalOrigin(b.Origin)
@@ -195,9 +250,222 @@ func sameEventSubject(a, b LeakEvent) bool {
 	return a.MAC == b.MAC
 }
 
+func (r *RingBuffer) isProxyConduit(uid int, pkg string) bool {
+	normPkg := strings.ToLower(strings.TrimSpace(pkg))
+	if normPkg != "" {
+		if _, ok := builtinProxyConduitPkgs[normPkg]; ok {
+			return true
+		}
+	}
+	if r != nil {
+		if fn := r.conduitCheck.Load(); fn != nil && *fn != nil {
+			return (*fn)(uid, normPkg)
+		}
+	}
+	return false
+}
+
+// hostIdentityRank scores host attribution quality:
+//   2 = real business app (UID > 0 and not a VPN/proxy conduit)
+//   1 = VPN/proxy conduit app (UID > 0 on conduit list)
+//   0 = unattributed / unknown (UID <= 0)
+func (r *RingBuffer) hostIdentityRank(e LeakEvent) int {
+	if e.UID <= 0 {
+		return 0
+	}
+	if r.isProxyConduit(e.UID, e.Pkg) {
+		return 1
+	}
+	return 2
+}
+
+func (r *RingBuffer) isUnattributedOrConduit(e LeakEvent) bool {
+	return r.hostIdentityRank(e) < 2
+}
+
+func isFakeIPBenchmarkStr(ipStr string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	if !addr.Is4() {
+		return false
+	}
+	b4 := addr.As4()
+	return b4[0] == 198 && (b4[1] == 18 || b4[1] == 19)
+}
+
+func (r *RingBuffer) mergeCrossIfaceHostLocked(cur *LeakEvent, ev LeakEvent, nowUnix int64) {
+	if nowUnix > cur.LastSeen {
+		cur.LastSeen = nowUnix
+		cur.Ts = nowUnix
+	}
+	curRank := r.hostIdentityRank(*cur)
+	evRank := r.hostIdentityRank(ev)
+
+	if evRank > curRank {
+		cur.UID = ev.UID
+		cur.Pkg = ev.Pkg
+		cur.AppName = ev.AppName
+		if ev.SrcPort != 0 {
+			cur.SrcPort = ev.SrcPort
+		}
+		if ev.ClientIP != "" {
+			cur.ClientIP = ev.ClientIP
+			cur.SrcIP = ev.ClientIP
+		}
+	} else if evRank == curRank {
+		if cur.UID <= 0 && ev.UID > 0 {
+			cur.UID = ev.UID
+		}
+		if cur.Pkg == "" && ev.Pkg != "" {
+			cur.Pkg = ev.Pkg
+		}
+		if cur.AppName == "" && ev.AppName != "" {
+			cur.AppName = ev.AppName
+		}
+		if cur.SrcPort == 0 && ev.SrcPort != 0 {
+			cur.SrcPort = ev.SrcPort
+		}
+	}
+
+	if ev.DstIP != "" && (cur.DstIP == "" || (isFakeIPBenchmarkStr(cur.DstIP) && !isFakeIPBenchmarkStr(ev.DstIP))) {
+		cur.DstIP = ev.DstIP
+	}
+	if cur.DstPort == 0 && ev.DstPort != 0 {
+		cur.DstPort = ev.DstPort
+	}
+	if cur.RawSnippet == "" && ev.RawSnippet != "" {
+		cur.RawSnippet = ev.RawSnippet
+	}
+	if cur.Path == "" && ev.Path != "" {
+		cur.Path = ev.Path
+	}
+	if cur.Method == "" && ev.Method != "" {
+		cur.Method = ev.Method
+	}
+	if cur.UserAgent == "" && ev.UserAgent != "" {
+		cur.UserAgent = ev.UserAgent
+	}
+	if cur.FieldKey == "" && ev.FieldKey != "" {
+		cur.FieldKey = ev.FieldKey
+	}
+	if ev.Blocked {
+		cur.Blocked = true
+		cur.IsBlocked = true
+	}
+}
+
+func (r *RingBuffer) foldUpgradedHostSlotLocked(slotIdx int, nowUnix int64) (LeakEvent, bool) {
+	window := int64(r.cooldownSec)
+	if window <= 0 || slotIdx < 0 || slotIdx >= r.count {
+		return LeakEvent{}, false
+	}
+	upgraded := r.buf[(r.head+slotIdx)%r.cap]
+	if r.hostIdentityRank(upgraded) != 2 {
+		return LeakEvent{}, false
+	}
+	for j := r.count - 1; j >= 0; j-- {
+		if j == slotIdx {
+			continue
+		}
+		older := &r.buf[(r.head+j)%r.cap]
+		if older.LeakType != upgraded.LeakType ||
+			older.DstHost != upgraded.DstHost ||
+			!sameRawValueForType(upgraded.LeakType, older.RawValue, upgraded.RawValue) {
+			continue
+		}
+		if !sameEventSubject(*older, upgraded) || r.hostIdentityRank(*older) != 2 {
+			continue
+		}
+		dt := nowUnix - older.LastSeen
+		if dt < window && dt >= -5 {
+			older.HitCount += upgraded.HitCount
+			if upgraded.FirstSeen > 0 && (older.FirstSeen == 0 || upgraded.FirstSeen < older.FirstSeen) {
+				older.FirstSeen = upgraded.FirstSeen
+			}
+			if upgraded.LastSeen > older.LastSeen {
+				older.LastSeen = upgraded.LastSeen
+				older.Ts = upgraded.LastSeen
+			}
+			if nowUnix > older.LastSeen {
+				older.LastSeen = nowUnix
+				older.Ts = nowUnix
+			}
+			if upgraded.Origin != "" {
+				older.Origin = upgraded.Origin
+			}
+			if upgraded.UID > 0 {
+				older.UID = upgraded.UID
+			}
+			if upgraded.Pkg != "" {
+				older.Pkg = upgraded.Pkg
+			}
+			if upgraded.AppName != "" {
+				older.AppName = upgraded.AppName
+			}
+			if upgraded.RawSnippet != "" {
+				older.RawSnippet = upgraded.RawSnippet
+			}
+			if upgraded.Path != "" {
+				older.Path = upgraded.Path
+			}
+			if upgraded.Method != "" {
+				older.Method = upgraded.Method
+			}
+			if upgraded.ClientIP != "" {
+				older.ClientIP = upgraded.ClientIP
+				older.SrcIP = upgraded.ClientIP
+			}
+			if upgraded.DstIP != "" && (older.DstIP == "" || !isFakeIPBenchmarkStr(upgraded.DstIP) || isFakeIPBenchmarkStr(older.DstIP)) {
+				older.DstIP = upgraded.DstIP
+			}
+			if upgraded.SrcPort != 0 {
+				older.SrcPort = upgraded.SrcPort
+			}
+			if upgraded.DstPort != 0 {
+				older.DstPort = upgraded.DstPort
+			}
+			if upgraded.UserAgent != "" {
+				older.UserAgent = upgraded.UserAgent
+			}
+			if upgraded.FieldKey != "" {
+				older.FieldKey = upgraded.FieldKey
+			}
+			older.Blocked = upgraded.Blocked
+			older.IsBlocked = upgraded.Blocked
+			folded := *older
+			r.removeLogicalSlotLocked(slotIdx)
+			return folded, true
+		}
+		break
+	}
+	return LeakEvent{}, false
+}
+
+func (r *RingBuffer) removeLogicalSlotLocked(slotIdx int) {
+	if slotIdx < 0 || slotIdx >= r.count {
+		return
+	}
+	for k := slotIdx; k < r.count-1; k++ {
+		dstPhys := (r.head + k) % r.cap
+		srcPhys := (r.head + k + 1) % r.cap
+		r.buf[dstPhys] = r.buf[srcPhys]
+	}
+	lastPhys := (r.head + r.count - 1) % r.cap
+	r.buf[lastPhys] = LeakEvent{}
+	r.count--
+	if r.count == 0 {
+		r.head = 0
+	}
+}
+
 // Record inserts or aggregates ev using (mac + dst_host + leak_type + raw_value)
 // for hotspot traffic or (uid/pkg + dst_host + leak_type + raw_value) for host
 // traffic when MAC is empty, over the configured cooldown window.
+// Cross-interface host duplicates within <5s where at least one side is UID<=0 or
+// a VPN/proxy conduit UID are merged onto the real business app without inflating HitCount.
 // Returns the updated event and isNewAlert.
 func (r *RingBuffer) Record(ev LeakEvent, now time.Time) (LeakEvent, bool) {
 	nowUnix := now.Unix()
@@ -240,64 +508,88 @@ func (r *RingBuffer) Record(ev LeakEvent, now time.Time) (LeakEvent, bool) {
 	defer r.mu.Unlock()
 
 	window := int64(r.cooldownSec)
-	if window > 0 {
-		for i := r.count - 1; i >= 0; i-- {
-			phys := (r.head + i) % r.cap
-			cur := &r.buf[phys]
-			if cur.LeakType == ev.LeakType &&
-				sameEventSubject(*cur, ev) &&
-				cur.DstHost == ev.DstHost &&
-				sameRawValueForType(ev.LeakType, cur.RawValue, ev.RawValue) {
-				dt := nowUnix - cur.LastSeen
-				if dt < window && dt >= -5 {
-					cur.HitCount += inc
-					if nowUnix > cur.LastSeen {
-						cur.LastSeen = nowUnix
-						cur.Ts = nowUnix
+	for i := r.count - 1; i >= 0; i-- {
+		phys := (r.head + i) % r.cap
+		cur := &r.buf[phys]
+		if cur.LeakType != ev.LeakType ||
+			cur.DstHost != ev.DstHost ||
+			!sameRawValueForType(ev.LeakType, cur.RawValue, ev.RawValue) {
+			continue
+		}
+
+		dt := nowUnix - cur.LastSeen
+		sameSubj := sameEventSubject(*cur, ev)
+
+		// Cross-interface host merge (<5s): tun/Meta + physical wlan/rmnet double-capture
+		// where at least one side has UID<=0 or belongs to a VPN/proxy conduit app.
+		// Never merges two distinct real business apps (both rank == 2).
+		if isHostNoMAC(*cur) && isHostNoMAC(ev) && dt > -crossIfaceMergeSec && dt < crossIfaceMergeSec {
+			if (!sameSubj && (r.isUnattributedOrConduit(*cur) || r.isUnattributedOrConduit(ev))) ||
+				(sameSubj && r.isUnattributedOrConduit(*cur) &&
+					cur.ClientIP != "" && ev.ClientIP != "" && cur.ClientIP != ev.ClientIP) {
+				prevRank := r.hostIdentityRank(*cur)
+				r.mergeCrossIfaceHostLocked(cur, ev, nowUnix)
+				if prevRank < 2 && r.hostIdentityRank(*cur) == 2 {
+					if folded, ok := r.foldUpgradedHostSlotLocked(i, nowUnix); ok {
+						return folded, false
 					}
-					if ev.Origin != "" {
-						cur.Origin = ev.Origin
-					}
-					if ev.UID > 0 {
-						cur.UID = ev.UID
-					}
-					if ev.Pkg != "" {
-						cur.Pkg = ev.Pkg
-					}
-					if ev.AppName != "" {
-						cur.AppName = ev.AppName
-					}
-					if ev.RawSnippet != "" {
-						cur.RawSnippet = ev.RawSnippet
-					}
-					if ev.Path != "" {
-						cur.Path = ev.Path
-					}
-					if ev.Method != "" {
-						cur.Method = ev.Method
-					}
-					if ev.ClientIP != "" {
-						cur.ClientIP = ev.ClientIP
-						cur.SrcIP = ev.ClientIP
-					}
-					if ev.DstIP != "" {
-						cur.DstIP = ev.DstIP
-					}
-					if ev.DstPort != 0 {
-						cur.DstPort = ev.DstPort
-					}
-					if ev.UserAgent != "" {
-						cur.UserAgent = ev.UserAgent
-					}
-					if ev.FieldKey != "" {
-						cur.FieldKey = ev.FieldKey
-					}
-					cur.Blocked = ev.Blocked
-					cur.IsBlocked = ev.Blocked
-					return *cur, false
 				}
-				break
+				return *cur, false
 			}
+		}
+
+		if sameSubj && window > 0 {
+			if dt < window && dt >= -5 {
+				cur.HitCount += inc
+				if nowUnix > cur.LastSeen {
+					cur.LastSeen = nowUnix
+					cur.Ts = nowUnix
+				}
+				if ev.Origin != "" {
+					cur.Origin = ev.Origin
+				}
+				if ev.UID > 0 {
+					cur.UID = ev.UID
+				}
+				if ev.Pkg != "" {
+					cur.Pkg = ev.Pkg
+				}
+				if ev.AppName != "" {
+					cur.AppName = ev.AppName
+				}
+				if ev.RawSnippet != "" {
+					cur.RawSnippet = ev.RawSnippet
+				}
+				if ev.Path != "" {
+					cur.Path = ev.Path
+				}
+				if ev.Method != "" {
+					cur.Method = ev.Method
+				}
+				if ev.ClientIP != "" {
+					cur.ClientIP = ev.ClientIP
+					cur.SrcIP = ev.ClientIP
+				}
+				if ev.DstIP != "" {
+					cur.DstIP = ev.DstIP
+				}
+				if ev.SrcPort != 0 {
+					cur.SrcPort = ev.SrcPort
+				}
+				if ev.DstPort != 0 {
+					cur.DstPort = ev.DstPort
+				}
+				if ev.UserAgent != "" {
+					cur.UserAgent = ev.UserAgent
+				}
+				if ev.FieldKey != "" {
+					cur.FieldKey = ev.FieldKey
+				}
+				cur.Blocked = ev.Blocked
+				cur.IsBlocked = ev.Blocked
+				return *cur, false
+			}
+			break
 		}
 	}
 

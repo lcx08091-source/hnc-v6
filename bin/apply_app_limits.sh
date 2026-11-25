@@ -26,6 +26,7 @@ fi
 RUN="$HNC_DIR/run"
 LIMITS_FLAT="$HNC_DIR/data/app_limits.flat"
 IP_APP_FLAT="$HNC_DIR/run/ip_app_map.flat"
+USER_RULES_JSON="$HNC_DIR/data/dpi_user_rules.json"
 DEVICES_FLAT="$HNC_DIR/run/devices.flat"
 DEVICES="$HNC_DIR/data/devices.json"
 RULES="$HNC_DIR/data/rules.json"
@@ -279,6 +280,7 @@ fi
 _al_cleanup() {
     al_tc_unlock
     rm -f ${IPNAME_APP_FLAT:+"$IPNAME_APP_FLAT"} \
+          ${EFF_IP_APP_FLAT:+"$EFF_IP_APP_FLAT"} \
           ${IPSTATS_FLAT:+"$IPSTATS_FLAT.tmp"} \
           ${DEV_META_MAP:+"$DEV_META_MAP"} \
           ${V4_HDR:+"$V4_HDR"} ${V4_RULES:+"$V4_RULES"} ${V4_BATCH:+"$V4_BATCH"} \
@@ -351,6 +353,7 @@ compute_full_sig() {
         printf 'iface=%s|v6=%s\n' "$IFACE" "$IPV6_OK"
         cat "$LIMITS_FLAT" 2>/dev/null
         cat "$IP_APP_FLAT" 2>/dev/null
+        [ -s "$USER_RULES_JSON" ] && cat "$USER_RULES_JSON" 2>/dev/null
         [ -s "$RUN/dpi_ipname.json" ] && cat "$RUN/dpi_ipname.json" 2>/dev/null
         [ -s "$DEVICES_FLAT" ] && cat "$DEVICES_FLAT" 2>/dev/null
         cat "$DEVICES" 2>/dev/null
@@ -401,7 +404,7 @@ heal_postrouting_before_save() {
     fi
 }
 
-if [ "$HAD_DIRTY" = 0 ] && [ -s "$LIMITS_FLAT" ] && [ -s "$IP_APP_FLAT" ] && [ -f "$FULL_SIG_FILE" ]; then
+if [ "$HAD_DIRTY" = 0 ] && [ -s "$LIMITS_FLAT" ] && { [ -s "$IP_APP_FLAT" ] || [ -s "$USER_RULES_JSON" ]; } && [ -f "$FULL_SIG_FILE" ]; then
     CUR_FULL_SIG=$(compute_full_sig)
     OLD_FULL_SIG=$(cat "$FULL_SIG_FILE" 2>/dev/null)
     if [ -n "$CUR_FULL_SIG" ] && [ "$CUR_FULL_SIG" = "$OLD_FULL_SIG" ] \
@@ -761,7 +764,92 @@ if [ ! -s "$LIMITS_FLAT" ]; then
     exit 0
 fi
 
-if [ ! -s "$IP_APP_FLAT" ]; then
+IPNAME_JSON="$RUN/dpi_ipname.json"
+EFF_IP_APP_FLAT="$RUN/.eff_ip_app.flat.$$"
+: > "$EFF_IP_APP_FLAT" 2>/dev/null
+[ -s "$IP_APP_FLAT" ] && cat "$IP_APP_FLAT" >> "$EFF_IP_APP_FLAT" 2>/dev/null
+
+if [ -s "$USER_RULES_JSON" ]; then
+    _now_ts=$(date +%s 2>/dev/null || echo 0)
+    awk -v urf="$USER_RULES_JSON" -v ipnf="$IPNAME_JSON" -v now="$_now_ts" '
+    function jfield(b, k,   pat, s) {
+        pat = "\"" k "\"[[:space:]]*:[[:space:]]*\"[^\"]*\""
+        if (!match(b, pat)) return ""
+        s = substr(b, RSTART, RLENGTH)
+        sub("^.*" k "\"[[:space:]]*:[[:space:]]*\"", "", s)
+        sub("\"$", "", s)
+        return s
+    }
+    function jnum(b, k,   pat, s) {
+        pat = "\"" k "\"[[:space:]]*:[[:space:]]*[0-9]+"
+        if (!match(b, pat)) return 0
+        s = substr(b, RSTART, RLENGTH)
+        sub("^.*:[[:space:]]*", "", s)
+        return s + 0
+    }
+    function is_priv_ip(ip,   low) {
+        low = tolower(ip)
+        if (low ~ /^(10\.|127\.|192\.168\.|169\.254\.|0\.|::1$|fe80:|fc|fd)/) return 1
+        if (low ~ /^172\.(1[6-9]|2[0-9]|3[0-1])\./) return 1
+        return 0
+    }
+    function match_udom(h,   cur, dot) {
+        gsub(/^[ \t\r\n.]+|[ \t\r\n.]+$/, "", h)
+        cur = tolower(h)
+        while (cur != "") {
+            if (cur in udom) return udom[cur]
+            dot = index(cur, ".")
+            if (dot <= 0) break
+            cur = substr(cur, dot + 1)
+        }
+        return ""
+    }
+    BEGIN {
+        ur = ""
+        while ((getline ln < urf) > 0) ur = ur ln " "
+        close(urf)
+        rest = ur
+        while (match(rest, /\{[^{}]*"kind"[[:space:]]*:[^{}]*\}/)) {
+            blk = substr(rest, RSTART, RLENGTH)
+            rest = substr(rest, RSTART + RLENGTH)
+            exp_ts = jnum(blk, "expires")
+            if (exp_ts > 0 && now > 0 && exp_ts <= now + 0) continue
+            aid = jfield(blk, "app_id")
+            knd = jfield(blk, "kind")
+            val = jfield(blk, "value")
+            if (aid == "" || val == "") continue
+            if (knd == "domain") {
+                gsub(/^[ \t\r\n.]+|[ \t\r\n.]+$/, "", val)
+                val = tolower(val)
+                if (val != "") udom[val] = aid
+            } else if (knd == "ip") {
+                if (!is_priv_ip(val)) print val, aid
+            }
+        }
+        if (ipnf != "") {
+            in_s = ""
+            while ((getline ln2 < ipnf) > 0) in_s = in_s ln2 " "
+            close(ipnf)
+            rest2 = in_s
+            while (match(rest2, /"[0-9A-Fa-f.:]+"[[:space:]]*:[[:space:]]*\{[^{}]*\}/)) {
+                blk2 = substr(rest2, RSTART, RLENGTH)
+                rest2 = substr(rest2, RSTART + RLENGTH)
+                ip = blk2
+                sub(/^"/, "", ip); sub(/".*/, "", ip)
+                if (ip == "" || ip == "entries" || (ip !~ /\./ && ip !~ /:/) || is_priv_ip(ip)) continue
+                body = blk2
+                sub(/^"[0-9A-Fa-f.:]+"[[:space:]]*:[[:space:]]*\{/, "", body)
+                nm = jfield(body, "name")
+                if (nm != "") {
+                    ua = match_udom(nm)
+                    if (ua != "") print ip, ua
+                }
+            }
+        }
+    }' >> "$EFF_IP_APP_FLAT" 2>/dev/null
+fi
+
+if [ ! -s "$EFF_IP_APP_FLAT" ]; then
     cleanup_ipt_app_limits
     reset_tc_app_limits 1
     al_tc_unlock
@@ -868,8 +956,11 @@ global_ceil_kbit() {
     echo 1000000
 }
 
-. "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh"
-IPNAME_JSON="$RUN/dpi_ipname.json"
+if [ -f "$HNC_DIR/bin/tc_rate_calc.sh" ]; then
+    . "$HNC_DIR/bin/tc_rate_calc.sh"
+else
+    . "$(dirname "$0")/tc_rate_calc.sh"
+fi
 IPNAME_APP_FLAT="$RUN/.ipname_app.flat.$$"
 DEV_META_MAP="$RUN/.al_devmeta.$$"
 V4_HDR="$RUN/.al_v4_hdr.$$"
@@ -906,7 +997,8 @@ unset _sif
 {
     echo "#sentinel -"
     if [ -s "$IPNAME_JSON" ]; then
-        awk -v sif="$SHARED_INFRA_TXT" '
+        _now_ts2=$(date +%s 2>/dev/null || echo 0)
+        awk -v sif="$SHARED_INFRA_TXT" -v urf="$USER_RULES_JSON" -v now="$_now_ts2" '
         function add_rule(ln) {
             sub(/#.*/, "", ln)
             gsub(/^[ \t\r\n.]+|[ \t\r\n.]+$/, "", ln)
@@ -918,6 +1010,32 @@ unset _sif
             } else {
                 suf[ln] = 1
             }
+        }
+        function jfield(b, k,   pat, st) {
+            pat = "\"" k "\"[[:space:]]*:[[:space:]]*\"[^\"]*\""
+            if (!match(b, pat)) return ""
+            st = substr(b, RSTART, RLENGTH)
+            sub("^.*" k "\"[[:space:]]*:[[:space:]]*\"", "", st)
+            sub("\"$", "", st)
+            return st
+        }
+        function jnum(b, k,   pat, st) {
+            pat = "\"" k "\"[[:space:]]*:[[:space:]]*[0-9]+"
+            if (!match(b, pat)) return 0
+            st = substr(b, RSTART, RLENGTH)
+            sub("^.*:[[:space:]]*", "", st)
+            return st + 0
+        }
+        function match_udom(h,   cur, dot) {
+            gsub(/^[ \t\r\n.]+|[ \t\r\n.]+$/, "", h)
+            cur = tolower(h)
+            while (cur != "") {
+                if (cur in udom) return udom[cur]
+                dot = index(cur, ".")
+                if (dot <= 0) break
+                cur = substr(cur, dot + 1)
+            }
+            return ""
         }
         function reg_domain(h,   n, a, t2) {
             n = split(h, a, ".")
@@ -963,19 +1081,46 @@ unset _sif
             }
             return 0
         }
-        function is_alipay_host(h) {
+        function foreign_payment_owner(h) {
+            gsub(/^[ \t\r\n.]+|[ \t\r\n.]+$/, "", h)
             h = tolower(h)
-            return (h == "alipay.com" || h ~ /\.alipay\.com$/ || h == "alipayobjects.com" || h ~ /\.alipayobjects\.com$/)
+            if (h == "alipay.com" || h ~ /\.alipay\.com$/ || h == "alipayobjects.com" || h ~ /\.alipayobjects\.com$/ || h == "alipaydns.com" || h ~ /\.alipaydns\.com$/) return "alipay"
+            if (h == "unionpay.com" || h ~ /\.unionpay\.com$/ || h == "95516.com" || h ~ /\.95516\.com$/) return "unionpay"
+            if (h == "paypal.com" || h ~ /\.paypal\.com$/ || h == "paypalobjects.com" || h ~ /\.paypalobjects\.com$/) return "paypal"
+            return ""
         }
         BEGIN {
             g_n = 0
-            # 内置多租户共享托管后缀与跨应用共享基础设施兜底(即使测试目录未拷 shared_infra.txt 仍生效)
-            builtin = "github.io githubusercontent.com githubassets.com pages.dev workers.dev vercel.app netlify.app herokuapp.com appspot.com azurewebsites.net firebaseapp.com web.app cloudfunctions.net run.app snssdk.com pstatp.com alicdn.com aliyuncs.com wechatpay.cn mdap.alipay.com mobilegw.alipay.com akamaized.net cloudfront.net fastly.net cloudflare-dns.com alibabadns.com dnspod.cn myqcloud.com tencentcos.cn bytecdn.com byteimg.com"
+            # 内置多租户共享托管后缀(含代码托管 gitlab.io/bitbucket.io/gitee.io)与跨应用共享基础设施兜底
+            builtin = "github.io githubusercontent.com githubassets.com gitlab.io bitbucket.io gitee.io pages.dev workers.dev vercel.app netlify.app herokuapp.com appspot.com azurewebsites.net firebaseapp.com web.app cloudfunctions.net run.app snssdk.com pstatp.com alicdn.com aliyuncs.com wechatpay.cn mdap.alipay.com mobilegw.alipay.com akamaized.net cloudfront.net fastly.net cloudflare-dns.com alibabadns.com dnspod.cn myqcloud.com tencentcos.cn bytecdn.com byteimg.com"
             bn = split(builtin, ba, " ")
             for (bi = 1; bi <= bn; bi++) add_rule(ba[bi])
             if (sif != "") {
                 while ((getline sl < sif) > 0) add_rule(sl)
                 close(sif)
+            }
+            if (urf != "") {
+                ur = ""
+                while ((getline uln < urf) > 0) ur = ur uln " "
+                close(urf)
+                urest = ur
+                while (match(urest, /\{[^{}]*"kind"[[:space:]]*:[^{}]*\}/)) {
+                    ublk = substr(urest, RSTART, RLENGTH)
+                    urest = substr(urest, RSTART + RLENGTH)
+                    uexp = jnum(ublk, "expires")
+                    if (uexp > 0 && now > 0 && uexp <= now + 0) continue
+                    uaid = jfield(ublk, "app_id")
+                    uknd = jfield(ublk, "kind")
+                    uval = jfield(ublk, "value")
+                    if (uaid == "" || uval == "") continue
+                    if (uknd == "domain") {
+                        gsub(/^[ \t\r\n.]+|[ \t\r\n.]+$/, "", uval)
+                        uval = tolower(uval)
+                        if (uval != "") udom[uval] = uaid
+                    } else if (uknd == "ip") {
+                        uip[uval] = uaid
+                    }
+                }
             }
             s = ""
         }
@@ -992,23 +1137,19 @@ unset _sif
                 body = blk
                 sub(/^"[0-9A-Fa-f.:]+"[[:space:]]*:[[:space:]]*\{/, "", body)
                 sub(/\}[[:space:]]*$/, "", body)
-                app = ""; nm = ""
-                if (match(body, /"app"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
-                    t = substr(body, RSTART, RLENGTH)
-                    sub(/^"app"[[:space:]]*:[[:space:]]*"/, "", t)
-                    sub(/"$/, "", t)
-                    app = t
+                app = jfield(body, "app")
+                nm = jfield(body, "name")
+                if (ip in uip) {
+                    app = uip[ip]
+                } else if (nm != "") {
+                    ua = match_udom(nm)
+                    if (ua != "") app = ua
                 }
-                if (match(body, /"name"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
-                    t = substr(body, RSTART, RLENGTH)
-                    sub(/^"name"[[:space:]]*:[[:space:]]*"/, "", t)
-                    sub(/"$/, "", t)
-                    nm = t
-                }
+                pay = (nm != "") ? foreign_payment_owner(nm) : ""
                 if (nm != "" && is_shared_host(nm)) {
                     print ip, "__shared_infra__"
-                } else if (nm != "" && is_alipay_host(nm) && app != "alipay") {
-                    print ip, "alipay"
+                } else if (pay != "" && app != pay) {
+                    print ip, pay
                 } else if (app != "") {
                     print ip, app
                 }
@@ -1030,7 +1171,7 @@ split_app_ips() {
         $2 == want {
             if (seen[$1]++) next
             if (inc != 1 && ($1 in sh)) print "S " $1; else print "K " $1
-        }' "$IPNAME_APP_FLAT" "$IP_APP_FLAT"
+        }' "$IPNAME_APP_FLAT" "$EFF_IP_APP_FLAT"
 }
 
 batch_top_inited=0

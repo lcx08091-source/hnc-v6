@@ -501,3 +501,43 @@ func TestLabelSamplesReopenAfterRemoved(t *testing.T) {
 		t.Fatalf("新文件行数 = %d, want 1", n)
 	}
 }
+
+func TestLabelSamplesSkipsVPNConduits(t *testing.T) {
+	oldNetDir := sysClassNetDir
+	oldDumpFn := runDumpsysVPNFn
+	t.Cleanup(func() {
+		sysClassNetDir = oldNetDir
+		runDumpsysVPNFn = oldDumpFn
+		resetDynamicVPNConduitCacheForTest()
+	})
+	resetDynamicVPNConduitCacheForTest()
+
+	fakeNet := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(fakeNet, "Meta"), 0o755)
+	_ = os.WriteFile(filepath.Join(fakeNet, "Meta", "tun_flags"), []byte("0x1001\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(fakeNet, "Meta", "ifindex"), []byte("27\n"), 0o644)
+	sysClassNetDir = fakeNet
+	runDumpsysVPNFn = func() (string, error) {
+		return "OwnerUid=10777\n", nil
+	}
+	_, _ = refreshDynamicVPNConduits()
+
+	w := lsvNew(t)
+	w.Observe(lsvInput(lsvDay1, 10599, "com.follow.clash", "capcom.co.jp", "j1"))           // 内置 VPN 列表
+	w.Observe(lsvInput(lsvDay1, 10777, "com.rebrand.mysteryproxy", "bilibili.com", "j2"))   // 动态 TUN OwnerUid
+	w.Observe(lsvInput(lsvDay1, 10234, "tv.danmaku.bili", "api.bilibili.com", "j3"))        // 真实业务 App
+
+	for {
+		select {
+		case s := <-w.ch:
+			w.handle(s)
+		default:
+			goto done
+		}
+	}
+done:
+	st := w.Stats()
+	if st.Written != 1 || st.SkippedExcluded != 2 {
+		t.Fatalf("expected Written=1 SkippedExcluded=2, got %+v", st)
+	}
+}

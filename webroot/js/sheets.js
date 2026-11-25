@@ -3,9 +3,99 @@
 
 var sheetOnClose = null;
 
+function sheetBodyEl() { return $('#sheet-body') || $('#sheet'); }
+function sheetScrollBlocked(targetEl, sh) {
+  var sb = $('#sheet-body');
+  if (sb && sb.scrollTop > 0) return true;
+  var el = targetEl && targetEl.nodeType === 1 ? targetEl : (targetEl && targetEl.parentElement ? targetEl.parentElement : null);
+  var stop = sh || $('#sheet');
+  while (el && el !== stop && el !== document.body && el !== document.documentElement) {
+    if (el.scrollTop > 0) return true;
+    el = el.parentElement;
+  }
+  return !!(stop && stop.scrollTop > 0);
+}
+
+/* 统一轻量模态历史栈控制器（供 #v6-scalpel-drawer 与 #sheet 共用，微任务合并防孤儿帧与误退 WebView） */
+var _mh = { curDepth: 0, inFlight: false, pending: false, scheduled: false, timer: 0 };
+function _mhModalFlags() {
+  var sh = document.getElementById('sheet');
+  var dr = document.getElementById('v6-scalpel-drawer');
+  var sheetOpen = !!(sh && sh.classList.contains('show') && !SM.closing);
+  var drawerOpen = (typeof V6 === 'object' && V6 && V6.scalpel && typeof V6.scalpel.open === 'boolean')
+    ? V6.scalpel.open
+    : !!(dr && dr.classList.contains('show') && !dr.hidden);
+  return { sheetOpen: sheetOpen, drawerOpen: drawerOpen, target: (drawerOpen ? 1 : 0) + (sheetOpen ? 1 : 0) };
+}
+function _mhSyncRootClass() {
+  var f = _mhModalFlags(), r = document.documentElement;
+  if (r && r.classList) r.classList.toggle('modal-open', f.target > 0);
+  return f;
+}
+function _mhClearFlight() {
+  if (_mh.timer) { clearTimeout(_mh.timer); _mh.timer = 0; }
+  _mh.inFlight = false;
+  if (_mh.pending) {
+    _mh.pending = false;
+    syncModalHistory();
+  }
+}
+function _mhFlush() {
+  _mh.scheduled = false;
+  var f = _mhSyncRootClass();
+  if (!window.history || typeof window.history.pushState !== 'function') return;
+  if (_mh.inFlight) {
+    _mh.pending = true;
+    return;
+  }
+  try {
+    if (_mh.curDepth === 0 && f.target > 0 && window.history.state && (window.history.state.hncScalpel || window.history.state.hncModalDepth)) {
+      _mh.curDepth = 1;
+    }
+  } catch (_) {}
+  var delta = f.target - _mh.curDepth;
+  if (delta > 0) {
+    try {
+      while (_mh.curDepth < f.target) {
+        _mh.curDepth++;
+        window.history.pushState({ hncModalDepth: _mh.curDepth }, '');
+      }
+    } catch (_) {}
+  } else if (delta < 0) {
+    _mh.curDepth = f.target;
+    _mh.inFlight = true;
+    if (_mh.timer) clearTimeout(_mh.timer);
+    _mh.timer = setTimeout(_mhClearFlight, 340);
+    try {
+      if (typeof window.history.go === 'function') window.history.go(delta);
+      else window.history.back();
+    } catch (_) {
+      _mhClearFlight();
+    }
+  }
+}
+function syncModalHistory() {
+  _mhSyncRootClass();
+  if (_mh.scheduled) return;
+  _mh.scheduled = true;
+  Promise.resolve().then(_mhFlush);
+}
+window.__hncSyncModalHistory = syncModalHistory;
+
+function sheetFxOn() {
+  return appleSheet() && (typeof fxOn !== 'function' || fxOn('sheet'));
+}
+
 function sheetOpenFx(already) {
   var sh = $('#sheet'), sc = $('#scrim');
-  if (!sh || !appleSheet()) return false;
+  if (sh && sh._morphAnim) { try { sh._morphAnim.cancel(); } catch (_) {} sh._morphAnim = null; }
+  if (!sh || !sheetFxOn()) {
+    SM.open = false; SM.closing = false;
+    shSpring.stop();
+    if (sh) { sh.classList.remove('closing', 'is-spring', 'is-dragging'); sh.style.transform = ''; sh.style.opacity = ''; sh.style.transition = ''; }
+    if (sc) sc.style.opacity = '';
+    return false;
+  }
   SM.closing = false;
   sh.classList.remove('closing', 'is-dragging');
   if (sc) sc.style.opacity = '';
@@ -13,23 +103,24 @@ function sheetOpenFx(already) {
   SM.open = true;
   var mor = !already && fxOn('morph') && !lowFx() && morphFrom();
   if (mor) {
-    sh.classList.remove('is-spring');
+    sh.classList.add('is-spring');
     shSpring.stop();
     shSpring.x = shSpring.to = 0;
     shSpring.v = 0;
-    sh.style.transform = '';
+    sh.style.transform = 'translate3d(-50%,0,0)';
+    void sh.offsetWidth;
     morphSheet(sh, mor);
     return true;
   }
   if (already && !shSpring.raf) {
     sh.classList.remove('is-spring');
     shSpring.set(0);
-    sh.style.transform = '';
+    sh.style.transform = 'translate3d(-50%,0,0)';
     return true;
   }
   sh.classList.add('is-spring');
-  if (!already && (!shSpring.raf || shSpring.x > SM.h * 0.65)) {
-    shSpring.set(Math.min(SM.h + 36, 420));
+  if (!already && (!shSpring.raf || shSpring.x > 180)) {
+    shSpring.set(Math.min(Math.round((SM.h || 360) * 0.38), 168));
   }
   shSpring.go(0, 0, springP());
   return true;
@@ -37,8 +128,10 @@ function sheetOpenFx(already) {
 
 function sheetCloseFx(v) {
   var sh = $('#sheet'), sc = $('#scrim');
-  if (!sh || !SM.open || !appleSheet()) {
+  if (sh && sh._morphAnim) { try { sh._morphAnim.cancel(); } catch (_) {} sh._morphAnim = null; }
+  if (!sh || !SM.open || !sheetFxOn()) {
     SM.open = false; SM.closing = false;
+    shSpring.stop();
     if (sh) { sh.classList.remove('closing', 'is-spring', 'is-dragging'); sh.style.transform = ''; sh.style.opacity = ''; sh.style.transition = ''; }
     if (sc) sc.style.opacity = '';
     return false;
@@ -52,19 +145,25 @@ function sheetCloseFx(v) {
   return true;
 }
 
-/* 共享元素展开: 记下刚点的那一行/卡片, 650ms 内打开的弹层从它的位置和大小"长"出来(裁剪 + 位移, 内容不变形) */
+/* 共享元素展开: 记下刚点的那一行/按钮, 650ms 内打开的弹层从它的位置和大小"长"出来(禁止穿透命中超大父容器 .glass / #v6-host-list-card) */
 var lastTap = null;
 document.addEventListener('pointerdown', function (e) {
   var t0 = evEl(e);
-  var el = t0 && t0.closest && t0.closest('.chip, .btn, .cn, .dg, .row, .sni-row, .client, .dev-h, .cc-tile, [data-act], .dev, .glass');
-  if (!el || (el.closest('#sheet') && !el.closest('.cn, .row, .dg, .btn'))) { lastTap = null; return; }
+  var el = t0 && t0.closest && t0.closest('.chip, .btn, .cn, .dg, .row, .sni-row, .v6-app-row, [data-v6-act], .client, .dev-h, .cc-tile, [data-act]');
+  if (!el || el.id === 'v6-host-list-card' || el.classList.contains('glass') || el.classList.contains('scard') || (el.closest('#sheet') && !el.closest('.cn, .row, .dg, .btn, .v6-app-row, [data-v6-act]'))) { lastTap = null; return; }
   var r = el.getBoundingClientRect();
+  if (r.height > Math.max(320, (window.innerHeight || 800) * 0.5)) { lastTap = null; return; }
   lastTap = { r: r, t: performance.now(), rad: parseFloat(getComputedStyle(el).borderRadius) || 14 };
 }, true);
 
 function morphFrom() { return lastTap && performance.now() - lastTap.t < 650 && lastTap.r.width > 20 ? lastTap : null; }
 function morphSheet(sh, from) {
+  if (sh._morphAnim) { try { sh._morphAnim.cancel(); } catch (_) {} sh._morphAnim = null; }
+  sh.classList.add('is-spring');
+  sh.style.transform = 'translate3d(-50%,0,0)';
+  void sh.offsetWidth;
   var fr = sh.getBoundingClientRect(), s = from.r, dy = s.top - fr.top;
+  SM.h = Math.max(260, Math.round(fr.height) || sh.offsetHeight || 520);
   var l = Math.max(0, s.left - fr.left), rgt = Math.max(0, fr.right - s.right), b = Math.max(0, fr.height - s.height);
   var endRad = getComputedStyle(sh).borderRadius || '24px 24px 0 0';
   var tp = typeof themePhys === 'function' ? themePhys() : { mode: 'default', q: EASE.q, page: { dur: 260 } };
@@ -73,35 +172,42 @@ function morphSheet(sh, from) {
     { transform: 'translate3d(-50%,' + dy.toFixed(1) + 'px,0)', clipPath: 'inset(0 ' + rgt.toFixed(1) + 'px ' + b.toFixed(1) + 'px ' + l.toFixed(1) + 'px round ' + from.rad + 'px)' },
     { transform: 'translate3d(-50%,0,0)', clipPath: 'inset(0 0 0 0 round ' + endRad + ')' }
   ], { duration: dur, easing: tp.q });
+  if (a) {
+    sh._morphAnim = a;
+    var doneMorph = function () {
+      if (sh._morphAnim === a) sh._morphAnim = null;
+      if (!sh._morphAnim && !shSpring.raf && !SM.closing && !sh.classList.contains('is-dragging')) {
+        sh.classList.remove('is-spring');
+      }
+    };
+    a.onfinish = doneMorph;
+    a.oncancel = doneMorph;
+  } else if (!shSpring.raf && !SM.closing && !sh.classList.contains('is-dragging')) {
+    sh.classList.remove('is-spring');
+  }
   anim($('#sheet-body'), [{ opacity: 0 }, { opacity: 1 }], { duration: Math.round(dur * 0.58), delay: Math.round(dur * 0.16), easing: 'ease-out', fill: 'backwards' });
   lastTap = null;
   return a;
 }
 
-var _sheetPushedOverDrawer = false;
 function sheet(html, opt) {
   opt = opt || {};
-  var sh = $('#sheet'); sh.classList.toggle('tall', !!opt.tall); sh.dataset.kind = opt.kind || '';
+  var sh = $('#sheet'), sb = sheetBodyEl();
+  sh.classList.toggle('tall', !!opt.tall); sh.dataset.kind = opt.kind || '';
   var already = sh.classList.contains('show') && !SM.closing;
   var prevClose = sheetOnClose; sheetOnClose = null;
   if (already && prevClose) { try { prevClose(); } catch (_) {} }
-  $('#sheet-body').innerHTML = html; sheetOnClose = opt.onClose || null;
-  $('#scrim').classList.add('show'); sh.classList.add('show'); sh.scrollTop = 0;
-  var drEl = document.getElementById('v6-scalpel-drawer');
-  if (!already && drEl && drEl.classList.contains('show') && !_sheetPushedOverDrawer) {
-    try {
-      if (window.history && typeof window.history.pushState === 'function') {
-        window.history.pushState({ hncSheet: 1, hncScalpel: 1 }, '');
-        _sheetPushedOverDrawer = true;
-      }
-    } catch (_) {}
-  }
+  sb.innerHTML = html; sheetOnClose = opt.onClose || null;
+  SM.closing = false;
+  $('#scrim').classList.add('show'); sh.classList.add('show');
+  sb.scrollTop = 0;
+  syncModalHistory();
   placeSegs(sh);
   var usedSpring = sheetOpenFx(already);
   if (already && motionOn()) {
     var tp = typeof themePhys === 'function' ? themePhys() : { mode: 'default' };
     var dur = tp.mode === 'cyber' ? 130 : tp.mode === 'default' ? 170 : 230;
-    anim($('#sheet-body'), [
+    anim(sb, [
       { opacity: 0, transform: tp.mode === 'liquid' || tp.mode === 'frosted' ? 'translate3d(0,6px,0)' : 'translate3d(0,3px,0)' },
       { opacity: 1, transform: 'none' }
     ], { duration: dur, easing: tp.soft || 'ease-out' });
@@ -123,21 +229,10 @@ function sheetSettled(v) {
 
 function closeSheet(v, fromPop) {
   if ($('#sheet').classList.contains('show')) sheetCloseAt = performance.now();
-  if (_sheetPushedOverDrawer) {
-    _sheetPushedOverDrawer = false;
-    if (!fromPop) {
-      try {
-        if (window.history && window.history.state && window.history.state.hncSheet) {
-          window.__hncSkipNextPop = (typeof window.__hncSkipNextPop === 'number' ? window.__hncSkipNextPop : (window.__hncSkipNextPop ? 1 : 0)) + 1;
-          window.history.back();
-          setTimeout(function () { if (window.__hncSkipNextPop) window.__hncSkipNextPop = false; }, 300);
-        }
-      } catch (_) {}
-    }
-  }
   $('#scrim').classList.remove('show');
   var sh = $('#sheet'); sh.classList.remove('show'); sh.dataset.kind = '';
   sheetCloseFx(typeof v === 'number' ? v : 0);
+  syncModalHistory(fromPop);
   var f = sheetOnClose; sheetOnClose = null; if (f) try { f(); } catch (_) {}
 }
 $('#scrim').addEventListener('click', function () { closeSheet(0); });
@@ -167,16 +262,17 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
     }
   }
 
-  function beginDrag(y, onGrab, pid) {
+  function beginDrag(y, onGrab, pid, targetEl) {
     if (!sh.classList.contains('show') || SM.closing) return false;
-    if (!onGrab && sh.scrollTop > 0) return false;
+    if (!onGrab && sheetScrollBlocked(targetEl, sh)) return false;
+    if (sh._morphAnim) { try { sh._morphAnim.cancel(); } catch (_) {} sh._morphAnim = null; }
     SM.h = Math.max(260, sh.offsetHeight || 520);
-    var useJs = appleSheet() && (typeof fxOn !== 'function' || fxOn('sheet'));
+    var useJs = sheetFxOn();
     if (useJs) { shSpring.stop(); SM.open = true; }
     st = {
       y0: y, ly: y, dy: 0, v: 0,
       t0: performance.now(), lt: performance.now(),
-      onGrab: !!onGrab, active: !!onGrab, js: useJs, pid: pid
+      onGrab: !!onGrab, active: !!onGrab, js: useJs, pid: pid, target: targetEl || null
     };
     if (onGrab) sh.classList.add('is-dragging');
     return true;
@@ -190,7 +286,7 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
     st.dy = cy - st.y0;
 
     if (!st.active) {
-      if (st.dy < -5 || sh.scrollTop > 0) {
+      if (st.dy < -5 || sheetScrollBlocked(st.target, sh)) {
         st = null;
         return;
       }
@@ -225,9 +321,12 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
       }
       return;
     }
-    sh.style.transform = '';
-    if (sc) sc.style.opacity = '';
-    if (shouldClose) closeSheet(0);
+    if (shouldClose) {
+      closeSheet(0);
+    } else {
+      sh.style.transform = 'translate3d(-50%,0,0)';
+      if (sc) sc.style.opacity = '';
+    }
   }
 
   // 触屏整卡顶部下拉关闭
@@ -236,7 +335,7 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
     var te = evEl(e);
     if (te && te.closest && te.closest('input,textarea,select,.seg,.toggle')) return;
     var onGrab = !!(te && te.closest && te.closest('.grab'));
-    beginDrag(e.touches[0].clientY, onGrab, null);
+    beginDrag(e.touches[0].clientY, onGrab, null, te);
   }, { passive: true });
   sh.addEventListener('touchmove', function (e) {
     if (!st || e.touches.length !== 1) return;
@@ -253,7 +352,7 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
     if (!grab) return;
     e.preventDefault();
     try { grab.setPointerCapture(e.pointerId); } catch (_) {}
-    beginDrag(e.clientY, true, e.pointerId);
+    beginDrag(e.clientY, true, e.pointerId, pe);
   });
   sh.addEventListener('pointermove', function (e) {
     if (!st || st.pid == null || e.pointerId !== st.pid) return;
@@ -289,30 +388,88 @@ function copyText(t) {
 function closeDD() { $$('.dd.open').forEach(function (d) { d.classList.remove('open'); }); }
 
 /* ═════════════════════ 告警 ═════════════════════ */
-var ALERT_KIND = { unknown_device: ['新设备接入', 'var(--orange)', devSvg('router', 'mini')], anomaly_traffic: ['流量异常', 'var(--red)', uiSvg('trend')], monthly_quota: ['月度配额', 'var(--purple)', uiSvg('chart')],
-  device_quota: ['设备超出流量配额', 'var(--red)', uiSvg('traffic')], phone_quota: ['本机流量套餐', 'var(--orange)', devSvg('phone', 'mini')], app_time_warn: ['应用时长快用完', 'var(--orange)', uiSvg('hourglass')], app_time_exhausted: ['应用时长已用完', 'var(--red)', uiSvg('hourglass')],
+var ALERT_KIND = {
+  unknown_device: ['新设备接入', 'var(--orange)', devSvg('router', 'mini')],
+  anomaly_traffic: ['流量异常', 'var(--red)', uiSvg('trend')],
+  monthly_quota: ['月度配额', 'var(--purple)', uiSvg('chart')],
+  device_quota: ['设备超出流量配额', 'var(--red)', uiSvg('traffic')],
+  phone_quota: ['本机流量套餐', 'var(--orange)', devSvg('phone', 'mini')],
+  app_time_warn: ['应用时长快用完', 'var(--orange)', uiSvg('hourglass')],
+  app_time_exhausted: ['应用时长已用完', 'var(--red)', uiSvg('hourglass')],
   mac_merge_suggest: ['疑似同一设备换了 MAC', 'var(--orange)', uiSvg('merge')],
   mac_merge_auto: ['随机 MAC 无感自动继承', 'var(--green)', uiSvg('merge')],
-  mac_merge_unmerge_auto: ['双胞胎同时在线 · 已自动拆分', 'var(--orange)', uiSvg('isolate')] };
+  mac_merge_unmerge_auto: ['双胞胎同时在线 · 已自动拆分', 'var(--orange)', uiSvg('isolate')],
+  leakguard: ['隐私明文预警', 'var(--red)', uiSvg('warn')],
+  block_hit: ['命中连接封禁', 'var(--orange)', uiSvg('ban')],
+  dns_takeover_failopen: ['DNS 接管降级', 'var(--orange)', uiSvg('warn')],
+  auth_bruteforce: ['配对防爆破拦截', 'var(--red)', uiSvg('ban')],
+  watchdog_stall: ['守护自愈告警', 'var(--orange)', uiSvg('bolt')]
+};
 function alertTitle(a) { return (ALERT_KIND[a.kind] || [a.kind || '告警'])[0]; }
+function groupAlertsForSheet(list) {
+  var map = {}, groups = [];
+  list.forEach(function (a) {
+    var ex = a && a.extra && typeof a.extra === 'object' ? a.extra : null;
+    var subj = a.mac || '';
+    if (!subj && ex) subj = String(ex.pkg || ex.app_name || ex.uid || ex.origin || '');
+    if (!subj && a.kind === 'leakguard' && a.detail) subj = String(a.detail).split(' 向 ')[0] || '';
+    if (!subj && a.kind === 'auth_bruteforce') subj = a.ip || '';
+    var gk = String(a.kind || 'alert') + '|' + subj;
+    var g = map[gk];
+    if (!g) {
+      g = { key: gk, head: a, count: 0, unreadIds: [], hasFresh: false };
+      map[gk] = g;
+      groups.push(g);
+    }
+    g.count++;
+    if (a.id != null) {
+      if (!a.seen) g.unreadIds.push(a.id);
+      if (alertFresh[a.id]) g.hasFresh = true;
+    }
+  });
+  return groups;
+}
 function renderAlertsSheet(keep) {
   var list = (S.alerts.list || []).slice().sort(function (a, b) { return num(b.ts) - num(a.ts); });
-  var html = '<h3>告警</h3><div class="sub">' + (list.length ? '未读 ' + S.alerts.unread + ' · 共 ' + list.length + ' 条' : '暂时没有告警') + '</div>' +
-    (list.length ? '<div>' + list.slice(0, 60).map(function (a) {
+  var groups = groupAlertsForSheet(list);
+  var subTxt = list.length
+    ? '未读 ' + S.alerts.unread + ' · 共 ' + list.length + ' 条' + (groups.length < list.length ? ' · 已折叠为 ' + groups.length + ' 项' : '')
+    : '暂时没有告警';
+  var html = '<h3>告警</h3><div class="sub">' + subTxt + '</div>' +
+    (groups.length ? '<div>' + groups.slice(0, 60).map(function (g) {
+      var a = g.head, ex = a && a.extra && typeof a.extra === 'object' ? a.extra : null;
       var k = ALERT_KIND[a.kind] || ['告警', 'var(--blue)'], d = a.mac ? devBy(a.mac) : null, nm = d ? d.name : (a.mac || '');
+      var isHostOrigin = !!(ex && ex.origin === 'host') || (a.kind === 'leakguard' && !a.mac && /^198\.1[89]\./.test(a.ip || ''));
+      var showIp = (!isHostOrigin && a.ip && String(a.detail || '').indexOf(a.ip) < 0) ? a.ip : '';
+      var isUnread = g.unreadIds.length > 0;
+      var actIds = isUnread ? g.unreadIds.join(',') : String(a.id || '');
       var acts = '';
       if (a.kind === 'unknown_device' && a.mac) acts += '<button class="linkish" data-al="rename">起名</button><button class="linkish" data-al="known">认识它</button><button class="linkish danger" data-al="block">拉黑</button>';
       if (a.kind === 'mac_merge_suggest' && a.mac) acts += '<button class="linkish" data-al="merge">查看建议</button>';
       if (a.kind === 'mac_merge_auto' && a.mac) acts += '<button class="linkish" data-al="unmerge">拆分恢复</button>';
-      if (!a.seen) acts += '<button class="linkish" data-al="seen">已读</button>';
-      return '<div class="alrow' + (a.seen && !alertFresh[a.id] ? ' seen' : '') + '" data-alid="' + esc(a.id) + '" data-almac="' + esc(a.mac || '') + '"><i style="background:' + k[1] + '"></i><div style="min-width:0">' +
-        '<div style="font-weight:700;font-size:14px">' + (k[2] ? '<span class="al-ic" style="color:' + k[1] + '">' + k[2] + '</span> ' : '') + esc(alertTitle(a)) + (nm ? ' · ' + esc(nm) : '') + '</div>' +
-        '<div class="s">' + esc(a.detail || '') + (a.ip ? ' · ' + esc(a.ip) : '') + ' · ' + ago(a.ts) + '</div>' + (acts ? '<div class="acts">' + acts + '</div>' : '') + '</div></div>';
+      if (isUnread) acts += '<button class="linkish" data-al="seen">已读</button>';
+      var cntBadge = g.count > 1 ? ' <span class="badge b-gray" style="vertical-align:1px">×' + g.count + '</span>' : '';
+      return '<div class="alrow' + (!isUnread && !g.hasFresh ? ' seen' : '') + '" data-alid="' + esc(actIds) + '" data-almac="' + esc(a.mac || '') + '"><i style="background:' + k[1] + '"></i><div style="min-width:0">' +
+        '<div style="font-weight:700;font-size:14px">' + (k[2] ? '<span class="al-ic" style="color:' + k[1] + '">' + k[2] + '</span> ' : '') + esc(alertTitle(a)) + (nm ? ' · ' + esc(nm) : '') + cntBadge + '</div>' +
+        '<div class="s">' + esc(a.detail || '') + (showIp ? ' · ' + esc(showIp) : '') + ' · ' + ago(a.ts) + '</div>' + (acts ? '<div class="acts">' + acts + '</div>' : '') + '</div></div>';
     }).join('') + '</div>' : '<div class="empty">' + uiSvg('check') + ' 一切正常</div>') +
-    '<div class="btns" style="margin-top:12px"><button class="btn sec press" data-close>关闭</button>' + (S.alerts.unread ? '<button class="btn pri press" id="al-all">全部已读</button>' : '') + '</div>';
-  if (keep && $('#sheet').dataset.kind === 'alerts') { var y = $('#sheet').scrollTop; $('#sheet-body').innerHTML = html; $('#sheet').scrollTop = y; }
+    '<div class="btns al-foot-btns"><button type="button" class="btn sec press" data-close>关闭</button>' +
+    (list.length ? '<button type="button" class="btn dan press" id="al-clear">清空告警</button>' : '') +
+    (S.alerts.unread ? '<button type="button" class="btn pri press" id="al-all">全部已读</button>' : '') + '</div>';
+  var sbAl = sheetBodyEl();
+  if (keep && $('#sheet').dataset.kind === 'alerts') { var y = sbAl.scrollTop; sbAl.innerHTML = html; sbAl.scrollTop = y; }
   else sheet(html, { kind: 'alerts', tall: true });
   var all = $('#al-all'); if (all) all.onclick = function () { api.action('alert_dismiss_all', {}).then(function () { toast('已全部标为已读'); return loadAlerts(); }).catch(function (e) { toast(errText(e), 'err'); }); };
+  var clr = $('#al-clear'); if (clr) clr.onclick = function () {
+    var p = api.action('alert_clear', {}).then(function () {
+      S.alerts = { unread: 0, list: [] };
+      alertFresh = {};
+      toast('已清空全部告警');
+      renderAlertsSheet(false);
+      return typeof loadAlerts === 'function' ? loadAlerts() : null;
+    }).catch(function (e) { toast(errText(e), 'err'); });
+    if (typeof busyWhile === 'function') busyWhile(clr, p);
+  };
 }
 var alertFresh = {};   // 打开面板时还未读的告警: 本次面板里保持高亮, 不因为自动标已读而立刻变灰
 function openAlerts() {
@@ -327,13 +484,14 @@ function openAlerts() {
   });
 }
 function alertAction(kind, id, mac) {
+  var firstId = String(id || '').split(',')[0];
   var d = devBy(mac) || { mac: mac, name: mac, ip: '' };
   var seen = function () { return api.action('alert_mark_seen', { ids: String(id) }).catch(function () {}); };
   var known = function () { return api.action('alert_mark_known', { mac: mac }).catch(function () {}); };
   if (kind === 'seen') return seen().then(loadAlerts);
-  if (kind === 'merge') { var al = (S.alerts.list || []).filter(function (x) { return String(x.id) === String(id); })[0], ex = al && al.extra && typeof al.extra === 'object' ? al.extra : null; seen().then(loadAlerts); mergeSheet(mac, ex && ex.old_mac, ex); return; }
+  if (kind === 'merge') { var al = (S.alerts.list || []).filter(function (x) { return String(x.id) === firstId; })[0], ex = al && al.extra && typeof al.extra === 'object' ? al.extra : null; seen().then(loadAlerts); mergeSheet(mac, ex && ex.old_mac, ex); return; }
   if (kind === 'unmerge') {
-    var alU = (S.alerts.list || []).filter(function (x) { return String(x.id) === String(id); })[0];
+    var alU = (S.alerts.list || []).filter(function (x) { return String(x.id) === firstId; })[0];
     var exU = alU && alU.extra && typeof alU.extra === 'object' ? alU.extra : null;
     seen().then(loadAlerts);
     if (typeof unmergeSheet === 'function') unmergeSheet(mac, (exU && (exU.old_mac || exU.from_mac)) || d.mergedFrom || '', (exU && exU.old_name) || d.mergedFromName || '');
@@ -347,10 +505,15 @@ function alertAction(kind, id, mac) {
   }
 }
 
-/* v6 连接抽屉跟手下拉关闭与 Android 侧滑返回拦截 */
+/* v6 连接抽屉跟手下拉关闭与 Android 侧滑返回统一历史栈拦截 */
 (function () {
   var dr = document.getElementById('v6-scalpel-drawer'), sc = document.getElementById('v6-scalpel-scrim'), ds = null;
   if (dr) {
+    if (typeof MutationObserver === 'function') {
+      try {
+        new MutationObserver(function () { syncModalHistory(); }).observe(dr, { attributes: true, attributeFilter: ['class', 'hidden'] });
+      } catch (_) {}
+    }
     dr.addEventListener('pointerdown', function (e) {
       if (e.button != null && e.button !== 0) return;
       if (!dr.classList.contains('show')) return;
@@ -395,14 +558,25 @@ function alertAction(kind, id, mac) {
     dr.addEventListener('lostpointercapture', endDrag);
   }
   window.addEventListener('popstate', function () {
+    if (_mh.inFlight) {
+      _mhClearFlight();
+      return;
+    }
     if (window.__hncSkipNextPop) {
       if (typeof window.__hncSkipNextPop === 'number' && window.__hncSkipNextPop > 1) window.__hncSkipNextPop--;
       else window.__hncSkipNextPop = false;
       return;
     }
+    if (_mh.curDepth > 0) _mh.curDepth--;
     var shEl = document.getElementById('sheet');
-    if (shEl && shEl.classList.contains('show')) { closeSheet(0, true); return; }
-    if (dr && dr.classList.contains('show') && typeof closeScalpelDrawer === 'function') closeScalpelDrawer(true);
+    if (shEl && shEl.classList.contains('show') && !SM.closing) {
+      closeSheet(0, true);
+      return;
+    }
+    var drOpen = (dr && dr.classList.contains('show')) || (typeof V6 === 'object' && V6 && V6.scalpel && V6.scalpel.open);
+    if (drOpen && typeof closeScalpelDrawer === 'function') {
+      closeScalpelDrawer(true);
+    }
   });
 })();
 
@@ -576,9 +750,9 @@ function renderQuickHealthSheet(raw, keepScroll) {
   }
 
   if (keepScroll && sh && sh.classList.contains('show') && sh.dataset.kind === 'quick-health') {
-    var topY = sh.scrollTop;
-    $('#sheet-body').innerHTML = bodyHtml;
-    sh.scrollTop = topY;
+    var sbQh = sheetBodyEl(), topY = sbQh.scrollTop;
+    sbQh.innerHTML = bodyHtml;
+    sbQh.scrollTop = topY;
   } else {
     sheet(bodyHtml, { kind: 'quick-health', tall: true });
   }

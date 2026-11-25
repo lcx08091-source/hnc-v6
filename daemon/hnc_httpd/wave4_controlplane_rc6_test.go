@@ -682,3 +682,120 @@ func TestWave4ControlplaneRC6_ZeroRateClearAndGatewayBlacklistGuard(t *testing.T
 		t.Fatalf("expected normal client MAC allowed for blacklist, got %+v", resp)
 	}
 }
+
+func TestWave4ControlplaneRC7_JSONHealth512KBStandbyMergeBillingShaper(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{"run", "data", "bin", "etc/dpi_rules.d", "data/dpi_history"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.WriteFile(filepath.Join(dir, "data", "rules.json"), []byte(`{"version":1,"whitelist_mode":false,"remote_enabled":false,"devices":{},"blacklist":[],"whitelist":[]}`), 0o644)
+
+	// 1. /api/json_health 超过 1024B (32KB) 不截断解析成功
+	bigPad := strings.Repeat("x", 32*1024)
+	jhpScript := "#!/system/bin/sh\nprintf '{\"ok\":true,\"overall\":\"ok\",\"pad\":\"%s\"}\\n'\n"
+	_ = os.WriteFile(filepath.Join(dir, "bin", "json_health_panel.sh"), []byte(fmt.Sprintf(jhpScript, bigPad)), 0o755)
+
+	srv := newServer(dir)
+	jhReq := httptest.NewRequest(http.MethodGet, "/api/json_health", nil)
+	jhRec := httptest.NewRecorder()
+	srv.apiJSONHealth(jhRec, jhReq)
+	var jhBody map[string]interface{}
+	if err := json.Unmarshal(jhRec.Body.Bytes(), &jhBody); err != nil || jhBody["pad"] != bigPad {
+		t.Fatalf("/api/json_health failed on >1KB output: code=%d err=%v", jhRec.Code, err)
+	}
+
+	// 2. /api/dpi_rules GET 大规则 (>1KB) 导出不截断, POST merge:true 透传 --merge
+	impLog := filepath.Join(dir, "run", "dpi_imp_args.txt")
+	bigRules := `{"schema_version":"1.0","rules_version":"test","rules":[{"id":"r1","note":"` + strings.Repeat("r", 8192) + `"}]}`
+	impScript := "#!/system/bin/sh\nif [ \"$1\" = \"--export\" ]; then\n  printf '%s' '" + bigRules + "'\n  exit 0\nfi\nprintf '%s\\n' \"$1\" > \"" + impLog + "\"\necho 'ok: merged'\n"
+	_ = os.WriteFile(filepath.Join(dir, "bin", "dpi_rules_import.sh"), []byte(impScript), 0o755)
+
+	expReq := httptest.NewRequest(http.MethodGet, "/api/dpi_rules", nil)
+	expRec := httptest.NewRecorder()
+	srv.apiDPIRules(expRec, expReq)
+	if expRec.Code != http.StatusOK || !strings.Contains(expRec.Body.String(), `"ok":true`) {
+		t.Fatalf("GET /api/dpi_rules >1KB export failed: code=%d body=%s", expRec.Code, expRec.Body.String())
+	}
+
+	postBody := `{"rules":"{\"rules\":[{\"id\":\"u1\"}]}","merge":true}`
+	impReq := httptest.NewRequest(http.MethodPost, "/api/dpi_rules", strings.NewReader(postBody))
+	impReq.RemoteAddr = "127.0.0.1:42001"
+	impReq.Header.Set("Content-Type", "application/json")
+	impReq.Header.Set("X-HNC-CSRF", "1")
+	impRec := httptest.NewRecorder()
+	srv.apiDPIRules(impRec, impReq)
+	if impRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/dpi_rules merge:true failed: code=%d body=%s", impRec.Code, impRec.Body.String())
+	}
+	if gotArg, err := os.ReadFile(impLog); err != nil || strings.TrimSpace(string(gotArg)) != "--merge" {
+		t.Fatalf("expected --merge forwarded to dpi_rules_import.sh, got %q err=%v", string(gotArg), err)
+	}
+
+	// 3. /api/devices 补齐 hotspot_active
+	_ = os.WriteFile(filepath.Join(dir, "run", "hnc_state"), []byte("IDLE\n"), 0o644)
+	_, devPayload := srv.buildDevicesPayload()
+	if ha, exists := devPayload["hotspot_active"]; !exists || ha != false {
+		t.Fatalf("expected hotspot_active=false in /api/devices when IDLE, got %v (exists=%v)", ha, exists)
+	}
+
+	// 4. statsHealth 待机休眠态抑制 ct_events_off 与 iptables_chain_missing 假告警
+	ctEvents.mu.Lock()
+	prevAct := ctEvents.active
+	ctEvents.active = false
+	ctEvents.mu.Unlock()
+	defer func() {
+		ctEvents.mu.Lock()
+		ctEvents.active = prevAct
+		ctEvents.mu.Unlock()
+	}()
+	sleepEnv := shEnv{
+		hotspotIface: func() string { return "" },
+		iptForward:   func() (string, error) { return "Chain FORWARD (policy ACCEPT 0 packets, 0 bytes)\n", nil },
+		ctAcct:       func() int { return 1 },
+		ctSleeping:   func() bool { return true },
+	}
+	shOut := statsHealth(dir, sleepEnv, &shState{}, time.Now())
+	if issues, _ := shOut["issues"].([]shIssue); len(issues) != 0 {
+		t.Fatalf("expected 0 issues in standby sleep, got %+v", issues)
+	}
+
+	// 5. 改计费日时清空 usageCache 即时切换周期
+	invalidateUsageCache()
+	defer invalidateUsageCache()
+	_ = os.WriteFile(puConfigPath(dir), []byte(`{"billing_day":1}`), 0o644)
+	uRec1 := httptest.NewRecorder()
+	srv.apiUsageMonth(uRec1, httptest.NewRequest(http.MethodGet, "/api/usage_month", nil))
+	var u1 map[string]interface{}
+	_ = json.Unmarshal(uRec1.Body.Bytes(), &u1)
+
+	_ = os.WriteFile(puConfigPath(dir), []byte(`{"billing_day":15}`), 0o644)
+	uRec2 := httptest.NewRecorder()
+	srv.apiUsageMonth(uRec2, httptest.NewRequest(http.MethodGet, "/api/usage_month", nil))
+	var u2 map[string]interface{}
+	_ = json.Unmarshal(uRec2.Body.Bytes(), &u2)
+	wantP15 := float64(billingPeriodStart(time.Now(), 15).Unix())
+	if u2["period_start"] != wantP15 {
+		t.Fatalf("expected period_start updated immediately to %v after billing_day=15, got u1=%v u2=%v", wantP15, u1["period_start"], u2["period_start"])
+	}
+
+	// 6. actionGlobalShaperSet 校验失败时不提前关闭 autorate
+	srv.autorate.mu.Lock()
+	srv.autorate.cfg.Enabled = true
+	srv.autorate.mu.Unlock()
+	badShaper := actionGlobalShaperSet(srv, map[string]string{
+		"enabled":          "true",
+		"autorate_enabled": "false",
+		"rate_down":        "invalid_rate",
+	})
+	if badShaper.OK {
+		t.Fatalf("expected invalid rate rejected")
+	}
+	srv.autorate.mu.Lock()
+	stillOn := srv.autorate.cfg.Enabled
+	srv.autorate.mu.Unlock()
+	if !stillOn {
+		t.Fatalf("autorate was prematurely disabled despite actionGlobalShaperSet validation failure")
+	}
+}

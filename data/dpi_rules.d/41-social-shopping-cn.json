@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "41-social-shopping-cn",
-  "rules_version": "hnc-curated-v6.1.0-rc.6#41-social-shopping-cn",
+  "rules_version": "hnc-curated-v6.1.0-rc.7#41-social-shopping-cn",
   "rules": [
     {
       "id": "didi",

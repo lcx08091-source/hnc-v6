@@ -97,7 +97,7 @@ HNC_P2P_IFACE_ERE='^p2p'
 # v5.20.1+: VPN 虚拟口(含 Tailscale / Clash Meta / sing-box / utun; 永不是热点上游或 AP 口)
 HNC_VPN_IFACE_ERE='^(tun[0-9]+|tap[0-9]+|ppp[0-9]+|wg[0-9]+|ipsec[0-9a-z_]*|xfrm[0-9]+|tailscale[0-9]*|utun[0-9]*|sing_tun[0-9]*|Meta)$'
 # 永不作为热点/上游的虚拟口
-HNC_IGNORE_IFACE_ERE='^(lo|dummy[0-9]*|v4-.*|tun[0-9]*|ifb[0-9]*|r_rmnet.*|rmnet_(ipa|mhi|usb).*|ip6tnl[0-9]*|sit[0-9]*|gre[0-9]*|gretap[0-9]*|erspan[0-9]*|ip_vti[0-9]*|ip6_vti[0-9]*|ip6gre[0-9]*|bond[0-9]*|umts_dm[0-9]*|clat.*)$'
+HNC_IGNORE_IFACE_ERE='^(lo|dummy[0-9]*|v4-.*|tun[0-9]*|ifb[0-9]*|r_rmnet.*|rmnet_(ipa|mhi|usb).*|ip6tnl[0-9]*|sit[0-9]*|gre[0-9]*|gretap[0-9]*|erspan[0-9]*|ip_vti[0-9]*|ip6_vti[0-9]*|ip6gre[0-9]*|bond[0-9]*|umts_dm[0-9]*|clat.*|vgate[0-9]*|veth.*)$'
 
 # hnc_iface_class <name>  —— 一次 awk 完成(同一组 ERE 字符串, 不逐条 fork grep)
 hnc_iface_class() {
@@ -202,13 +202,18 @@ _hi_collect() {
         { for (i = 1; i < NF; i++) if ($i == "inet") {
               n = $2; sub(/:$/, "", n); sub(/@.*/, "", n)
               a = $(i+1); sub(/\/.*/, "", a); print n, a; break } }')
-    # 任意路由表里带 default route 的接口(STA / 蜂窝 / VPN)—— AP 口不会有
-    _HI_DEFRT=$(ip route show table all 2>/dev/null | awk '
+    # 任意路由表里带 IPv4 default route 的接口(STA / 蜂窝 / VPN)—— 优先 ip -4 route 防混入 IMS IPv6 RA
+    _HI_DEFRT=$(ip -4 route show table all 2>/dev/null | awk '
         $1 == "default" { for (i = 1; i < NF; i++) if ($i == "dev") print $(i+1) }' | sort -u | tr '\n' ' ')
+    if [ -z "$_HI_DEFRT" ]; then
+        _HI_DEFRT=$(ip route show table all 2>/dev/null | awk '
+            $1 == "default" && $0 !~ / via [^ ]*:/ { for (i = 1; i < NF; i++) if ($i == "dev") print $(i+1) }' | sort -u | tr '\n' ' ')
+    fi
     _HI_UPSTREAM=""
     local t r
     for t in 1.1.1.1 223.5.5.5 8.8.8.8; do
-        r=$(ip route get "$t" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit } }')
+        r=$(ip -4 route get "$t" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit } }')
+        [ -n "$r" ] || r=$(ip route get "$t" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit } }')
         [ -n "$r" ] && { _HI_UPSTREAM="$r"; break; }
     done
 }

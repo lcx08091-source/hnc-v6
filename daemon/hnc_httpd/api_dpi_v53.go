@@ -17,6 +17,7 @@ package main
 import (
 	"net/http"
 	"path/filepath"
+	"strings"
 )
 
 //go:noinline
@@ -37,6 +38,63 @@ func (s *server) apiDPIState(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// normalizeDPIProbeOffloadHint 结合当前热点活跃态与 offload_guard.json 实时压制状态修正静态 offload_hint,
+// 避免关热点或守卫已压制慢路径(fallback_active==true)时将常驻 /sys/fs/bpf/tethering 目录误报为失控硬件分流。
+func normalizeDPIProbeOffloadHint(hncDir string, raw interface{}) interface{} {
+	src, ok := raw.(map[string]interface{})
+	if !ok || src == nil {
+		return raw
+	}
+	out := make(map[string]interface{}, len(src)+1)
+	for k, v := range src {
+		out[k] = v
+	}
+	staticHint := dpJSONBool(out["offload_hint"])
+	if staticHint {
+		out["offload_static_hint"] = true
+	}
+
+	clearHint := func() {
+		out["offload_hint"] = false
+		if ev, hasEv := out["offload_evidence"]; hasEv {
+			out["offload_static_evidence"] = ev
+			delete(out, "offload_evidence")
+		}
+	}
+
+	if hncDir == "" || readHotspotIfaceName(hncDir) == "" {
+		if staticHint {
+			clearHint()
+		}
+		return out
+	}
+
+	og := readOffloadGuard(hncDir)
+	if len(og) == 0 {
+		return out
+	}
+	fbActive := dpJSONBool(og["fallback_active"]) || dpJSONBool(og["fallback"])
+	spStr := strings.ToLower(strings.TrimSpace(asString(og["slowpath"])))
+	spActive := spStr == "ok" || dpJSONBool(og["slowpath_active"])
+	tetherDisabled := dpJSONBool(og["tether_offload_disabled"])
+	if fbActive || spActive || tetherDisabled {
+		clearHint()
+		return out
+	}
+
+	st := strings.ToUpper(strings.TrimSpace(asString(og["offload_state"])))
+	if st == "" {
+		st = strings.ToUpper(strings.TrimSpace(asString(og["state"])))
+	}
+	switch st {
+	case "ACTIVE":
+		out["offload_hint"] = true
+	case "IDLE", "CAPABLE", "NOMAP", "NOHOTSPOT":
+		clearHint()
+	}
+	return out
+}
+
 //go:noinline
 func (s *server) apiDPIProbe(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.hncDir, "run", "dpid.probe.json")
@@ -51,6 +109,6 @@ func (s *server) apiDPIProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"available": true,
-		"probe":     raw,
+		"probe":     normalizeDPIProbeOffloadHint(s.hncDir, raw),
 	})
 }

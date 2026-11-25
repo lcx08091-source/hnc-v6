@@ -102,6 +102,7 @@ type DataplaneBPFMaps struct {
 
 // DataplaneOffloadGuard 硬件卸载慢路径压制核验状态。
 type DataplaneOffloadGuard struct {
+	Mode                  string `json:"mode,omitempty"`
 	SlowpathActive        bool   `json:"slowpath_active"`
 	TetherOffloadDisabled bool   `json:"tether_offload_disabled"`
 	HWNAT                 string `json:"hwnat"`
@@ -440,7 +441,7 @@ func dispatchDataplaneVerifyAction(s *server, action string, p map[string]string
 
 func dpParamTruthy(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "on":
+	case "1", "true", "yes", "on", "ok":
 		return true
 	}
 	return false
@@ -2196,8 +2197,40 @@ func parseTCFilterFlowIDs(tcOut string) map[string]bool {
 	return out
 }
 
+func dpSlowpathActiveFromGuardMap(m map[string]interface{}) bool {
+	if len(m) == 0 {
+		return false
+	}
+	if dpJSONBool(m["slowpath_active"]) {
+		return true
+	}
+	if rawSP, exists := m["slowpath"]; exists && rawSP != nil {
+		switch v := rawSP.(type) {
+		case string:
+			sp := strings.ToLower(strings.TrimSpace(v))
+			switch sp {
+			case "":
+				// fall through to fallback_active
+			case "unavailable", "error", "false", "0", "off", "n/a", "empty":
+				return false
+			default:
+				return dpParamTruthy(sp)
+			}
+		default:
+			return dpJSONBool(rawSP)
+		}
+	}
+	return dpJSONBool(m["fallback_active"]) || dpJSONBool(m["fallback"])
+}
+
 func dpInspectOffloadGuard(env *dpVerifyEnv) (DataplaneOffloadGuard, string) {
 	m := dpReadJSONMap(env, filepath.Join(env.HNCDir, "run", "offload_guard.json"))
+	mode := strings.ToLower(strings.TrimSpace(dpJSONString(m["mode"])))
+	if mode == "" && env != nil && env.HNCDir != "" {
+		if rm := dpReadJSONMap(env, filepath.Join(env.HNCDir, "data", "rules.json")); len(rm) > 0 {
+			mode = clsactModeFromRules(rm)
+		}
+	}
 	hwnat := strings.TrimSpace(dpJSONString(m["hwnat"]))
 	if hwnat == "" {
 		mtk := dpReadJSONMap(env, filepath.Join(env.HNCDir, "run", "mtk_hwnat.json"))
@@ -2209,10 +2242,11 @@ func dpInspectOffloadGuard(env *dpVerifyEnv) (DataplaneOffloadGuard, string) {
 	if hwnat == "" {
 		hwnat = "none"
 	}
-	slowpath := dpJSONBool(m["slowpath"]) || dpJSONBool(m["fallback_active"]) || dpJSONBool(m["slowpath_active"])
+	slowpath := dpSlowpathActiveFromGuardMap(m)
 	tetherOff := dpJSONBool(m["tether_offload_disabled"])
 	rawState := strings.ToUpper(strings.TrimSpace(dpJSONString(m["offload_state"])))
 	return DataplaneOffloadGuard{
+		Mode:                  mode,
 		SlowpathActive:        slowpath,
 		TetherOffloadDisabled: tetherOff,
 		HWNAT:                 hwnat,

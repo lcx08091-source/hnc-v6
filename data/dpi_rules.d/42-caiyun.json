@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "42-caiyun",
-  "rules_version": "hnc-curated-v6.1.0-rc.6#42-caiyun",
+  "rules_version": "hnc-curated-v6.1.0-rc.7#42-caiyun",
   "rules": [
     {
       "id": "caiyun_tech",

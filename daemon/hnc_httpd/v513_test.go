@@ -88,10 +88,10 @@ func TestAPIConnections(t *testing.T) {
 	r2 := get("?mac=aa:bb:cc:00:00:01")
 	conns := r2["conns"].([]interface{})
 	top := conns[0].(map[string]interface{})
-	if top["name"] != "v.douyin.com" || top["app"] != "抖音" || top["svc"] != "HTTPS" {
+	if top["name"] != "v.douyin.com" || top["app"] != "抖音" || top["svc"] != "HTTPS" || top["src"] != "192.168.43.12" {
 		t.Fatalf("enrichment wrong: %v", top)
 	}
-	if dn := top["down_bps"].(float64); dn < 300000 || dn > 500000 { // 100000B*8/2s = 400kbps
+	if dn := top["down_bps"].(float64); dn < 37500 || dn > 62500 { // 100000B/2s = 50000 B/s
 		t.Fatalf("down_bps = %v", dn)
 	}
 	dns := conns[1].(map[string]interface{})

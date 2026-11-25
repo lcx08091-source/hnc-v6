@@ -44,8 +44,8 @@ DEV_STATUS="$(file_ok "$DATA/devices.json")"
 
 for s in "$RULES_STATUS" "$NAMES_STATUS" "$TPL_STATUS" "$TOK_STATUS" "$DEV_STATUS"; do
   [ "$s" = bad ] && OVERALL="fail"
-  [ "$s" = missing ] && [ "$OVERALL" = ok ] && OVERALL="warn"
 done
+[ "$RULES_STATUS" = missing ] && [ "$OVERALL" = ok ] && OVERALL="warn"
 
 BACKUP_COUNT=0
 [ -d "$BACKUP_DIR" ] && BACKUP_COUNT="$(ls "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d ' ')"

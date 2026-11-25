@@ -390,3 +390,60 @@ func TestInitHistoryStorage_MovesOutOfTmpfsRunDir(t *testing.T) {
 		t.Fatalf("migrated file content mismatch: err=%v body=%q", err, string(b))
 	}
 }
+
+func TestRunCapture_HotspotOffDeadIfaceSilentStandbyNoOpenWarn(t *testing.T) {
+	oldOpen := openCaptureFn
+	oldByName := ifaceByNameFn
+	oldDiscover := discoverAPFn
+	oldAct := actReader
+	t.Cleanup(func() {
+		openCaptureFn = oldOpen
+		ifaceByNameFn = oldByName
+		discoverAPFn = oldDiscover
+		actReader = oldAct
+		capture.SetHotspotNets(nil)
+		capture.SetLocalMACs(nil)
+	})
+
+	runDir := t.TempDir()
+	actReader = activity.NewReader(runDir)
+	// Explicitly write hotspot_active=false + stale hotspot_iface="wlan2".
+	offBody := fmt.Sprintf(`{"ts":%d,"level":"hotspot_off","screen_on":false,"screen_known":true,"hotspot_active":false,"clients_online":0,"webui_active":false}`, time.Now().Unix())
+	if err := os.WriteFile(filepath.Join(runDir, activity.FileName), []byte(offBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "hotspot_iface"), []byte("wlan2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	discoverAPFn = func() ([]capture.IfaceCandidate, error) { return nil, nil }
+	ifaceByNameFn = func(name string) (*net.Interface, error) { return nil, syscall.ENODEV }
+
+	var openAttempts atomic.Int32
+	openCaptureFn = func(opts capture.Options) (captureRunner, error) {
+		openAttempts.Add(1)
+		return nil, syscall.ENODEV
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wakeCh := make(chan struct{}, 1)
+	sw := output.NewWriter(filepath.Join(runDir, "dpi_state.json"), "test")
+	devID := output.NewDeviceIdentifier()
+	ipNames := output.NewIPNameTable()
+	lg := leakguard.NewEngine(runDir)
+	defer lg.Close()
+	shmTr := newSHMRuntimeTracker()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runCapture(ctx, Config{RunDir: runDir, Iface: "wlan2", Snaplen: 1024}, probe.Result{AFPacketAvailable: true}, sw, devID, ipNames, lg, shmTr, wakeCh, nil)
+	}()
+
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+	<-done
+
+	if got := openAttempts.Load(); got != 0 {
+		t.Fatalf("hotspot explicitly off + dead wlan2 must enter silent standby without openCaptureFn WARN spam, got %d open attempts", got)
+	}
+}

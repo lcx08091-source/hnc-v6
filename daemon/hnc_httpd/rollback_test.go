@@ -91,6 +91,7 @@ func TestVcName(t *testing.T) {
 		"6009304": "6.1.0-rc.4",
 		"6009305": "6.1.0-rc.5",
 		"6009306": "6.1.0-rc.6",
+		"6009307": "6.1.0-rc.7",
 		"6010000": "6.1.0",
 		"6010002": "6.1.2",
 		"6019203": "6.2.0-beta.3",
@@ -160,29 +161,29 @@ func TestRollbackCorridorRC2And610(t *testing.T) {
 		t.Fatalf("rc.4 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
 	}
 
-	// 场景 1c: 历史候选版 6009305 (6.1.0-rc.5) 与当前候选版 6009306 (6.1.0-rc.6) 启动失败自动退回黄金底包 6000001 (6.0.1)
-	dirRC6 := t.TempDir()
-	dataRC6 := filepath.Join(dirRC6, "data")
-	if err := os.MkdirAll(dataRC6, 0o755); err != nil {
+	// 场景 1c: 历史候选版 6009306 (6.1.0-rc.6) 与当前候选版 6009307 (6.1.0-rc.7) 启动失败自动退回黄金底包 6000001 (6.0.1)
+	dirRC7 := t.TempDir()
+	dataRC7 := filepath.Join(dirRC7, "data")
+	if err := os.MkdirAll(dataRC7, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rc6JSON := `{"from":"6009306","to":"6000001","reason":"failstreak=6 restarts=0","at":1795400000,"action":"rolled_back"}`
-	if err := os.WriteFile(filepath.Join(dataRC6, "rollback.json"), []byte(rc6JSON), 0o644); err != nil {
+	rc7JSON := `{"from":"6009307","to":"6000001","reason":"failstreak=6 restarts=0","at":1795410000,"action":"rolled_back"}`
+	if err := os.WriteFile(filepath.Join(dataRC7, "rollback.json"), []byte(rc7JSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dataRC6, "rollback.pinned"), []byte("6009306\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dataRC7, "rollback.pinned"), []byte("6009307\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sRC6 := &server{hncDir: dirRC6}
-	gotRC6 := sRC6.rollbackStatus()
-	if gotRC6 == nil || !gotRC6.Rolled || gotRC6.From != "6009306" || gotRC6.To != "6000001" ||
-		gotRC6.FromName != "6.1.0-rc.6" || gotRC6.ToName != "6.0.1" || !gotRC6.Pinned || gotRC6.Acknowledged {
-		t.Fatalf("rc.6 -> 6.0.1 rollbackStatus mismatch: %+v", gotRC6)
+	sRC7 := &server{hncDir: dirRC7}
+	gotRC7 := sRC7.rollbackStatus()
+	if gotRC7 == nil || !gotRC7.Rolled || gotRC7.From != "6009307" || gotRC7.To != "6000001" ||
+		gotRC7.FromName != "6.1.0-rc.7" || gotRC7.ToName != "6.0.1" || !gotRC7.Pinned || gotRC7.Acknowledged {
+		t.Fatalf("rc.7 -> 6.0.1 rollbackStatus mismatch: %+v", gotRC7)
 	}
-	f.files[f.h("data", "rollback.json")] = rc6JSON
+	f.files[f.h("data", "rollback.json")] = rc7JSON
 	if it := scRollbackItem(c); it.Status != scWarn || it.Value != "已自动退回 6.0.1" ||
-		!strings.Contains(it.Detail, "检测到 6.1.0-rc.6 启动失败") {
-		t.Fatalf("rc.6 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
+		!strings.Contains(it.Detail, "检测到 6.1.0-rc.7 启动失败") {
+		t.Fatalf("rc.7 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
 	}
 
 	// 场景 2: 6010000 (6.1.0 正式版) 回退至 6000001 (6.0.1) 与后续预发布回退至 6010000 (6.1.0)
@@ -213,7 +214,7 @@ func TestRollbackStaleRecordFilteredByRuntimeVersion(t *testing.T) {
 	if err := os.MkdirAll(data, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rec := `{"from":"6009305","to":"6000001","reason":"failstreak=6","at":1795400000,"action":"rolled_back"}`
+	rec := `{"from":"6009306","to":"6000001","reason":"failstreak=6","at":1795400000,"action":"rolled_back"}`
 	if err := os.WriteFile(filepath.Join(data, "rollback.json"), []byte(rec), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -238,8 +239,8 @@ func TestRollbackStaleRecordFilteredByRuntimeVersion(t *testing.T) {
 		}
 	}
 
-	// 2) runtime_version 等于 to ("6000001") 或 from ("6009305") -> 当前关联记录, 保持展示
-	for _, rv := range []string{"6000001", "6009305"} {
+	// 2) runtime_version 等于 to ("6000001") 或 from ("6009306") -> 当前关联记录, 保持展示
+	for _, rv := range []string{"6000001", "6009306"} {
 		if err := os.WriteFile(filepath.Join(data, "runtime_version"), []byte(rv+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -252,13 +253,13 @@ func TestRollbackStaleRecordFilteredByRuntimeVersion(t *testing.T) {
 		}
 	}
 
-	// 3) 已升级至 v6.1.0-rc.6 ("6009306"), 既不等于 from 也不等于 to -> 陈旧记录自动隐藏
-	if err := os.WriteFile(filepath.Join(data, "runtime_version"), []byte("6009306\n"), 0o644); err != nil {
+	// 3) 已升级至 v6.1.0-rc.7 ("6009307"), 既不等于 from 也不等于 to -> 陈旧记录自动隐藏
+	if err := os.WriteFile(filepath.Join(data, "runtime_version"), []byte("6009307\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f.files[f.h("data", "runtime_version")] = "6009306\n"
+	f.files[f.h("data", "runtime_version")] = "6009307\n"
 	if got := s.rollbackStatus(); got != nil {
-		t.Fatalf("stale rollback record with rv=6009306 should be nil, got %+v", got)
+		t.Fatalf("stale rollback record with rv=6009307 should be nil, got %+v", got)
 	}
 	if it := scRollbackItem(c); it.Status != scOK || it.Value != "正常" {
 		t.Fatalf("stale rollback record scRollbackItem want ok/正常, got %+v", it)

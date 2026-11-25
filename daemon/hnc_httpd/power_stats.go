@@ -133,8 +133,8 @@ func (fs powerFS) findPID(d powerProcDef, hncDir string, tab map[int]procfind.Ro
 	return fs.procFS().FindPID(procfind.Spec(d.Name), hncDir, tab)
 }
 
-// descTicks 存活后代进程的 Own+Child 之和(不含 root 自己)
-func descTicks(root int, tab map[int]procfind.Row) uint64 {
+// descTicks 存活后代进程的 Own+Child 之和(不含 root 自己; 遇到其他独立在榜守护进程立即剪枝防双计)
+func descTicks(root int, tab map[int]procfind.Row, skip map[int]bool) uint64 {
 	kids := map[int][]int{}
 	for pid, r := range tab {
 		kids[r.PPID] = append(kids[r.PPID], pid)
@@ -145,7 +145,7 @@ func descTicks(root int, tab map[int]procfind.Row) uint64 {
 	for len(stack) > 0 {
 		p := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if seen[p] {
+		if seen[p] || (p != root && skip[p]) {
 			continue
 		}
 		seen[p] = true
@@ -178,16 +178,35 @@ func takePowerSample(fs powerFS, hncDir string, now time.Time, level string) pow
 	if f := strings.Fields(fs.readTrim("/proc/uptime")); len(f) > 0 {
 		smp.UptimeS, _ = strconv.ParseFloat(f[0], 64)
 	}
+	type foundProc struct {
+		def powerProcDef
+		pid int
+		row procfind.Row
+	}
+	found := make([]foundProc, 0, len(powerProcDefs))
+	daemonPIDs := make(map[int]bool, len(powerProcDefs))
 	for _, d := range powerProcDefs {
 		pid := fs.findPID(d, hncDir, tab)
 		r, ok := tab[pid]
 		if pid <= 0 || !ok {
 			continue
 		}
-		ps := powerProcSample{PID: pid, Start: r.Start, Ticks: r.Own + r.Child + descTicks(pid, tab)}
-		ps.Slices = fs.threadSlices(pid)
-		ps.RSSKB = scParseVmRSS(fs.readTrim(fmt.Sprintf("/proc/%d/status", pid)))
-		smp.Procs[d.Name] = ps
+		found = append(found, foundProc{def: d, pid: pid, row: r})
+		daemonPIDs[pid] = true
+	}
+	for _, fp := range found {
+		var ticks uint64
+		if fp.def.Name == "dpid_guard" {
+			// C launcher(hnc_launcher)仅负责拉起并 waitpid 子进程 hnc_dpid, 仅计自身 Own,
+			// 严禁把 hnc_dpid 存活后代或回收后的 cutime/cstime(Child) 重复算入!
+			ticks = fp.row.Own
+		} else {
+			ticks = fp.row.Own + fp.row.Child + descTicks(fp.pid, tab, daemonPIDs)
+		}
+		ps := powerProcSample{PID: fp.pid, Start: fp.row.Start, Ticks: ticks}
+		ps.Slices = fs.threadSlices(fp.pid)
+		ps.RSSKB = scParseVmRSS(fs.readTrim(fmt.Sprintf("/proc/%d/status", fp.pid)))
+		smp.Procs[fp.def.Name] = ps
 	}
 	return smp
 }

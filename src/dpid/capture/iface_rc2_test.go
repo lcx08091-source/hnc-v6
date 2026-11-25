@@ -20,14 +20,24 @@ func TestIfacePatternsAndCGNAT_RC2(t *testing.T) {
 		t.Errorf("ap_br_wlan2 should rank ahead of generic wlan2")
 	}
 
-	// Excluded cellular / CLAT / 464XLAT interfaces
+	// Excluded cellular / CLAT / 464XLAT / OEM & VPN virtual interfaces
 	for _, ex := range []string{
 		"sipa_eth0", "sipa_eth", "seth_lte0", "seth_nr",
 		"gti0", "gti", "v4-rmnet_data0", "r_rmnet_data0", "clat4", "clat",
+		"vgate0", "vgate", "veth0", "veth_abc123", "Meta", "meta0", "sing_tun0", "tailscale0",
 	} {
 		if !isExcluded(ex) {
 			t.Errorf("expected %q to be excluded from AP candidates", ex)
 		}
+	}
+
+	// Without HNC hint or ARP clients, an unrecognized interface name with RFC1918 IP must not become an AP candidate.
+	candsNoHint := filterAndSortAPCandidates([]apIfaceInput{
+		{Name: "vgate0", Index: 31, Flags: net.FlagUp, IPv4: "10.88.0.1"},
+		{Name: "oem_vir0", Index: 32, Flags: net.FlagUp, IPv4: "192.168.200.1"},
+	}, "", map[string]bool{}, map[string]bool{})
+	if len(candsNoHint) != 0 {
+		t.Fatalf("expected virtual/unknown RFC1918 interfaces without hint/ARP to be rejected, got %+v", candsNoHint)
 	}
 
 	// CGNAT 100.64.0.0/10 private IPv4 support

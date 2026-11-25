@@ -491,12 +491,12 @@ func buildArbiterLimiterReason(
 	switch winner {
 	case "thermo_stage2":
 		if thermoRecovering && !thermoStage2 {
-			return fmt.Sprintf("电芯 %.1f℃ 降温平滑恢复中（%s）", tempC, capText)
+			return fmt.Sprintf("电芯 %.1f°C 降温平滑恢复中（%s）", tempC, capText)
 		}
 		if hasAutorate {
-			return fmt.Sprintf("电芯 %.1f℃ 温控巡航保护中（叠加 5G 自适应，%s）", tempC, capText)
+			return fmt.Sprintf("电芯 %.1f°C 温控巡航保护中（叠加 5G 自适应，%s）", tempC, capText)
 		}
-		return fmt.Sprintf("电芯 %.1f℃ 温控巡航保护中（%s）", tempC, capText)
+		return fmt.Sprintf("电芯 %.1f°C 温控巡航保护中（%s）", tempC, capText)
 	case "autorate":
 		if hasThermo {
 			return fmt.Sprintf("5G 信号抖动自适应控速中（叠加温控保护，%s）", capText)

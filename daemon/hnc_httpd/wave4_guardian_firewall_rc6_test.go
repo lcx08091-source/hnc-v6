@@ -626,3 +626,185 @@ func TestWave4GuardianC058HotspotTempPrivacyIPv6ScopeAndForwardCut(t *testing.T)
 		t.Fatalf("unexpected HNC_SCALPEL IPv6 payload:\n%s", lastHotspotV6)
 	}
 }
+
+func TestRC7HostConnsBpsBytesPerSecFakeIPFreezeSimFlowsAndCacheClear(t *testing.T) {
+	dir := setupNativeTierTestEnv(t, "wlan2")
+	for _, sub := range []string{"data", "run", "etc"} {
+		_ = os.MkdirAll(filepath.Join(dir, sub), 0o755)
+	}
+	procDir, pkgListPath := hostConnSetupFakeHostEnv(t, dir)
+	hostConnInvalidateIfaceCache()
+
+	_ = os.WriteFile(pkgListPath, []byte("com.tencent.mm 10245 0 /data/user/0/com.tencent.mm default:targetSdkVersion=34 3003 0 1\n"), 0o644)
+
+	// 1) B004: /proc/net/tcp 含 04(FIN_WAIT1)/05(FIN_WAIT2)/06(TIME_WAIT)/0B(CLOSING)/0C(NEW_SYN_RECV) 孤儿行 -> 必须全部过滤
+	tcpLines := strings.Join([]string{
+		"  sl  local_address rem_address   st tx_queue:rx_queue tr:tm->when retrnsmt   uid  timeout inode",
+		"   0: 0F02000A:C738 020012C6:0035 01 00000000:00000000 00:00000000 00000000 10245        0 90001 1 0 0", // 10.0.2.15:51000 -> 198.18.0.2:53 (Fake-IP DNS)
+		"   1: 0F02000A:C739 08080808:0035 01 00000000:00000000 00:00000000 00000000 10245        0 90002 1 0 0", // 10.0.2.15:51001 -> 8.8.8.8:53 (Direct DNS)
+		"   2: 0F02000A:C73A 08080808:01BB 04 00000000:00000000 00:00000000 00000000     0        0 0 1 0 0",
+		"   3: 0F02000A:C73B 08080808:01BB 05 00000000:00000000 00:00000000 00000000     0        0 90003 1 0 0",
+		"   4: 0F02000A:C73C 08080808:01BB 06 00000000:00000000 00:00000000 00000000     0        0 0 1 0 0",
+		"   5: 0F02000A:C73D 08080808:01BB 0B 00000000:00000000 00:00000000 00000000     0        0 0 1 0 0",
+		"   6: 0F02000A:C73E 08080808:01BB 0C 00000000:00000000 00:00000000 00000000     0        0 0 1 0 0",
+	}, "\n") + "\n"
+	_ = os.WriteFile(filepath.Join(procDir, "tcp"), []byte(tcpLines), 0o644)
+	_ = os.WriteFile(filepath.Join(procDir, "tcp6"), []byte("  sl  local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(procDir, "udp"), []byte("  sl  local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ref pointer drops\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(procDir, "udp6"), []byte("  sl  local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ref pointer drops\n"), 0o644)
+
+	ps := hostConnReadProcSnapshot()
+	if !ps.readable || len(ps.list) != 2 {
+		t.Fatalf("expected 5 orphan TCP rows filtered leaving 2 active sockets, got %d: %+v", len(ps.list), ps.list)
+	}
+	if _, ok := scalpelLookupSocketUID(ScalpelTuple{Proto: "tcp", SrcIP: "10.0.2.15", Sport: 51002, DstIP: "8.8.8.8", Dport: 443}); ok {
+		t.Fatal("orphan FIN_WAIT1 uid=0 row must NOT resolve as UID 0 in scalpelLookupSocketUID")
+	}
+
+	// 2) B026: Fake-IP (198.18.0.0/15, fc00::/18) 豁免 :53 dns_direct, 8.8.8.8:53 仍正常报
+	if rFake4 := scalpelDetectCleartextRiskForTarget("udp", "198.18.0.2", 53, 10245); rFake4 != "" {
+		t.Fatalf("expected Fake-IPv4 198.18.0.2:53 exempted, got %q", rFake4)
+	}
+	if rFake6 := scalpelDetectCleartextRiskForTarget("udp", "fc00::2", 53, 10245); rFake6 != "" {
+		t.Fatalf("expected Fake-IPv6 fc00::2:53 exempted, got %q", rFake6)
+	}
+	if rReal := scalpelDetectCleartextRiskForTarget("udp", "8.8.8.8", 53, 10245); rReal != "dns_direct" {
+		t.Fatalf("expected 8.8.8.8:53 to report dns_direct, got %q", rReal)
+	}
+
+	// 3) B023: ctSnap 内部存 bits/s, v6_host_conns 对外必须 /8 输出 bytes/s
+	fakeCT := filepath.Join(dir, "run", "fake_ct_rc7")
+	ctLineV1 := "ipv4 2 tcp 6 300 ESTABLISHED src=10.0.2.15 dst=8.8.8.8 sport=51001 dport=53 packets=10 bytes=1000 src=8.8.8.8 dst=10.0.2.15 sport=53 dport=51001 packets=10 bytes=2000 [ASSURED]\n"
+	ctLineV2 := "ipv4 2 tcp 6 300 ESTABLISHED src=10.0.2.15 dst=8.8.8.8 sport=51001 dport=53 packets=20 bytes=9000 src=8.8.8.8 dst=10.0.2.15 sport=53 dport=51001 packets=20 bytes=18000 [ASSURED]\n"
+	_ = os.WriteFile(fakeCT, []byte(ctLineV1), 0o644)
+	t.Setenv("HNC_CONNTRACK_PATH", fakeCT)
+	ctState.mu.Lock()
+	ctState.snap = nil
+	ctState.prev = map[string]ctPrev{
+		"tcp|10.0.2.15|51001|8.8.8.8|53": {up: 1000, dn: 2000, at: time.Now().Add(-1 * time.Second)},
+	}
+	ctState.mu.Unlock()
+	_ = os.WriteFile(fakeCT, []byte(ctLineV2), 0o644)
+
+	srv := newServer(dir)
+	sc := srv.v6State().scalpel
+	defer sc.stopStandaloneTimer()
+
+	dual := scalpelCollectDualDomainFlows(srv, nil, nil)
+	var found51001, found51000 bool
+	for _, fl := range dual.HostList {
+		if fl.Sport == 51000 {
+			found51000 = true
+			if fl.CleartextRisk != "" {
+				t.Fatalf("expected Fake-IP 198.18.0.2:53 flow CleartextRisk empty, got %q", fl.CleartextRisk)
+			}
+		}
+		if fl.Sport == 51001 {
+			found51001 = true
+			if fl.CleartextRisk != "dns_direct" {
+				t.Fatalf("expected 8.8.8.8:53 flow CleartextRisk=dns_direct, got %q", fl.CleartextRisk)
+			}
+			// 1 秒内 +8000 UpB, +16000 DnB -> bytes/s 应在 ~8000 与 ~16000 附近 (绝非 *8 的 64000 / 128000!)
+			if fl.UpBps <= 2000 || fl.UpBps > 16000 || fl.DownBps <= 4000 || fl.DownBps > 32000 {
+				t.Fatalf("B023 rate unit error: expected ~8000/16000 bytes/s (not 8x bits/s), got up=%v down=%v", fl.UpBps, fl.DownBps)
+			}
+		}
+	}
+	if !found51000 || !found51001 {
+		t.Fatalf("missing expected host flows: found51000=%v found51001=%v", found51000, found51001)
+	}
+
+	// 4) B026: 拦截对 Fake-IP (198.18.0.55 / fc00::55) 执行 cut_freeze_15m (409 + allowed_mode=cut_once), 允许 cut_once
+	origResolve := scalpelResolveBinFn
+	origExec := scalpelIptExecFn
+	t.Cleanup(func() {
+		scalpelResolveBinFn = origResolve
+		scalpelIptExecFn = origExec
+	})
+	scalpelResolveBinFn = func(name string) string { return "/system/bin/" + name }
+	scalpelIptExecFn = func(_ string, _ ...string) (string, error) { return "", nil }
+	sc.sockDestroyRunner = func(_ ScalpelTuple, _ uint32) error { return nil }
+	sc.ctDelRunner = func(_ ScalpelTuple, _ uint32) error { return nil }
+	sc.iptRunner = func(_ int, _ string) error { return nil }
+
+	for _, fakeDst := range []struct {
+		src, dst string
+	}{
+		{"10.0.2.15", "198.18.0.55"},
+		{"fd00::1", "fc00::55"},
+	} {
+		frzRec := httptest.NewRecorder()
+		srv.apiScalpelCut(frzRec, httptest.NewRequest(http.MethodPost, "/api/v6/scalpel/cut", strings.NewReader(
+			fmt.Sprintf(`{"scope":"host","mode":"cut_freeze_15m","uid":10245,"proto":"tcp","src_ip":%q,"sport":54000,"dst_ip":%q,"dport":443}`, fakeDst.src, fakeDst.dst))))
+		var frzOut map[string]any
+		_ = json.Unmarshal(frzRec.Body.Bytes(), &frzOut)
+		if frzRec.Code != http.StatusConflict || frzOut["allowed_mode"] != "cut_once" {
+			t.Fatalf("expected 409 Conflict with allowed_mode=cut_once for Fake-IP %s freeze_15m, got %d %+v", fakeDst.dst, frzRec.Code, frzOut)
+		}
+
+		onceRec := httptest.NewRecorder()
+		srv.apiScalpelCut(onceRec, httptest.NewRequest(http.MethodPost, "/api/v6/scalpel/cut", strings.NewReader(
+			fmt.Sprintf(`{"scope":"host","mode":"cut_once","uid":10245,"proto":"tcp","src_ip":%q,"sport":54000,"dst_ip":%q,"dport":443}`, fakeDst.src, fakeDst.dst))))
+		if onceRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for Fake-IP %s cut_once, got %d: %s", fakeDst.dst, onceRec.Code, onceRec.Body.String())
+		}
+	}
+
+	// 5) 双缓存清理验证: hostConnInvalidateProcCache 同步清空 hostConnSplitCountCache
+	hostConnSplitCountCache.mu.Lock()
+	hostConnSplitCountCache.byDir = map[string]hostConnSplitCountEntry{dir: {hotspotFlows: 99}}
+	hostConnSplitCountCache.mu.Unlock()
+	hostConnInvalidateProcCache()
+	hostConnSplitCountCache.mu.Lock()
+	clearedCache := hostConnSplitCountCache.byDir == nil
+	hostConnSplitCountCache.mu.Unlock()
+	if !clearedCache {
+		t.Fatal("expected hostConnInvalidateProcCache to clear hostConnSplitCountCache")
+	}
+
+	// 6) B015: simActive() 合并在线且未拉黑模拟设备 simConnsFor 流; sim 关闭后彻底隔离 02:5e:00:*
+	simJSON := `{
+		"enabled": true,
+		"seed": 12345,
+		"devices": [
+			{"mac": "02:5e:00:aa:bb:01", "ip": "192.168.43.201", "name": "SimOnline", "type": "phone", "rx_bps": 100000, "tx_bps": 20000, "app_id": "bilibili", "app_name": "哔哩哔哩", "category": "video"},
+			{"mac": "02:5e:00:aa:bb:02", "ip": "192.168.43.202", "name": "SimOffline", "type": "phone", "rx_bps": 100000, "tx_bps": 20000, "offline": true},
+			{"mac": "02:5e:00:aa:bb:03", "ip": "192.168.43.203", "name": "SimBlocked", "type": "phone", "rx_bps": 100000, "tx_bps": 20000, "blocked": true}
+		]
+	}`
+	_ = os.WriteFile(filepath.Join(dir, "data", "sim.json"), []byte(simJSON), 0o644)
+	simStores.Delete(dir)
+	t.Cleanup(func() { simStores.Delete(dir) })
+
+	hsAct, onlineCnt, _, _ := scalpelHotspotOnlineState(srv)
+	if !hsAct || onlineCnt != 1 {
+		t.Fatalf("expected simActive hotspotActive=true onlineCount=1 (excluding Offline & Blocked), got active=%v online=%d", hsAct, onlineCnt)
+	}
+	dualSim := scalpelCollectDualDomainFlows(srv, nil, nil)
+	if dualSim.HotspotFlows <= 0 {
+		t.Fatalf("expected positive HotspotFlows from online sim device, got %+v", dualSim)
+	}
+	for _, fl := range dualSim.HotspotList {
+		if fl.MAC == "02:5e:00:aa:bb:02" || fl.MAC == "02:5e:00:aa:bb:03" {
+			t.Fatalf("Offline/Blocked sim device flow leaked into HotspotList: %+v", fl)
+		}
+	}
+	hsCnt, _ := scalpelLiveFlowCounts(srv, hsAct, onlineCnt)
+	if int(hsCnt) != dualSim.HotspotFlows {
+		t.Fatalf("scalpelLiveFlowCounts hotspot=%d != dualSim.HotspotFlows=%d", hsCnt, dualSim.HotspotFlows)
+	}
+
+	// 关闭模拟环境 -> 必须 0 残留 02:5e:00:*
+	if r := actionSimSet(srv, map[string]string{"enabled": "false"}); !r.OK {
+		t.Fatalf("actionSimSet(false) failed: %+v", r)
+	}
+	dualOff := scalpelCollectDualDomainFlows(srv, nil, nil)
+	if dualOff.HotspotFlows != 0 {
+		t.Fatalf("expected HotspotFlows=0 after sim_set(false), got %d", dualOff.HotspotFlows)
+	}
+	for _, fl := range dualOff.HotspotList {
+		if strings.HasPrefix(fl.MAC, "02:5e:00:") {
+			t.Fatalf("stray 02:5e:00:* flow after sim_set(false): %+v", fl)
+		}
+	}
+}

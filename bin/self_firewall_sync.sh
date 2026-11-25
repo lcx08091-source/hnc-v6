@@ -315,7 +315,78 @@ fi
 _SF_PKGS_IN="/dev/null"
 [ -r "$SF_PKGS_LIST" ] && _SF_PKGS_IN="$SF_PKGS_LIST"
 
-_SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
+sf_detect_cell_only_vpn() {
+    if [ "${HNC_SELF_FW_CELL_VPN:-}" = "1" ]; then
+        return 0
+    fi
+    if [ "${HNC_SELF_FW_CELL_VPN:-}" = "0" ]; then
+        return 1
+    fi
+    if [ -n "${HNC_TEST_MODE:-}" ] && [ -z "${HNC_SELF_FW_ROUTES_TEXT:-}" ]; then
+        return 1
+    fi
+    _sfr_ap=""
+    if [ -r "$HNC_DIR/run/hnc_state" ]; then
+        _sfr_st=$(cat "$HNC_DIR/run/hnc_state" 2>/dev/null)
+        case "$_sfr_st" in
+            ACTIVE:*) _sfr_ap=${_sfr_st#ACTIVE:} ;;
+        esac
+    fi
+    _sfr_txt=""
+    if [ -n "${HNC_SELF_FW_ROUTES_TEXT:-}" ]; then
+        _sfr_txt="$HNC_SELF_FW_ROUTES_TEXT"
+    elif command -v ip >/dev/null 2>&1; then
+        _sfr_txt="$(ip -4 route show table all 2>/dev/null; ip -6 route show table all 2>/dev/null)"
+    fi
+    if [ -z "$_sfr_txt" ] && [ -r /proc/net/route ]; then
+        _sfr_txt=$(awk 'NR>1 && $2=="00000000" && $8=="00000000" { print "default dev " $1 }' /proc/net/route 2>/dev/null)
+    fi
+    [ -n "$_sfr_txt" ] || { unset _sfr_ap _sfr_st _sfr_txt; return 1; }
+
+    printf '%s\n' "$_sfr_txt" | awk -v ap="$_sfr_ap" '
+        {
+            r0 = $1
+            if (r0 == "unicast") r0 = $2
+            if (r0 != "default" && r0 != "0.0.0.0/0" && r0 != "0.0.0.0/1" && r0 != "128.0.0.0/1" && r0 != "::/0" && r0 != "::/1" && r0 != "8000::/1") {
+                next
+            }
+            for (i = 1; i < NF; i++) {
+                if ($i == "dev") {
+                    d = $(i + 1)
+                    if (d == "" || d == "lo") continue
+                    if (d ~ /^(tun[0-9]+|tap[0-9]+|ppp[0-9]+|wg[0-9]+|ipsec[0-9a-z_]*|xfrm[0-9]+|tailscale[0-9]*|utun[0-9]*|sing_tun[0-9]*|Meta)$/) {
+                        has_vpn = 1
+                        continue
+                    }
+                    p = d
+                    sub(/^v4-/, "", p)
+                    sub(/^clat4-/, "", p)
+                    if ((ap != "" && (d == ap || p == ap)) || d ~ /^(ap[0-9]*|ap_br_[a-z0-9_]+|softap[0-9]+|swlan[0-9]+)$/) {
+                        continue
+                    }
+                    if (p ~ /^(rmnet|ccmni|seth_|sipa_eth|gti[0-9]|wwan)/ || d ~ /^clat4/) {
+                        has_cell = 1
+                    } else if (p ~ /^(wlan|eth|usb|rndis|ncm|enx)/) {
+                        has_wifi = 1
+                    }
+                }
+            }
+        }
+        END {
+            exit ((has_vpn && has_cell && !has_wifi) ? 0 : 1)
+        }
+    '
+    _sfr_rc=$?
+    unset _sfr_ap _sfr_st _sfr_txt
+    return "$_sfr_rc"
+}
+
+_SF_CELL_VPN=0
+if sf_detect_cell_only_vpn; then
+    _SF_CELL_VPN=1
+fi
+
+_SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" -v cell_vpn="$_SF_CELL_VPN" '
     function is_protected_pkg(p) {
         p = tolower(p)
         return (p == "me.weishu.kernelsu" || p == "com.rifsxd.ksunext" || p == "com.sukisu.ultra" || \
@@ -330,6 +401,66 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
             if (index("0123456789abcdefABCDEF:.[]", c) == 0) return 0
         }
         return 1
+    }
+    function is_public_dns_ip(ip) {
+        ip = tolower(ip)
+        return (ip == "8.8.8.8" || ip == "8.8.4.4" || ip == "1.1.1.1" || ip == "1.0.0.1" || \
+                ip == "9.9.9.9" || ip == "149.112.112.112" || ip == "223.5.5.5" || ip == "223.6.6.6" || \
+                ip == "119.29.29.29" || ip == "119.28.28.28" || ip == "182.254.116.116" || \
+                ip == "114.114.114.114" || ip == "114.114.115.115" || ip == "180.76.76.76" || \
+                ip == "2001:4860:4860::8888" || ip == "2001:4860:4860::8844" || \
+                ip == "2606:4700:4700::1111" || ip == "2606:4700:4700::1001" || \
+                ip == "2400:3200::1" || ip == "2400:3200:baba::1" || ip == "2402:4e00::")
+    }
+    function is_forbidden_ip(ip,    low, nb, oct, o1, o2) {
+        low = tolower(ip)
+        if (low == "" || low == "127.0.0.1" || low == "::1" || low == "0.0.0.0" || low == "::") return 1
+        if (is_public_dns_ip(low)) return 1
+        if (index(low, ":") > 0) {
+            if (low ~ /^(fe[89ab]|fc|fd|ff)/) return 1
+            return 0
+        }
+        nb = split(low, oct, ".")
+        if (nb != 4) return 1
+        if (oct[1] !~ /^[0-9]+$/ || oct[2] !~ /^[0-9]+$/ || oct[3] !~ /^[0-9]+$/ || oct[4] !~ /^[0-9]+$/) return 1
+        o1 = oct[1] + 0; o2 = oct[2] + 0
+        if (o1 == 0 || o1 == 10 || o1 == 127 || o1 >= 224) return 1
+        if (o1 == 169 && o2 == 254) return 1
+        if (o1 == 172 && o2 >= 16 && o2 <= 31) return 1
+        if (o1 == 192 && o2 == 168) return 1
+        if (o1 == 100 && o2 >= 64 && o2 <= 127) return 1
+        if (o1 == 198 && (o2 == 18 || o2 == 19)) return 1
+        return 0
+    }
+    function filter_valid_targets(csv,    n, arr, i, rawt, ip, prt, rb, c1, pnum, out) {
+        if (csv == "") return ""
+        n = split(csv, arr, ",")
+        out = ""
+        for (i = 1; i <= n; i++) {
+            rawt = arr[i]
+            if (!is_valid_tgt_chars(rawt)) continue
+            ip = rawt; prt = ""
+            if (substr(rawt, 1, 1) == "[") {
+                rb = index(rawt, "]")
+                if (rb <= 2) continue
+                ip = substr(rawt, 2, rb - 2)
+                if (substr(rawt, rb + 1, 1) == ":") prt = substr(rawt, rb + 2)
+            } else {
+                c1 = index(rawt, ":")
+                if (c1 > 0 && index(substr(rawt, c1 + 1), ":") == 0) {
+                    ip = substr(rawt, 1, c1 - 1)
+                    prt = substr(rawt, c1 + 1)
+                }
+            }
+            if (is_forbidden_ip(ip)) continue
+            if (prt != "") {
+                if (prt !~ /^[0-9]+$/) continue
+                pnum = prt + 0
+                if (pnum < 1 || pnum > 65535 || pnum == 53 || pnum == 853 || pnum == 8080 || pnum == 8443 || pnum == 8444) continue
+            }
+            out = (out == "" ? rawt : out "," rawt)
+        }
+        return out
     }
     function build_dns_hex(dom,    nb, labs, i, L, out) {
         dom = tolower(dom)
@@ -353,7 +484,7 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
             pa = u % 100000
             if (is_protected_pkg($1)) {
                 prot_uid[u] = 1
-                if (pa >= 10000) {
+                if (pa >= 10000 && pa < 90000) {
                     prot_appid[pa] = 1
                     if (pa <= 19999) prot_appid[pa + 10000] = 1
                 }
@@ -442,15 +573,17 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
                     if (tt == "}") {
                         in_rule = 0
                         m = tolower(cur_mode)
+                        if (cur_pkg ~ /^(uid:|isolated:)/) cur_pkg = ""
+                        valid_tgts = filter_valid_targets(cur_tgts)
                         app_id = cur_uid % 100000
-                        # C064: 按 appId = uid % 100000 严格拒绝 < 10000 的主用户与多用户系统进程及受保护包
-                        if (cur_uid >= 10000 && cur_uid <= 99999999 && app_id >= 10000 && \
+                        # C064 + B026 + B007: 严格拒绝 appId < 10000 或 >= 90000 (隔离进程) 及受保护包; 允许 mode=="allow" 带合法 block_targets
+                        if (cur_uid >= 10000 && cur_uid <= 99999999 && app_id >= 10000 && app_id < 90000 && \
                             !(cur_uid in prot_uid) && !(app_id in prot_appid) && !is_protected_pkg(cur_pkg) && \
-                            (m == "block_cleartext" || m == "block_cellular" || m == "block_all")) {
+                            ((m == "allow" && valid_tgts != "") || m == "block_cleartext" || m == "block_cellular" || m == "block_all")) {
                             rcnt++
                             r_uid[rcnt] = cur_uid
                             r_mode[rcnt] = m
-                            r_tgts[rcnt] = cur_tgts
+                            r_tgts[rcnt] = valid_tgts
                             seen_uid[cur_uid] = 1
                         }
                         continue
@@ -531,10 +664,10 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
                             }
                             is6 = (index(ip, ":") > 0 ? 1 : 0)
                             if ((fam == 6 && !is6) || (fam == 4 && is6)) continue
-                            if (ip == "127.0.0.1" || ip == "::1" || ip == "0.0.0.0" || ip == "::") continue
+                            if (is_forbidden_ip(ip)) continue
                             if (prt != "" && prt ~ /^[0-9]+$/) {
                                 pnum = prt + 0
-                                if (pnum >= 1 && pnum <= 65535 && pnum != 8443 && pnum != 8444 && pnum != 8080) {
+                                if (pnum >= 1 && pnum <= 65535 && pnum != 53 && pnum != 853 && pnum != 8443 && pnum != 8444 && pnum != 8080) {
                                     printf "%s -A HNC_SELF_UID -d %s -p tcp --dport %d -m owner --uid-owner %d -j REJECT --reject-with tcp-reset\n", tag, ip, pnum, u
                                     printf "%s -A HNC_SELF_UID -d %s -p udp --dport %d -m owner --uid-owner %d -j REJECT\n", tag, ip, pnum, u
                                 }
@@ -550,6 +683,13 @@ _SF_PARSED=$(awk -v pkgs_file="$_SF_PKGS_IN" '
                             printf "%s -A HNC_SELF_UID -o seth_w+ -m owner --uid-owner %d -j REJECT\n", tag, u
                             printf "%s -A HNC_SELF_UID -o clat4+ -m owner --uid-owner %d -j REJECT\n", tag, u
                             printf "%s -A HNC_SELF_UID -o v4-+ -m owner --uid-owner %d -j REJECT\n", tag, u
+                            if (cell_vpn == 1) {
+                                printf "%s -A HNC_SELF_UID -o tun+ -m owner --uid-owner %d -j REJECT\n", tag, u
+                                printf "%s -A HNC_SELF_UID -o Meta -m owner --uid-owner %d -j REJECT\n", tag, u
+                                printf "%s -A HNC_SELF_UID -o wg+ -m owner --uid-owner %d -j REJECT\n", tag, u
+                                printf "%s -A HNC_SELF_UID -o utun+ -m owner --uid-owner %d -j REJECT\n", tag, u
+                                printf "%s -A HNC_SELF_UID -o sing_tun+ -m owner --uid-owner %d -j REJECT\n", tag, u
+                            }
                         } else if (r_mode[r] == "block_all") {
                             printf "%s -A HNC_SELF_UID -m owner --uid-owner %d -j REJECT\n", tag, u
                         }

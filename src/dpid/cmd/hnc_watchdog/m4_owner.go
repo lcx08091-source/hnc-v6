@@ -199,6 +199,7 @@ type m4GoRunner struct {
 	clearOnStop atomic.Bool
 	stopMu      sync.Mutex
 	writeGen    uint64
+	resyncCh    chan struct{}
 }
 
 func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
@@ -222,6 +223,7 @@ func newM4GoRunner(iface string) *m4GoRunner {
 		stopCtx:    stopCtx,
 		stopCancel: stopCancel,
 		writeGen:   gen,
+		resyncCh:   make(chan struct{}, 1),
 	}
 	r.subscribeFn = func() (m4NeighSource, error) { return neigh.Subscribe() }
 	r.dumpIfFn = r.defaultDumpIf
@@ -291,8 +293,45 @@ func (r *m4GoRunner) start() {
 		}
 	}
 	r.atomicIfIdx.Store(int32(r.ifIdx))
-	r.table.SetIface(r.iface, r.ifIdx)
+	if r.table != nil {
+		r.table.SetIface(r.iface, r.ifIdx)
+	}
 	go r.run()
+}
+
+func (r *m4GoRunner) triggerResync() {
+	if r == nil || r.resyncCh == nil {
+		return
+	}
+	select {
+	case r.resyncCh <- struct{}{}:
+	default:
+	}
+}
+
+// syncIfaceIndex 线程安全探测并原子同步同名热点口重建后的新 ifindex:
+// 仅更新 atomicIfIdx(atomic.Int32) 与带互斥锁的 table.SetIface, 严禁跨协程改非原子 r.ifIdx。
+func (r *m4GoRunner) syncIfaceIndex() (curIdx int, changed bool) {
+	if r == nil {
+		return 0, false
+	}
+	prev := int(r.atomicIfIdx.Load())
+	if r.ifIndexFn == nil {
+		return prev, false
+	}
+	idx, err := r.ifIndexFn(r.iface)
+	if err != nil || idx <= 0 {
+		return prev, false
+	}
+	if idx == prev {
+		return idx, false
+	}
+	r.atomicIfIdx.Store(int32(idx))
+	if r.table != nil {
+		r.table.SetIface(r.iface, idx)
+	}
+	logf("m4_owner: 热点网卡重建 %s ifindex=%d", r.iface, idx)
+	return idx, true
 }
 
 // Stop 幂等停止运行器: 先调 stopCancel() 立即中断在途子进程与阻塞解析, 再关闭 stopCh。
@@ -321,6 +360,9 @@ func (m *m4WriterMgr) ensureGoRunnerLocked(iface string) {
 			// 旧写者已退出, 置空重建以恢复首屏与持续刷新
 			m.runner = nil
 		default:
+			if _, changed := m.runner.syncIfaceIndex(); changed {
+				m.runner.triggerResync()
+			}
 			return
 		}
 	}
@@ -366,6 +408,9 @@ func (r *m4GoRunner) run() {
 	if r.stopCancel != nil {
 		defer r.stopCancel()
 	}
+	if r.atomicIfIdx.Load() == 0 && r.ifIdx > 0 {
+		r.atomicIfIdx.Store(int32(r.ifIdx))
+	}
 	bootAt := time.Now()
 	monoMs := func() int64 {
 		d := time.Since(bootAt).Milliseconds()
@@ -375,7 +420,10 @@ func (r *m4GoRunner) run() {
 		return 1 + d
 	}
 	events := make(chan []neigh.Entry, 64)
-	resyncCh := make(chan struct{}, 1)
+	resyncCh := r.resyncCh
+	if resyncCh == nil {
+		resyncCh = make(chan struct{}, 1)
+	}
 	var (
 		subMu      sync.Mutex
 		stopping   bool
@@ -450,6 +498,7 @@ func (r *m4GoRunner) run() {
 		}
 		lastSubErrMsg := firstErrMsg
 		var lastEnobufsLog time.Time
+		var lastIdxProbe time.Time
 		for {
 			select {
 			case <-r.stopCh:
@@ -536,7 +585,26 @@ func (r *m4GoRunner) run() {
 				continue
 			}
 			backoff = m4ReconnectBaseBackoff
-			es = filterHotspotNeighEvents(es, int(r.atomicIfIdx.Load()))
+			hotIdx := int(r.atomicIfIdx.Load())
+			needProbe := hotIdx <= 0
+			if !needProbe {
+				for _, e := range es {
+					if e.IfIndex > 0 && e.IfIndex != hotIdx {
+						needProbe = true
+						break
+					}
+				}
+			}
+			if needProbe && (lastIdxProbe.IsZero() || time.Since(lastIdxProbe) >= 500*time.Millisecond) {
+				lastIdxProbe = time.Now()
+				if curIdx, changed := r.syncIfaceIndex(); curIdx > 0 {
+					hotIdx = curIdx
+					if changed {
+						triggerResync()
+					}
+				}
+			}
+			es = filterHotspotNeighEvents(es, hotIdx)
 			if len(es) == 0 {
 				continue
 			}
@@ -651,12 +719,18 @@ func (r *m4GoRunner) run() {
 		case <-resolved:
 			markDirty()
 		case es := <-events:
-			if r.ifIdx == 0 {
-				r.refreshIface()
+			curIdx := int(r.atomicIfIdx.Load())
+			if curIdx == 0 {
+				curIdx, _ = r.syncIfaceIndex()
 			}
-			if r.ifIdx != 0 {
+			if curIdx != 0 {
 				changed := false
 				for _, e := range es {
+					if e.IfIndex > 0 && e.IfIndex != curIdx {
+						if nextIdx, upd := r.syncIfaceIndex(); upd && nextIdx > 0 {
+							curIdx = nextIdx
+						}
+					}
 					if r.table.Apply(e, time.Now()) {
 						changed = true
 					}
@@ -670,13 +744,13 @@ func (r *m4GoRunner) run() {
 			r.tickN.Add(1)
 			now := time.Now()
 			if nonce, modNano, due := refreshDue(now); due {
-				r.refreshIface()
+				curIdx, _ := r.syncIfaceIndex()
 				var (
 					es      []neigh.Entry
 					dumpErr error
 				)
-				if r.ifIdx != 0 {
-					es, dumpErr = r.dumpIfFn(r.ifIdx)
+				if curIdx != 0 {
+					es, dumpErr = r.dumpIfFn(curIdx)
 					if dumpErr == nil {
 						r.table.FullSync(es, now)
 					}
@@ -716,9 +790,9 @@ func (r *m4GoRunner) run() {
 			}
 			if syncDue {
 				lastSyncAttempt = now
-				r.refreshIface()
-				if r.ifIdx != 0 {
-					if es, dumpErr := r.dumpIfFn(r.ifIdx); dumpErr == nil {
+				curIdx, _ := r.syncIfaceIndex()
+				if curIdx != 0 {
+					if es, dumpErr := r.dumpIfFn(curIdx); dumpErr == nil {
 						needResync = false
 						lastSync = now
 						syncRetryWait = time.Second
@@ -745,8 +819,8 @@ func (r *m4GoRunner) run() {
 			}
 			if now.Sub(lastPending) >= time.Second {
 				lastPending = now
-				if r.ifIdx == 0 {
-					r.refreshIface()
+				if r.atomicIfIdx.Load() == 0 {
+					r.syncIfaceIndex()
 				}
 				if mac, ip, ok := r.table.PendingDue(now); ok {
 					inFlightMu.Lock()
@@ -817,17 +891,7 @@ func filterHotspotNeighEvents(es []neigh.Entry, hotIfIdx int) []neigh.Entry {
 }
 
 func (r *m4GoRunner) refreshIface() {
-	if r.ifIndexFn == nil {
-		return
-	}
-	idx, err := r.ifIndexFn(r.iface)
-	if err != nil || idx == r.ifIdx {
-		return
-	}
-	r.ifIdx = idx
-	r.atomicIfIdx.Store(int32(idx))
-	r.table.SetIface(r.iface, idx)
-	logf("m4_owner: 热点网卡重建 %s ifindex=%d", r.iface, idx)
+	_, _ = r.syncIfaceIndex()
 }
 
 func (r *m4GoRunner) writeOut(lastWritten []byte, lastStatsAt *time.Time, lastStatsMap *map[string][2]int64, force bool) []byte {

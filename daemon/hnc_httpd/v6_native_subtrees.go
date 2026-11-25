@@ -1421,6 +1421,9 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 		return rep, errors.New("NativeFullRestoreV6: nil server or empty hncDir")
 	}
 
+	// 铁律锁序: 严禁持 nativeDPLockMu 调用 Actor.Do / shaperArbiter, 在拿锁前无锁读取 Express 参数快照
+	expActive, expMark, expBgCeilKbps, expUpBgCeilKbps := resolveActiveVectorExpressParamsFull(s, s.hncDir)
+
 	unlock, lockErr := acquireNativeDataplaneLock(s.hncDir, "v6_full_restore")
 	if lockErr != nil {
 		return rep, lockErr
@@ -1459,6 +1462,7 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 		mid      int
 		dnBps    uint64
 		upBps    uint64
+		hasDelay bool
 		appQoSOn bool
 	}
 	var devSpecs []devRestoreSpec
@@ -1494,13 +1498,14 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 				dnBps, _ = mbpsStrToBytesPerSec(anyToRuleString(dm["down_mbps"]))
 				upBps, _ = mbpsStrToBytesPerSec(anyToRuleString(dm["up_mbps"]))
 			}
-			appQoS := anyToRuleBool(dm["app_qos"]) && !deviceHasDelayOwner(dm)
+			hasDelay := deviceHasDelayOwner(dm)
+			appQoS := anyToRuleBool(dm["app_qos"]) && !hasDelay
 			hasAppLim := deviceHasAppLimitsForMAC(s.hncDir, "", mac, mid)
-			if upBps == 0 && !deviceHasDelayOwner(dm) && !seenUpInactiveMid[mid] {
+			if upBps == 0 && !hasDelay && !seenUpInactiveMid[mid] {
 				seenUpInactiveMid[mid] = true
 				upInactiveMids = append(upInactiveMids, mid)
 			}
-			if dnBps == 0 && upBps == 0 && !appQoS && !hasAppLim && !deviceHasDelayOwner(dm) && !anyToRuleBool(dm["sqm_enabled"]) {
+			if dnBps == 0 && upBps == 0 && !appQoS && !hasAppLim && !hasDelay && !anyToRuleBool(dm["sqm_enabled"]) {
 				if !seenInactiveMid[mid] {
 					seenInactiveMid[mid] = true
 					inactiveMids = append(inactiveMids, mid)
@@ -1508,7 +1513,7 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 				continue
 			}
 			midByMAC[mac] = mid
-			if upBps > 0 {
+			if upBps > 0 || hasDelay {
 				upLimitedMAC[mac] = true
 			}
 			devSpecs = append(devSpecs, devRestoreSpec{
@@ -1517,6 +1522,7 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 				mid:      mid,
 				dnBps:    dnBps,
 				upBps:    upBps,
+				hasDelay: hasDelay,
 				appQoSOn: appQoS,
 			})
 		}
@@ -1536,7 +1542,14 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 	prevAppLimCnt := globalV6Subtrees.lastRestore.AppLimitClasses
 	globalV6Subtrees.mu.RUnlock()
 
-	expActive, expMark, expBgCeilKbps, expUpBgCeilKbps := resolveActiveVectorExpressParamsFull(s, s.hncDir)
+	type pendingUplinkPoliceFallback struct {
+		iface  string
+		mid    int
+		ipv4   string
+		mac    string
+		upKbit uint64
+	}
+	var pendingPoliceFallbacks []pendingUplinkPoliceFallback
 
 	// 3. 若处于原生数据面环境且存在活跃下游口, 下发全部 HTB 设备类、二级子树与双栈防火墙, 并拆除已清空的旧类与旧链
 	if useNativeDataplane(s.hncDir) && len(downIfindexes) > 0 {
@@ -1602,7 +1615,7 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 		for _, ds := range devSpecs {
 			if mn, mErr := htbClassMinorForMid(ds.mid); mErr == nil {
 				activeDownMinors[mn] = true
-				if ds.upBps > 0 {
+				if ds.upBps > 0 || ds.hasDelay {
 					activeUpMinors[mn] = true
 				}
 			}
@@ -1714,7 +1727,13 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 								upKbit = 64
 							}
 							if _, stErr := os.Stat(filepath.Join(s.hncDir, "bin", "tc_manager.sh")); stErr == nil {
-								_, _ = runBin(s.hncDir, "tc_manager.sh", "set_uplink_police", downName, classIDStringForMid(ds.mid), strconv.FormatUint(upKbit, 10)+"kbit", ds.ipv4, ds.mac)
+								pendingPoliceFallbacks = append(pendingPoliceFallbacks, pendingUplinkPoliceFallback{
+									iface:  downName,
+									mid:    ds.mid,
+									ipv4:   ds.ipv4,
+									mac:    ds.mac,
+									upKbit: upKbit,
+								})
 							} else {
 								rep.Warnings = append(rep.Warnings, fmt.Sprintf("ingress police (%s/%s): %v", downName, ds.mac, pErr))
 							}
@@ -1807,6 +1826,13 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 
 	locked = false
 	unlock()
+
+	for _, pf := range pendingPoliceFallbacks {
+		rc, _ := runBin(s.hncDir, "tc_manager.sh", "set_uplink_police", pf.iface, strconv.Itoa(pf.mid), pf.ipv4, strconv.FormatUint(pf.upKbit, 10)+"kbit")
+		if rc != 0 {
+			rep.Warnings = append(rep.Warnings, fmt.Sprintf("set_uplink_police fallback (%s/%s): exit %d", pf.iface, pf.mac, rc))
+		}
+	}
 
 	// 重建 tc 树后立即重放 RootShaperArbiter 当前仲裁生效上限, 防止设备规则刷新冲掉温控/5G 自适应/静态总限速
 	primaryIface := ""
@@ -2188,15 +2214,29 @@ func ensureAppLimitTopHooksOnBin(iptBin string) {
 		}
 	}
 
-	// 1. mangle/FORWARD -> HNC_APP_LIMIT_UP
-	if _, err := runSubtreeIptCmd(iptBin, "-t", "mangle", "-C", "FORWARD", "-j", "HNC_APP_LIMIT_UP"); err != nil {
-		ensureChainExists("mangle", "HNC_APP_LIMIT_UP")
+	// 1. mangle/FORWARD -> HNC_APP_LIMIT_UP (置于 HNC_MARK/HNC_STATS 之后, 含错位自动重排)
+	locateMangleForwardLines := func() (int, int) {
 		listOut, _ := runSubtreeIptCmd(iptBin, "-t", "mangle", "-L", "FORWARD", "-n", "--line-numbers")
-		saveOut := ""
-		if findIptLastChainRuleLine(listOut, "", "HNC_STATS", "HNC_MARK") == 0 {
-			saveOut, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-S", "FORWARD")
+		aLn := findIptLastChainRuleLine(listOut, "", "HNC_STATS", "HNC_MARK")
+		uLn := findIptFirstChainRuleLine(listOut, "", "HNC_APP_LIMIT_UP")
+		if aLn == 0 && uLn == 0 {
+			saveOut, _ := runSubtreeIptCmd(iptBin, "-t", "mangle", "-S", "FORWARD")
+			aLn = findIptLastChainRuleLine(listOut, saveOut, "HNC_STATS", "HNC_MARK")
+			uLn = findIptFirstChainRuleLine(listOut, saveOut, "HNC_APP_LIMIT_UP")
 		}
-		if anchorLn := findIptLastChainRuleLine(listOut, saveOut, "HNC_STATS", "HNC_MARK"); anchorLn > 0 {
+		return aLn, uLn
+	}
+	_, hasUpErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-C", "FORWARD", "-j", "HNC_APP_LIMIT_UP")
+	if hasUpErr == nil {
+		if anchorM, upLn := locateMangleForwardLines(); anchorM > 0 && upLn > 0 && upLn < anchorM {
+			_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-D", "FORWARD", "-j", "HNC_APP_LIMIT_UP")
+			hasUpErr = errors.New("reinsert HNC_APP_LIMIT_UP after HNC_MARK/HNC_STATS")
+		}
+	}
+	if hasUpErr != nil {
+		ensureChainExists("mangle", "HNC_APP_LIMIT_UP")
+		anchorLn, _ := locateMangleForwardLines()
+		if anchorLn > 0 {
 			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-I", "FORWARD", strconv.Itoa(anchorLn+1), "-j", "HNC_APP_LIMIT_UP"); iErr != nil {
 				_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "FORWARD", "-j", "HNC_APP_LIMIT_UP")
 			}
@@ -2205,15 +2245,29 @@ func ensureAppLimitTopHooksOnBin(iptBin string) {
 		}
 	}
 
-	// 2. filter/FORWARD -> HNC_QUIC_APPLIM
-	if _, err := runSubtreeIptCmd(iptBin, "-t", "filter", "-C", "FORWARD", "-j", "HNC_QUIC_APPLIM"); err != nil {
-		ensureChainExists("filter", "HNC_QUIC_APPLIM")
+	// 2. filter/FORWARD -> HNC_QUIC_APPLIM (置于 HNC_SCALPEL/HNC_ISOLATE/HNC_CTRL/HNC_WHITELIST/HNC_QUIC 之后防越权抢占, 含错位重排; 空链保留 -I FORWARD 1)
+	locateFilterForwardLines := func() (int, int) {
 		fListOut, _ := runSubtreeIptCmd(iptBin, "-t", "filter", "-L", "FORWARD", "-n", "--line-numbers")
-		fSaveOut := ""
-		if findIptLastChainRuleLine(fListOut, "", "HNC_SCALPEL", "HNC_ISOLATE", "HNC_CTRL", "HNC_WHITELIST", "HNC_QUIC") == 0 {
-			fSaveOut, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-S", "FORWARD")
+		aLn := findIptLastChainRuleLine(fListOut, "", "HNC_SCALPEL", "HNC_ISOLATE", "HNC_CTRL", "HNC_WHITELIST", "HNC_QUIC")
+		qLn := findIptFirstChainRuleLine(fListOut, "", "HNC_QUIC_APPLIM")
+		if aLn == 0 && qLn == 0 {
+			fSaveOut, _ := runSubtreeIptCmd(iptBin, "-t", "filter", "-S", "FORWARD")
+			aLn = findIptLastChainRuleLine(fListOut, fSaveOut, "HNC_SCALPEL", "HNC_ISOLATE", "HNC_CTRL", "HNC_WHITELIST", "HNC_QUIC")
+			qLn = findIptFirstChainRuleLine(fListOut, fSaveOut, "HNC_QUIC_APPLIM")
 		}
-		if anchorF := findIptLastChainRuleLine(fListOut, fSaveOut, "HNC_SCALPEL", "HNC_ISOLATE", "HNC_CTRL", "HNC_WHITELIST", "HNC_QUIC"); anchorF > 0 {
+		return aLn, qLn
+	}
+	_, hasQuicErr := runSubtreeIptCmd(iptBin, "-t", "filter", "-C", "FORWARD", "-j", "HNC_QUIC_APPLIM")
+	if hasQuicErr == nil {
+		if anchorF, quicLn := locateFilterForwardLines(); anchorF > 0 && quicLn > 0 && quicLn < anchorF {
+			_, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-D", "FORWARD", "-j", "HNC_QUIC_APPLIM")
+			hasQuicErr = errors.New("reinsert HNC_QUIC_APPLIM after security chains")
+		}
+	}
+	if hasQuicErr != nil {
+		ensureChainExists("filter", "HNC_QUIC_APPLIM")
+		anchorF, _ := locateFilterForwardLines()
+		if anchorF > 0 {
 			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "filter", "-I", "FORWARD", strconv.Itoa(anchorF+1), "-j", "HNC_QUIC_APPLIM"); iErr != nil {
 				_, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-A", "FORWARD", "-j", "HNC_QUIC_APPLIM")
 			}

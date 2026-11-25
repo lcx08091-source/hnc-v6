@@ -1,4 +1,4 @@
-/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.6 · 智能护航、本机守护、隐私安检与连接排障中心
+/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.7 · 智能护航、本机守护、隐私安检与连接排障中心
  * 设计准则:
  *   1. 全站原语彻底收口: 统一复用 .hero.v6-hero、.cc-bento-row/.cc-tile、seg() 弹簧胶囊与 .sgrp.scard.glass.open 标准卡片，零孤岛私有大卡。
  *   2. 诚实三态与正交双连接: 严格区分热点待机/热点就绪无设备/热点活跃三态；热点连接数与本机连接数正交独立展示与检索。
@@ -79,11 +79,83 @@ function extractHttpMetaFromSnippet(snippet) {
 
 function v6ValidIp(ip) {
   var s = String(ip || '').trim();
+  if (s.charAt(0) === '[' && s.charAt(s.length - 1) === ']') s = s.slice(1, -1);
   if (!s || s === '-' || s === '—') return false;
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
     return s.split('.').every(function (p) { var n = parseInt(p, 10); return n >= 0 && n <= 255; });
   }
   return s.indexOf(':') >= 0 && /^[0-9a-fA-F:.]+$/.test(s);
+}
+
+/* 提取纯 IPv4/IPv6 字面量（支持 [ipv6]:port / ipv4:port），若是域名或空则返回 '' */
+function v6ExtractPureIp(hostRaw) {
+  var s = String(hostRaw || '').trim();
+  if (!s || s === '-' || s === '—') return '';
+  if (s.charAt(0) === '[') {
+    var rb = s.indexOf(']');
+    if (rb > 1) {
+      var inner6 = s.slice(1, rb);
+      var rest6 = s.slice(rb + 1);
+      if ((!rest6 || /^:\d{1,5}$/.test(rest6)) && v6ValidIp(inner6)) return inner6;
+    }
+    return '';
+  }
+  if (v6ValidIp(s)) return s;
+  var m4 = /^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/.exec(s);
+  if (m4 && v6ValidIp(m4[1])) return m4[1];
+  return '';
+}
+
+/* 识别回环、私网、链路本地、CGNAT 及代理 Fake-IP (198.18.0.0/15, fc00::/7) */
+function v6IsFakeOrPrivateIp(ipRaw) {
+  var s = v6ExtractPureIp(ipRaw) || String(ipRaw || '').trim().replace(/^\[|\]$/g, '');
+  s = s.toLowerCase();
+  if (!v6ValidIp(s)) return false;
+  if (s.indexOf('::ffff:') === 0) s = s.slice(7);
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) {
+    var p = s.split('.').map(function (x) { return parseInt(x, 10); });
+    if (p[0] === 0 || p[0] === 10 || p[0] === 127 || p[0] >= 224) return true;
+    if (p[0] === 169 && p[1] === 254) return true;
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+    if (p[0] === 192 && p[1] === 168) return true;
+    if (p[0] === 198 && (p[1] === 18 || p[1] === 19)) return true;
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true;
+    return false;
+  }
+  if (s === '::' || s === '::1') return true;
+  if (/^(fc|fd)[0-9a-f]{0,2}:/.test(s)) return true;
+  if (/^fe[89ab][0-9a-f]:/.test(s)) return true;
+  if (/^ff[0-9a-f]{0,2}:/.test(s)) return true;
+  return false;
+}
+
+/* 统一格式化 host/IP 与端口，IPv6 自动包裹方括号为 [ipv6]:port */
+function v6FmtHostPort(hostOrIp, port) {
+  var h = String(hostOrIp == null ? '' : hostOrIp).trim();
+  if (!h || h === '—') return port ? ('—:' + port) : '—';
+  var hasBracket = h.charAt(0) === '[' && h.indexOf(']') > 0;
+  var isV6 = !hasBracket && h.indexOf(':') >= 0;
+  if (port != null && port !== '' && Number(port) > 0) {
+    return (isV6 ? ('[' + h + ']') : h) + ':' + port;
+  }
+  return h;
+}
+
+/* 过滤后端占位的 uid: / isolated: 伪包名，防止传给防火墙校验报错或重复展示 */
+function v6CleanHostRealPkg(pkg) {
+  var s = String(pkg || '').trim();
+  if (!s || /^(uid|isolated):/i.test(s)) return '';
+  return s;
+}
+
+/* 本机事件应用名兜底：uid <= 0 统一展示为「本机未知连接」，杜绝刺眼的 UID 0 */
+function v6HostEventAppLabel(appName, pkg, uid) {
+  var nm = String(appName || '').trim();
+  if (nm && !/^uid\s*[:#-]?\s*0$/i.test(nm) && !/^(uid|isolated):/i.test(nm)) return nm;
+  var cp = v6CleanHostRealPkg(pkg);
+  if (cp) return cp;
+  var u = Math.round(num(uid, 0));
+  return u > 0 ? ('UID ' + u) : '本机未知连接';
 }
 
 function v6ValidMac(m) {
@@ -369,6 +441,7 @@ var V6 = {
   sse: null,
   sseRetryT: 0
 };
+V6.appSheet = V6.host.appSheet;
 if (['escort', 'host', 'privacy', 'troubleshoot'].indexOf(V6.subtab) < 0) V6.subtab = 'escort';
 if (['live', 'traffic', 'power', 'firewall'].indexOf(V6.host.mode) < 0) V6.host.mode = 'live';
 if (['boot', 'today', '7d', '30d'].indexOf(V6.host.period) < 0) V6.host.period = 'today';
@@ -401,7 +474,7 @@ function leakTypeZh(tp) {
   if (/GPS|LOC|LAT|LON/.test(u)) return '精准定位';
   if (/WIFI_BSSID|BSSID/.test(u)) return '周边Wi-Fi定位';
   if (/MAC/.test(u)) return '网卡地址';
-  if (/TOKEN|BEARER|COOKIE|AUTH|PASS|KEY/.test(u)) return '登录凭证';
+  if (/TOKEN|BEARER|COOKIE|AUTH|PASS|KEY/.test(u)) return '登录凭据';
   if (/IMEI|IMSI|OAID|IDFA|ANDROID_ID|DEVICE|SERIAL/.test(u)) return '设备指纹';
   return '敏感明文';
 }
@@ -477,25 +550,35 @@ function v6NormInfraGuard(rawGuard, fallbackLevel, fallbackLabel, dstHost) {
 function v6NormWhitelistItem(it, idx) {
   if (typeof it === 'string') {
     var sh = it.trim().toLowerCase();
-    return sh ? { id: sh, scope: 'host', dst_host: sh, leak_type: '', mac: '', device_name: '', note: '', label: '' } : null;
+    return sh ? { id: sh, scope: 'host', dst_host: sh, leak_type: '', mac: '', uid: 0, pkg: '', app_name: '', device_name: '', note: '', label: '' } : null;
   }
   if (!it || typeof it !== 'object') return null;
   var host = String(it.dst_host || it.domain || it.host || it.value || '').trim().toLowerCase();
   var lTypeRaw = String(it.leak_type || it.type || '').trim();
   var lType = (!lTypeRaw || lTypeRaw === '*' || lTypeRaw.toUpperCase() === 'ALL') ? '' : leakTypeBadgeCode(lTypeRaw);
   var mac = String(it.mac || it.client_mac || '').trim().toLowerCase();
-  var scope = String(it.scope || it.kind || (mac && host ? 'device_host_type' : (lType ? 'host_type' : 'host'))).toLowerCase();
+  var uid = it.uid != null ? Math.round(num(it.uid, 0)) : 0;
+  var pkg = v6CleanHostRealPkg(it.pkg || it.package || '').toLowerCase();
+  var appName = String(it.app_name || '').trim();
+  var defaultScope = mac && host ? 'device_host_type' : ((uid > 0 || pkg) && host ? 'app_host_type' : (lType ? 'host_type' : 'host'));
+  var scope = String(it.scope || it.kind || defaultScope).toLowerCase();
   if (scope === 'device_host') scope = 'device_host_type';
+  if (scope === 'app_host') scope = 'app_host_type';
   var d = mac ? devBy(mac) : null;
   var noteTxt = String(it.note != null ? it.note : (it.label || ''));
-  var id = String(it.id || it.rule_id || it.key || (scope + '|' + host + '|' + lType + '|' + mac + '|' + (idx || 0)));
+  var comboKey = scope + '|' + host + '|' + lType + '|' + mac + '|' + (uid > 0 ? uid : '') + '|' + pkg;
+  var id = String(it.id || it.rule_id || it.key || (comboKey + '|' + (idx || 0)));
   return {
     id: id,
+    comboKey: comboKey,
     hasServerId: !!(it.id || it.rule_id || it.key),
     scope: scope,
     dst_host: host,
     leak_type: lType,
     mac: mac,
+    uid: uid > 0 ? uid : 0,
+    pkg: pkg,
+    app_name: appName,
     device_name: String(it.device_name || (d && d.name) || ''),
     note: noteTxt,
     label: noteTxt
@@ -504,19 +587,32 @@ function v6NormWhitelistItem(it, idx) {
 
 function v6IsEventWhitelisted(ev, wlList) {
   if (!ev || !Array.isArray(wlList) || !wlList.length) return false;
+  var evOrigin = ev.origin || 'hotspot';
   var evHost = String(ev.dst_host || '').toLowerCase();
   var evType = leakTypeBadgeCode(ev.leak_type);
   var evMac = String(ev.mac || '').toLowerCase();
+  var evUid = Math.round(num(ev.uid, 0));
+  var evPkg = v6CleanHostRealPkg(ev.pkg).toLowerCase();
   for (var i = 0; i < wlList.length; i++) {
     var w = wlList[i];
     if (!w) continue;
     var wScope = String(w.scope || '').toLowerCase();
     if (wScope === 'device_host') wScope = 'device_host_type';
+    if (wScope === 'app_host') wScope = 'app_host_type';
     if (w.dst_host) {
       if (evHost !== w.dst_host && evHost.slice(-(w.dst_host.length + 1)) !== '.' + w.dst_host && ev.dst_ip !== w.dst_host) continue;
     }
-    if ((wScope === 'device_host_type' || w.mac) && (!w.mac || w.mac !== evMac)) continue;
-    if ((wScope === 'host_type' || wScope === 'device_host_type' || w.leak_type) && w.leak_type && leakTypeBadgeCode(w.leak_type) !== evType) continue;
+    if (wScope === 'app_host_type' || (w.uid > 0) || w.pkg) {
+      if (evOrigin !== 'host') continue;
+      var wPkg = v6CleanHostRealPkg(w.pkg).toLowerCase();
+      var wUid = Math.round(num(w.uid, 0));
+      var pkgMatch = !!(wPkg && evPkg && wPkg === evPkg);
+      var uidMatch = !!(wUid > 0 && evUid > 0 && wUid === evUid);
+      if (!pkgMatch && !uidMatch) continue;
+    } else if (wScope === 'device_host_type' || w.mac) {
+      if (evOrigin === 'host' || !w.mac || w.mac !== evMac) continue;
+    }
+    if ((wScope === 'host_type' || wScope === 'device_host_type' || wScope === 'app_host_type' || w.leak_type) && w.leak_type && leakTypeBadgeCode(w.leak_type) !== evType) continue;
     return true;
   }
   return false;
@@ -528,12 +624,13 @@ function v6NormUndoBlockItem(it, idx) {
   if (!host) return null;
   var alsoIp = String(it.also_ip || it.dst_ip || it.ip || '').trim();
   var targetScope = String(it.target_scope || it.scope || '').toLowerCase();
+  var uid = it.uid != null ? Math.round(num(it.uid, 0)) : 0;
   var macs = Array.isArray(it.macs) ? it.macs.map(function (m) { return String(m || '').trim().toLowerCase(); }).filter(Boolean) : [];
   var mac = String(it.mac || (macs.length === 1 ? macs[0] : '') || '').trim().toLowerCase();
   if (!macs.length && mac) macs = [mac];
-  var devLabel = String(it.device_name || '');
+  var devLabel = String(it.device_name || it.app_name || '');
   if (!devLabel && targetScope === 'host') {
-    devLabel = '本机应用';
+    devLabel = uid > 0 ? ('本机应用 UID ' + uid) : '本机应用';
   } else if (!devLabel && targetScope === 'both') {
     devLabel = '本机与热点双端';
   } else if (!devLabel && macs.length) {
@@ -545,10 +642,11 @@ function v6NormUndoBlockItem(it, idx) {
   }
   var ts = num(it.ts != null ? it.ts : it.created_at, 0);
   return {
-    id: String(it.id || it.undo_id || (host + '|' + ts + '|' + (idx || 0))),
+    id: String(it.id || it.undo_id || (host + '|' + uid + '|' + ts + '|' + (idx || 0))),
     hasServerId: !!(it.id || it.undo_id),
-    kind: String(it.kind || 'domain'),
+    kind: String(it.kind || (v6ExtractPureIp(host) ? 'ip' : 'domain')),
     target_scope: targetScope,
+    uid: uid > 0 ? uid : 0,
     dst_host: host,
     also_ip: (alsoIp && alsoIp.toLowerCase() !== host.toLowerCase()) ? alsoIp : '',
     mac: mac,
@@ -576,6 +674,7 @@ function v6UnreadLeakHits() {
 function v6MarkLeakGuardSeen() {
   LS.set('hnc6.lg_seen_hits', String(Math.max(0, num(V6.lg.total_hits, 0))));
   v6PaintHeaderBadges();
+  if (typeof S !== 'undefined' && S.page === 'vector') v6RefreshNavBadges();
 }
 
 function v6RecalcLeakWatermark() {
@@ -585,7 +684,8 @@ function v6RecalcLeakWatermark() {
     sumHits += h;
     if (e.origin === 'host') {
       hostHits += h;
-      var ak = e.pkg ? ('pkg:' + String(e.pkg).toLowerCase()) : (e.uid > 0 ? ('uid:' + e.uid) : (e.app_name ? ('app:' + String(e.app_name).toLowerCase()) : 'host'));
+      var cp0 = v6CleanHostRealPkg(e.pkg);
+      var ak = cp0 ? ('pkg:' + cp0.toLowerCase()) : (e.uid > 0 ? ('uid:' + e.uid) : (e.app_name ? ('app:' + String(e.app_name).toLowerCase()) : 'host'));
       appSeen[ak] = 1;
     } else {
       hsHits += h;
@@ -604,6 +704,7 @@ function v6RecalcLeakWatermark() {
     v6MarkLeakGuardSeen();
   } else {
     v6PaintHeaderBadges();
+    if (S.page === 'vector') v6RefreshNavBadges();
   }
 }
 
@@ -614,10 +715,11 @@ function v6NormLeakEvent(raw, idx, batchCounts) {
   var mac = String(raw.mac || raw.client_mac || raw.src_mac || '').toLowerCase();
   var srcIp = String(raw.src_ip || raw.client_ip || raw.ip || '');
   var uid = raw.uid != null ? Math.round(num(raw.uid, 0)) : 0;
-  var pkg = String(raw.pkg || raw.package || '').trim();
+  var rawPkgStr = String(raw.pkg || raw.package || '').trim();
+  var pkg = v6CleanHostRealPkg(rawPkgStr);
   var appName = String(raw.app_name || '').trim();
   var originRaw = String(raw.origin || '').toLowerCase().trim();
-  var origin = (originRaw === 'host' || (!originRaw && !mac && (uid > 0 || pkg))) ? 'host' : 'hotspot';
+  var origin = (originRaw === 'host' || (!originRaw && !mac && (uid > 0 || rawPkgStr))) ? 'host' : 'hotspot';
 
   var d = (origin === 'hotspot' && mac) ? devBy(mac) : null;
   if (origin === 'hotspot' && !d && srcIp && Array.isArray(S.devices)) {
@@ -637,7 +739,16 @@ function v6NormLeakEvent(raw, idx, batchCounts) {
   var ua = String(raw.user_agent || raw.ua || meta.ua || '（未携带客户端标识）');
   var id = String(raw.id || raw.event_id || (ts + '_' + origin + '_' + (uid || srcIp) + '_' + lType + '_' + dstHost + '_' + (idx || 0)));
   var hostLower = dstHost.toLowerCase();
-  var isBlocked = raw.is_blocked === true || raw.blocked === true || (origin !== 'host' && !!V6.lg.blocked_set[hostLower]) || (origin === 'host' && !!(V6.host.firewall && V6.host.firewall.blocked_set && V6.host.firewall.blocked_set[hostLower]));
+  var dstPortNum = num(raw.dst_port != null ? raw.dst_port : raw.dport, 80);
+  var protoStr = String(raw.proto || 'tcp').toLowerCase();
+  var isBlocked = raw.is_blocked === true || raw.blocked === true ||
+    (origin !== 'host' && !!V6.lg.blocked_set[hostLower]) ||
+    (origin === 'host' && (
+      v6IsHostDomainBlocked(dstHost) ||
+      v6IsHostIpTargetBlocked(uid, dstHost) ||
+      (dstIp ? v6IsHostIpTargetBlocked(uid, dstIp) : false) ||
+      !!v6HostAppBlockingModeForEvent(uid, dstPortNum, protoStr)
+    ));
   var infraGuard = v6NormInfraGuard(raw.infra_guard, raw.guard_level, raw.guard_label || raw.infra_label, dstHost);
   var hKey = leakHitKey(origin, uid, mac, srcIp, dstHost, lType, rawVal);
   var computedHits = Math.max(
@@ -647,8 +758,9 @@ function v6NormLeakEvent(raw, idx, batchCounts) {
     num(V6.lg.hit_ledger[hKey], 0)
   );
   var devLabel = origin === 'host'
-    ? (appName || pkg || (uid > 0 ? ('本机应用 UID ' + uid) : '本机应用'))
+    ? v6HostEventAppLabel(appName, pkg, uid)
     : (raw.device_name || (d ? d.name : '') || (srcIp || mac || '未知设备'));
+  var srcPort = Math.max(0, Math.round(num(raw.src_port != null ? raw.src_port : (raw.sport != null ? raw.sport : raw.client_port), 0)));
 
   return {
     id: id,
@@ -656,16 +768,18 @@ function v6NormLeakEvent(raw, idx, batchCounts) {
     ts: ts,
     timeStr: raw.time_str || fmtClockTs(ts),
     origin: origin,
+    scope: origin,
     uid: uid,
     pkg: pkg,
     app_name: appName,
     mac: mac,
     devName: devLabel,
     src_ip: srcIp || (d && d.ip) || '',
-    src_port: num(raw.src_port != null ? raw.src_port : raw.sport, 0),
+    src_port: srcPort,
+    sport: srcPort,
     dst_ip: dstIp,
-    dst_port: num(raw.dst_port != null ? raw.dst_port : raw.dport, 80),
-    proto: String(raw.proto || 'tcp').toLowerCase(),
+    dst_port: dstPortNum,
+    proto: protoStr,
     leak_type: lType,
     leak_label: String(raw.leak_label || leakTypeZh(lType)),
     raw_value: rawVal,
@@ -719,6 +833,12 @@ function v6ApplyLeakGuardData(d, forceAccept) {
       normUs.reverse();
     }
     V6.lg.undo_stack = normUs.slice(0, 10);
+    V6.lg.undo_stack.forEach(function (u) {
+      if (u && (u.target_scope === 'host' || u.target_scope === 'both') && u.uid > 0 && u.kind === 'ip' && u.dst_host) {
+        var uIp = v6ExtractPureIp(u.dst_host) || u.dst_host;
+        V6.lg.blocked_set['uid:' + u.uid + '|' + String(uIp).toLowerCase()] = 1;
+      }
+    });
   }
   if (d.undo_count != null || stats.undo_count != null) {
     V6.lg.undo_count = Math.max(0, Math.round(num(d.undo_count != null ? d.undo_count : stats.undo_count, V6.lg.undo_stack.length)));
@@ -740,7 +860,16 @@ function v6ApplyLeakGuardData(d, forceAccept) {
     });
     var list = rawArr.map(function (it, idx) {
       var ev = v6NormLeakEvent(it, idx, batchCounts);
-      if (ev.is_blocked && ev.dst_host && ev.origin !== 'host') V6.lg.blocked_set[ev.dst_host.toLowerCase()] = 1;
+      if (ev.is_blocked && ev.dst_host) {
+        if (ev.origin !== 'host') {
+          V6.lg.blocked_set[ev.dst_host.toLowerCase()] = 1;
+        } else if (ev.uid > 0) {
+          var evPureIp = v6ExtractPureIp(ev.dst_host);
+          if (evPureIp && !v6HostAppBlockingModeForEvent(ev.uid, ev.dst_port, ev.proto)) {
+            V6.lg.blocked_set['uid:' + ev.uid + '|' + evPureIp.toLowerCase()] = 1;
+          }
+        }
+      }
       return ev;
     }).filter(function (ev) {
       return !v6IsEventWhitelisted(ev, V6.lg.whitelist);
@@ -800,11 +929,15 @@ function v6ApplyLeakGuardData(d, forceAccept) {
     V6.lg.blocked_domains = V6.lg.hotspot_blocked_domains + V6.lg.self_blocked_domains;
   }
 
+  if ((Array.isArray(d.events) || Array.isArray(d.items)) && V6.lg.events.length === 0) {
+    LS.set('hnc6.lg_seen_hits', String(Math.max(0, num(V6.lg.total_hits, 0))));
+  }
   v6SeenLeakHits();
   if (S.page === 'vector' && V6.subtab === 'privacy') {
     v6MarkLeakGuardSeen();
   } else {
     v6PaintHeaderBadges();
+    if (S.page === 'vector') v6RefreshNavBadges();
   }
 }
 
@@ -879,14 +1012,23 @@ function v6ApplyExpressData(r, forceAccept) {
   if (typeof r.active === 'boolean') V6.express.active = r.active;
   if (Array.isArray(r.forced_macs)) {
     V6.express.forced_macs = r.forced_macs.map(function (m) { return String(m || '').toLowerCase(); }).filter(v6ValidMac);
+  } else if ('forced_macs' in r && !r.forced_macs) {
+    V6.express.forced_macs = [];
   } else if (Array.isArray(cfg.forced_macs)) {
     V6.express.forced_macs = cfg.forced_macs.map(function (m) { return String(m || '').toLowerCase(); }).filter(v6ValidMac);
+  } else if (cfg !== r && 'forced_macs' in cfg && !cfg.forced_macs) {
+    V6.express.forced_macs = [];
   }
+  var hasRuntimeFields = !forceAccept || ('active' in r || 'state' in r || 'escorted_macs' in r || 'bg_ceil_pct' in r || 'transitions' in r);
   if (Array.isArray(r.escorted_macs)) {
     V6.express.escorted_macs = r.escorted_macs.map(function (m) { return String(m || '').toLowerCase(); }).filter(Boolean);
+  } else if (r.escorted_macs === null || r.active === false || !V6.express.enabled || (hasRuntimeFields && !r.escorted_macs)) {
+    V6.express.escorted_macs = [];
   }
   if (r.escort_reasons && typeof r.escort_reasons === 'object') {
     V6.express.escort_reasons = r.escort_reasons;
+  } else if (r.escort_reasons === null || r.active === false || !V6.express.enabled || !V6.express.escorted_macs.length || (hasRuntimeFields && !r.escort_reasons)) {
+    V6.express.escort_reasons = {};
   }
   if (r.bg_ceil_pct != null) V6.express.bg_ceil_pct = Math.round(num(r.bg_ceil_pct, 100));
   if (r.configured_bg_ceil_pct != null) V6.express.configured_bg_ceil_pct = Math.round(num(r.configured_bg_ceil_pct, 85));
@@ -895,7 +1037,8 @@ function v6ApplyExpressData(r, forceAccept) {
   if (r.transitions != null) V6.express.transitions = Math.max(0, Math.round(num(r.transitions)));
   if (r.dataplane && r.dataplane.qdisc) V6.express.qdisc = String(r.dataplane.qdisc);
   if (r.dataplane && (r.dataplane.tier || r.dataplane.active_tier)) V6.express.tier = String(r.dataplane.tier || r.dataplane.active_tier);
-  else if (r.dataplane_tier) V6.express.tier = String(r.dataplane_tier);
+  else if (typeof r.dataplane_tier === 'string' && r.dataplane_tier) V6.express.tier = r.dataplane_tier;
+  else if (r.dataplane_tier && (r.dataplane_tier.active_tier || r.dataplane_tier.tier)) V6.express.tier = String(r.dataplane_tier.active_tier || r.dataplane_tier.tier);
   V6._committed.express = {
     enabled: V6.express.enabled,
     auto_detect: V6.express.auto_detect,
@@ -938,7 +1081,7 @@ function v6ApplyLeashData(r, forceAccept) {
         vendor_label: String(s.vendor_label || ''),
         down_mb: downBytes / 1048576,
         rem_mb: remBytes / 1048576,
-        cur_kbps: downBps > 0 ? Math.round(downBps * 8 / 1000) : Math.round(num(s.applied_kbps, 0)),
+        cur_kbps: downBps > 0 ? Math.round(downBps * 8 / 1000) : 0,
         applied_kbps: Math.round(num(s.applied_kbps, V6.leash.leash_kbps)),
         state: st,
         bypass_once: s.bypass_once === true || st === 'bypassed',
@@ -946,6 +1089,12 @@ function v6ApplyLeashData(r, forceAccept) {
       };
     });
     V6.leash.active_sessions = V6.leash.sessions.length;
+    if (r.leashed_count == null) {
+      V6.leash.leashed_count = V6.leash.sessions.filter(function (x) { return x.state === 'leashed'; }).length;
+    }
+  } else if ((r.active_sessions != null && V6.leash.active_sessions === 0) || ('sessions' in r && !r.sessions) || !V6.leash.enabled) {
+    V6.leash.sessions = [];
+    if (!V6.leash.enabled || V6.leash.active_sessions === 0) V6.leash.leashed_count = 0;
   }
   V6._committed.leash = {
     enabled: V6.leash.enabled,
@@ -1003,11 +1152,16 @@ function v6ApplyThermoData(r, forceAccept) {
   }
 
   V6.thermo.sensor_checked = true;
+  var hasThermoSnap = !forceAccept || (bat != null || r.temp_c != null || r.stage != null || r.effective_stage != null || r.raw_thermal_stage != null || typeof r.bat_available === 'boolean' || 'reason_code' in r || 'reason_zh' in r || 'reason' in r);
   if (r.reason_code != null || (bat && bat.reason_code != null)) {
     V6.thermo.reason_code = String(r.reason_code != null ? r.reason_code : bat.reason_code).trim();
+  } else if (hasThermoSnap) {
+    V6.thermo.reason_code = '';
   }
   if (r.reason_zh != null || r.reason != null || (bat && (bat.reason_zh != null || bat.reason != null))) {
     V6.thermo.reason_zh = String(r.reason_zh || r.reason || (bat && (bat.reason_zh || bat.reason)) || '').trim();
+  } else if (hasThermoSnap) {
+    V6.thermo.reason_zh = '';
   }
 
   if (typeof r.bat_available === 'boolean') {
@@ -1057,7 +1211,9 @@ function v6ApplyThermoData(r, forceAccept) {
 
   if (typeof r.vector_express_active === 'boolean') V6.thermo.vector_express_active = r.vector_express_active;
   if (typeof r.stage2_exempt === 'boolean') V6.thermo.stage2_exempt = r.stage2_exempt;
+  else if (hasThermoSnap) V6.thermo.stage2_exempt = false;
   if (r.exempt_reason != null) V6.thermo.exempt_reason = String(r.exempt_reason || '');
+  else if (hasThermoSnap) V6.thermo.exempt_reason = '';
   if (typeof r.low_battery_cruise === 'boolean') V6.thermo.low_battery_cruise = r.low_battery_cruise;
   if (r.cool_hold_remaining_sec != null) V6.thermo.cool_hold_remaining_sec = Math.max(0, Math.round(num(r.cool_hold_remaining_sec)));
 
@@ -1066,7 +1222,7 @@ function v6ApplyThermoData(r, forceAccept) {
     V6.thermo.raw_stage = 0;
     V6.thermo.stage = 0;
   } else {
-    var effStg = r.effective_stage != null ? Math.round(num(r.effective_stage)) : (r.raw_thermal_stage != null ? Math.round(num(r.raw_thermal_stage)) : null);
+    var effStg = r.effective_stage != null ? Math.round(num(r.effective_stage)) : (r.stage != null ? Math.round(num(r.stage)) : (r.raw_thermal_stage != null ? Math.round(num(r.raw_thermal_stage)) : null));
     if (r.raw_thermal_stage != null) V6.thermo.raw_stage = Math.round(num(r.raw_thermal_stage));
     if (effStg != null) {
       V6.thermo.stage = clamp(effStg, 0, 2);
@@ -1125,10 +1281,11 @@ function v6NormScalpelFlowList(fl) {
     var mac = String(f.mac || '').toLowerCase();
     var srcIp = String(f.src_ip || '');
     var uid = f.uid != null ? Math.round(num(f.uid, -1)) : -1;
-    var pkg = String(f.package || f.pkg || '');
+    var rawPkg = String(f.package || f.pkg || '');
+    var pkg = v6CleanHostRealPkg(rawPkg);
     var hostAppName = String(f.host_app_name || '');
     var scopeRaw = String(f.scope || '').toLowerCase();
-    var flowScope = (scopeRaw === 'host' || (!scopeRaw && !mac && (uid >= 0 || pkg || hostAppName))) ? 'host' : 'hotspot';
+    var flowScope = (scopeRaw === 'host' || (!scopeRaw && !mac && (uid >= 0 || rawPkg || hostAppName))) ? 'host' : 'hotspot';
 
     var d = (flowScope === 'hotspot' && mac) ? devBy(mac) : null;
     if (flowScope === 'hotspot' && !d && srcIp && Array.isArray(S.devices)) {
@@ -1142,7 +1299,7 @@ function v6NormScalpelFlowList(fl) {
     var isQuic = rawProto === 'quic' || (rawProto === 'udp' && dport === 443);
     var frozenUntil = num(f.frozen_until, 0);
     var ownerLabel = flowScope === 'host'
-      ? (hostAppName || pkg || (uid >= 0 ? ('UID ' + uid) : '本机进程'))
+      ? (uid === 0 && !hostAppName && !pkg ? 'Root / 内核系统' : v6HostEventAppLabel(hostAppName, pkg, uid))
       : (f.device_name || (d ? d.name : '') || srcIp || '未知设备');
 
     return {
@@ -1177,12 +1334,24 @@ function v6NormScalpelFlowList(fl) {
 function v6ApplyScalpelData(r, isDrawerScoped) {
   if (!r || typeof r !== 'object') return;
   if (typeof r.readable === 'boolean') V6.scalpel.readable = r.readable;
-  if (r.cut_total != null) V6.scalpel.cutTotal = Math.max(0, Math.round(num(r.cut_total)));
-  if (Array.isArray(r.active_rules)) {
-    V6.scalpel.active_rules = r.active_rules;
-    V6.scalpel.activeRulesCount = r.active_rules.length;
-  } else if (typeof r.active_rules === 'number') {
-    V6.scalpel.activeRulesCount = Math.max(0, Math.round(r.active_rules));
+  if (!isDrawerScoped) {
+    var rawHsCut = r.cut_total != null ? r.cut_total : r.total_cut_count;
+    if (rawHsCut != null || r.host_cut_total != null || r.total_cuts != null) {
+      var hsCut = Math.max(0, Math.round(num(rawHsCut, 0)));
+      var hoCut = Math.max(0, Math.round(num(r.host_cut_total, 0)));
+      V6.scalpel.cutTotal = r.total_cuts != null
+        ? Math.max(0, Math.round(num(r.total_cuts, 0)))
+        : (hsCut + hoCut);
+    }
+    if (Array.isArray(r.active_rules)) {
+      var extraHostArr = Array.isArray(r.host_active_rules) ? r.host_active_rules : [];
+      V6.scalpel.active_rules = extraHostArr.length ? r.active_rules.concat(extraHostArr) : r.active_rules;
+      var hostRuleNum = typeof r.host_active_rules === 'number' ? Math.max(0, Math.round(r.host_active_rules)) : 0;
+      var hasHostInArr = r.active_rules.some(function (x) { return x && x.scope === 'host'; });
+      V6.scalpel.activeRulesCount = V6.scalpel.active_rules.length + (hasHostInArr ? 0 : hostRuleNum);
+    } else if (typeof r.active_rules === 'number' || typeof r.host_active_rules === 'number') {
+      V6.scalpel.activeRulesCount = Math.max(0, Math.round(num(r.active_rules, 0) + num(r.host_active_rules, 0)));
+    }
   }
   if (!isDrawerScoped && (r.hotspot_flows != null || r.host_flows != null)) {
     V6.scalpel.hasSplitCounts = true;
@@ -1225,12 +1394,15 @@ function v6ApplyBlackboxData(r) {
 }
 
 var V6_ARBITER_SRC_ZH = {
+  thermo_stage2: '温控二阶保护',
+  thermo_recovery: '温控平滑恢复',
   thermo: '发热温控巡航',
   thermo_cruise: '发热温控巡航',
   thermal: '发热温控巡航',
+  static_shaper: '全局静态限速',
+  global_shaper: '全局静态限速',
   autorate: '5G 自适应总带宽',
   '5g_autorate': '5G 自适应总带宽',
-  global_shaper: '热点总网速上限',
   manual: '手动总带宽上限'
 };
 
@@ -1269,7 +1441,7 @@ function v6ApplyArbiterData(arb, liveObj) {
     }
   });
 
-  var winSrc = String((arb && (arb.active_source || arb.winner || arb.source)) || (lv.active_limiter_source || '')).trim();
+  var winSrc = String((arb && (arb.winning_source || arb.active_source || arb.winner || arb.source)) || (lv.winning_source || lv.active_limiter_source || '')).trim();
   var reasonStr = String(
     (arb && (arb.active_limiter_reason || arb.active_reason || arb.reason_zh || arb.reason || arb.summary)) ||
     lv.active_limiter_reason ||
@@ -1378,8 +1550,9 @@ function v6ApplyHostSyncSummary(hg) {
     if (hg.uid_rule_count != null) V6.host.firewall.uid_rule_count = Math.max(0, Math.round(num(hg.uid_rule_count, 0)));
     if (hg.blocked_domain_count != null) V6.host.firewall.blocked_domain_count = Math.max(0, Math.round(num(hg.blocked_domain_count, 0)));
   }
-  if (typeof hg.self_capture_enabled === 'boolean' && Date.now() >= V6.mutUntil.selfCap) {
-    V6.host.privacy.self_capture_enabled = hg.self_capture_enabled;
+  if (Date.now() >= V6.mutUntil.selfCap) {
+    if (typeof hg.self_capture_enabled === 'boolean') V6.host.privacy.self_capture_enabled = hg.self_capture_enabled;
+    if (hg.self_capture_mode != null) V6.host.privacy.self_capture_mode = String(hg.self_capture_mode || '');
   }
 }
 
@@ -1390,7 +1563,7 @@ function v6IngestVectorSync(r) {
 
   var lgSrc = r.leakguard || ext.leakguard || v.leakguard;
   var exSrc = r.express || ext.express || v.express;
-  var ulSrc = r.update_leash || ext.update_leash || v.update_leash || v.leash;
+  var ulSrc = r.update_leash || r.leash || ext.update_leash || ext.leash || v.update_leash || v.leash;
   var thSrc = r.thermo || ext.thermo || v.thermo || v.thermo_cruise;
   var scSrc = r.scalpel || ext.scalpel || v.scalpel;
   var bbSrc = r.blackbox || ext.blackbox || v.blackbox;
@@ -1414,6 +1587,13 @@ function v6IngestVectorSync(r) {
     if (rawSfDom != null) {
       V6.host.firewall.blocked_domain_count = Array.isArray(rawSfDom) ? rawSfDom.length : Math.max(0, Math.round(num(rawSfDom, 0)));
     }
+    var sfUpd = num(sfSrc.updated_at, 0);
+    var needFwSync = !V6.host.fwLoadedAt
+      ? (sfSrc.active === true || V6.host.firewall.uid_rule_count > 0 || V6.host.firewall.blocked_domain_count > 0)
+      : (sfUpd > 0 && sfUpd !== V6.host.firewall.updated_at);
+    if (needFwSync && !V6.host.fwLoading) {
+      v6LoadHostFirewall(false);
+    }
   }
 
   V6._rawSyncArbiter = arbSrc;
@@ -1422,9 +1602,12 @@ function v6IngestVectorSync(r) {
 
   var pk = (ext.v6_pack && typeof ext.v6_pack === 'object') ? ext.v6_pack : ((r.v6_pack && typeof r.v6_pack === 'object') ? r.v6_pack : null);
   if (pk) v6ApplyScreenshotPackSummary(pk);
-  if (r.dataplane && (r.dataplane.tier || r.dataplane.active_tier)) V6.express.tier = String(r.dataplane.tier || r.dataplane.active_tier);
-  else if (r.dataplane_tier) V6.express.tier = String(r.dataplane_tier);
-  else if (r.bulkheads && r.bulkheads.dataplane && (r.bulkheads.dataplane.tier || r.bulkheads.dataplane.active_tier)) V6.express.tier = String(r.bulkheads.dataplane.tier || r.bulkheads.dataplane.active_tier);
+  var dpTierVal = (r.extensions && r.extensions.dataplane_tier && (r.extensions.dataplane_tier.active_tier || r.extensions.dataplane_tier.tier)) ||
+    (ext && ext.dataplane_tier && (ext.dataplane_tier.active_tier || ext.dataplane_tier.tier)) ||
+    (r.dataplane && (r.dataplane.active_tier || r.dataplane.tier)) ||
+    (typeof r.dataplane_tier === 'string' ? r.dataplane_tier : (r.dataplane_tier && (r.dataplane_tier.active_tier || r.dataplane_tier.tier))) ||
+    (r.bulkheads && r.bulkheads.dataplane && (r.bulkheads.dataplane.active_tier || r.bulkheads.dataplane.tier)) || '';
+  if (dpTierVal) V6.express.tier = String(dpTierVal);
 
   V6.loaded = true;
   S.v6 = V6;
@@ -1604,17 +1787,26 @@ function v6DeviceBadgesHtml(d, skipUsb) {
   return out;
 }
 
+function v6ActiveLeashedCount() {
+  if (!v6IsHotspotActive() || v6OnlineClientCount() <= 0 || !V6.leash.enabled) return 0;
+  if (V6.leash.active_sessions <= 0 && !V6.leash.sessions.length) return 0;
+  if (V6.leash.sessions.length) {
+    return V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length;
+  }
+  return Math.max(0, Math.round(num(V6.leash.leashed_count, 0)));
+}
+
 /* 设备页顶部紧凑单行人话状态条（诚实反映热点开关与本机守护状态） */
 function v6DevicesStripHtml() {
   var hsActive = v6IsHotspotActive();
   var onlineCnt = v6OnlineClientCount();
   var escortCnt = (hsActive && onlineCnt > 0 && V6.express.enabled) ? v6UniqueEscortCount(V6.express) : 0;
-  var leashCnt = (hsActive && onlineCnt > 0 && V6.leash.enabled) ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
+  var leashCnt = v6ActiveLeashedCount();
   var unreadLg = v6UnreadLeakHits();
-  var totalLg = num(V6.lg.total_hits, 0);
+  var curLgCnt = Array.isArray(V6.lg.events) ? V6.lg.events.length : 0;
   var sensorUnreadable = v6IsThermoSensorUnreadable(V6.thermo);
   var effTemp = v6EffectiveTempC(V6.thermo);
-  var tempTxt = (!sensorUnreadable && effTemp > 0) ? (effTemp.toFixed(1) + '℃') : '';
+  var tempTxt = (!sensorUnreadable && effTemp > 0) ? (effTemp.toFixed(1) + '°C') : '';
   var arbInfo = hsActive ? v6ActiveLimiterInfo() : null;
 
   var parts = [];
@@ -1649,8 +1841,8 @@ function v6DevicesStripHtml() {
   if (unreadLg > 0) {
     parts.push('新发现 ' + unreadLg + ' 次明文外发');
     dotCls = 'warn';
-  } else if (totalLg > 0) {
-    parts.push('安检记录 ' + totalLg + ' 条');
+  } else if (curLgCnt > 0) {
+    parts.push('安检记录 ' + curLgCnt + ' 条');
   }
 
   var goTarget = unreadLg > 0 ? 'go-privacy' : (!hsActive ? 'go-host' : 'go-vector');
@@ -1671,12 +1863,12 @@ function v6RefreshDevicesBannerDom() {
 
 /* 设置页折叠行内部简洁面板（嵌入标准 scard('scard-v6')） */
 function v6SettingsBodyHtml() {
-  var lgHits = num(V6.lg.total_hits, 0);
+  var lgHits = Array.isArray(V6.lg.events) && V6.lg.events.length ? V6.lg.events.length : 0;
   var hsConn = v6HotspotFlowCount();
   var hostConn = v6HostFlowCount();
   return '<div class="row">' +
       '<span class="tx"><div class="t">智能护航与本机守护中心</div>' +
-      '<div class="s">集中管理网速护航、本机应用联网防火墙与隐私安检记录（共 ' + lgHits + ' 条）</div></span>' +
+      '<div class="s">集中管理网速护航、本机应用联网防火墙与隐私安检记录（当前 ' + lgHits + ' 条）</div></span>' +
       '<button type="button" class="v6-mini-btn pri press" data-v6-act="go-vector">打开护航页</button>' +
     '</div>' +
     '<div class="row">' +
@@ -1773,7 +1965,7 @@ function v6HeroHeadlineInfo() {
   var hsActive = v6IsHotspotActive();
   var onlineCnt = v6OnlineClientCount();
   var escortCnt = (hsActive && onlineCnt > 0 && V6.express.enabled) ? v6UniqueEscortCount(V6.express) : 0;
-  var leashCnt = (hsActive && onlineCnt > 0 && V6.leash.enabled) ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
+  var leashCnt = v6ActiveLeashedCount();
   var unreadLg = v6UnreadLeakHits();
   var effTemp = v6EffectiveTempC(V6.thermo);
 
@@ -1783,7 +1975,7 @@ function v6HeroHeadlineInfo() {
   if (V6.thermo.enabled && !v6IsThermoSensorUnreadable(V6.thermo) && V6.thermo.stage >= 2) {
     return {
       dot: 'bad',
-      title: '机身温度偏高（' + effTemp.toFixed(1) + '℃），正在自动降载降温',
+      title: '机身温度偏高（' + effTemp.toFixed(1) + '°C），正在自动降载降温',
       sub: hsActive ? '已温和收紧后台大流量下载，防止系统过热强关热点' : '热点待机中 · 本机温控巡航与后台守护持续运行'
     };
   }
@@ -1885,7 +2077,7 @@ function v6RenderHeroCardHtml() {
     ? '已关闭 · 点击开启'
     : (expCnt > 0 ? ('已开启 · ' + expCnt + ' 台加速') : (V6.express.auto_detect ? '已开启 · 自动识别' : '已开启 · 手动指定'));
 
-  var leashActCnt = (hsActive && onlineCnt > 0) ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
+  var leashActCnt = v6ActiveLeashedCount();
   var leashGraceStr = V6.leash.grace_mb >= 1024 ? (trim0((V6.leash.grace_mb / 1024).toFixed(1)) + 'G') : (V6.leash.grace_mb + 'M');
   var leashSub = !V6.leash.enabled
     ? '已关闭 · 点击开启'
@@ -1893,7 +2085,7 @@ function v6RenderHeroCardHtml() {
 
   var sensorUnreadable = v6IsThermoSensorUnreadable(V6.thermo);
   var effTemp = v6EffectiveTempC(V6.thermo);
-  var tempShort = sensorUnreadable ? '传感器异常' : (effTemp > 0 ? (effTemp.toFixed(1) + '℃') : '待采样');
+  var tempShort = sensorUnreadable ? '传感器异常' : (effTemp > 0 ? (effTemp.toFixed(1) + '°C') : '待采样');
   var batShort = V6.thermo.capacity_pct > 0 ? (V6.thermo.capacity_pct + '%') : '';
   var thSub = !V6.thermo.enabled
     ? ('已关闭 · ' + tempShort)
@@ -1952,10 +2144,8 @@ function v6BuildMainSegLabel(tabKey) {
     return '本机守护' + (fwCnt > 0 ? ('<span class="v6-seg-cnt">' + (fwCnt > 99 ? '99+' : fwCnt) + '</span>') : '');
   }
   if (tabKey === 'privacy') {
-    var lgTotal = num(V6.lg.total_hits, 0);
     var lgUnread = v6UnreadLeakHits();
     if (lgUnread > 0) return '隐私安检<span class="v6-seg-cnt unread">' + (lgUnread > 99 ? '99+' : lgUnread) + '</span>';
-    if (lgTotal > 0) return '隐私安检<span class="v6-seg-cnt">' + (lgTotal > 99 ? '99+' : lgTotal) + '</span>';
     return '隐私安检';
   }
   var scCnt = Math.max(0, num(V6.scalpel.activeRulesCount, 0));
@@ -2107,7 +2297,7 @@ function v6RenderLeashCardHtml() {
       return '<div class="v6-flow-item">' +
         '<div class="v6-flow-main">' +
           '<div class="v6-flow-t">' + stBadge + '<span>' + escapeHtml(s.devName) + ' · ' + escapeHtml(srcTitle) + '</span></div>' +
-          '<div class="v6-flow-s">已下载 ' + s.down_mb.toFixed(0) + ' MB · ' + escapeHtml(s.dst_host) + (s.cur_kbps > 0 ? (' · 当前 ' + trim0((s.cur_kbps / 1000).toFixed(2)) + ' Mbps') : '') + '</div>' +
+          '<div class="v6-flow-s">已下载 ' + s.down_mb.toFixed(0) + ' MB · ' + escapeHtml(s.dst_host) + ' · 当前 ' + (s.cur_kbps > 0 ? (trim0((s.cur_kbps / 1000).toFixed(2)) + ' Mbps') : '0 Mbps') + '</div>' +
         '</div>' +
         '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
           (!s.bypass_once ? '<button type="button" class="v6-mini-btn ok press" data-v6-act="leash-release" data-skey="' + escapeHtml(s.session_key) + '" data-mac="' + escapeHtml(s.mac) + '" data-host="' + escapeHtml(s.dst_host) + '">本次全速</button>' : '') +
@@ -2164,12 +2354,12 @@ function v6RenderThermoCardHtml() {
   var tempBadges = '';
   if (!sensorUnreadable) {
     if (th.shell_temp_available && th.shell_temp_c > 0) {
-      tempBadges += '<span class="v6-mono-badge b-acc">机身壳温 ' + th.shell_temp_c.toFixed(1) + '℃</span>';
+      tempBadges += '<span class="v6-mono-badge b-acc">机身壳温 ' + th.shell_temp_c.toFixed(1) + '°C</span>';
       if (th.battery_temp_c > 0) {
-        tempBadges += '<span class="v6-mono-badge">电池传感器 ' + th.battery_temp_c.toFixed(1) + '℃</span>';
+        tempBadges += '<span class="v6-mono-badge">电池传感器 ' + th.battery_temp_c.toFixed(1) + '°C</span>';
       }
     } else if (hasTemp) {
-      tempBadges += '<span class="v6-mono-badge">当前温度 ' + effTemp.toFixed(1) + '℃</span>';
+      tempBadges += '<span class="v6-mono-badge">当前温度 ' + effTemp.toFixed(1) + '°C</span>';
     }
   }
 
@@ -2205,15 +2395,15 @@ function v6RenderThermoCardHtml() {
       '</div>' +
       extraNotes +
       '<details class="v6-adv-fold" data-v6-fold="thermo"' + (V6.advOpen.thermo ? ' open' : '') + '>' +
-        '<summary><span>修改温控触发阈值</span><span class="v6-adv-r"><span>' + th.stage1_temp_c + '℃ 省电 / ' + th.stage2_temp_c + '℃ 降温</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+        '<summary><span>修改温控触发阈值</span><span class="v6-adv-r"><span>' + th.stage1_temp_c + '°C 省电 / ' + th.stage2_temp_c + '°C 降温</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
         '<div class="v6-adv-body">' +
           '<div class="lgd-sw-row">' +
             '<span>严重过热时自动收紧后台下载网速<small>达到二级降温温度且未充电、未打游戏时自动温和限流降温</small></span>' +
             toggle(th.stage2_shaper_enabled, 'data-v6-tog="thermo-shaper" aria-label="严重过热自动收紧后台网速"') +
           '</div>' +
           '<div class="v6-num-grid">' +
-            '<label class="v6-num-field"><span>一级省电温度（降低采样功耗）</span><span class="v6-num-box"><input id="v6-th-t1" type="number" min="30" max="70" step="1" inputmode="numeric" value="' + th.stage1_temp_c + '"><span class="u">℃</span></span></label>' +
-            '<label class="v6-num-field"><span>二级降温温度（收紧后台大下载）</span><span class="v6-num-box"><input id="v6-th-t2" type="number" min="32" max="75" step="1" inputmode="numeric" value="' + th.stage2_temp_c + '"><span class="u">℃</span></span></label>' +
+            '<label class="v6-num-field"><span>一级省电温度（降低采样功耗）</span><span class="v6-num-box"><input id="v6-th-t1" type="number" min="30" max="70" step="1" inputmode="numeric" value="' + th.stage1_temp_c + '"><span class="u">°C</span></span></label>' +
+            '<label class="v6-num-field"><span>二级降温温度（收紧后台大下载）</span><span class="v6-num-box"><input id="v6-th-t2" type="number" min="32" max="75" step="1" inputmode="numeric" value="' + th.stage2_temp_c + '"><span class="u">°C</span></span></label>' +
           '</div>' +
           '<div style="display:flex;justify-content:flex-end">' +
             '<button type="button" class="btn sm pri press" data-v6-act="thermo-save">保存温度阈值</button>' +
@@ -2271,19 +2461,129 @@ function v6FwModeZh(mode) {
   return '正常放行';
 }
 
+function v6LookupHostUidRule(uid) {
+  var u = Math.round(num(uid, -1));
+  if (u < 0 || !V6.host || !V6.host.firewall || !V6.host.firewall.uid_map) return null;
+  var r = V6.host.firewall.uid_map[String(u)];
+  if (r) return r;
+  var appId = u % 100000;
+  if (appId >= 20000 && appId <= 29999) {
+    return V6.host.firewall.uid_map[String(u - 10000)] || null;
+  }
+  return null;
+}
+
 function v6HostUidMode(uid) {
-  var r = V6.host.firewall.uid_map[String(Math.round(num(uid, -1)))];
+  var r = v6LookupHostUidRule(uid);
   return r ? v6NormFwMode(r.mode) : 'allow';
+}
+
+function v6HostUidBlockTargets(uid) {
+  var r = v6LookupHostUidRule(uid);
+  return (r && Array.isArray(r.block_targets)) ? r.block_targets : [];
+}
+
+function v6IsHostDomainBlocked(hostRaw) {
+  if (!V6.host || !V6.host.firewall || !V6.host.firewall.blocked_set) return false;
+  var s = String(hostRaw || '').trim().toLowerCase();
+  if (!s || s === '-' || s === '—') return false;
+  if (v6ExtractPureIp(s)) return false;
+  if (s.indexOf(':') >= 0) s = s.split(':')[0];
+  s = s.replace(/^\.+|\.+$/g, '');
+  if (!s) return false;
+  var bSet = V6.host.firewall.blocked_set;
+  var cur = s;
+  while (cur) {
+    if (bSet[cur]) return true;
+    var dot = cur.indexOf('.');
+    if (dot < 0 || dot + 1 >= cur.length) break;
+    cur = cur.slice(dot + 1);
+  }
+  return false;
+}
+
+function v6IsHostIpTargetBlocked(uid, ipOrHostRaw) {
+  var u = Math.round(num(uid, 0));
+  if (u <= 0) return false;
+  var rawLow = String(ipOrHostRaw || '').trim().toLowerCase();
+  if (!rawLow || rawLow === '-' || rawLow === '—') return false;
+  var pureIp = v6ExtractPureIp(rawLow).toLowerCase();
+  if (V6.lg && V6.lg.blocked_set) {
+    if (V6.lg.blocked_set['uid:' + u + '|' + rawLow]) return true;
+    if (pureIp && V6.lg.blocked_set['uid:' + u + '|' + pureIp]) return true;
+  }
+  var targets = v6HostUidBlockTargets(u);
+  for (var i = 0; i < targets.length; i++) {
+    var tLow = String(targets[i] || '').trim().toLowerCase();
+    if (!tLow) continue;
+    if (tLow === rawLow) return true;
+    if (pureIp && (tLow === pureIp || v6ExtractPureIp(tLow).toLowerCase() === pureIp)) return true;
+  }
+  return false;
+}
+
+function v6IsCleartextHttpPortProto(port, proto) {
+  var lp = String(proto || '').trim().toLowerCase();
+  if (lp && lp !== 'tcp' && lp !== 'http') return false;
+  var p = Math.round(num(port, 0));
+  return p === 0 || p === 80 || p === 8080 || p === 8000 || p === 8008 || p === 8888;
+}
+
+function v6HostAppBlockingModeForEvent(uid, port, proto) {
+  var u = Math.round(num(uid, 0));
+  if (u <= 0 || v6IsHostAppProtected(u, '')) return '';
+  var m = v6HostUidMode(u);
+  if (m === 'block_all') return 'block_all';
+  if (m === 'block_cleartext' && v6IsCleartextHttpPortProto(port, proto)) return 'block_cleartext';
+  return '';
+}
+
+function v6ClassifyHostLeakBlockState(ev) {
+  if (!ev || ev.origin !== 'host') {
+    return { targetBlocked: !!(ev && ev.is_blocked), appMode: '', appOnlyBlocked: false };
+  }
+  var evUid = Math.round(num(ev.uid, 0));
+  var primaryHost = String(ev.dst_host && ev.dst_host !== '—' ? ev.dst_host : ev.dst_ip).trim();
+  var pureIp = v6ExtractPureIp(primaryHost);
+  var targetBlocked = pureIp
+    ? v6IsHostIpTargetBlocked(evUid, primaryHost)
+    : (v6IsHostDomainBlocked(primaryHost) || (ev.dst_ip ? v6IsHostIpTargetBlocked(evUid, ev.dst_ip) : false));
+  var appMode = v6HostAppBlockingModeForEvent(evUid, ev.dst_port, ev.proto);
+  return {
+    targetBlocked: targetBlocked,
+    appMode: appMode,
+    appOnlyBlocked: !targetBlocked && !!appMode
+  };
+}
+
+function v6SyncHostLeakEventsBlocked() {
+  if (!V6.lg || !Array.isArray(V6.lg.events)) return;
+  V6.lg.events.forEach(function (ev) {
+    if (!ev || ev.origin !== 'host') return;
+    var st = v6ClassifyHostLeakBlockState(ev);
+    ev.is_blocked = !!(st.targetBlocked || st.appMode);
+  });
 }
 
 function v6IsHostAppProtected(uid, pkg) {
   var u = Math.round(num(uid, 0));
-  if (u >= 0 && (u % 100000) < 10000) return true;
-  var p = String(pkg || '').toLowerCase().trim();
+  var appId = u >= 0 ? (u % 100000) : -1;
+  if (u >= 0 && (appId < 10000 || appId >= 90000)) return true;
+  var p = v6CleanHostRealPkg(pkg).toLowerCase();
   if (!p) return false;
   var list = V6.host.firewall.protected_packages || [];
   for (var i = 0; i < list.length; i++) {
     if (String(list[i] || '').toLowerCase() === p) return true;
+  }
+  return false;
+}
+
+function v6IsSheetShowing() {
+  if (V6.appSheet && V6.appSheet.open) return true;
+  if (V6.host.appSheet && V6.host.appSheet.open) return true;
+  if (typeof document !== 'undefined') {
+    var sh = document.getElementById('sheet');
+    if (sh && sh.classList && sh.classList.contains('show')) return true;
   }
   return false;
 }
@@ -2350,12 +2650,26 @@ function v6LoadHostTraffic(manual) {
         V6.host.traffic.apps = r.apps;
       }
     }
-    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    if (S.page === 'vector' && V6.subtab === 'host') {
+      if (v6IsSheetShowing()) {
+        V6.host._deferTrafficPaint = true;
+      } else {
+        V6.host._deferTrafficPaint = false;
+        v6RefreshActiveSubviewDom();
+      }
+    }
     return r;
   }).catch(function (e) {
     V6.host.trafficLoading = false;
     V6.host.trafficErr = errText(e);
-    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    if (S.page === 'vector' && V6.subtab === 'host') {
+      if (v6IsSheetShowing()) {
+        V6.host._deferTrafficPaint = true;
+      } else {
+        V6.host._deferTrafficPaint = false;
+        v6RefreshActiveSubviewDom();
+      }
+    }
     return null;
   });
 }
@@ -2387,12 +2701,18 @@ function v6LoadHostPower(forceRefresh) {
         V6.host.power.apps = r.apps;
       }
     }
-    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    if (S.page === 'vector' && V6.subtab === 'host') {
+      if (v6IsSheetShowing()) V6.host._deferTrafficPaint = true;
+      else v6RefreshActiveSubviewDom();
+    }
     return r;
   }).catch(function (e) {
     V6.host.powerLoading = false;
     V6.host.powerErr = errText(e);
-    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    if (S.page === 'vector' && V6.subtab === 'host') {
+      if (v6IsSheetShowing()) V6.host._deferTrafficPaint = true;
+      else v6RefreshActiveSubviewDom();
+    }
     return null;
   });
 }
@@ -2418,12 +2738,18 @@ function v6LoadHostPrivacy(forceAccept) {
         V6.host.privacy.findings = r.findings;
       }
     }
-    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    if (S.page === 'vector' && V6.subtab === 'host') {
+      if (v6IsSheetShowing()) V6.host._deferTrafficPaint = true;
+      else v6RefreshActiveSubviewDom();
+    }
     return r;
   }).catch(function (e) {
     V6.host.privacyLoading = false;
     V6.host.privacyErr = errText(e);
-    if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+    if (S.page === 'vector' && V6.subtab === 'host') {
+      if (v6IsSheetShowing()) V6.host._deferTrafficPaint = true;
+      else v6RefreshActiveSubviewDom();
+    }
     return null;
   });
 }
@@ -2435,20 +2761,37 @@ function v6ApplyHostFirewallData(r) {
     V6.host.firewall.protected_packages = r.protected_packages.map(String);
   }
   if (Array.isArray(r.uid_rules)) {
+    if (V6.lg && V6.lg.blocked_set) {
+      Object.keys(V6.lg.blocked_set).forEach(function (k) {
+        if (k.indexOf('uid:') === 0) delete V6.lg.blocked_set[k];
+      });
+    }
     var uMap = {};
     V6.host.firewall.uid_rules = r.uid_rules.map(function (it) {
       var u = Math.round(num(it.uid, 0));
+      var bTargets = Array.isArray(it.block_targets)
+        ? it.block_targets.map(function (t) { return String(t || '').trim(); }).filter(Boolean)
+        : [];
       var norm = {
         uid: u,
         sdk_sandbox_uid: Math.round(num(it.sdk_sandbox_uid, 0)),
-        pkg: String(it.pkg || it.package || ''),
-        app_name: String(it.app_name || ''),
+        pkg: v6CleanHostRealPkg(it.pkg || it.package || ''),
+        app_name: String(it.app_name || it.display_name || ''),
         mode: v6NormFwMode(it.mode),
+        block_targets: bTargets,
         updated_at: num(it.updated_at, 0)
       };
-      if (norm.mode !== 'allow') uMap[String(u)] = norm;
+      if (u > 0 && bTargets.length > 0 && V6.lg && V6.lg.blocked_set) {
+        bTargets.forEach(function (tgt) {
+          var tLow = tgt.toLowerCase();
+          V6.lg.blocked_set['uid:' + u + '|' + tLow] = 1;
+          var pIp = v6ExtractPureIp(tgt);
+          if (pIp) V6.lg.blocked_set['uid:' + u + '|' + pIp.toLowerCase()] = 1;
+        });
+      }
+      if (norm.mode !== 'allow' || norm.block_targets.length > 0) uMap[String(u)] = norm;
       return norm;
-    }).filter(function (x) { return x.mode !== 'allow'; });
+    }).filter(function (x) { return x.mode !== 'allow' || (x.block_targets && x.block_targets.length > 0); });
     V6.host.firewall.uid_map = uMap;
     V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
   } else if (r.uid_rule_count != null) {
@@ -2466,6 +2809,7 @@ function v6ApplyHostFirewallData(r) {
   } else if (r.blocked_domain_count != null) {
     V6.host.firewall.blocked_domain_count = Math.max(0, Math.round(num(r.blocked_domain_count, 0)));
   }
+  v6SyncHostLeakEventsBlocked();
 }
 
 function v6LoadHostFirewall(forceAccept) {
@@ -2479,7 +2823,12 @@ function v6LoadHostFirewall(forceAccept) {
     }
     if (S.page === 'vector') {
       v6RefreshNavBadges();
-      if (V6.subtab === 'host') v6RefreshActiveSubviewDom();
+      if (V6.subtab === 'host') {
+        if (v6IsSheetShowing()) V6.host._deferTrafficPaint = true;
+        else v6RefreshActiveSubviewDom();
+      } else if (V6.subtab === 'privacy') {
+        v6RefreshActiveSubviewDom();
+      }
     }
     if (V6.host.appSheet.open) v6PaintHostAppSheetFwButtons();
     return r;
@@ -2525,6 +2874,16 @@ function v6StopHostAppSheetTimer() {
   v6PauseHostAppSheetTimer();
   V6.host.appSheet.open = false;
   V6.host.appSheet.reqSeq = (V6.host.appSheet.reqSeq || 0) + 1;
+  if (V6.host._deferTrafficPaint) {
+    V6.host._deferTrafficPaint = false;
+    var flushDeferred = function () {
+      if (typeof S !== 'undefined' && S.page === 'vector' && V6.subtab === 'host' && !v6IsSheetShowing()) {
+        v6RefreshActiveSubviewDom();
+      }
+    };
+    if (typeof sheetSettled === 'function') sheetSettled().then(flushDeferred);
+    else setTimeout(flushDeferred, 260);
+  }
 }
 
 function v6HostAppFlowsInnerHtml() {
@@ -2545,7 +2904,7 @@ function v6HostAppFlowsInnerHtml() {
     var riskBadge = f.cleartext_risk === 'http_cleartext'
       ? '<span class="v6-mono-badge b-bad">HTTP明文</span>'
       : (f.cleartext_risk === 'dns_direct' ? '<span class="v6-mono-badge b-warn">直连DNS</span>' : '');
-    var titleMain = f.dst_host || (f.dst_ip + ':' + f.dport);
+    var titleMain = f.dst_host || v6FmtHostPort(f.dst_ip, f.dport);
     return '<div class="v6-tuple-row" data-mkey="huid-' + escapeHtml(f.id) + '">' +
       '<div class="v6-tuple-5">' +
         '<div class="v6-tuple-primary">' +
@@ -2553,7 +2912,7 @@ function v6HostAppFlowsInnerHtml() {
           riskBadge +
           '<span>' + escapeHtml(titleMain) + '</span>' +
         '</div>' +
-        '<div class="ep">' + escapeHtml(f.src_ip + ':' + f.sport + ' -> ' + f.dst_ip + ':' + f.dport) + '</div>' +
+        '<div class="ep">' + escapeHtml(v6FmtHostPort(f.src_ip, f.sport) + ' -> ' + v6FmtHostPort(f.dst_ip, f.dport)) + '</div>' +
       '</div>' +
       '<div class="v6-tuple-rate">↓ ' + rxB.v + ' ' + rxB.u + '<br>↑ ' + txB.v + ' ' + txB.u + '</div>' +
       '<div class="v6-tuple-acts">' +
@@ -2586,7 +2945,28 @@ function v6FetchHostAppFlows() {
     st.err = errText(e);
     var box = document.getElementById('v6-host-sheet-flows');
     if (box) box.innerHTML = v6HostAppFlowsInnerHtml();
+    var cnt = document.getElementById('v6-host-sheet-cnt');
+    if (cnt) cnt.textContent = '读取失败';
   });
+}
+
+function v6HostAppSheetIpTargetsInnerHtml(uid, pkg, appName) {
+  var targets = v6HostUidBlockTargets(uid);
+  if (!targets.length) return '';
+  var cleanPkg = v6CleanHostRealPkg(pkg);
+  var disp = v6HostEventAppLabel(appName, cleanPkg, uid);
+  return '<div style="margin:12px 0 4px">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">' +
+      '<b style="font-size:12.5px;color:var(--text-2)">该应用已封目标 IP（' + targets.length + ' 项）</b>' +
+      (targets.length > 1 ? '<button type="button" class="v6-mini-btn ok press" data-v6-act="host-uid-ip-clear" data-uid="' + uid + '" data-pkg="' + escapeHtml(cleanPkg) + '" data-name="' + escapeHtml(disp) + '">全部解封</button>' : '') +
+    '</div>' +
+    '<div class="v6-flow-list">' + targets.map(function (t) {
+      return '<div class="v6-flow-item" data-mkey="hsip-' + uid + '-' + escapeHtml(t) + '">' +
+        '<div class="v6-flow-main"><div class="v6-flow-t"><span class="v6-mono-badge b-bad">IP拦截</span><span class="mono">' + escapeHtml(t) + '</span></div></div>' +
+        '<button type="button" class="v6-mini-btn ok press" data-v6-act="host-ip-unblock" data-uid="' + uid + '" data-ip="' + escapeHtml(t) + '" data-pkg="' + escapeHtml(cleanPkg) + '" data-name="' + escapeHtml(disp) + '">解除封禁</button>' +
+      '</div>';
+    }).join('') + '</div>' +
+  '</div>';
 }
 
 function v6PaintHostAppSheetFwButtons() {
@@ -2597,22 +2977,18 @@ function v6PaintHostAppSheetFwButtons() {
     var m = b.getAttribute('data-fw-mode');
     b.classList.toggle('on', m === curMode);
   });
+  var ipBox = document.getElementById('v6-host-sheet-ips');
+  if (ipBox) {
+    morph(ipBox, v6HostAppSheetIpTargetsInnerHtml(st.uid, st.pkg, st.appName));
+  }
 }
 
 function v6OpenHostAppSheet(uid, pkg, appName, isSystem) {
   uid = Math.round(num(uid, -1));
   if (uid < 0 || typeof sheet !== 'function') return;
-  pkg = String(pkg || '').trim();
-  appName = String(appName || pkg || ('UID ' + uid)).trim();
-  v6StopHostAppSheetTimer();
-
-  V6.host.appSheet.open = true;
-  V6.host.appSheet.uid = uid;
-  V6.host.appSheet.pkg = pkg;
-  V6.host.appSheet.appName = appName;
-  V6.host.appSheet.isSystem = !!isSystem;
-  V6.host.appSheet.flows = [];
-  V6.host.appSheet.err = '';
+  pkg = v6CleanHostRealPkg(pkg);
+  appName = v6HostEventAppLabel(appName, pkg, uid);
+  v6PauseHostAppSheetTimer();
 
   var curMode = v6HostUidMode(uid);
   var isProt = v6IsHostAppProtected(uid, pkg);
@@ -2621,21 +2997,31 @@ function v6OpenHostAppSheet(uid, pkg, appName, isSystem) {
   var html = '<h3>' + escapeHtml(appName) + '</h3>' +
     '<div class="sub mono">' + escapeHtml((pkg ? pkg + ' · ' : '') + 'UID ' + uid + (isSystem ? ' · 系统组件' : '')) + '</div>' +
     '<div style="margin:10px 0 6px;font-size:12.5px;font-weight:700;color:var(--text-2)">本机联网四档管控（内核 UID 级即时生效）</div>' +
-    (isProt ? '<div class="note warn" style="margin:0 0 8px">该组件属于 Android 核心系统或 Root / WebView 保护白名单，已锁定防断网自锁，仅支持查看连接</div>' : '') +
+    (isProt ? '<div class="note warn" style="margin:0 0 8px">该组件属于 Android 核心系统、隔离沙盒或 Root / WebView 保护白名单，已锁定防断网自锁，仅支持查看连接</div>' : '') +
     '<div class="v6-fw-grid' + (isProt ? ' v6-dimmed' : '') + '" id="v6-host-fw-picker">' +
       '<button type="button" class="v6-fw-btn m-allow press' + (curMode === 'allow' ? ' on' : '') + '" data-v6-act="host-fw-set" data-fw-mode="allow" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appName) + '"><b><span>正常放行</span></b><small>允许全部网络通信</small></button>' +
       '<button type="button" class="v6-fw-btn m-http press' + (curMode === 'block_cleartext' ? ' on' : '') + '" data-v6-act="host-fw-set" data-fw-mode="block_cleartext" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appName) + '"' + disAttr + '><b><span>仅禁明文HTTP</span></b><small>阻断80端口防裸奔，HTTPS正常</small></button>' +
       '<button type="button" class="v6-fw-btn m-mob press' + (curMode === 'block_cellular' ? ' on' : '') + '" data-v6-act="host-fw-set" data-fw-mode="block_cellular" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appName) + '"' + disAttr + '><b><span>禁移动数据</span></b><small>仅允许Wi-Fi联网，省流量</small></button>' +
       '<button type="button" class="v6-fw-btn m-all press' + (curMode === 'block_all' ? ' on' : '') + '" data-v6-act="host-fw-set" data-fw-mode="block_all" data-uid="' + uid + '" data-pkg="' + escapeHtml(pkg) + '" data-name="' + escapeHtml(appName) + '"' + disAttr + '><b><span>全局禁网</span></b><small>阻断前后台一切联网</small></button>' +
     '</div>' +
+    '<div id="v6-host-sheet-ips">' + v6HostAppSheetIpTargetsInnerHtml(uid, pkg, appName) + '</div>' +
     '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 8px">' +
       '<b style="font-size:13px;color:var(--text-1)">当前活跃连接</b>' +
       '<span class="v6-mono-badge" id="v6-host-sheet-cnt">读取中…</span>' +
     '</div>' +
-    '<div id="v6-host-sheet-flows">' + v6HostAppFlowsInnerHtml() + '</div>' +
+    '<div id="v6-host-sheet-flows"><div class="note">正在读取该应用的内核实时连接…</div></div>' +
     '<button type="button" class="btn sec wide press" data-close style="margin-top:12px">关闭</button>';
 
+  /* 必须先调用 sheet() 让前一次已打开弹窗的 prevClose 执行完毕，再置 open=true 并拉取连接 */
   sheet(html, { tall: true, kind: 'v6-host-app', onClose: v6StopHostAppSheetTimer });
+  V6.host.appSheet.open = true;
+  V6.host.appSheet.uid = uid;
+  V6.host.appSheet.pkg = pkg;
+  V6.host.appSheet.appName = appName;
+  V6.host.appSheet.isSystem = !!isSystem;
+  V6.host.appSheet.flows = [];
+  V6.host.appSheet.loading = true;
+  V6.host.appSheet.err = '';
   v6FetchHostAppFlows();
   v6StartHostAppSheetTimer();
 }
@@ -2644,41 +3030,62 @@ function v6OpenHostAppSheet(uid, pkg, appName, isSystem) {
 function v6SetHostUidFirewall(uid, rawMode, pkg, appName, triggerEl, fromUndo) {
   uid = Math.round(num(uid, -1));
   if (uid < 0) return Promise.resolve();
+  pkg = v6CleanHostRealPkg(pkg);
   var wireMode = v6NormFwMode(rawMode);
   if (wireMode !== 'allow' && v6IsHostAppProtected(uid, pkg)) {
-    toast('核心系统或管理器组件受安全保护，禁止拦截', 'warn');
+    toast('核心系统、隔离沙盒或管理器组件受安全保护，禁止拦截', 'warn');
     return Promise.resolve();
   }
-  var prevMode = v6HostUidMode(uid);
+  var prevRule = V6.host.firewall.uid_map[String(uid)] || null;
+  var prevMode = prevRule ? v6NormFwMode(prevRule.mode) : v6HostUidMode(uid);
+  var existingTargets = (prevRule && Array.isArray(prevRule.block_targets)) ? prevRule.block_targets.slice() : [];
+  var hasBlockTargets = existingTargets.length > 0;
   if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
   V6.mutUntil.hostFw = Date.now() + 1500;
 
-  if (wireMode === 'allow') {
+  if (wireMode === 'allow' && !hasBlockTargets) {
     delete V6.host.firewall.uid_map[String(uid)];
     V6.host.firewall.uid_rules = V6.host.firewall.uid_rules.filter(function (x) { return x.uid !== uid; });
   } else {
-    var nextRule = { uid: uid, sdk_sandbox_uid: 0, pkg: pkg || '', app_name: appName || '', mode: wireMode, updated_at: Math.round(Date.now() / 1000) };
+    var nextRule = {
+      uid: uid,
+      sdk_sandbox_uid: prevRule ? Math.round(num(prevRule.sdk_sandbox_uid, 0)) : 0,
+      pkg: pkg || (prevRule && prevRule.pkg) || '',
+      app_name: appName || (prevRule && prevRule.app_name) || '',
+      mode: wireMode,
+      block_targets: existingTargets,
+      updated_at: Math.round(Date.now() / 1000)
+    };
     V6.host.firewall.uid_map[String(uid)] = nextRule;
     var rest = V6.host.firewall.uid_rules.filter(function (x) { return x.uid !== uid; });
     rest.unshift(nextRule);
     V6.host.firewall.uid_rules = rest;
   }
   V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
+  v6SyncHostLeakEventsBlocked();
   v6PaintHostAppSheetFwButtons();
   v6RefreshNavBadges();
-  if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+  if (S.page === 'vector') {
+    if (V6.subtab === 'host') {
+      if (v6IsSheetShowing()) V6.host._deferTrafficPaint = true;
+      else v6RefreshActiveSubviewDom();
+    } else if (V6.subtab === 'privacy') {
+      v6RefreshActiveSubviewDom();
+    }
+  }
 
-  var actName = wireMode === 'allow' ? 'self_firewall_remove' : 'self_firewall_set';
-  var actParams = wireMode === 'allow'
+  var keepIpRule = wireMode === 'allow' && hasBlockTargets;
+  var actName = (wireMode === 'allow' && !keepIpRule) ? 'self_firewall_remove' : 'self_firewall_set';
+  var actParams = (wireMode === 'allow' && !keepIpRule)
     ? { uid: String(uid) }
-    : { uid: String(uid), mode: wireMode, pkg: pkg || '', app_name: appName || '' };
+    : { uid: String(uid), mode: wireMode, pkg: pkg, app_name: appName || '' };
   var dispApp = appName || pkg || ('UID ' + uid);
 
   return busyWhile(triggerEl, api.action(actName, actParams)).then(function () {
     v6LoadHostFirewall(true);
     if (V6.host.mode === 'firewall') v6LoadHostPrivacy();
     var okMsg = wireMode === 'allow'
-      ? ('已恢复放行：' + dispApp)
+      ? ('已恢复放行：' + dispApp + (keepIpRule ? ('（保留 ' + existingTargets.length + ' 项单 IP 封禁）') : ''))
       : ('已对「' + dispApp + '」设为' + v6FwModeZh(wireMode));
     if (!fromUndo && prevMode !== wireMode && typeof undoToast === 'function') {
       undoToast(okMsg, function () {
@@ -2687,6 +3094,148 @@ function v6SetHostUidFirewall(uid, rawMode, pkg, appName, triggerEl, fromUndo) {
     } else {
       toast(okMsg);
     }
+  }).catch(function (e) {
+    V6.mutUntil.hostFw = 0;
+    v6LoadHostFirewall(true);
+    toast(errText(e), 'err');
+  });
+}
+
+function v6UnblockHostUidIp(uid, targetRaw, pkg, appName, triggerEl, fromUndo) {
+  uid = Math.round(num(uid, -1));
+  var tgt = String(targetRaw || '').trim();
+  if (uid <= 0 || !tgt) return Promise.resolve();
+  var cleanPkg = v6CleanHostRealPkg(pkg);
+  var dispApp = v6HostEventAppLabel(appName, cleanPkg, uid);
+  var tgtLow = tgt.toLowerCase();
+  var pureIp = v6ExtractPureIp(tgt);
+  var pureLow = pureIp ? pureIp.toLowerCase() : '';
+  var curRule = V6.host.firewall.uid_map[String(uid)] || null;
+  var curMode = curRule ? v6NormFwMode(curRule.mode) : 'allow';
+  var prevTargets = (curRule && Array.isArray(curRule.block_targets)) ? curRule.block_targets.slice() : [];
+  var keptTargets = prevTargets.filter(function (x) {
+    return String(x || '').trim().toLowerCase() !== tgtLow;
+  });
+
+  if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
+  V6.mutUntil.hostFw = Date.now() + 1500;
+  V6.mutUntil.lg = Date.now() + 1500;
+
+  if (V6.lg && V6.lg.blocked_set) {
+    delete V6.lg.blocked_set['uid:' + uid + '|' + tgtLow];
+    if (pureLow && keptTargets.every(function (x) { return v6ExtractPureIp(x).toLowerCase() !== pureLow; })) {
+      delete V6.lg.blocked_set['uid:' + uid + '|' + pureLow];
+    }
+  }
+  if (curRule) {
+    curRule.block_targets = keptTargets;
+    if (curMode === 'allow' && keptTargets.length === 0) {
+      delete V6.host.firewall.uid_map[String(uid)];
+      V6.host.firewall.uid_rules = V6.host.firewall.uid_rules.filter(function (x) { return x.uid !== uid; });
+    }
+    V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
+  }
+  v6SyncHostLeakEventsBlocked();
+  v6PaintHostAppSheetFwButtons();
+  v6RefreshNavBadges();
+  if (S.page === 'vector') {
+    if (V6.subtab === 'host' && v6IsSheetShowing()) V6.host._deferTrafficPaint = true;
+    else v6RefreshActiveSubviewDom();
+  }
+
+  var reqPromise = v6ValidIp(tgt)
+    ? api.post(V6_API.lgBlockDomain, {
+        action: 'unblock',
+        target_scope: 'host',
+        uid: uid,
+        dst_host: tgt,
+        mac: '',
+        pkg: cleanPkg,
+        app_name: appName || '',
+        force: false
+      }, { timeout: 9000 })
+    : api.action('self_firewall_set', {
+        uid: String(uid),
+        mode: curMode,
+        pkg: cleanPkg,
+        app_name: appName || '',
+        block_targets: JSON.stringify(keptTargets)
+      });
+
+  return busyWhile(triggerEl, reqPromise).then(function () {
+    v6LoadHostFirewall(true);
+    v6LoadLeakGuard(true);
+    var msg = '已解除「' + dispApp + '」目标 IP 封禁：' + tgt;
+    if (!fromUndo && v6ValidIp(tgt) && typeof undoToast === 'function') {
+      undoToast(msg, function () {
+        return api.post(V6_API.lgBlockDomain, {
+          action: 'block',
+          target_scope: 'host',
+          uid: uid,
+          dst_host: tgt,
+          mac: '',
+          pkg: cleanPkg,
+          app_name: appName || '',
+          force: true
+        }, { timeout: 9000 }).then(function () {
+          v6LoadHostFirewall(true);
+          v6LoadLeakGuard(true);
+          toast('已恢复封禁「' + dispApp + '」目标 IP：' + tgt);
+        }).catch(function (err) { toast(errText(err), 'err'); });
+      });
+    } else {
+      toast(msg);
+    }
+  }).catch(function (e) {
+    V6.mutUntil.hostFw = 0;
+    V6.mutUntil.lg = 0;
+    v6LoadHostFirewall(true);
+    v6LoadLeakGuard(true);
+    toast(errText(e), 'err');
+  });
+}
+
+function v6ClearHostUidIps(uid, pkg, appName, triggerEl) {
+  uid = Math.round(num(uid, -1));
+  if (uid <= 0) return Promise.resolve();
+  var cleanPkg = v6CleanHostRealPkg(pkg);
+  var dispApp = v6HostEventAppLabel(appName, cleanPkg, uid);
+  var curRule = V6.host.firewall.uid_map[String(uid)] || null;
+  var curMode = curRule ? v6NormFwMode(curRule.mode) : 'allow';
+  var prevTargets = (curRule && Array.isArray(curRule.block_targets)) ? curRule.block_targets.slice() : [];
+  if (!prevTargets.length) return Promise.resolve();
+
+  if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
+  V6.mutUntil.hostFw = Date.now() + 1500;
+
+  if (V6.lg && V6.lg.blocked_set) {
+    Object.keys(V6.lg.blocked_set).forEach(function (k) {
+      if (k.indexOf('uid:' + uid + '|') === 0) delete V6.lg.blocked_set[k];
+    });
+  }
+  if (curMode === 'allow') {
+    delete V6.host.firewall.uid_map[String(uid)];
+    V6.host.firewall.uid_rules = V6.host.firewall.uid_rules.filter(function (x) { return x.uid !== uid; });
+  } else if (curRule) {
+    curRule.block_targets = [];
+  }
+  V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
+  v6SyncHostLeakEventsBlocked();
+  v6PaintHostAppSheetFwButtons();
+  v6RefreshNavBadges();
+  if (S.page === 'vector') {
+    if (V6.subtab === 'host' && v6IsSheetShowing()) V6.host._deferTrafficPaint = true;
+    else v6RefreshActiveSubviewDom();
+  }
+
+  var actPromise = curMode === 'allow'
+    ? api.action('self_firewall_remove', { uid: String(uid) })
+    : api.action('self_firewall_set', { uid: String(uid), mode: curMode, pkg: cleanPkg, app_name: appName || '', block_targets: '[]' });
+
+  return busyWhile(triggerEl, actPromise).then(function () {
+    v6LoadHostFirewall(true);
+    v6LoadLeakGuard(true);
+    toast('已清空「' + dispApp + '」全部 ' + prevTargets.length + ' 项单 IP 封禁');
   }).catch(function (e) {
     V6.mutUntil.hostFw = 0;
     v6LoadHostFirewall(true);
@@ -2712,6 +3261,7 @@ function v6BlockHostDomain(domainRaw, triggerEl, opts) {
       V6.host.firewall.blocked_domains.unshift(dom);
       V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
     }
+    v6SyncHostLeakEventsBlocked();
     var inp = document.getElementById('v6-host-dom-inp');
     if (inp) inp.value = '';
     v6RefreshNavBadges();
@@ -2752,8 +3302,9 @@ function v6UnblockHostDomain(domainRaw, triggerEl, fromUndo) {
   delete V6.host.firewall.blocked_set[dom];
   V6.host.firewall.blocked_domains = V6.host.firewall.blocked_domains.filter(function (x) { return x !== dom; });
   V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
+  v6SyncHostLeakEventsBlocked();
   v6RefreshNavBadges();
-  if (S.page === 'vector' && V6.subtab === 'host') v6RefreshActiveSubviewDom();
+  if (S.page === 'vector' && (V6.subtab === 'host' || V6.subtab === 'privacy')) v6RefreshActiveSubviewDom();
 
   return busyWhile(triggerEl, api.action('self_dns_unblock', { domain: dom })).then(function () {
     v6LoadHostFirewall(true);
@@ -2784,6 +3335,12 @@ function v6ClearHostFirewall(btn) {
       V6.host.firewall.blocked_set = {};
       V6.host.firewall.uid_rule_count = 0;
       V6.host.firewall.blocked_domain_count = 0;
+      if (V6.lg && V6.lg.blocked_set) {
+        Object.keys(V6.lg.blocked_set).forEach(function (k) {
+          if (k.indexOf('uid:') === 0) delete V6.lg.blocked_set[k];
+        });
+      }
+      v6SyncHostLeakEventsBlocked();
       v6RefreshNavBadges();
       v6RefreshActiveSubviewDom();
       toast('已清空全部本机防火墙与域名规则');
@@ -2796,15 +3353,49 @@ function v6ClearHostFirewall(btn) {
 }
 
 function v6ToggleSelfCapture(nextOn, togEl) {
+  var isLease15mNow = function (modeStr) {
+    var m = String(modeStr || V6.host.privacy.self_capture_mode || (typeof S !== 'undefined' && S.selfStudio && S.selfStudio.mode) || '').toLowerCase();
+    return m === 'lease_15m';
+  };
+  if (nextOn && isLease15mNow()) {
+    V6.host.privacy.self_capture_enabled = true;
+    if (togEl) togEl.setAttribute('aria-checked', 'true');
+    v6LoadHostPrivacy(false);
+    toast('15分钟集中快训租约生效中，已保持深度明文审计开启');
+    return Promise.resolve();
+  }
   if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
   V6.mutUntil.selfCap = Date.now() + 6000;
   V6.host.privacy.self_capture_enabled = nextOn;
-  return busyWhile(togEl, api.post(V6_API.selfToggle, { enabled: !!nextOn }, { timeout: 7000 })).then(function (r) {
-    V6.mutUntil.selfCap = Date.now() + 5500;
-    if (r && typeof r.enabled === 'boolean') V6.host.privacy.self_capture_enabled = r.enabled;
-    v6LoadHostPrivacy(false);
-    toast(nextOn ? '已开启本机深度明文抓包审计（5秒内生效）' : '已关闭本机深度抓包，恢复零开销巡检');
-  }).catch(function (e) {
+
+  var runToggleReq = function () {
+    return api.post(V6_API.selfToggle, { enabled: !!nextOn }, { timeout: 7000 }).then(function (r) {
+      V6.mutUntil.selfCap = Date.now() + 5500;
+      if (r && typeof r.enabled === 'boolean') V6.host.privacy.self_capture_enabled = r.enabled;
+      if (r && r.mode != null) V6.host.privacy.self_capture_mode = String(r.mode || '');
+      else if (!nextOn) V6.host.privacy.self_capture_mode = 'off';
+      v6LoadHostPrivacy(false);
+      toast(nextOn ? '已开启本机深度明文抓包审计（5秒内生效）' : '已关闭本机深度抓包，恢复零开销巡检');
+    });
+  };
+
+  var p = (nextOn && !V6.host.privacy.self_capture_mode)
+    ? api.get(V6_API.localPrivacy, { include_system: '0' }, { timeout: 5000 }).catch(function () { return null; }).then(function (pr) {
+        if (pr && pr.self_capture_mode != null) {
+          V6.host.privacy.self_capture_mode = String(pr.self_capture_mode || '');
+        }
+        if (isLease15mNow(pr && pr.self_capture_mode)) {
+          V6.mutUntil.selfCap = 0;
+          V6.host.privacy.self_capture_enabled = true;
+          v6LoadHostPrivacy(false);
+          toast('15分钟集中快训租约生效中，已保持深度明文审计开启');
+          return;
+        }
+        return runToggleReq();
+      })
+    : runToggleReq();
+
+  return busyWhile(togEl, p).catch(function (e) {
     V6.mutUntil.selfCap = 0;
     V6.host.privacy.self_capture_enabled = !nextOn;
     if (togEl) togEl.setAttribute('aria-checked', String(!nextOn));
@@ -2843,8 +3434,8 @@ function v6RenderHostLiveListHtml() {
   }
   return '<div class="scard-rows">' + apps.slice(0, 60).map(function (a) {
     var uid = Math.round(num(a.uid, 0));
-    var pkg = String(a.package || '');
-    var nm = String(a.app_name || pkg || ('UID ' + uid));
+    var pkg = v6CleanHostRealPkg(a.package);
+    var nm = v6HostEventAppLabel(a.app_name, pkg, uid);
     var isFg = a.current_state === 'fg' || a.current_state === 'foreground';
     var stateBadge = isFg
       ? '<span class="v6-mono-badge b-ok">前台</span>'
@@ -2895,8 +3486,8 @@ function v6RenderHostTrafficRankHtml() {
   var maxTot = Math.max.apply(null, apps.map(function (a) { return num(a.total_bytes, 0); }).concat([1]));
   return '<div style="display:grid;gap:4px">' + apps.slice(0, 50).map(function (a) {
     var uid = Math.round(num(a.uid, 0));
-    var pkg = String(a.package || '');
-    var nm = String(a.app_name || pkg || ('UID ' + uid));
+    var pkg = v6CleanHostRealPkg(a.package);
+    var nm = v6HostEventAppLabel(a.app_name, pkg, uid);
     var bgB = Math.max(0, num(a.bg_total_bytes, 0));
     var fgB = Math.max(0, num(a.fg_total_bytes, Math.max(0, num(a.total_bytes, 0) - bgB)));
     var totB = Math.max(1, bgB + fgB, num(a.total_bytes, 0));
@@ -2957,8 +3548,8 @@ function v6RenderHostPowerListHtml() {
   }
   return '<div class="scard-rows">' + apps.slice(0, 50).map(function (a) {
     var uid = Math.round(num(a.uid, 0));
-    var pkg = String(a.package || '');
-    var nm = String(a.app_name || pkg || ('UID ' + uid));
+    var pkg = v6CleanHostRealPkg(a.package);
+    var nm = v6HostEventAppLabel(a.app_name, pkg, uid);
     var fwBadge = v6FwModeBadgeHtml(v6HostUidMode(uid));
     var wlMs = Math.max(num(a.wakelock_bg_ms, 0), num(a.wakelock_partial_ms, 0));
     var radioMs = num(a.mobile_radio_active_ms, 0);
@@ -3021,8 +3612,8 @@ function v6RenderHostFirewallModeHtml() {
   } else {
     findingsHtml = '<div class="v6-flow-list">' + findings.slice(0, 30).map(function (f, idx) {
       var uid = Math.round(num(f.uid, 0));
-      var pkg = String(f.package || '');
-      var appNm = String(f.app_name || f.name || pkg || ('UID ' + uid));
+      var pkg = v6CleanHostRealPkg(f.package);
+      var appNm = v6HostEventAppLabel(f.app_name || f.name, pkg, uid);
       var rType = String(f.risk_type || '');
       var isHttpClear = (rType === 'http_cleartext' || rType === 'cleartext_http');
       var isDnsDirect = (rType === 'dns_direct' || rType === 'direct_dns');
@@ -3035,7 +3626,7 @@ function v6RenderHostFirewallModeHtml() {
             : '<span class="v6-mono-badge b-pur">' + escapeHtml(f.sdk_name || '追踪SDK') + '</span>'));
       var rIp = f.remote_ip || f.dst_ip || '';
       var rPort = f.remote_port != null ? f.remote_port : (f.dport != null ? f.dport : '');
-      var targetStr = f.domain ? (f.domain + (rPort ? ':' + rPort : '')) : (rIp + (rPort ? ':' + rPort : ''));
+      var targetStr = f.domain ? v6FmtHostPort(f.domain, rPort) : v6FmtHostPort(rIp, rPort);
       var isProt = v6IsHostAppProtected(uid, pkg);
       var curMode = v6HostUidMode(uid);
       var domBlocked = !!(f.domain && fw.blocked_set[String(f.domain).toLowerCase()]);
@@ -3061,19 +3652,52 @@ function v6RenderHostFirewallModeHtml() {
     }).join('') + '</div>';
   }
 
+  var ipTargetEntries = [];
+  fw.uid_rules.forEach(function (r) {
+    var rPkg = v6CleanHostRealPkg(r.pkg);
+    var disp = v6HostEventAppLabel(r.app_name, rPkg, r.uid);
+    var bts = Array.isArray(r.block_targets) ? r.block_targets : [];
+    bts.forEach(function (t) {
+      var ts = String(t || '').trim();
+      if (ts) ipTargetEntries.push({ uid: r.uid, pkg: rPkg, disp: disp, target: ts });
+    });
+  });
+
   var uidRulesHtml = fw.uid_rules.length ? ('<div class="v6-flow-list">' + fw.uid_rules.map(function (r) {
-    var disp = r.app_name || r.pkg || ('UID ' + r.uid);
+    var rPkg = v6CleanHostRealPkg(r.pkg);
+    var disp = v6HostEventAppLabel(r.app_name, rPkg, r.uid);
+    var rMode = v6NormFwMode(r.mode);
+    var bts = Array.isArray(r.block_targets) ? r.block_targets : [];
+    var modeBadges = rMode !== 'allow'
+      ? (v6FwModeBadgeHtml(rMode) + (bts.length ? ('<span class="v6-mono-badge b-warn">+' + bts.length + ' IP</span>') : ''))
+      : ('<span class="v6-mono-badge b-warn">单IP封禁 (' + bts.length + ')</span>');
+    var subMeta = (rPkg ? rPkg + ' · ' : '') + 'UID ' + r.uid +
+      (r.sdk_sandbox_uid > 0 ? (' · 同步沙箱 ' + r.sdk_sandbox_uid) : '') +
+      (bts.length ? (' · 已封 IP：' + bts.slice(0, 3).join('、') + (bts.length > 3 ? (' 等 ' + bts.length + ' 项') : '')) : '');
+    var rightBtnHtml = rMode !== 'allow'
+      ? '<button type="button" class="v6-mini-btn ok press" data-v6-act="host-fw-set" data-fw-mode="allow" data-uid="' + r.uid + '" data-pkg="' + escapeHtml(rPkg) + '" data-name="' + escapeHtml(disp) + '">恢复放行</button>'
+      : '<button type="button" class="v6-mini-btn ok press" data-v6-act="host-uid-ip-clear" data-uid="' + r.uid + '" data-pkg="' + escapeHtml(rPkg) + '" data-name="' + escapeHtml(disp) + '">清空IP封禁</button>';
     return '<div class="v6-flow-item" data-mkey="hfwu-' + r.uid + '">' +
       '<div class="v6-flow-main">' +
-        '<div class="v6-flow-t">' + v6FwModeBadgeHtml(r.mode) + '<span>' + escapeHtml(disp) + '</span></div>' +
-        '<div class="v6-flow-s">' + escapeHtml((r.pkg ? r.pkg + ' · ' : '') + 'UID ' + r.uid + (r.sdk_sandbox_uid > 0 ? (' · 同步沙箱 ' + r.sdk_sandbox_uid) : '')) + '</div>' +
+        '<div class="v6-flow-t">' + modeBadges + '<span>' + escapeHtml(disp) + '</span></div>' +
+        '<div class="v6-flow-s">' + escapeHtml(subMeta) + '</div>' +
       '</div>' +
-      '<div style="display:inline-flex;gap:6px">' +
-        '<button type="button" class="v6-mini-btn press" data-v6-act="host-app-open" data-uid="' + r.uid + '" data-pkg="' + escapeHtml(r.pkg) + '" data-name="' + escapeHtml(disp) + '" data-sys="0">改档位</button>' +
-        '<button type="button" class="v6-mini-btn ok press" data-v6-act="host-fw-set" data-fw-mode="allow" data-uid="' + r.uid + '" data-pkg="' + escapeHtml(r.pkg) + '" data-name="' + escapeHtml(disp) + '">恢复放行</button>' +
+      '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="host-app-open" data-uid="' + r.uid + '" data-pkg="' + escapeHtml(rPkg) + '" data-name="' + escapeHtml(disp) + '" data-sys="0">改档位</button>' +
+        rightBtnHtml +
       '</div>' +
     '</div>';
   }).join('') + '</div>') : '<div class="note" style="margin:0">暂无受限应用（在「实时联网 / 后台耗流 / 后台耗电」点任意应用即可一键设为仅禁明文、禁移动网或全局禁网）</div>';
+
+  var ipRulesHtml = ipTargetEntries.length ? ('<div class="v6-flow-list">' + ipTargetEntries.map(function (it) {
+    return '<div class="v6-flow-item" data-mkey="hfwip-' + it.uid + '-' + escapeHtml(it.target) + '">' +
+      '<div class="v6-flow-main">' +
+        '<div class="v6-flow-t"><span class="v6-mono-badge b-bad">应用级IP拦截</span><span class="mono">' + escapeHtml(it.target) + '</span></div>' +
+        '<div class="v6-flow-s">' + escapeHtml('所属应用：' + it.disp + '（' + (it.pkg ? it.pkg + ' · ' : '') + 'UID ' + it.uid + '）') + '</div>' +
+      '</div>' +
+      '<button type="button" class="v6-mini-btn ok press" data-v6-act="host-ip-unblock" data-uid="' + it.uid + '" data-ip="' + escapeHtml(it.target) + '" data-pkg="' + escapeHtml(it.pkg) + '" data-name="' + escapeHtml(it.disp) + '">解除封禁</button>' +
+    '</div>';
+  }).join('') + '</div>') : '<div class="note" style="margin:0">暂无按应用封禁的纯 IP 目标（可在「隐私安检」对直连公网 IP 的明文请求一键封禁）</div>';
 
   var domRulesHtml = fw.blocked_domains.length ? ('<div class="v6-flow-list">' + fw.blocked_domains.map(function (dom) {
     return '<div class="v6-flow-item" data-mkey="hfwd-' + escapeHtml(dom) + '">' +
@@ -3119,6 +3743,7 @@ function v6RenderHostFirewallModeHtml() {
           '<button type="button" class="btn sm pri press" data-v6-act="host-dns-add">添加本机拦截</button>' +
         '</div>' +
         '<div><div class="note" style="margin:0 0 6px;font-weight:700;color:var(--text-2)">应用联网限制（' + fw.uid_rules.length + ' 款）</div>' + uidRulesHtml + '</div>' +
+        '<div><div class="note" style="margin:0 0 6px;font-weight:700;color:var(--text-2)">本机已封目标 IP（' + ipTargetEntries.length + ' 个）</div>' + ipRulesHtml + '</div>' +
         '<div><div class="note" style="margin:0 0 6px;font-weight:700;color:var(--text-2)">本机屏蔽域名（' + fw.blocked_domains.length + ' 个）</div>' + domRulesHtml + '</div>' +
       '</div>' +
     '</div>' +
@@ -3259,14 +3884,22 @@ function v6FilteredLeakEvents() {
 }
 
 function v6RenderLeakForensicInnerHtml(ev) {
-  var tupleStr = (ev.src_ip || '—') + (ev.src_port ? ':' + ev.src_port : '') + ' -> ' + (ev.dst_ip || ev.dst_host) + ':' + (ev.dst_port || 80) + ' (' + ev.proto.toUpperCase() + ')';
+  var srcEnd = ev.src_ip ? v6FmtHostPort(ev.src_ip, ev.src_port || '') : '—';
+  var dstEnd = v6FmtHostPort(ev.dst_ip || ev.dst_host || '—', ev.dst_port || 80);
+  var tupleStr = srcEnd + ' -> ' + dstEnd + ' (' + ev.proto.toUpperCase() + ')';
+  var hostAppLbl = v6HostEventAppLabel(ev.app_name, ev.pkg, ev.uid);
+  var realPkg = v6CleanHostRealPkg(ev.pkg);
   var srcOwner = ev.origin === 'host'
-    ? ('本机应用 · ' + (ev.app_name || ev.pkg || ('UID ' + ev.uid)) + (ev.pkg ? ' (' + ev.pkg + ')' : ''))
+    ? ('本机应用 · ' + hostAppLbl + (realPkg && realPkg !== hostAppLbl ? ' (' + realPkg + ')' : '') + (ev.uid > 0 && hostAppLbl.indexOf('UID ') !== 0 ? ' [UID ' + ev.uid + ']' : ''))
     : ('热点设备 · ' + ev.devName + (ev.mac ? ' (' + ev.mac + ')' : ''));
+  var urlHost = String(ev.dst_host || '');
+  if (urlHost && urlHost.charAt(0) !== '[' && urlHost.indexOf(':') >= 0 && v6ValidIp(urlHost)) {
+    urlHost = '[' + urlHost + ']';
+  }
   return '<dl class="lgd-forensic-meta">' +
       '<dt>事件来源</dt><dd>' + escapeHtml(srcOwner) + '</dd>' +
       '<dt>通信地址</dt><dd>' + escapeHtml(tupleStr) + '</dd>' +
-      '<dt>请求路径</dt><dd>' + escapeHtml(ev.method + ' http://' + ev.dst_host + ev.url_path) + '</dd>' +
+      '<dt>请求路径</dt><dd>' + escapeHtml(ev.method + ' http://' + urlHost + ev.url_path) + '</dd>' +
       '<dt>客户端标识</dt><dd>' + escapeHtml(ev.user_agent) + '</dd>' +
       '<dt>泄露原文</dt><dd>' + escapeHtml(ev.raw_value) + '</dd>' +
     '</dl>' +
@@ -3301,22 +3934,60 @@ function v6LeakStreamHtml() {
     var isHostEv = ev.origin === 'host';
     var dObj = (!isHostEv && ev.mac) ? devBy(ev.mac) : null;
     var dispDev = isHostEv
-      ? (ev.app_name || ev.pkg || ('UID ' + ev.uid))
+      ? v6HostEventAppLabel(ev.app_name, ev.pkg, ev.uid)
       : ((dObj && dObj.name && dObj.name !== dObj.mac) ? dObj.name : (ev.devName && !v6ValidMac(ev.devName) && !v6ValidIp(ev.devName) ? ev.devName : (dObj ? v6FriendlyDevLabel(dObj, ev.devName) : ev.devName)));
     var originTag = isHostEv
       ? '<span class="v6-mono-badge b-acc">本机应用</span>'
       : '<span class="v6-mono-badge">热点设备</span>';
-    var blkBtnTxt = ev.is_blocked ? '解除封禁' : (isHostEv ? '拦截本机域名' : '封禁热点域名');
+    var realPkg = v6CleanHostRealPkg(ev.pkg);
+    var evUid = Math.round(num(ev.uid, 0));
+    var devTitle = isHostEv
+      ? [realPkg, evUid > 0 ? ('UID ' + evUid) : '本机未知连接'].filter(Boolean).join(' ')
+      : [ev.src_ip, ev.mac].filter(Boolean).join(' ');
+
+    var pureIp = v6ExtractPureIp(ev.dst_host);
+    var appId = evUid > 0 ? (evUid % 100000) : -1;
+    var isNormalHostApp = isHostEv && evUid > 0 && appId >= 10000 && appId < 90000 && !v6IsHostAppProtected(evUid, ev.pkg);
+    var isFakeOrPriv = pureIp ? v6IsFakeOrPrivateIp(pureIp) : false;
+    var hostBlkState = isHostEv ? v6ClassifyHostLeakBlockState(ev) : null;
+    var appOnlyBlocked = !!(ev.is_blocked && hostBlkState && hostBlkState.appOnlyBlocked);
+    var blkDimmed = false;
+    var blkBtnTxt;
+    var blkBtnActAttr = ' data-v6-act="lgd-block-domain" data-id="' + escapeHtml(ev.id) + '"';
+    if (ev.is_blocked) {
+      if (appOnlyBlocked) {
+        blkBtnTxt = hostBlkState.appMode === 'block_all' ? '已全局禁网 · 管控' : '已禁明文 · 管控';
+        blkBtnActAttr = ' data-v6-act="host-app-open" data-uid="' + evUid + '" data-pkg="' + escapeHtml(realPkg) + '" data-name="' + escapeHtml(dispDev) + '" data-sys="0"';
+      } else {
+        blkBtnTxt = '解除封禁';
+      }
+    } else if (pureIp) {
+      if (isFakeOrPriv || (isHostEv && !isNormalHostApp)) {
+        blkBtnTxt = '封禁此 IP';
+        blkDimmed = true;
+      } else if (isHostEv) {
+        blkBtnTxt = '封禁该应用此 IP';
+      } else {
+        blkBtnTxt = '封禁热点此 IP';
+      }
+    } else {
+      blkBtnTxt = isHostEv ? '拦截本机域名' : '封禁热点域名';
+    }
+    var blkBadgeLabel = appOnlyBlocked
+      ? (hostBlkState.appMode === 'block_all' ? '应用已禁网' : '应用已禁明文')
+      : '已封禁目标';
+    var blkBtnCls = 'lgd-act-btn ' + (ev.is_blocked ? 'ok' : (blkDimmed ? 'is-dim' : 'warn')) + ' press';
+    var blkBtnExtra = blkDimmed ? ' style="opacity:.52" aria-disabled="true" title="系统/代理内网流请用断开或应用防火墙"' : '';
 
     return '<div class="lgd-item' + (isOpen ? ' is-open' : '') + (ev.is_blocked ? ' is-blocked' : '') + '" data-mkey="lgd-' + escapeHtml(ev.id) + '" data-lgd-id="' + escapeHtml(ev.id) + '">' +
       '<div class="lgd-card-body">' +
         '<div class="lgd-r1">' +
           '<div class="lgd-r1-l">' +
             originTag +
-            '<span class="lgd-dev" title="' + escapeHtml(isHostEv ? (ev.pkg + ' UID ' + ev.uid) : (ev.src_ip + ' ' + ev.mac)) + '">' + escapeHtml(dispDev) + '</span>' +
+            '<span class="lgd-dev" title="' + escapeHtml(devTitle) + '">' + escapeHtml(dispDev) + '</span>' +
             '<span class="v6-mono-badge ' + leakTypeBadgeCls(ev.leak_type) + '">' + escapeHtml(leakTypeZh(ev.leak_type)) + '</span>' +
             v6InfraGuardBadgeHtml(ev.infra_guard) +
-            (ev.is_blocked ? '<span class="v6-mono-badge b-ok">已封禁目标</span>' : '') +
+            (ev.is_blocked ? '<span class="v6-mono-badge b-ok">' + blkBadgeLabel + '</span>' : '') +
           '</div>' +
           '<div class="lgd-r1-r">' +
             (ev.hit_count > 1 ? '<span class="lgd-cnt">' + ev.hit_count + ' 次</span>' : '') +
@@ -3331,7 +4002,7 @@ function v6LeakStreamHtml() {
           '<span class="lgd-host" title="' + escapeHtml(ev.dst_host + ev.url_path) + '">发往 -> ' + escapeHtml(ev.dst_host) + (ev.url_path && ev.url_path !== '/' ? (' ' + escapeHtml(ev.url_path)) : '') + '</span>' +
         '</div>' +
         '<div class="lgd-acts">' +
-          '<button type="button" class="lgd-act-btn ' + (ev.is_blocked ? 'ok' : 'warn') + ' press" data-v6-act="lgd-block-domain" data-id="' + escapeHtml(ev.id) + '">' + blkBtnTxt + '</button>' +
+          '<button type="button" class="' + blkBtnCls + '"' + blkBtnExtra + blkBtnActAttr + '>' + blkBtnTxt + '</button>' +
           '<button type="button" class="lgd-act-btn press" data-v6-act="lgd-ignore-sheet" data-id="' + escapeHtml(ev.id) + '">忽略误报</button>' +
           '<button type="button" class="lgd-act-btn dan press" data-v6-act="lgd-cut-conn" data-id="' + escapeHtml(ev.id) + '">断开连接</button>' +
           '<button type="button" class="lgd-act-btn press" data-v6-act="lgd-toggle-btn" data-id="' + escapeHtml(ev.id) + '">' + (isOpen ? '收起原文' : '查看原文') + '</button>' +
@@ -3349,6 +4020,13 @@ function v6LeakStreamHtml() {
 
 function v6WhitelistScopeLabel(w) {
   if (!w) return '域名忽略';
+  if (w.scope === 'app_host_type' || w.scope === 'app_host' || w.uid > 0 || w.pkg) {
+    var aName = v6HostEventAppLabel(w.app_name, w.pkg, w.uid);
+    if (w.leak_type) {
+      return '仅本机应用「' + aName + '」访问此目标的「' + leakTypeZh(w.leak_type) + '」豁免';
+    }
+    return '仅本机应用「' + aName + '」豁免';
+  }
   if (w.scope === 'device_host_type' || w.scope === 'device_host' || w.mac) {
     var dName = w.device_name || (w.mac && devBy(w.mac) ? devBy(w.mac).name : '') || w.mac || '指定设备';
     if (w.leak_type) {
@@ -3377,15 +4055,15 @@ function v6RenderLeakGuardManagerBodyHtml() {
         '<div class="v6-flow-t"><span class="v6-mono-badge b-warn">已封禁</span><span class="mono">' + escapeHtml(u.dst_host) + '</span></div>' +
         (subParts.length ? '<div class="v6-flow-s">' + escapeHtml(subParts.join(' · ')) + '</div>' : '') +
       '</div>' +
-      '<button type="button" class="v6-mini-btn ok press" data-v6-act="lgd-undo-block" data-uid="' + escapeHtml(u.hasServerId ? u.id : '') + '" data-host="' + escapeHtml(u.dst_host) + '" data-tscope="' + escapeHtml(u.target_scope || '') + '">撤销封禁</button>' +
+      '<button type="button" class="v6-mini-btn ok press" data-v6-act="lgd-undo-block" data-uid="' + escapeHtml(u.hasServerId ? u.id : '') + '" data-app-uid="' + escapeHtml(u.uid > 0 ? String(u.uid) : '') + '" data-host="' + escapeHtml(u.dst_host) + '" data-tscope="' + escapeHtml(u.target_scope || '') + '">撤销封禁</button>' +
     '</div>';
-  }).join('') + '</div>') : '<div class="note" style="margin:0">暂无最近封禁操作记录（封禁追踪域名后最多保留最近 10 条供一键反悔恢复）</div>';
+  }).join('') + '</div>') : '<div class="note" style="margin:0">暂无最近封禁操作记录（封禁追踪域名或目标 IP 后最多保留最近 10 条供一键反悔恢复）</div>';
 
   var wlHtml = wlList.length ? ('<div class="v6-flow-list">' + wlList.map(function (w) {
     var scopeTxt = v6WhitelistScopeLabel(w);
     var noteTxt = w.note || w.label || '';
-    var ns = w.scope === 'device_host' ? 'device_host_type' : (w.scope || 'host');
-    var wid = w.id || w.comboKey || (ns + '|' + (w.dst_host || '') + '|' + (w.leak_type || '') + '|' + (w.mac || ''));
+    var ns = w.scope === 'device_host' ? 'device_host_type' : (w.scope === 'app_host' ? 'app_host_type' : (w.scope || 'host'));
+    var wid = w.id || w.comboKey || (ns + '|' + (w.dst_host || '') + '|' + (w.leak_type || '') + '|' + (w.mac || '') + '|' + (w.uid > 0 ? w.uid : '') + '|' + (w.pkg || ''));
     return '<div class="v6-flow-item" data-mkey="lgwl-' + escapeHtml(wid) + '">' +
       '<div class="v6-flow-main">' +
         '<div class="v6-flow-t"><span class="v6-mono-badge b-acc">已忽略</span><span class="mono">' + escapeHtml(w.dst_host || '全局规则') + '</span></div>' +
@@ -3399,6 +4077,17 @@ function v6RenderLeakGuardManagerBodyHtml() {
     '<div><div class="note" style="margin:0 0 6px;font-weight:700;color:var(--text-2)">最近封禁记录（最多 10 条）</div>' + undoHtml + '</div>' +
     '<div><div class="note" style="margin:0 0 6px;font-weight:700;color:var(--text-2)">已忽略误报白名单（共 ' + wlList.length + ' 项）</div>' + wlHtml + '</div>' +
   '</div>';
+}
+
+function v6LeakSummaryInnerHtml() {
+  var lg = V6.lg;
+  var curCnt = Array.isArray(lg.events) ? lg.events.length : 0;
+  var wlCnt = Math.max(lg.whitelist ? lg.whitelist.length : 0, Math.round(num(lg.whitelist_count, 0)));
+  var blkCnt = Math.max(0, Math.round(num(lg.blocked_domains, 0)));
+  var hitExtra = (curCnt > 0 && num(lg.total_hits) > curCnt) ? ('（共触发 ' + num(lg.total_hits) + ' 次）') : '';
+  return '<span>当前有效记录 <b class="' + (curCnt > 0 ? 'bad' : '') + '">' + curCnt + '</b> 条' + hitExtra +
+    ' · 涉及 <b>' + (curCnt > 0 ? num(lg.affected_devices) : 0) + '</b> 个来源 · 已封禁 <b>' + blkCnt + '</b> 个追踪目标' +
+    (wlCnt > 0 ? (' · 已忽略 <b>' + wlCnt + '</b> 项白名单') : '') + '</span>';
 }
 
 function v6RenderPrivacySubviewHtml() {
@@ -3416,7 +4105,8 @@ function v6RenderPrivacySubviewHtml() {
     ['DEVICE_ID', '设备指纹'],
     ['GPS', '精准定位'],
     ['MAC_ADDR', '网卡地址'],
-    ['TOKEN', '账号/凭证']
+    ['TOKEN', '账号/凭据'],
+    ['OTHER', '其他明文']
   ];
   var originChipsHtml = originTypes.map(function (ot) {
     var on = (lg.originFilter || 'ALL') === ot[0];
@@ -3439,7 +4129,7 @@ function v6RenderPrivacySubviewHtml() {
     '</div>' +
     '<div class="v6-scard-body">' +
       '<div class="lgd-summary-line" id="lgd-summary-line">' +
-        '<span>累计发现 <b class="' + (num(lg.total_hits) > 0 ? 'bad' : '') + '">' + num(lg.total_hits) + '</b> 次明文传输 · 涉及 <b>' + num(lg.affected_devices) + '</b> 个来源 · 已封禁 <b>' + num(lg.blocked_domains) + '</b> 个追踪域名' + (wlCnt > 0 ? (' · 已忽略 <b>' + wlCnt + '</b> 项白名单') : '') + '</span>' +
+        v6LeakSummaryInnerHtml() +
       '</div>' +
       '<details class="v6-adv-fold" data-v6-fold="lgCfg"' + (V6.advOpen.lgCfg ? ' open' : '') + '>' +
         '<summary><span>手机通知提醒与保留条数设置</span><span class="v6-adv-r"><span>' + (lg.notify_enabled ? '通知已开' : '通知已关') + ' · 保留 ' + lg.capacity + ' 条</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
@@ -3580,7 +4270,7 @@ function v6BlackboxEvidenceLine(inc, dim) {
       var upPct = inc.uplink_util_pct != null ? num(inc.uplink_util_pct, -1) : num(inc.up_util_pct, -1);
       if (upPct > 0) evParts.push('上行占用 ' + Math.round(upPct) + '%');
       var tc = num(inc.temp_c != null ? inc.temp_c : (inc.thermal_temp_c != null ? inc.thermal_temp_c : 0), 0);
-      if (tc > 0) evParts.push('机身 ' + tc.toFixed(1) + '℃');
+      if (tc > 0) evParts.push('机身 ' + tc.toFixed(1) + '°C');
       var rcZh = String(inc.root_cause_zh || '').trim();
       if (!evParts.length && rcZh && rcZh !== String(inc.verdict_zh || '').trim()) evParts.push(rcZh);
       if (!evParts.length && inc.culprit_device && !v6ValidMac(inc.culprit_device)) evParts.push(String(inc.culprit_device));
@@ -3759,7 +4449,7 @@ function v6RefreshActiveSubviewDom() {
       if (gc) gc.textContent = '可撤销 ' + undoCnt + ' 条 · 白名单 ' + wlCnt + ' 项';
       var sl = document.getElementById('lgd-summary-line');
       if (sl) {
-        sl.innerHTML = '<span>累计发现 <b class="' + (num(lg.total_hits) > 0 ? 'bad' : '') + '">' + num(lg.total_hits) + '</b> 次明文传输 · 涉及 <b>' + num(lg.affected_devices) + '</b> 个来源 · 已封禁 <b>' + num(lg.blocked_domains) + '</b> 个追踪域名' + (wlCnt > 0 ? (' · 已忽略 <b>' + wlCnt + '</b> 项白名单') : '') + '</span>';
+        sl.innerHTML = v6LeakSummaryInnerHtml();
       }
       var ha = document.getElementById('lgd-head-acts');
       if (ha) {
@@ -3882,7 +4572,9 @@ function v6FilteredScalpelDrawerFlows() {
     if (pf === 'UDP' && f.proto !== 'udp') return false;
     if (pf === 'FROZEN' && !f.frozen) return false;
     if (!q) return true;
-    var hay = (f.devName + ' ' + (f.pkg || '') + ' ' + f.app_name + ' ' + f.dst_host + ' ' + f.src_ip + ':' + f.sport + ' ' + f.dst_ip + ':' + f.dport + ' ' + f.protoBadge).toLowerCase();
+    var srcEp = v6FmtHostPort(f.src_ip, f.sport);
+    var dstEp = v6FmtHostPort(f.dst_ip, f.dport);
+    var hay = (f.devName + ' ' + (f.pkg || '') + ' ' + f.app_name + ' ' + f.dst_host + ' ' + srcEp + ' ' + dstEp + ' ' + f.src_ip + ' ' + f.dst_ip + ' ' + f.protoBadge).toLowerCase();
     return hay.indexOf(q) >= 0;
   });
 }
@@ -3903,7 +4595,9 @@ function v6ScalpelListHtml() {
   return list.map(function (f) {
     var rxB = bps(f.rx_bps), txB = bps(f.tx_bps);
     var pCls = f.frozen ? 'b-bad' : (f.protoBadge === 'QUIC' ? 'b-pur' : (f.proto === 'udp' ? 'b-acc' : ''));
-    var titleMain = f.app_name ? (f.app_name + (f.dst_host ? ' · ' + f.dst_host : '')) : (f.dst_host || (f.dst_ip + ':' + f.dport));
+    var dstEp = v6FmtHostPort(f.dst_ip, f.dport);
+    var srcEp = v6FmtHostPort(f.src_ip, f.sport);
+    var titleMain = f.app_name ? (f.app_name + (f.dst_host ? ' · ' + f.dst_host : '')) : (f.dst_host || dstEp);
     var remMin = f.frozen ? Math.max(1, Math.ceil((f.frozen_until - Date.now() / 1000) / 60)) : 0;
     var isHost = f.scope === 'host';
     var ownerBadge = !V6.scalpel.scopeMac
@@ -3921,7 +4615,7 @@ function v6ScalpelListHtml() {
           '<span>' + escapeHtml(titleMain) + '</span>' +
           ownerBadge +
         '</div>' +
-        '<div class="ep">' + escapeHtml(f.src_ip + ':' + f.sport + ' -> ' + f.dst_ip + ':' + f.dport) + (f.state && f.state !== 'ESTABLISHED' && f.state !== 'ASSURED' ? (' · ' + escapeHtml(f.state)) : '') + '</div>' +
+        '<div class="ep">' + escapeHtml(srcEp + ' -> ' + dstEp) + (f.state && f.state !== 'ESTABLISHED' && f.state !== 'ASSURED' ? (' · ' + escapeHtml(f.state)) : '') + '</div>' +
       '</div>' +
       '<div class="v6-tuple-rate">↓ ' + rxB.v + ' ' + rxB.u + '<br>↑ ' + txB.v + ' ' + txB.u + '</div>' +
       '<div class="v6-tuple-acts">' +
@@ -3930,6 +4624,11 @@ function v6ScalpelListHtml() {
       '</div>' +
     '</div>';
   }).join('');
+}
+
+function v6ResetScalpelScroll() {
+  var listEl = document.getElementById('v6-scalpel-list') || document.querySelector('#v6-scalpel-drawer .v6-tuple-list');
+  if (listEl) listEl.scrollTop = 0;
 }
 
 function v6ScalpelDrawerBodyHtml() {
@@ -4030,6 +4729,25 @@ function v6FetchScalpelFlows() {
     if (isDevScoped && reqMac && S.conn && S.conn[reqMac] && S.conn[reqMac].r) {
       var cr = S.conn[reqMac].r;
       V6.scalpel.drawerFlows = (cr.conns || []).map(function (c, idx) {
+        var dstStr = String(c.dst || c.dst_ip || '').trim().replace(/^\[|\]$/g, '');
+        var isDstV6 = dstStr.indexOf(':') >= 0;
+        var rawSrc = String(c.src || c.src_ip || '').trim().replace(/^\[|\]$/g, '');
+        var cleanReqIp = String(reqIp || '').trim().replace(/^\[|\]$/g, '');
+        var fbSrcIp = '';
+        if (v6ValidIp(rawSrc) && (!dstStr || (rawSrc.indexOf(':') >= 0) === isDstV6)) {
+          fbSrcIp = rawSrc;
+        } else if (v6ValidIp(cleanReqIp) && (!dstStr || (cleanReqIp.indexOf(':') >= 0) === isDstV6)) {
+          fbSrcIp = cleanReqIp;
+        }
+        var rxBps = c.down_bps != null
+          ? Math.max(0, Math.round(num(c.down_bps, 0)))
+          : (c.rx_bps != null ? Math.max(0, Math.round(num(c.rx_bps, 0))) : Math.round(num(c.bps, 0) * 0.7));
+        var txBps = c.up_bps != null
+          ? Math.max(0, Math.round(num(c.up_bps, 0)))
+          : (c.tx_bps != null ? Math.max(0, Math.round(num(c.tx_bps, 0))) : Math.round(num(c.bps, 0) * 0.3));
+        var totBytes = (c.down_bytes != null || c.up_bytes != null)
+          ? Math.max(0, num(c.down_bytes, 0) + num(c.up_bytes, 0))
+          : Math.max(0, num(c.bytes, 0));
         return {
           id: 'fb_' + idx,
           scope: 'hotspot',
@@ -4045,16 +4763,16 @@ function v6FetchScalpelFlows() {
           frozen_until: 0,
           mac: reqMac,
           devName: reqDevName || reqMac,
-          src_ip: reqIp || '',
+          src_ip: fbSrcIp,
           sport: num(c.sport, 0),
-          dst_ip: String(c.dst || ''),
+          dst_ip: dstStr,
           dport: num(c.dport, 0),
           dst_host: String(c.name || ''),
           app_name: String(c.app || ''),
           traffic_type: '',
-          rx_bps: Math.round(num(c.bps, 0) * 0.7),
-          tx_bps: Math.round(num(c.bps, 0) * 0.3),
-          bytes: num(c.bytes, 0)
+          rx_bps: rxBps,
+          tx_bps: txBps,
+          bytes: totBytes
         };
       });
       V6.scalpel.drawerTotal = V6.scalpel.drawerFlows.length;
@@ -4095,18 +4813,25 @@ function openScalpelDrawer(mac, ip, devName, initialScope) {
   if (!dr || !bd) return;
   dr.hidden = false;
   bd.innerHTML = v6ScalpelDrawerBodyHtml();
+  v6ResetScalpelScroll();
   if (typeof placeSegs === 'function') placeSegs(bd);
+  void dr.offsetWidth;
+  if (sc) sc.classList.add('show');
+  dr.classList.add('show');
   requestAnimationFrame(function () {
-    if (sc) sc.classList.add('show');
-    dr.classList.add('show');
     if (typeof placeSegs === 'function') placeSegs(bd);
   });
-  try {
-    if (window.history && typeof window.history.pushState === 'function' && !(window.history.state && window.history.state.hncScalpel)) {
-      window.history.pushState({ hncScalpel: 1 }, '');
-      V6.scalpel._pushedHist = true;
-    }
-  } catch (_) {}
+  if (typeof window.__hncSyncModalHistory === 'function') {
+    V6.scalpel._pushedHist = false;
+    window.__hncSyncModalHistory();
+  } else {
+    try {
+      if (window.history && typeof window.history.pushState === 'function' && !(window.history.state && window.history.state.hncScalpel)) {
+        window.history.pushState({ hncScalpel: 1 }, '');
+        V6.scalpel._pushedHist = true;
+      }
+    } catch (_) {}
+  }
 
   v6FetchScalpelFlows();
   v6StartScalpelTimer();
@@ -4132,20 +4857,6 @@ function closeScalpelDrawer(fromPop) {
   if (!V6.scalpel.open) return;
   V6.scalpel.open = false;
   V6.scalpel.reqSeq = (V6.scalpel.reqSeq || 0) + 1;
-  if (!fromPop && V6.scalpel._pushedHist) {
-    V6.scalpel._pushedHist = false;
-    try {
-      if (window.history && window.history.state && window.history.state.hncScalpel) {
-        window.__hncSkipNextPop = true;
-        window.history.back();
-        setTimeout(function () { window.__hncSkipNextPop = false; }, 300);
-      }
-    } catch (_) {
-      window.__hncSkipNextPop = false;
-    }
-  } else {
-    V6.scalpel._pushedHist = false;
-  }
   V6.scalpel.scopeDomain = 'all';
   V6.scalpel.scopeMac = '';
   V6.scalpel.scopeIp = '';
@@ -4162,6 +4873,23 @@ function closeScalpelDrawer(fromPop) {
   if (dr) {
     dr.classList.remove('show');
     setTimeout(function () { if (!V6.scalpel.open) dr.hidden = true; }, 260);
+  }
+  if (typeof window.__hncSyncModalHistory === 'function') {
+    V6.scalpel._pushedHist = false;
+    window.__hncSyncModalHistory(!!fromPop);
+  } else if (!fromPop && V6.scalpel._pushedHist) {
+    V6.scalpel._pushedHist = false;
+    try {
+      if (window.history && window.history.state && window.history.state.hncScalpel) {
+        window.__hncSkipNextPop = true;
+        window.history.back();
+        setTimeout(function () { window.__hncSkipNextPop = false; }, 300);
+      }
+    } catch (_) {
+      window.__hncSkipNextPop = false;
+    }
+  } else {
+    V6.scalpel._pushedHist = false;
   }
 }
 
@@ -4232,31 +4960,44 @@ function v6ClearLeakGuard(btn) {
 function v6OpenLeakWhitelistSheet(ev) {
   if (!ev) return;
   var hostVal = String(ev.dst_host && ev.dst_host !== '—' ? ev.dst_host : ev.dst_ip).trim().toLowerCase();
-  if (!hostVal) { toast('该记录缺少可忽略的目标域名', 'warn'); return; }
+  if (!hostVal) { toast('该记录缺少可忽略的目标域名或 IP', 'warn'); return; }
   var typeZh = leakTypeZh(ev.leak_type);
-  var dObj = ev.mac ? devBy(ev.mac) : null;
+  var isHostEv = ev.origin === 'host';
+  var evUid = Math.round(num(ev.uid, 0));
+  var realPkg = v6CleanHostRealPkg(ev.pkg);
+  var hasHostApp = isHostEv && (evUid > 0 || !!realPkg);
+  var appLbl = hasHostApp ? v6HostEventAppLabel(ev.app_name, realPkg, evUid) : '';
+  var dObj = (!isHostEv && ev.mac) ? devBy(ev.mac) : null;
   var dispDev = (dObj && dObj.name && dObj.name !== dObj.mac) ? dObj.name : (ev.devName || ev.mac || '当前设备');
-  var hasMac = v6ValidMac(ev.mac);
+  var hasMac = !isHostEv && v6ValidMac(ev.mac);
+  var defaultScope = hasHostApp ? 'app_host_type' : 'host_type';
 
   var optRowStyle = 'display:flex;align-items:flex-start;gap:9px;padding:10px 12px;border-radius:12px;background:var(--input);border:1px solid var(--stroke);cursor:pointer;margin-bottom:8px';
   var html = '<h3>加入忽略误报白名单</h3>' +
     '<div class="sub">选择对 <b class="mono">' + escapeHtml(hostVal) + '</b> 的忽略粒度（随时可在「误封恢复与忽略白名单管理」中移除）：</div>' +
     '<div id="v6-wl-scope-box" style="margin:10px 0 4px">' +
+      (hasHostApp ? (
+        '<label style="' + optRowStyle + '">' +
+          '<input type="radio" name="v6_wl_scope" value="app_host_type" checked style="margin-top:3px">' +
+          '<span><b style="display:block;font-size:13px;color:var(--text-1)">仅忽略该应用访问此目标的「' + escapeHtml(typeZh) + '」提醒（推荐）</b>' +
+          '<small style="display:block;font-size:11.5px;color:var(--text-3);margin-top:2px">仅对本机应用「' + escapeHtml(appLbl) + '」访问此目标的「' + escapeHtml(typeZh) + '」免提醒，手机上其他应用或其他敏感类别（如密码或凭据）仍正常检测</small></span>' +
+        '</label>'
+      ) : '') +
       '<label style="' + optRowStyle + '">' +
-        '<input type="radio" name="v6_wl_scope" value="host_type" checked style="margin-top:3px">' +
-        '<span><b style="display:block;font-size:13px;color:var(--text-1)">仅忽略此域名的「' + escapeHtml(typeZh) + '」提醒（推荐）</b>' +
-        '<small style="display:block;font-size:11.5px;color:var(--text-3);margin-top:2px">若该域名后续明文传输其他敏感类别（如密码或凭证）仍会正常报警</small></span>' +
+        '<input type="radio" name="v6_wl_scope" value="host_type"' + (!hasHostApp ? ' checked' : '') + ' style="margin-top:3px">' +
+        '<span><b style="display:block;font-size:13px;color:var(--text-1)">仅忽略此目标的「' + escapeHtml(typeZh) + '」提醒' + (!hasHostApp ? '（推荐）' : '') + '</b>' +
+        '<small style="display:block;font-size:11.5px;color:var(--text-3);margin-top:2px">若该目标后续明文传输其他敏感类别（如密码或凭据）仍会正常报警</small></span>' +
       '</label>' +
       '<label style="' + optRowStyle + '">' +
         '<input type="radio" name="v6_wl_scope" value="host" style="margin-top:3px">' +
-        '<span><b style="display:block;font-size:13px;color:var(--text-1)">忽略此域名的全部明文提醒</b>' +
-        '<small style="display:block;font-size:11.5px;color:var(--text-3);margin-top:2px">将该域名视为公开无害接口，不再对其产生任何明文安检告警</small></span>' +
+        '<span><b style="display:block;font-size:13px;color:var(--text-1)">忽略此目标的全部明文提醒</b>' +
+        '<small style="display:block;font-size:11.5px;color:var(--text-3);margin-top:2px">将该目标视为公开无害接口，不再对其产生任何明文安检告警</small></span>' +
       '</label>' +
       (hasMac ? (
         '<label style="' + optRowStyle + '">' +
           '<input type="radio" name="v6_wl_scope" value="device_host_type" style="margin-top:3px">' +
-          '<span><b style="display:block;font-size:13px;color:var(--text-1)">仅忽略该设备访问此域名的此类提醒</b>' +
-          '<small style="display:block;font-size:11.5px;color:var(--text-3);margin-top:2px">仅对设备「' + escapeHtml(dispDev) + '」访问此域名的「' + escapeHtml(typeZh) + '」免提醒，其他设备或其他敏感类别仍正常检测</small></span>' +
+          '<span><b style="display:block;font-size:13px;color:var(--text-1)">仅忽略该设备访问此目标的此类提醒</b>' +
+          '<small style="display:block;font-size:11.5px;color:var(--text-3);margin-top:2px">仅对设备「' + escapeHtml(dispDev) + '」访问此目标的「' + escapeHtml(typeZh) + '」免提醒，其他设备或其他敏感类别仍正常检测</small></span>' +
         '</label>'
       ) : '') +
     '</div>' +
@@ -4271,7 +5012,7 @@ function v6OpenLeakWhitelistSheet(ev) {
   if (!subBtn) return;
   subBtn.onclick = function () {
     var checked = document.querySelector('input[name="v6_wl_scope"]:checked');
-    var scopeVal = checked ? checked.value : 'host_type';
+    var scopeVal = checked ? checked.value : defaultScope;
     if (typeof closeSheet === 'function') closeSheet(0);
     v6AddLeakWhitelist(ev, hostVal, scopeVal, null);
   };
@@ -4279,16 +5020,23 @@ function v6OpenLeakWhitelistSheet(ev) {
 
 function v6AddLeakWhitelist(ev, hostVal, scopeVal, triggerEl) {
   if (scopeVal === 'device_host') scopeVal = 'device_host_type';
+  if (scopeVal === 'app_host') scopeVal = 'app_host_type';
   var reqBody = {
     action: 'add',
     scope: scopeVal,
     dst_host: hostVal
   };
-  if ((scopeVal === 'host_type' || scopeVal === 'device_host_type') && ev && ev.leak_type) {
+  if ((scopeVal === 'host_type' || scopeVal === 'device_host_type' || scopeVal === 'app_host_type') && ev && ev.leak_type) {
     reqBody.leak_type = ev.leak_type;
   }
   if (scopeVal === 'device_host_type' && ev && v6ValidMac(ev.mac)) {
     reqBody.mac = ev.mac;
+  }
+  if (scopeVal === 'app_host_type' && ev) {
+    var evUid = Math.round(num(ev.uid, 0));
+    var realPkg = v6CleanHostRealPkg(ev.pkg).toLowerCase();
+    if (evUid > 0) reqBody.uid = evUid;
+    if (realPkg) reqBody.pkg = realPkg;
   }
 
   if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
@@ -4299,6 +5047,9 @@ function v6AddLeakWhitelist(ev, hostVal, scopeVal, triggerEl) {
     dst_host: hostVal,
     leak_type: reqBody.leak_type || '',
     mac: reqBody.mac || '',
+    uid: reqBody.uid || 0,
+    pkg: reqBody.pkg || '',
+    app_name: (ev && ev.app_name) || '',
     device_name: ev && ev.devName || ''
   }, V6.lg.whitelist.length);
 
@@ -4333,8 +5084,8 @@ function v6RemoveLeakWhitelist(widOrIdx, triggerEl) {
     for (var i = 0; i < list.length; i++) {
       var w = list[i];
       if (!w) continue;
-      var ns = w.scope === 'device_host' ? 'device_host_type' : (w.scope || 'host');
-      var wk = w.comboKey || (ns + '|' + (w.dst_host || '') + '|' + (w.leak_type || '') + '|' + (w.mac || ''));
+      var ns = w.scope === 'device_host' ? 'device_host_type' : (w.scope === 'app_host' ? 'app_host_type' : (w.scope || 'host'));
+      var wk = w.comboKey || (ns + '|' + (w.dst_host || '') + '|' + (w.leak_type || '') + '|' + (w.mac || '') + '|' + (w.uid > 0 ? w.uid : '') + '|' + (w.pkg || ''));
       if (w.id === targetWid || wk === targetWid) {
         wIdx = i;
         break;
@@ -4343,7 +5094,7 @@ function v6RemoveLeakWhitelist(widOrIdx, triggerEl) {
   }
   var item = wIdx >= 0 ? list[wIdx] : null;
   if (!item) return;
-  var normScope = item.scope === 'device_host' ? 'device_host_type' : (item.scope || 'host');
+  var normScope = item.scope === 'device_host' ? 'device_host_type' : (item.scope === 'app_host' ? 'app_host_type' : (item.scope || 'host'));
   var reqBody = {
     action: 'remove',
     scope: normScope,
@@ -4352,6 +5103,8 @@ function v6RemoveLeakWhitelist(widOrIdx, triggerEl) {
   if (item.hasServerId && item.id) reqBody.id = item.id;
   if (item.leak_type) reqBody.leak_type = item.leak_type;
   if (item.mac) reqBody.mac = item.mac;
+  if (item.uid > 0) reqBody.uid = item.uid;
+  if (item.pkg) reqBody.pkg = item.pkg;
 
   if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
   V6.mutUntil.lg = Date.now() + 1500;
@@ -4374,7 +5127,7 @@ function v6RemoveLeakWhitelist(widOrIdx, triggerEl) {
   });
 }
 
-function v6UndoLeakBlock(undoId, fallbackHost, targetScope, triggerEl) {
+function v6UndoLeakBlock(undoId, fallbackHost, targetScope, triggerEl, fallbackAppUid) {
   var reqBody = {};
   if (undoId) reqBody.id = undoId;
   if (targetScope) reqBody.target_scope = targetScope;
@@ -4387,17 +5140,37 @@ function v6UndoLeakBlock(undoId, fallbackHost, targetScope, triggerEl) {
     var restoredHost = String((undoneObj && (undoneObj.dst_host || undoneObj.host || undoneObj.domain)) || fallbackHost || '').trim();
     var restoredIp = String((undoneObj && (undoneObj.also_ip || undoneObj.dst_ip)) || '').trim();
     var effScope = String((undoneObj && undoneObj.target_scope) || targetScope || '').toLowerCase();
+    var effUid = Math.round(num(undoneObj && undoneObj.uid != null ? undoneObj.uid : fallbackAppUid, 0));
     if (restoredHost) {
       var rk = restoredHost.toLowerCase();
+      var rkPureIp = v6ExtractPureIp(rk).toLowerCase();
       if (effScope !== 'host') delete V6.lg.blocked_set[rk];
-      if (effScope === 'host' || effScope === 'both') {
+      if (effScope === 'host' && effUid > 0) {
+        delete V6.lg.blocked_set['uid:' + effUid + '|' + rk];
+        if (rkPureIp) delete V6.lg.blocked_set['uid:' + effUid + '|' + rkPureIp];
+        var existRule = V6.host.firewall.uid_map[String(effUid)];
+        if (existRule && Array.isArray(existRule.block_targets)) {
+          existRule.block_targets = existRule.block_targets.filter(function (t) {
+            var tLow = String(t || '').toLowerCase();
+            return tLow !== rk && (!rkPureIp || v6ExtractPureIp(tLow).toLowerCase() !== rkPureIp);
+          });
+          if (v6NormFwMode(existRule.mode) === 'allow' && existRule.block_targets.length === 0) {
+            delete V6.host.firewall.uid_map[String(effUid)];
+            V6.host.firewall.uid_rules = V6.host.firewall.uid_rules.filter(function (x) { return x.uid !== effUid; });
+            V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
+          }
+        }
+      } else if (effScope === 'host' || effScope === 'both') {
         delete V6.host.firewall.blocked_set[rk];
         V6.host.firewall.blocked_domains = V6.host.firewall.blocked_domains.filter(function (x) { return x !== rk; });
         V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
       }
       V6.lg.events.forEach(function (x) {
         if (String(x.dst_host || '').toLowerCase() === rk || (restoredIp && x.dst_ip === restoredIp)) {
-          if (!effScope || effScope === 'both' || (x.origin || 'hotspot') === effScope) {
+          if (x.origin === 'host') {
+            var xSt = v6ClassifyHostLeakBlockState(x);
+            x.is_blocked = !!(xSt.targetBlocked || xSt.appMode);
+          } else if (!effScope || effScope === 'both' || (x.origin || 'hotspot') === effScope) {
             x.is_blocked = false;
           }
         }
@@ -4421,6 +5194,7 @@ function v6UndoLeakBlock(undoId, fallbackHost, targetScope, triggerEl) {
       V6.lg.undo_count = V6.lg.undo_stack.length;
     }
     if (r) v6ApplyLeakGuardData(r, true);
+    if (effScope === 'host' || effScope === 'both') v6LoadHostFirewall(true);
     v6RefreshHeroDom();
     v6RefreshNavBadges();
     v6RefreshActiveSubviewDom();
@@ -4437,27 +5211,168 @@ function v6BlockLeakDomain(evId, btn, opts) {
   opts = opts || {};
   var ev = V6.lg.events.filter(function (x) { return x.id === evId; })[0] || opts.evSnapshot;
   if (!ev) return;
+  var evUid = Math.round(num(ev.uid, 0));
+  var cleanPkg = v6CleanHostRealPkg(ev.pkg);
+  if (!opts.targetAction && ev.is_blocked && ev.origin === 'host') {
+    var hbs0 = v6ClassifyHostLeakBlockState(ev);
+    if (hbs0.appOnlyBlocked) {
+      v6OpenHostAppSheet(evUid, cleanPkg, v6HostEventAppLabel(ev.app_name, cleanPkg, evUid), false);
+      return Promise.resolve();
+    }
+  }
   var wantBlock = opts.targetAction ? (opts.targetAction === 'block') : !ev.is_blocked;
   var act = wantBlock ? 'block' : 'unblock';
   var primaryHost = String(ev.dst_host && ev.dst_host !== '—' ? ev.dst_host : ev.dst_ip).trim();
   if (!primaryHost) { toast('该记录缺少可封禁的目标域名或公网 IP', 'warn'); return; }
   var targetScope = String(opts.targetScope || (ev.origin === 'host' ? 'host' : 'hotspot')).toLowerCase();
-  if (targetScope === 'host' && v6ValidIp(primaryHost)) {
-    var evUidNum = Math.round(num(ev.uid, -1));
-    if (evUidNum >= 0 && (evUidNum % 100000) >= 10000) {
-      v6OpenHostAppSheet(ev.uid, ev.pkg, ev.app_name || ev.devName, false);
-      toast('纯 IP 明文连接无法通过域名拦截，请在此对该应用开启「仅禁明文HTTP」或「全局禁网」', 'warn');
-    } else {
-      toast('纯 IP 明文连接无法通过域名拦截，请前往「连接排障」断开该连接', 'warn');
+  var pureIp = v6ExtractPureIp(primaryHost);
+  var appId = evUid > 0 ? (evUid % 100000) : -1;
+  var isNormalHostApp = targetScope === 'host' && evUid > 0 && appId >= 10000 && appId < 90000 && !v6IsHostAppProtected(evUid, cleanPkg);
+
+  if (pureIp) {
+    if (wantBlock && (v6IsFakeOrPrivateIp(pureIp) || (targetScope === 'host' && !isNormalHostApp))) {
+      toast('系统/代理内网流请用断开或应用防火墙', 'warn');
+      return Promise.resolve();
     }
-    return Promise.resolve();
+    if (targetScope === 'host') {
+      if (!isNormalHostApp) {
+        toast('系统/代理内网流请用断开或应用防火墙', 'warn');
+        return Promise.resolve();
+      }
+      var hostIpPayload = {
+        action: act,
+        target_scope: 'host',
+        uid: evUid,
+        dst_host: pureIp,
+        mac: '',
+        pkg: cleanPkg,
+        app_name: ev.app_name || '',
+        force: !!opts.force
+      };
+      if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
+      V6.mutUntil.lg = Date.now() + 1500;
+      var evIpSnap = Object.assign({}, ev);
+
+      return busyWhile(btn, api.post(V6_API.lgBlockDomain, hostIpPayload, { timeout: 9000 })).then(function (r) {
+        var dkIp = primaryHost.toLowerCase();
+        var pIpLow = pureIp.toLowerCase();
+        if (wantBlock) {
+          V6.lg.blocked_set['uid:' + evUid + '|' + pIpLow] = 1;
+          V6.lg.blocked_set['uid:' + evUid + '|' + dkIp] = 1;
+          var curR = V6.host.firewall.uid_map[String(evUid)];
+          if (!curR) {
+            curR = {
+              uid: evUid,
+              sdk_sandbox_uid: (appId >= 10000 && appId <= 19999) ? (evUid + 10000) : 0,
+              pkg: cleanPkg,
+              app_name: ev.app_name || '',
+              mode: 'allow',
+              block_targets: [pureIp],
+              updated_at: Math.round(Date.now() / 1000)
+            };
+            V6.host.firewall.uid_map[String(evUid)] = curR;
+            V6.host.firewall.uid_rules.unshift(curR);
+            V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
+          } else {
+            if (!Array.isArray(curR.block_targets)) curR.block_targets = [];
+            if (curR.block_targets.indexOf(pureIp) < 0) curR.block_targets.push(pureIp);
+          }
+        } else {
+          delete V6.lg.blocked_set['uid:' + evUid + '|' + pIpLow];
+          delete V6.lg.blocked_set['uid:' + evUid + '|' + dkIp];
+          var curR2 = V6.host.firewall.uid_map[String(evUid)];
+          if (curR2 && Array.isArray(curR2.block_targets)) {
+            curR2.block_targets = curR2.block_targets.filter(function (t) {
+              var tl = String(t || '').toLowerCase();
+              return tl !== pIpLow && v6ExtractPureIp(tl).toLowerCase() !== pIpLow;
+            });
+            if (v6NormFwMode(curR2.mode) === 'allow' && curR2.block_targets.length === 0) {
+              delete V6.host.firewall.uid_map[String(evUid)];
+              V6.host.firewall.uid_rules = V6.host.firewall.uid_rules.filter(function (x) { return x.uid !== evUid; });
+              V6.host.firewall.uid_rule_count = V6.host.firewall.uid_rules.length;
+            }
+          }
+        }
+        var stillAppBlockedIp = !wantBlock && !!v6HostAppBlockingModeForEvent(evUid, ev.dst_port, ev.proto);
+        ev.is_blocked = wantBlock || stillAppBlockedIp;
+        V6.lg.events.forEach(function (x) {
+          if (x.origin === 'host' && Math.round(num(x.uid, 0)) === evUid) {
+            var xHost = String(x.dst_host || '').toLowerCase();
+            if (xHost === dkIp || v6ExtractPureIp(xHost).toLowerCase() === pIpLow) {
+              var xSt = v6ClassifyHostLeakBlockState(x);
+              x.is_blocked = !!(xSt.targetBlocked || xSt.appMode);
+            }
+          }
+        });
+        if (r) v6ApplyLeakGuardData(r, true);
+        v6LoadHostFirewall(true);
+        v6RefreshNavBadges();
+        v6RefreshActiveSubviewDom();
+        v6LoadLeakGuard(true);
+        var appLbl = v6HostEventAppLabel(ev.app_name, cleanPkg, evUid);
+        var ipMsg = wantBlock
+          ? ('已封禁「' + appLbl + '」访问目标 IP：' + pureIp)
+          : ('已解除「' + appLbl + '」目标 IP 封禁：' + pureIp + (stillAppBlockedIp ? '（该应用仍受应用防火墙限制）' : ''));
+        if (!opts.fromUndo && typeof undoToast === 'function') {
+          undoToast(ipMsg, function () {
+            return v6BlockLeakDomain(evId, null, {
+              fromUndo: true,
+              targetAction: wantBlock ? 'unblock' : 'block',
+              targetScope: 'host',
+              force: true,
+              evSnapshot: evIpSnap
+            });
+          });
+        } else {
+          toast(ipMsg);
+        }
+      }).catch(function (e) {
+        V6.mutUntil.lg = 0;
+        if (e && e.status === 409 && e.body) {
+          var gLvlIp = String(e.body.guard_level || (e.body.infra_guard && e.body.infra_guard.level) || '').toLowerCase();
+          var gRsnIp = String(e.body.detail || e.body.reason_zh || e.body.message || e.body.error || '涉及公共网络基础设施');
+          if (gLvlIp === 'warn_confirm') {
+            confirmSheet(
+              '确认强制封禁共享节点 IP？',
+              '<b>' + escapeHtml(pureIp) + '</b> 属于共享云底座或 CDN 节点（' + escapeHtml(gRsnIp) + '），仅对该应用封禁仍可能影响其正常加载内容，确定强制封禁吗？',
+              '强制封禁'
+            ).then(function (ok) {
+              if (ok) {
+                v6BlockLeakDomain(evId, btn, {
+                  force: true,
+                  fromUndo: opts.fromUndo,
+                  targetAction: 'block',
+                  targetScope: 'host',
+                  evSnapshot: evIpSnap
+                });
+              }
+            });
+            return;
+          }
+          if (gLvlIp === 'hard_block') {
+            toast('核心公共服务 IP 受保护：' + gRsnIp, 'warn');
+            return;
+          }
+        }
+        toast(errText(e), 'err');
+      });
+    }
   }
+
   var macArg = (targetScope !== 'host' && v6ValidMac(ev.mac)) ? ev.mac : '';
-  var alsoIp = (targetScope !== 'host' && !opts.skipAlsoIp && v6ValidIp(ev.dst_ip) && ev.dst_ip.toLowerCase() !== primaryHost.toLowerCase()) ? ev.dst_ip : '';
-  var reqPayload = { action: act, dst_host: primaryHost, mac: macArg, target_scope: targetScope };
+  var alsoIp = (targetScope !== 'host' && !pureIp && !opts.skipAlsoIp && v6ValidIp(ev.dst_ip) && ev.dst_ip.toLowerCase() !== primaryHost.toLowerCase()) ? ev.dst_ip : '';
+  var reqPayload = {
+    action: act,
+    target_scope: targetScope,
+    uid: targetScope === 'hotspot' ? 0 : (evUid > 0 ? evUid : 0),
+    dst_host: pureIp || primaryHost,
+    mac: macArg,
+    pkg: targetScope === 'hotspot' ? '' : cleanPkg,
+    app_name: targetScope === 'hotspot' ? '' : (ev.app_name || ''),
+    force: !!opts.force
+  };
   if (targetScope !== 'host' && !macArg) reqPayload.scope = 'global';
   if (alsoIp) reqPayload.also_ip = alsoIp;
-  if (opts.force) reqPayload.force = true;
 
   if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
   V6.mutUntil.lg = Date.now() + 1500;
@@ -4466,7 +5381,6 @@ function v6BlockLeakDomain(evId, btn, opts) {
   return busyWhile(btn, api.post(V6_API.lgBlockDomain, reqPayload, { timeout: 9000 })).then(function (r) {
     var skippedSharedIp = !!(wantBlock && r && r.skipped_shared_ip === true);
     var effAlsoIp = skippedSharedIp ? '' : alsoIp;
-    ev.is_blocked = wantBlock;
     var dk = primaryHost.toLowerCase();
     if (wantBlock) {
       if (targetScope !== 'host') V6.lg.blocked_set[dk] = 1;
@@ -4485,25 +5399,33 @@ function v6BlockLeakDomain(evId, btn, opts) {
         V6.host.firewall.blocked_domain_count = V6.host.firewall.blocked_domains.length;
       }
     }
+    var stillAppBlockedDom = (!wantBlock && ev.origin === 'host') ? !!v6HostAppBlockingModeForEvent(evUid, ev.dst_port, ev.proto) : false;
+    ev.is_blocked = wantBlock || stillAppBlockedDom;
     V6.lg.events.forEach(function (x) {
       if (String(x.dst_host || '').toLowerCase() === dk || (effAlsoIp && x.dst_ip === effAlsoIp)) {
         if (targetScope === 'both' || (x.origin || 'hotspot') === targetScope) {
-          x.is_blocked = wantBlock;
+          if (x.origin === 'host') {
+            var xSt = v6ClassifyHostLeakBlockState(x);
+            x.is_blocked = !!(xSt.targetBlocked || xSt.appMode);
+          } else {
+            x.is_blocked = wantBlock;
+          }
         }
       }
     });
     if (r) v6ApplyLeakGuardData(r, true);
+    if (targetScope === 'host' || targetScope === 'both') v6LoadHostFirewall(true);
     v6RefreshNavBadges();
     v6RefreshActiveSubviewDom();
     v6LoadLeakGuard(true);
-    var scopeZh = targetScope === 'host' ? '本机域名' : (targetScope === 'both' ? '双端域名' : '热点域名');
+    var scopeZh = pureIp ? '热点目标 IP' : (targetScope === 'host' ? '本机域名' : (targetScope === 'both' ? '双端域名' : '热点域名'));
     var msgTxt;
     if (wantBlock && skippedSharedIp) {
       msgTxt = '已封禁' + scopeZh + '：' + primaryHost + '（共享 CDN IP 已自动跳过防误伤）';
     } else if (wantBlock) {
       msgTxt = '已封禁' + scopeZh + (effAlsoIp ? '与 IP' : '') + '：' + primaryHost;
     } else {
-      msgTxt = '已解除封禁：' + primaryHost;
+      msgTxt = '已解除封禁：' + primaryHost + (stillAppBlockedDom ? '（该应用仍受应用防火墙限制）' : '');
     }
     if (!opts.fromUndo && typeof undoToast === 'function') {
       undoToast(msgTxt, function () {
@@ -4566,13 +5488,14 @@ function v6BuildScalpelCutPayload(flowObj, modeStr) {
     mode: modeStr === 'cut_freeze_15m' ? 'cut_freeze_15m' : 'cut_once',
     scope: fScope,
     proto: normProto,
-    src_ip: String(flowObj.src_ip || '').trim(),
+    src_ip: String(flowObj.src_ip || '').trim().replace(/^\[|\]$/g, ''),
     sport: clamp(Math.round(num(flowObj.sport != null ? flowObj.sport : flowObj.src_port, 0)), 1, 65535),
-    dst_ip: String(flowObj.dst_ip || '').trim(),
+    dst_ip: String(flowObj.dst_ip || '').trim().replace(/^\[|\]$/g, ''),
     dport: clamp(Math.round(num(flowObj.dport != null ? flowObj.dport : flowObj.dst_port, 80)), 1, 65535)
   };
-  if (fScope === 'host' && flowObj.uid != null && num(flowObj.uid, -1) >= 0) {
-    out.uid = Math.round(num(flowObj.uid, 0));
+  var rawUid = flowObj.uid != null ? Math.round(num(flowObj.uid, -1)) : -1;
+  if (fScope === 'host' && (rawUid > 0 || (rawUid === 0 && !flowObj.leak_type))) {
+    out.uid = rawUid;
   } else if (v6ValidMac(flowObj.mac)) {
     out.mac = String(flowObj.mac).toLowerCase();
   }
@@ -4590,8 +5513,8 @@ function v6CutFlow(flowObj, freeze15m, btn) {
   if (api && typeof api.bumpWriteGen === 'function') api.bumpWriteGen();
   busyWhile(btn, api.post(V6_API.scalpelCut, payload, { timeout: 8000 })).then(function () {
     toast(freeze15m
-      ? ('已断开并冻结 15 分钟：' + (flowObj.dst_host || flowObj.dst_ip))
-      : ('已秒断连接：' + (flowObj.dst_host || payload.dst_ip) + ':' + payload.dport));
+      ? ('已断开并冻结 15 分钟：' + (flowObj.dst_host || payload.dst_ip))
+      : ('已秒断连接：' + v6FmtHostPort(flowObj.dst_host || payload.dst_ip, payload.dport)));
     if (V6.scalpel.open) v6FetchScalpelFlows();
     if (V6.host.appSheet.open) v6FetchHostAppFlows();
     if (S.page === 'vector') v6LoadCockpitAll();
@@ -4600,13 +5523,15 @@ function v6CutFlow(flowObj, freeze15m, btn) {
 
 function v6CutLeakEventConn(ev, btn) {
   if (!ev) return;
-  if (v6ValidIp(ev.src_ip) && v6ValidIp(ev.dst_ip) && ev.src_port >= 1 && ev.src_port <= 65535) {
+  var fastSport = Math.round(num(ev.src_port != null ? ev.src_port : ev.sport, 0));
+  if (v6ValidIp(ev.src_ip) && v6ValidIp(ev.dst_ip) && fastSport >= 1 && fastSport <= 65535) {
     v6CutFlow(ev, false, btn);
     return;
   }
   var isHostEv = ev.origin === 'host';
+  var evUid = Math.round(num(ev.uid, 0));
   var qParams = { scope: isHostEv ? 'host' : 'hotspot', limit: 250 };
-  if (isHostEv && ev.uid > 0) qParams.uid = ev.uid;
+  if (isHostEv && evUid > 0) qParams.uid = evUid;
   if (!isHostEv && v6ValidMac(ev.mac)) qParams.mac = ev.mac;
   if (!isHostEv && v6ValidIp(ev.src_ip)) qParams.ip = ev.src_ip;
 
@@ -4616,6 +5541,7 @@ function v6CutLeakEventConn(ev, btn) {
     var matched = flows.filter(function (f) {
       var sp = Math.round(num(f.sport, 0)), dp = Math.round(num(f.dport, 0));
       if (!v6ValidIp(f.src_ip) || !v6ValidIp(f.dst_ip) || sp < 1 || dp < 1) return false;
+      if (fastSport >= 1 && sp === fastSport && (!ev.src_ip || f.src_ip === ev.src_ip)) return true;
       if (ev.dst_ip && f.dst_ip === ev.dst_ip) return true;
       var dom = String(f.domain || '').toLowerCase();
       if (hostLow && hostLow !== '—' && (dom === hostLow || dom.slice(-(hostLow.length + 1)) === '.' + hostLow || f.dst_ip === hostLow)) return true;
@@ -4636,14 +5562,17 @@ function v6CutLeakEventConn(ev, btn) {
     });
     return chain.then(function () { return { cutN: cutN, skipProt: skipProt, failN: failN, lastErr: lastErr }; });
   })).then(function (res) {
+    var appId = evUid > 0 ? (evUid % 100000) : -1;
     if (res && res.cutN > 0) {
       toast('已断开 ' + res.cutN + ' 条相关连接' + (res.skipProt > 0 ? ('（跳过 ' + res.skipProt + ' 条受保护连接）') : '') + '：' + (ev.dst_host || ev.dst_ip));
     } else if (res && res.skipProt > 0) {
       toast('匹配的 ' + res.skipProt + ' 条连接受系统保护，已跳过断开', 'warn');
     } else if (res && res.failN > 0 && res.lastErr) {
       toast(errText(res.lastErr), 'err');
-    } else if (isHostEv && ev.uid >= 0 && (Math.round(num(ev.uid, 0)) % 100000) >= 10000) {
-      v6OpenHostAppSheet(ev.uid, ev.pkg, ev.app_name || ev.devName, false);
+    } else if (isHostEv && evUid <= 0) {
+      toast('该本机未知连接已结束且未归属具体应用，暂无可断开的活跃连接', 'warn');
+    } else if (isHostEv && appId >= 10000 && appId < 90000) {
+      v6OpenHostAppSheet(evUid, ev.pkg, ev.app_name || ev.devName, false);
       toast('该短连接已自然结束，已打开此应用的联网管控面板', 'warn');
     } else {
       openScalpelDrawer(isHostEv ? '' : ev.mac, isHostEv ? '' : ev.src_ip, isHostEv ? '' : ev.devName, isHostEv ? 'host' : 'hotspot');
@@ -4830,7 +5759,7 @@ function v6ExportBackupBundle(actEl) {
   if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function' && typeof loadSecret === 'function') {
     var ksuVer = v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.6';
+      'v6.1.0-rc.7';
     var ksuFname = 'hnc-backup-' + ksuVer + '-' + Date.now() + '.json';
     var outPath = '/sdcard/Download/' + ksuFname;
     var runCurlSave = function (forceSec) {
@@ -4876,7 +5805,7 @@ function v6ExportBackupBundle(actEl) {
     var verTag = v6CleanBackupVer(bundle.module_version) ||
       v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.6';
+      'v6.1.0-rc.7';
     var fname = 'hnc-backup-' + verTag + '-' + Date.now() + '.json';
     try {
       var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
@@ -4909,7 +5838,7 @@ function v6BindEvents() {
   if (scScrim) scScrim.addEventListener('click', function () { closeScalpelDrawer(false); });
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && V6.scalpel.open) {
+    if (e.key === 'Escape' && V6.scalpel.open && !v6IsSheetShowing()) {
       closeScalpelDrawer(false);
       return;
     }
@@ -4921,14 +5850,20 @@ function v6BindEvents() {
         if (ok !== false) inp.value = '';
       });
     }
-  });
+  }, true);
 
-  /* 记录 <details class="v6-adv-fold"> 展开态，保证后台轮询 morph 时不会自动合上用户展开的高级设置 */
+  /* 记录 <details class="v6-adv-fold"> 展开态，保证后台轮询 morph 时不会自动合上用户展开的高级设置，并在用户点击展开时调用 ensureAboveTabbar 防底栏遮挡 */
   document.addEventListener('toggle', function (e) {
     var dt = typeof evEl === 'function' ? evEl(e) : (e && e.target && e.target.nodeType === 3 ? e.target.parentNode : e && e.target);
     if (dt && dt.matches && dt.matches('details[data-v6-fold]')) {
       var fk = dt.getAttribute('data-v6-fold');
+      var wasOpen = fk ? !!V6.advOpen[fk] : false;
       if (fk) V6.advOpen[fk] = !!dt.open;
+      var tapped = !!(dt._v6UserTapAt && Date.now() - dt._v6UserTapAt < 800);
+      if (dt._v6UserTapAt) dt._v6UserTapAt = 0;
+      if (dt.open && (tapped || !wasOpen) && typeof ensureAboveTabbar === 'function') {
+        ensureAboveTabbar(dt);
+      }
     }
   }, true);
 
@@ -4988,6 +5923,11 @@ function v6BindEvents() {
     if (!t || typeof t.closest !== 'function') return;
     if (!t.closest('.dd') && typeof closeDD === 'function') closeDD();
 
+    var foldSum = t.closest('details[data-v6-fold] > summary');
+    if (foldSum && foldSum.parentNode) {
+      foldSum.parentNode._v6UserTapAt = Date.now();
+    }
+
     /* 0. 全站原生 .seg 弹簧分段器（v6-tab / v6-host-mode / v6-host-period / v6-host-net / v6-sc-scope） */
     var segBtn = t.closest('.seg button');
     if (segBtn && segBtn.parentNode) {
@@ -5029,6 +5969,7 @@ function v6BindEvents() {
           V6.scalpel.drawerFlows = null;
           V6.scalpel.drawerTotal = 0;
           v6RefreshScalpelDrawerList();
+          v6ResetScalpelScroll();
           v6FetchScalpelFlows();
         }
         return;
@@ -5160,6 +6101,7 @@ function v6BindEvents() {
           bd0.innerHTML = v6ScalpelDrawerBodyHtml();
           if (typeof placeSegs === 'function') placeSegs(bd0);
         }
+        v6ResetScalpelScroll();
         v6FetchScalpelFlows();
         break;
       case 'scalpel-pause':
@@ -5172,6 +6114,7 @@ function v6BindEvents() {
         V6.scalpel.protoFilter = actEl.getAttribute('data-proto') || 'ALL';
         $$('#v6-scalpel-body [data-v6-act="scalpel-proto"]').forEach(function (b) { b.classList.toggle('on', b === actEl); });
         v6RefreshScalpelDrawerList();
+        v6ResetScalpelScroll();
         break;
       case 'scalpel-cut-once':
       case 'scalpel-cut-freeze':
@@ -5238,6 +6181,24 @@ function v6BindEvents() {
         break;
       case 'host-dns-unblock':
         v6UnblockHostDomain(actEl.getAttribute('data-domain') || '', actEl, false);
+        break;
+      case 'host-ip-unblock':
+        v6UnblockHostUidIp(
+          num(actEl.getAttribute('data-uid'), -1),
+          actEl.getAttribute('data-ip') || '',
+          actEl.getAttribute('data-pkg') || '',
+          actEl.getAttribute('data-name') || '',
+          actEl,
+          false
+        );
+        break;
+      case 'host-uid-ip-clear':
+        v6ClearHostUidIps(
+          num(actEl.getAttribute('data-uid'), -1),
+          actEl.getAttribute('data-pkg') || '',
+          actEl.getAttribute('data-name') || '',
+          actEl
+        );
         break;
       case 'host-sheet-cut':
         var hfid = actEl.getAttribute('data-fid');
@@ -5329,7 +6290,8 @@ function v6BindEvents() {
           actEl.getAttribute('data-uid') || '',
           actEl.getAttribute('data-host') || '',
           actEl.getAttribute('data-tscope') || '',
-          actEl
+          actEl,
+          actEl.getAttribute('data-app-uid') || ''
         );
         break;
       case 'lgd-cut-conn':

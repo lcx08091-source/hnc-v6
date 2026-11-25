@@ -82,56 +82,52 @@ func actionEncdnsSet(s *server, p map[string]string) actionResp {
 			scope = "device"
 		}
 	}
-	resp, needSync := func() (actionResp, bool) {
-		encdnsMu.Lock()
-		defer encdnsMu.Unlock()
-		c := loadEncdns(s.hncDir)
-		switch scope {
-		case "global":
-			if !validEncdnsPolicy(policy) {
-				return actionResp{OK: false, Error: "bad params", Detail: "policy must be off|dot|strict"}, false
+	encdnsMu.Lock()
+	defer encdnsMu.Unlock()
+
+	c := loadEncdns(s.hncDir)
+	switch scope {
+	case "global":
+		if !validEncdnsPolicy(policy) {
+			return actionResp{OK: false, Error: "bad params", Detail: "policy must be off|dot|strict"}
+		}
+		if c.Policy == policy {
+			return actionResp{OK: true, Detail: "no change"}
+		}
+		c.Policy = policy
+	case "device":
+		if !validMAC(mac) {
+			return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
+		}
+		if dpiCtlSkipMAC(mac) {
+			return actionResp{OK: false, Error: "bad params", Detail: "模拟设备不下发 iptables"}
+		}
+		switch {
+		case policy == "inherit" || policy == "":
+			if _, ok := c.Devices[mac]; !ok {
+				return actionResp{OK: true, Detail: "no change"}
 			}
-			if c.Policy == policy {
-				return actionResp{OK: true, Detail: "no change"}, false
+			delete(c.Devices, mac)
+		case validEncdnsPolicy(policy):
+			if c.Devices[mac] == policy {
+				return actionResp{OK: true, Detail: "no change"}
 			}
-			c.Policy = policy
-		case "device":
-			if !validMAC(mac) {
-				return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}, false
+			if _, ok := c.Devices[mac]; !ok && len(c.Devices) >= encdnsMaxDevices {
+				return actionResp{OK: false, Error: "too many", Detail: "按设备覆盖已达上限 64"}
 			}
-			if dpiCtlSkipMAC(mac) {
-				return actionResp{OK: false, Error: "bad params", Detail: "模拟设备不下发 iptables"}, false
-			}
-			switch {
-			case policy == "inherit" || policy == "":
-				if _, ok := c.Devices[mac]; !ok {
-					return actionResp{OK: true, Detail: "no change"}, false
-				}
-				delete(c.Devices, mac)
-			case validEncdnsPolicy(policy):
-				if c.Devices[mac] == policy {
-					return actionResp{OK: true, Detail: "no change"}, false
-				}
-				if _, ok := c.Devices[mac]; !ok && len(c.Devices) >= encdnsMaxDevices {
-					return actionResp{OK: false, Error: "too many", Detail: "按设备覆盖已达上限 64"}, false
-				}
-				c.Devices[mac] = policy
-			default:
-				return actionResp{OK: false, Error: "bad params", Detail: "policy must be off|dot|strict|inherit"}, false
-			}
+			c.Devices[mac] = policy
 		default:
-			return actionResp{OK: false, Error: "bad params", Detail: "scope must be global|device"}, false
+			return actionResp{OK: false, Error: "bad params", Detail: "policy must be off|dot|strict|inherit"}
 		}
-		c.Ts = time.Now().Unix()
-		b, _ := json.Marshal(c)
-		if err := discoverWriteAtomic(encdnsPath(s.hncDir), b); err != nil {
-			return actionResp{OK: false, Error: "write failed", Detail: err.Error()}, false
-		}
-		return actionResp{OK: true}, true
-	}()
-	if !needSync {
-		return resp
+	default:
+		return actionResp{OK: false, Error: "bad params", Detail: "scope must be global|device"}
 	}
+	c.Ts = time.Now().Unix()
+	b, _ := json.Marshal(c)
+	if err := discoverWriteAtomic(encdnsPath(s.hncDir), b); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	}
+
 	encdnsCountersInvalidate()
 	rc, out := runBin(s.hncDir, "encdns_sync.sh")
 	encdnsCountersInvalidate()
