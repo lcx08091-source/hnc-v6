@@ -563,6 +563,7 @@ fi
 # 改为直接 fork service.sh · nohup + & 脱离 cleanup.sh 生命周期
 # (cleanup.sh exit 后 service.sh 仍活 + setsid 保留 session 独立).
 if [ "$MODE" = "restart" ]; then
+    rm -f "$HNC_DIR/data/rollback.lastpid_httpd" "$HNC_DIR/data/rollback.lastpid_watchdog" 2>/dev/null || true
     SERVICE_SH=""
     # 路径 1 (首选): service.sh 启动时写的 $RUN/service.path
     if [ -f "$RUN/service.path" ]; then

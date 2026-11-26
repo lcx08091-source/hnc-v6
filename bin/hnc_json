@@ -526,6 +526,52 @@ prune_bad_backups() {
   return 0
 }
 
+_FSYNC_METHOD=""
+fsync_file() {
+  _ff="$1"
+  [ -f "$_ff" ] || return 0
+  if [ -z "$_FSYNC_METHOD" ]; then
+    if command -v busybox >/dev/null 2>&1 && busybox fsync "$_ff" 2>/dev/null; then
+      _FSYNC_METHOD="busybox_fsync"
+      return 0
+    elif command -v fsync >/dev/null 2>&1 && fsync "$_ff" 2>/dev/null; then
+      _FSYNC_METHOD="fsync"
+      return 0
+    elif command -v toybox >/dev/null 2>&1 && toybox fsync "$_ff" 2>/dev/null; then
+      _FSYNC_METHOD="toybox_fsync"
+      return 0
+    elif command -v python3 >/dev/null 2>&1; then
+      _FSYNC_METHOD="python3"
+    else
+      _FSYNC_METHOD="sync"
+    fi
+  fi
+  case "$_FSYNC_METHOD" in
+    busybox_fsync) busybox fsync "$_ff" 2>/dev/null || sync 2>/dev/null || true ;;
+    fsync) fsync "$_ff" 2>/dev/null || sync 2>/dev/null || true ;;
+    toybox_fsync) toybox fsync "$_ff" 2>/dev/null || sync 2>/dev/null || true ;;
+    python3)
+      python3 -c 'import os,sys; fd=os.open(sys.argv[1],os.O_RDONLY); os.fsync(fd); os.close(fd)' "$_ff" 2>/dev/null \
+        || sync 2>/dev/null || true
+      ;;
+    *)
+      sync 2>/dev/null || true
+      ;;
+  esac
+  return 0
+}
+
+ensure_json_file_locked() {
+  _ej_target="$1"; _ej_default="$2"
+  [ -f "$_ej_target" ] && return 0
+  _ej_dir="$(dirname "$_ej_target")"
+  _ej_base="$(basename "$_ej_target")"
+  _ej_tmp="$_ej_dir/.$_ej_base.hnc_json_init.$$"
+  printf '%s\n' "$_ej_default" > "$_ej_tmp"
+  fsync_file "$_ej_tmp"
+  mv -f "$_ej_tmp" "$_ej_target" || { rm -f "$_ej_tmp" 2>/dev/null || true; return 1; }
+}
+
 set_top() {
   target="$1"; key="$2"; value="$3"; typ="${4:-str}"
   [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
@@ -535,7 +581,7 @@ set_top() {
   mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
   acquire_lock || return 1
   lit="$(json_literal "$value" "$typ")" || return $?
-  [ -f "$target" ] || printf '{}\n' > "$target"
+  ensure_json_file_locked "$target" '{}' || return 1
   validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
   bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
@@ -557,6 +603,7 @@ set_top() {
   fi
   validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
 
+  fsync_file "$tmp"
   mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
   prune_backups "$target_base"
 }
@@ -682,9 +729,9 @@ set_device() {
   target_dir="$(dirname "$target")"
   target_base="$(basename "$target")"
   mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
-  [ -f "$target" ] || printf '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}\n' > "$target"
-  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   acquire_lock || return 1
+  ensure_json_file_locked "$target" '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}' || return 1
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
   bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_device.$$"
@@ -696,6 +743,7 @@ set_device() {
     return 1
   fi
   validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
+  fsync_file "$tmp"
   mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
   prune_backups "$target_base"
 }
@@ -812,9 +860,9 @@ del_object_key() {
   target_dir="$(dirname "$target")"
   target_base="$(basename "$target")"
   mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
-  [ -f "$target" ] || printf '{}\n' > "$target"
-  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   acquire_lock || return 1
+  ensure_json_file_locked "$target" '{}' || return 1
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
   bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_del.$$"
@@ -825,6 +873,7 @@ del_object_key() {
     return 1
   fi
   validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
+  fsync_file "$tmp"
   mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
   prune_backups "$target_base"
 }
@@ -871,6 +920,7 @@ replace_file() {
     fi
   fi
   chmod 600 "$tmp" 2>/dev/null || true
+  fsync_file "$tmp"
   mv -f "$tmp" "$target" || { rm -f "$tmp"; return 1; }
   validate_file "$target" || {
     echo "hnc_json: live JSON failed validation after replace, rolling back" >&2
@@ -992,10 +1042,9 @@ set_device_batch() {
   target_dir="$(dirname "$target")"
   target_base="$(basename "$target")"
   mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
-  [ -f "$target" ] || printf '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}\n' > "$target"
-  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
-
   acquire_lock || return 1
+  ensure_json_file_locked "$target" '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}' || return 1
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
   bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_batch.$$"
@@ -1017,6 +1066,7 @@ set_device_batch() {
   done
 
   validate_file "$tmp" || { rm -f "$tmp" "$tmp2"; echo "hnc_json: final batch candidate failed validation" >&2; return 1; }
+  fsync_file "$tmp"
   mv -f "$tmp" "$target" || { rm -f "$tmp" "$tmp2"; return 1; }
   prune_backups "$target_base"
 }

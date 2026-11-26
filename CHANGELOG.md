@@ -14,6 +14,17 @@
 
 ---
 
+## [6.1.0-rc.10] - 2026-11-26
+
+> **通道说明（候选发布通道 · 稳定版当前为 `v6.0.1`）**：本版本为 `v6.1.0` 正式封版前的第十候选全栈 96 路三波联动深审闭环版（`versionCode=6009310`），集中落地封版前 96 路跨层联动审计与红队实证确认的全部阻断与高优修复，涵盖热点硬件加速原值持久化防跨重启锁死、120Hz 滑动实时 RGB 棱镜色散与底栏独立透镜真折射重构、真机 5G-A 多载波与 Wi-Fi 7 MLO 4D 信号探测重构、配置保险箱恢复保留热点密码与防明文泄露、随机 MAC 同型机防误并红线守卫，以及全栈内核数据面、守护进程与升级回滚加固；自动更新广播文件（`update.json`）继续锁定于 `v6.0.1`（`6000001`），不会向稳定版用户自动推送。
+
+### v6.1.0 全量收尾工程第十三阶段 · 96 路深审全栈收口、滑动实时 RGB 色散、5G-A/Wi-Fi 7 MLO 探测重构与数据面闭环封版
+- **Fixed · 热点硬件加速开关原值持久化备份与跨重启/卸载精准还原 (`./bin/hnc_offload_guard.sh` + `./service.sh` + `./uninstall.sh`)**: 将用户原始系统级热点硬件加速状态（`tether_offload_disabled`）主备份由易失内存盘迁入持久化 `data/orig_tether_offload_disabled`（同步镜像 `run/` 兼容运行态探针），补齐单开域名/连接封锁或加密 DNS 时的硬件快路径压制守卫，并在模块卸载时派生脱离模块目录的后台任务等待 `sys.boot_completed=1` 还原原值，彻底根除压制态重启手机后硬件加速开关被永久锁死为关闭的问题。
+- **Changed · 120Hz 滑动实时 RGB 棱镜色散、底栏独立透镜真折射重构与连续弹簧动效引擎 (`webroot/index.html` + `webroot/css/*` + `webroot/js/fx.js` + `webroot/js/devices.js` + `webroot/js/main.js`)**: 废除列表滚动期间一刀切拔除折射滤镜导致的色散消失与停手跳变，锁定单滤镜实时维持高帧率 RGB 棱镜色散并根据滚动速度连续调制红青边缘内阴影；重构底栏 `#tabbar` 光学层级为 `.tabbar-bg` 磨砂底板与同级独立 `#lens` 放大透镜直采实景折射，修复 `prism` 模式下卡片级动态侧光变量继承失效，构建单 `rAF` 连续弹簧循环与 `data-dirty` 输入防冲刷守卫，彻底告别轮询冲回旧值与动画打断。
+- **Changed · 真机 5G-A 多载波与 Wi-Fi 7 MLO 4D 信号探测重构 (`daemon/hnc_httpd/signal_monitor.go` + `webroot/js/main.js`)**: 拦截 `telephony.registry` 缓存与未注册邻区 `mCellInfo` 覆盖主服务小区信号导致的 `9dB` 偏差，联动 `isub` 补齐 Android 16 双卡 `SubID` 选槽、`mCellBandwidths` 载波带宽与切卡清历史；重构 Wi-Fi 7 MLO 多链路解析以择优锁定 5GHz/6GHz 高速主链并提取 Wi-Fi 代际、信道号与频宽，修复弱 Wi-Fi 信号色阶误染亮绿及 `0 dB` 临界真实 SINR 被吞掉的问题。
+- **Fixed · 配置保险箱恢复保留热点密码、导出防明文泄密与随机 MAC 红线保护 (`daemon/hnc_httpd/v6_blackbox_backup.go` + `daemon/hnc_httpd/rmac_guard.go` + `daemon/hnc_httpd/mac_merge.go` + `webroot/js/settings.js` + `./bin/debug_bundle.sh`)**: 整机备份恢复 `rules.json` 时自动合并保留本机原热点密码等敏感键并同步触发访问门禁与加密 DNS 规则刷新（超时放宽至 `60s`），堵住设置页直接复制原始 `rules.json` 及转义引号截断导致的密码明文泄露；收紧同型号匿名随机 MAC 自动合并门槛（严禁无主机名新设备自动继承黑名单，且要求至少命中 2 款小众共现应用），死守不对随机 MAC 新访客默认限速或阻拦的红线；同步消除明文隐私安检合规哈希/掩码误报、本机守护沙盒 UID 漏映射与 VPN 流量翻倍、双接口在线口径分裂及 `ECH` 低分盲猜误限共享 CDN 等问题。
+- **Fixed · 全栈内核数据面、C 守护进程、单芯片抓包、观察窗防误回滚与 32 位 OTA 加固 (`src/dpid/bpf/hnc_clsact.bpf.c` + `./bin/*.sh` + `daemon/*` + `src/launcher/hnc_launcher.c` + `.github/workflows/build.yml` + `tools/ui_mock/fake_api.js` + `data/*`)**: 修复拉黑设备快路径驱逐与 eBPF 高位掩码匹配、IPv6 下行标记缺失被 `1:8010` 抢占、单应用临时 `mid` 撞车与清限速悬空旧 `ceil`、多脚本遇 `xtables.lock` `rc=4` 误剥 `-w 2`、VPN FakeIP 回包黑洞与本机防火墙切网重同步；修复 `hotspotd` 500ms 轮询坍缩与半包命令拦截、`hnc_launcher` 孤儿锁碰撞死循环、单芯片手机关热点残留 `wlan0` 误抓家庭 Wi-Fi，以及升级 10 分钟观察窗内手动重启服务双计 PID 误回滚问题；移除 32 位 `armv7.zip` 内指向 `-arm64.zip` 的 `updateJson` 行并补齐 `COMPATIBILITY.md` 版本门禁与 `fake_api.js` 仿真对齐，全仓 34 个策展规则分包与 JA4 指纹库同步升至 `v6.1.0-rc.10`（`6009310`）。
+
 ## [6.1.0-rc.9] - 2026-11-26
 
 > **通道说明（候选发布通道 · 稳定版当前为 `v6.0.1`）**：本版本为 `v6.1.0` 正式封版前的第九候选液态玻璃三版本精调版（`versionCode=6009309`），集中落地液态玻璃三套光学配方精调（「纯透无框 / 棱镜色散 / 凝脂水滴」）、消除卡片静态白框与假蓝底光、恢复顶层操作胶囊真透射磨砂、升级裸文字零灰黑框 8 频段视口柔晕、根除壁纸双重模糊，并修复 `content://` 独立预览存储沙箱与折射引擎兼容问题；自动更新广播文件（`update.json`）继续锁定于 `v6.0.1`（`6000001`），不会向稳定版用户自动推送。

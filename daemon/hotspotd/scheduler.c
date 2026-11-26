@@ -428,10 +428,11 @@ static int rebuild_from_rules(void)
         }
         if (!block_end) break;
 
-        /* 在 block 内精确找 "limit_enabled": true */
+        /* 在 block 内精确找 "limit_enabled": true 或 "delay_enabled": true */
         char saved = *(block_end + 1);
         *(block_end + 1) = '\0';
-        int has_limit = json_bool_true_in_block(block_open, "limit_enabled");
+        int has_limit = json_bool_true_in_block(block_open, "limit_enabled") ||
+                        json_bool_true_in_block(block_open, "delay_enabled");
         *(block_end + 1) = saved;
 
         if (has_limit) {
@@ -449,6 +450,56 @@ static int rebuild_from_rules(void)
     }
 
     *dev_end = '}';   /* 复位 */
+
+    /* 同步扫描顶层 "blacklist":[...] 数组, 与 apply_device_rule.sh bl_add notify_offload 对称 */
+    char *arr_open = NULL;
+    for (char *bl_cur = buf; (bl_cur = strstr(bl_cur, "\"blacklist\"")) != NULL; bl_cur += 11) {
+        char *c = bl_cur + 11;
+        while (*c && isspace((unsigned char)*c)) c++;
+        if (*c != ':') continue;
+        c++;
+        while (*c && isspace((unsigned char)*c)) c++;
+        if (*c == '[') {
+            arr_open = c;
+            break;
+        }
+    }
+    if (arr_open) {
+        int in_s = 0, esc = 0;
+        char *arr_end = NULL;
+        for (char *r = arr_open + 1; *r; r++) {
+            if (esc) { esc = 0; continue; }
+            if (*r == '\\') { esc = 1; continue; }
+            if (*r == '"') { in_s = !in_s; continue; }
+            if (in_s) continue;
+            if (*r == ']') { arr_end = r; break; }
+        }
+        char *bp = arr_open + 1;
+        while (arr_end && bp < arr_end) {
+            char *bq = strchr(bp, '"');
+            if (!bq || bq >= arr_end) break;
+            char *be = bq + 1;
+            while (be < arr_end && *be) {
+                if (*be == '\\') { be++; if (be < arr_end && *be) be++; continue; }
+                if (*be == '"') break;
+                be++;
+            }
+            if (be >= arr_end || *be != '"') break;
+            if ((be - (bq + 1)) == 17) {
+                char mac_raw[18], norm[18];
+                memcpy(mac_raw, bq + 1, 17);
+                mac_raw[17] = '\0';
+                if (normalize_mac(mac_raw, norm) == 0) {
+                    pthread_mutex_lock(&sched.lock);
+                    if (limited_set_add(norm) >= 0) {
+                        added++;
+                    }
+                    pthread_mutex_unlock(&sched.lock);
+                }
+            }
+            bp = be + 1;
+        }
+    }
 
     if (added > 0) {
         fprintf(stderr, "[sched] rebuild: %d limited device(s) from rules.json\n",
@@ -671,6 +722,78 @@ static int scheduler_sleep_interruptible(int sec)
     return stopped ? -1 : 0;
 }
 
+static int is_hotspot_known_off(void)
+{
+    const char *hnc_dir = getenv("HNC_DIR");
+    if (!hnc_dir || hnc_dir[0] == '\0')
+        hnc_dir = "/data/local/hnc";
+
+    char path[512];
+    /* 1. 优先读 hnc_httpd 维护的 run/activity.json (新鲜窗口 <= 120s) */
+    int n = snprintf(path, sizeof(path), "%s/run/activity.json", hnc_dir);
+    if (n > 0 && (size_t)n < sizeof(path)) {
+        FILE *af = fopen(path, "re");
+        if (af) {
+            char abuf[1024];
+            size_t rd = fread(abuf, 1, sizeof(abuf) - 1U, af);
+            fclose(af);
+            abuf[rd] = '\0';
+            if (rd > 0U && json_bool_true_in_block(abuf, "known")) {
+                const char *ts_p = strstr(abuf, "\"ts\"");
+                long long ts_val = 0;
+                if (ts_p) {
+                    const char *colon = strchr(ts_p + 4, ':');
+                    if (colon)
+                        ts_val = strtoll(colon + 1, NULL, 10);
+                }
+                long long now_s = (long long)time(NULL);
+                long long age = now_s - ts_val;
+                if (ts_val > 0 && age >= -60LL && age <= 120LL) {
+                    if (json_bool_true_in_block(abuf, "hotspot_active"))
+                        return 0;
+                    return 1;
+                }
+            }
+        }
+    }
+
+    /* 2. 兜底读 run/hnc_state: PENDING/PASSIVE 或 ACTIVE:<已销毁网卡> 均为关闭态 */
+    n = snprintf(path, sizeof(path), "%s/run/hnc_state", hnc_dir);
+    if (n > 0 && (size_t)n < sizeof(path)) {
+        FILE *sf = fopen(path, "re");
+        if (sf) {
+            char line[128] = {0};
+            int has_line = (fgets(line, sizeof(line), sf) != NULL);
+            fclose(sf);
+            if (has_line) {
+                char *nl = strpbrk(line, "\r\n \t");
+                if (nl) *nl = '\0';
+                if (strncmp(line, "ACTIVE:", 7) != 0)
+                    return 1;
+                const char *ifc = line + 7;
+                if (ifc[0] == '\0')
+                    return 1;
+                int valid_ifc = 1;
+                for (const char *c = ifc; *c; c++) {
+                    unsigned char uc = (unsigned char)*c;
+                    if (!(isalnum(uc) || uc == '_' || uc == '-' || uc == '.')) {
+                        valid_ifc = 0;
+                        break;
+                    }
+                }
+                if (valid_ifc) {
+                    char sys_p[256];
+                    int sn = snprintf(sys_p, sizeof(sys_p), "/sys/class/net/%s", ifc);
+                    if (sn > 0 && (size_t)sn < sizeof(sys_p) && access(sys_p, F_OK) != 0)
+                        return 1;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
 static void *worker_main(void *arg)
 {
     (void)arg;
@@ -696,6 +819,31 @@ static void *worker_main(void *arg)
         }
         sched.worker_refresh_requested = 0;
         pthread_mutex_unlock(&sched.worker_lock);
+
+        /* C-23: 热点处于关闭态且无活跃压制时, 跳过每 60s 派生 ip route get 与 5s 双采空转 */
+        pthread_mutex_lock(&sched.lock);
+        int idle_suppression = (sched.limited_count > 0 || sched.force_global_disabled);
+        pthread_mutex_unlock(&sched.lock);
+        if (!idle_suppression && is_offload_guard_fallback_active())
+            idle_suppression = 1;
+        if (!idle_suppression && sched.adapter && sched.adapter->status) {
+            offload_status_t st;
+            memset(&st, 0, sizeof(st));
+            sched.adapter->status(&st);
+            if (st.globally_disabled || st.disabled_upstream_count > 0)
+                idle_suppression = 1;
+        }
+        if (!idle_suppression && is_hotspot_known_off()) {
+            pthread_mutex_lock(&sched.lock);
+            if (sched.limited_count == 0 && !sched.force_global_disabled) {
+                sched.eempty_retry_pending = 0;
+                sched.eempty_fast_credits  = 0;
+                next_wait_sec = HNC_SCHED_REFRESH_INTERVAL_SEC;
+                pthread_mutex_unlock(&sched.lock);
+                continue;
+            }
+            pthread_mutex_unlock(&sched.lock);
+        }
 
         time_t cyc_ts = time(NULL);
         int p_idx = 0;

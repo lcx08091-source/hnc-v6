@@ -45,6 +45,10 @@ elif [ -f "${0%/*}/hnc_constants.sh" ]; then
     . "${0%/*}/hnc_constants.sh"
 fi
 MARK_BASE="${HNC_MARK_BASE:-0x00800000}"
+DEV_MARK_MASK="${HNC_MARK_MASK:-0x00ff0000}"
+command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
+    hnc_dev_mark_hex() { printf '0x%08x\n' $(( 0x00800000 | ($1 << 16) )); }
+}
 command -v hnc_parse_mid_from_mark >/dev/null 2>&1 || {
     hnc_parse_mid_from_mark() {
         local _r="${1%%/*}"
@@ -55,6 +59,177 @@ command -v hnc_parse_mid_from_mark >/dev/null 2>&1 || {
         if [ "$_seg" -eq 128 ] && [ "$_low" -ge 1 ] && [ "$_low" -le 99 ]; then echo "$_low"; return 0; fi
         return 1
     }
+}
+
+IP6T=${HNC_IP6T:-"ip6tables -w 2"}
+_V6_IP6T_PROBED=0
+_V6_IP6T_OK=0
+_v6_probe_wait_bin() {
+    local _b="$1" _rc
+    "$_b" -w 2 -t filter -L -n >/dev/null 2>&1
+    _rc=$?
+    if [ "$_rc" -eq 2 ]; then
+        "$_b" -w -t filter -L -n >/dev/null 2>&1
+        _rc=$?
+        if [ "$_rc" -eq 2 ]; then
+            printf '%s\n' "$_b"
+        else
+            printf '%s -w\n' "$_b"
+        fi
+    else
+        # rc=0 或 rc=4(短暂 xtables 锁竞争超时)等非语法错误: 保持 -w 2 绝不误剥!
+        printf '%s -w 2\n' "$_b"
+    fi
+}
+v6_ip6t_mangle_ok() {
+    if [ "$_V6_IP6T_PROBED" = "0" ]; then
+        _V6_IP6T_PROBED=1
+        if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
+            IP6T=$(_v6_probe_wait_bin ip6tables)
+        fi
+        if command -v "${IP6T%% *}" >/dev/null 2>&1 && $IP6T -t mangle -L HNC_MARK -n >/dev/null 2>&1; then
+            _V6_IP6T_OK=1
+        else
+            _V6_IP6T_OK=0
+        fi
+    fi
+    [ "$_V6_IP6T_OK" = "1" ]
+}
+
+_V6_CANON_AWK='
+function canon_ip6(raw,    s, hal, nl, nr, L, R, z, out, i, h) {
+    s = tolower(raw)
+    sub(/\/[0-9]+$/, "", s)
+    sub(/%.*/, "", s)
+    if (s !~ /:/) return s
+    if (index(s, "::") > 0) {
+        split(s, hal, "::")
+        nl = (hal[1] == "") ? 0 : split(hal[1], L, ":")
+        nr = (hal[2] == "") ? 0 : split(hal[2], R, ":")
+        z = 8 - nl - nr
+        out = ""
+        for (i = 1; i <= nl; i++) { h = L[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+        for (i = 1; i <= z; i++)  { out = (out == "" ? "0" : out ":0") }
+        for (i = 1; i <= nr; i++) { h = R[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+        return out
+    }
+    nl = split(s, L, ":")
+    out = ""
+    for (i = 1; i <= nl; i++) { h = L[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+    return out
+}
+'
+
+# 同步维护 ip6tables -t mangle HNC_MARK -d <ip6>/128 -j MARK --set-xmark <dev_hex>/0x00ff0000
+# 防止 IPv6 下行包在无 conntrack 标时因缺 [23:16] 设备标被 Vector Express 1:8010(prio 5) 抢走。
+# 注: 真实内核 ip6tables -t mangle -S HNC_MARK 恒至少输出 "-N HNC_MARK"(_cur6 非空), 走精确差量增删;
+#     无状态单测 mock 下 _cur6 为空串, 仅对本轮应装列表(_add_hint)下发 -A。
+_sync_ip6_hnc_mark() {
+    local _mid="$1" _want="$2" _add_hint="${3:-}" _steady="${4:-0}"
+    case "$_mid" in ''|*[!0-9]*) return 0 ;; esac
+    v6_ip6t_mangle_ok || return 0
+    local _dhex _mshort _cur6 _d_raw _d_cnt _k _a6
+    _dhex=$(hnc_dev_mark_hex "$_mid") || return 0
+    _mshort=$(printf '0x%x' $(( 0x00800000 | (_mid << 16) )))
+    _cur6=$($IP6T -t mangle -S HNC_MARK 2>/dev/null)
+    if [ -n "$_cur6" ]; then
+        printf '%s\n' "$_cur6" | awk -v mk="$_dhex" -v mks="$_mshort" -v want="$_want" "$_V6_CANON_AWK"'
+            BEGIN {
+                n = split(want, wa, "\n")
+                for (i = 1; i <= n; i++) if (wa[i] != "") wset[canon_ip6(wa[i])] = 1
+            }
+            $1 == "-A" && $2 == "HNC_MARK" {
+                hm = 0; hk = 0; d = ""
+                for (i = 3; i <= NF; i++) {
+                    if ($i == "--mac-source") hm = 1
+                    if ($i == "--set-xmark" || $i == "--set-mark") {
+                        t = tolower($(i+1))
+                        if (index(t, tolower(mk)) == 1 || index(t, tolower(mks)) == 1) hk = 1
+                    }
+                    if ($i == "-d") d = $(i+1)
+                }
+                if (!hm && hk && d != "") {
+                    cd = canon_ip6(d)
+                    if (!(cd in wset)) {
+                        del_cnt[d]++
+                    } else if (seen_ok[cd]++) {
+                        del_cnt[d]++
+                    }
+                }
+            }
+            END {
+                for (d in del_cnt) printf "%d %s\n", del_cnt[d], d
+            }' | while read -r _d_cnt _d_raw; do
+            [ -n "$_d_raw" ] || continue
+            _k=0
+            while [ "$_k" -lt "${_d_cnt:-1}" ] && [ "$_k" -lt 8 ]; do
+                $IP6T -t mangle -D HNC_MARK -d "$_d_raw" -j MARK --set-xmark "${_dhex}/${DEV_MARK_MASK}" 2>/dev/null || break
+                _k=$((_k + 1))
+            done
+        done
+        for _a6 in $_want; do
+            if printf '%s\n' "$_cur6" | awk -v mk="$_dhex" -v mks="$_mshort" -v a="$_a6" "$_V6_CANON_AWK"'
+                BEGIN { target = canon_ip6(a); hit = 0 }
+                $1 == "-A" && $2 == "HNC_MARK" {
+                    hm = 0; hk = 0; d = ""
+                    for (i = 3; i <= NF; i++) {
+                        if ($i == "--mac-source") hm = 1
+                        if ($i == "--set-xmark" || $i == "--set-mark") {
+                            t = tolower($(i+1))
+                            if (index(t, tolower(mk)) == 1 || index(t, tolower(mks)) == 1) hk = 1
+                        }
+                        if ($i == "-d") d = $(i+1)
+                    }
+                    if (!hm && hk && d != "" && canon_ip6(d) == target) { hit = 1; exit }
+                }
+                END { exit !hit }'; then
+                continue
+            fi
+            $IP6T -t mangle -A HNC_MARK -d "${_a6}/128" -j MARK --set-xmark "${_dhex}/${DEV_MARK_MASK}" 2>/dev/null || true
+        done
+    else
+        if [ "$_steady" != "1" ] || [ -z "${HNC_TEST_MODE:-}" ]; then
+            for _a6 in $_add_hint; do
+                $IP6T -t mangle -A HNC_MARK -d "${_a6}/128" -j MARK --set-xmark "${_dhex}/${DEV_MARK_MASK}" 2>/dev/null || true
+            done
+        fi
+    fi
+}
+
+_clear_ip6_hnc_mark() {
+    local _mid="$1" _snap_addrs="${2:-}"
+    case "$_mid" in ''|*[!0-9]*) return 0 ;; esac
+    v6_ip6t_mangle_ok || return 0
+    local _dhex _mshort _cur6 _d_cnt _d_raw _k _a6 _cleaned=" "
+    _dhex=$(hnc_dev_mark_hex "$_mid") || return 0
+    _mshort=$(printf '0x%x' $(( 0x00800000 | (_mid << 16) )))
+    _cur6=$($IP6T -t mangle -S HNC_MARK 2>/dev/null)
+    if [ -n "$_cur6" ]; then
+        for _d_raw in $(printf '%s\n' "$_cur6" | awk -v mk="$_dhex" -v mks="$_mshort" '
+            $1 == "-A" && $2 == "HNC_MARK" {
+                hm = 0; hk = 0; d = ""
+                for (i = 3; i <= NF; i++) {
+                    if ($i == "--mac-source") hm = 1
+                    if ($i == "--set-xmark" || $i == "--set-mark") {
+                        t = tolower($(i+1))
+                        if (index(t, tolower(mk)) == 1 || index(t, tolower(mks)) == 1) hk = 1
+                    }
+                    if ($i == "-d") d = $(i+1)
+                }
+                if (!hm && hk && d != "") print d
+            }' | sort -u); do
+            _k=0
+            while [ "$_k" -lt 8 ] && $IP6T -t mangle -D HNC_MARK -d "$_d_raw" -j MARK --set-xmark "${_dhex}/${DEV_MARK_MASK}" 2>/dev/null; do
+                _k=$((_k + 1))
+            done
+            _cleaned="${_cleaned}${_d_raw%/128} "
+        done
+    else
+        for _a6 in $_snap_addrs; do
+            [ -n "$_a6" ] || continue
+            $IP6T -t mangle -D HNC_MARK -d "${_a6}/128" -j MARK --set-xmark "${_dhex}/${DEV_MARK_MASK}" 2>/dev/null || true
+        done
+    fi
 }
 
 log() { echo "[$(date '+%H:%M:%S')] [V6] $*" >> "$LOG" 2>/dev/null; }
@@ -122,21 +297,10 @@ v6_unlock() {
 # 数据源：从 iptables HNC_MARK 提取 (mac, mark_hex) 对
 # 输出每行 "MAC MARK_HEX" 形如 "e2:0d:4a:48:5d:40 0x00bb0000/0x00ff0000"
 # ═══════════════════════════════════════════════════════════════
-list_marked_devices() {
-    local raw parsed
-    if [ -n "${HNC_IPT:-}" ]; then
-        raw=$($HNC_IPT -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
-    else
-        raw=$(iptables -w 2 -t mangle -L HNC_MARK -n 2>/dev/null) || {
-            if [ -z "${HNC_TEST_MODE:-}" ] && iptables -t filter -L -n >/dev/null 2>&1; then
-                raw=$(iptables -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
-            else
-                return 1
-            fi
-        }
-    fi
-    parsed=$(printf '%s
-' "$raw" | awk '
+_parse_hnc_mark_raw() {
+    local _in="$1" _out
+    [ -n "$_in" ] || return 0
+    _out=$(printf '%s\n' "$_in" | awk '
     /MAC/ && /MARK/ {
         mac=""; mark=""
         for (i=1; i<=NF; i++) {
@@ -145,10 +309,8 @@ list_marked_devices() {
         }
         if (mac != "" && mark != "") print mac, mark
     }' | sort -u)
-    if [ -z "$parsed" ]; then
-        # 同时兼容 iptables -S HNC_MARK 输出 (--mac-source <mac> ... --set-xmark <mark>/<mask>)
-        parsed=$(printf '%s
-' "$raw" | awk '
+    if [ -z "$_out" ]; then
+        _out=$(printf '%s\n' "$_in" | awk '
         /--mac-source/ && /--set-(x)?mark/ {
             mac=""; mark=""
             for (i=1; i<=NF; i++) {
@@ -158,8 +320,38 @@ list_marked_devices() {
             if (mac != "" && mark != "") print mac, mark
         }' | sort -u)
     fi
-    [ -n "$parsed" ] && printf '%s
-' "$parsed"
+    [ -n "$_out" ] && printf '%s\n' "$_out"
+}
+
+list_marked_devices() {
+    local raw _rc parsed raw6 parsed6
+    if [ -n "${HNC_IPT:-}" ]; then
+        raw=$($HNC_IPT -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
+    else
+        raw=$(iptables -w 2 -t mangle -L HNC_MARK -n 2>/dev/null)
+        _rc=$?
+        if [ "$_rc" -ne 0 ]; then
+            # 仅当退出码为 2(非法参数, 真不支持 -w)时才降级尝试 -w / 无 -w;
+            # 退出码 4(xtables.lock 锁竞争超时)绝不剥离 -w 2!
+            if [ "$_rc" -eq 2 ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+                raw=$(iptables -w -t mangle -L HNC_MARK -n 2>/dev/null)
+                _rc=$?
+                if [ "$_rc" -eq 2 ]; then
+                    raw=$(iptables -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
+                elif [ "$_rc" -ne 0 ]; then
+                    return 1
+                fi
+            else
+                return 1
+            fi
+        fi
+    fi
+    parsed=$(_parse_hnc_mark_raw "$raw")
+    if [ -z "$parsed" ] && v6_ip6t_mangle_ok; then
+        raw6=$($IP6T -t mangle -L HNC_MARK -n 2>/dev/null) && parsed6=$(_parse_hnc_mark_raw "$raw6")
+        [ -n "$parsed6" ] && parsed="$parsed6"
+    fi
+    [ -n "$parsed" ] && printf '%s\n' "$parsed"
     return 0
 }
 
@@ -337,6 +529,7 @@ $merged"
     if [ "$hdr" = "$prev_hdr" ] && [ -z "$removed" ]; then
         if [ -z "$added" ]; then
             if [ -z "$want" ] || [ "$filters_ok" = "1" ]; then
+                [ -n "$want" ] && _sync_ip6_hnc_mark "$mark_id" "$want" "" 1
                 [ "$snap_new" != "$prev_all" ] && { printf '%s\n' "$snap_new" > "${snap}.tmp" && mv -f "${snap}.tmp" "$snap"; }
                 return 0
             fi
@@ -366,6 +559,7 @@ $merged"
                     fail_addrs="${fail_addrs}${addr} "
                 fi
             done
+            _sync_ip6_hnc_mark "$mark_id" "$want" "$added" 0
             _write_snap_filtered "$snap" "$hdr" "$merged" "$fail_addrs"
             log "Sync $mac (mark=$mark_id prio=$prio): +$(echo "$added" | tr '\n' ' ')(incremental, added=$n failed=$nfail ingress=$has_ingress)"
             [ "$nfail" -eq 0 ]
@@ -386,6 +580,7 @@ $merged"
         tc filter del dev "$IFB_IFACE" parent 1: prio "$old_prio" protocol ipv6 2>/dev/null
         [ -n "$prev_iface" ] && [ "$prev_iface" != "$iface" ] && \
             tc filter del dev "$prev_iface" parent 1: prio "$old_prio" protocol ipv6 2>/dev/null
+        _clear_ip6_hnc_mark "$prev_mark" "$prev"
     fi
     if [ -n "$prev_iface" ] && [ "$prev_iface" != "$iface" ]; then
         tc filter del dev "$prev_iface" parent 1: prio "$prio" protocol ipv6 2>/dev/null
@@ -395,6 +590,7 @@ $merged"
     tc filter del dev "$IFB_IFACE" parent 1: prio "$prio" protocol ipv6 2>/dev/null
 
     if [ -z "$want" ]; then
+        _sync_ip6_hnc_mark "$mark_id" "" "" 0
         printf '%s\n' "$snap_new" > "${snap}.tmp" && mv -f "${snap}.tmp" "$snap"
         log "  $mac: no active v6 addresses"
         return 0
@@ -425,6 +621,7 @@ $merged"
         fi
     done
 
+    _sync_ip6_hnc_mark "$mark_id" "$want" "$want" 0
     _write_snap_filtered "$snap" "$hdr" "$merged" "$fail_addrs"
     log "  $mac: synced $n filter(s) (failed=$nfail, ingress=$has_ingress)"
     [ "$nfail" -eq 0 ]
@@ -462,7 +659,7 @@ clear_one() {
 
     # 试图从快照文件读出该设备的 prio——但我们没存 prio
     # 改为：从 iptables 找 mark_hex（即使被 unmark 了，可能还在）
-    local mark_hex mark_id="" snap_iface=""
+    local mark_hex mark_id="" snap_iface="" snap_addrs=""
     mark_hex=$(marked_devices | awk -v m="$mac" '$1==m {print $2; exit}')
     if [ -n "$mark_hex" ]; then
         mark_id=$(hnc_parse_mid_from_mark "$mark_hex" 2>/dev/null) || mark_id=""
@@ -473,6 +670,7 @@ clear_one() {
     if [ -f "$snap" ]; then
         [ -n "$mark_id" ] || mark_id=$(sed -n 's/^#hnc_v6 .* mark=\([0-9]*\).*/\1/p' "$snap" 2>/dev/null | head -n 1)
         snap_iface=$(sed -n 's/^#hnc_v6 iface=\([^ ]*\).*/\1/p' "$snap" 2>/dev/null | head -n 1)
+        snap_addrs=$(grep -v '^#' "$snap" 2>/dev/null | awk 'NF{print $1}' | sort -u)
     fi
 
     case "$mark_id" in
@@ -484,6 +682,7 @@ clear_one() {
             tc filter del dev "$IFB_IFACE" parent 1: prio "$prio" protocol ipv6 2>/dev/null
             [ -n "$snap_iface" ] && [ "$snap_iface" != "$iface" ] && \
                 tc filter del dev "$snap_iface" parent 1: prio "$prio" protocol ipv6 2>/dev/null
+            _clear_ip6_hnc_mark "$mark_id" "$snap_addrs"
             log "Clear $mac (mark=$mark_id prio=$prio): filters removed" ;;
     esac
 

@@ -49,6 +49,20 @@ else
     CL_SEC="$(awk -v ver="$VER_BARE" 'index($0, "## [" ver "]") == 1 {found=1; next} found && /^## \[/ {exit} found {print}' CHANGELOG.md | tr -d ' \t\r\n')"
     if [ -n "$CL_SEC" ]; then ok "CHANGELOG.md has non-empty section for [$VER_BARE]"; else fail "CHANGELOG.md missing or empty section for ## [$VER_BARE]"; fi
   fi
+  if [ -f COMPATIBILITY.md ]; then
+    COMPAT_VER="$(sed -n 's/^\*\*当前版本\*\*:[[:space:]]*\([^[:space:]]*\).*/\1/p' COMPATIBILITY.md | head -n 1 | tr -d '\r')"
+    COMPAT_BODY_VERS="$(grep -Eo 'HNC `v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*`' COMPATIBILITY.md 2>/dev/null | sed 's/^HNC `//;s/`$//' || true)"
+    COMPAT_BAD=0
+    [ "$COMPAT_VER" = "$VERSION" ] || COMPAT_BAD=1
+    for _cv in $COMPAT_BODY_VERS; do
+      [ "$_cv" = "$VERSION" ] || COMPAT_BAD=1
+    done
+    if [ "$COMPAT_BAD" -eq 0 ] && [ -n "$COMPAT_VER" ]; then
+      ok "COMPATIBILITY.md matches $VERSION"
+    else
+      fail "COMPATIBILITY.md version mismatch (expected $VERSION, got '${COMPAT_VER:-missing}')"
+    fi
+  fi
   if [ -f webroot/changelog.html ]; then
     if grep -Fq "data-version=\"$VERSION\"" webroot/changelog.html; then
       ok "webroot/changelog.html contains $VERSION entry"

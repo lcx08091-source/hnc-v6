@@ -20,11 +20,14 @@ type rfBandSpec struct {
 }
 
 // nrDownlinkBands 覆盖国内四大运营商及港澳台/日韩/欧美主流 5G NR 频段 (3GPP TS 38.104)。
+// 排序原则: 窄专有频段排在宽超集频段之前(如 n5 先于 n26, n1 先于 n66, n38/n7 先于 n41, n48/n78 先于 n77, n261 先于 n257),
+// 防止宽超集频段无条件吞死窄频段; 区域专有重叠则由 nrBandFromARFCN 结合 MCC 精准消歧。
 var nrDownlinkBands = []rfBandSpec{
 	{Band: "n71", LoARFCN: 123400, HiARFCN: 130400, FreqMHz: 600},
 	{Band: "n28", LoARFCN: 151600, HiARFCN: 160600, FreqMHz: 700},
 	{Band: "n20", LoARFCN: 158200, HiARFCN: 164200, FreqMHz: 800},
 	{Band: "n5", LoARFCN: 173800, HiARFCN: 178800, FreqMHz: 850},
+	{Band: "n26", LoARFCN: 171800, HiARFCN: 178800, FreqMHz: 850},
 	{Band: "n8", LoARFCN: 185000, HiARFCN: 192000, FreqMHz: 900},
 	{Band: "n3", LoARFCN: 361000, HiARFCN: 376000, FreqMHz: 1800},
 	{Band: "n39", LoARFCN: 376000, HiARFCN: 384000, FreqMHz: 1900},
@@ -33,14 +36,16 @@ var nrDownlinkBands = []rfBandSpec{
 	{Band: "n1", LoARFCN: 422000, HiARFCN: 434000, FreqMHz: 2100},
 	{Band: "n66", LoARFCN: 422000, HiARFCN: 440000, FreqMHz: 2100},
 	{Band: "n40", LoARFCN: 460000, HiARFCN: 480000, FreqMHz: 2300},
-	{Band: "n41", LoARFCN: 499200, HiARFCN: 537999, FreqMHz: 2600},
+	{Band: "n38", LoARFCN: 514000, HiARFCN: 524000, FreqMHz: 2600},
 	{Band: "n7", LoARFCN: 524000, HiARFCN: 538000, FreqMHz: 2600},
+	{Band: "n41", LoARFCN: 499200, HiARFCN: 537999, FreqMHz: 2600},
+	{Band: "n48", LoARFCN: 636667, HiARFCN: 646666, FreqMHz: 3600},
 	{Band: "n78", LoARFCN: 620000, HiARFCN: 653333, FreqMHz: 3500},
 	{Band: "n77", LoARFCN: 620000, HiARFCN: 680000, FreqMHz: 3700},
 	{Band: "n79", LoARFCN: 693334, HiARFCN: 733333, FreqMHz: 4900},
 	{Band: "n258", LoARFCN: 2016667, HiARFCN: 2070832, FreqMHz: 26000},
-	{Band: "n257", LoARFCN: 2054166, HiARFCN: 2104165, FreqMHz: 28000},
 	{Band: "n261", LoARFCN: 2070833, HiARFCN: 2084999, FreqMHz: 28000},
+	{Band: "n257", LoARFCN: 2054166, HiARFCN: 2104165, FreqMHz: 28000},
 	{Band: "n260", LoARFCN: 2229166, HiARFCN: 2279165, FreqMHz: 39000},
 }
 
@@ -63,19 +68,20 @@ var lteDownlinkBands = []rfBandSpec{
 	{Band: "B39", LoARFCN: 38250, HiARFCN: 38649, FreqMHz: 1900},
 	{Band: "B40", LoARFCN: 38650, HiARFCN: 39649, FreqMHz: 2300},
 	{Band: "B41", LoARFCN: 39650, HiARFCN: 41589, FreqMHz: 2600},
+	{Band: "B48", LoARFCN: 55240, HiARFCN: 56739, FreqMHz: 3600},
 	{Band: "B66", LoARFCN: 66436, HiARFCN: 67335, FreqMHz: 2100},
 }
 
 var bandCenterFreqMHz = map[string]int{
-	"n71": 600, "n28": 700, "n20": 800, "n5": 850, "n8": 900,
+	"n71": 600, "n28": 700, "n20": 800, "n5": 850, "n26": 850, "n8": 900,
 	"n3": 1800, "n39": 1900, "n2": 1900, "n34": 2000, "n1": 2100,
 	"n66": 2100, "n40": 2300, "n41": 2600, "n38": 2600, "n7": 2600,
-	"n78": 3500, "n77": 3700, "n79": 4900, "n257": 28000, "n258": 26000,
+	"n48": 3600, "n78": 3500, "n77": 3700, "n79": 4900, "n257": 28000, "n258": 26000,
 	"n260": 39000, "n261": 28000,
 	"B1": 2100, "B2": 1900, "B3": 1800, "B4": 1700, "B5": 850,
 	"B7": 2600, "B8": 900, "B12": 700, "B17": 700, "B20": 800,
 	"B26": 850, "B28": 700, "B34": 2000, "B38": 2600, "B39": 1900,
-	"B40": 2300, "B41": 2600, "B66": 2100,
+	"B40": 2300, "B41": 2600, "B48": 3600, "B66": 2100,
 }
 
 func nrBandFromARFCN(arfcn int, mccmnc string) (string, int) {
@@ -86,16 +92,44 @@ func nrBandFromARFCN(arfcn int, mccmnc string) (string, int) {
 	if len(mccmnc) >= 3 {
 		mcc = mccmnc[:3]
 	}
-	isNorthAmerica := mcc == "310" || mcc == "311" || mcc == "312" || mcc == "302"
+	isUS := mcc == "310" || mcc == "311" || mcc == "312" || mcc == "313" || mcc == "316"
+	isNorthAmerica := isUS || mcc == "302"
 	isJapan := mcc == "440" || mcc == "441"
 
-	// 处理重叠频段优先级: 北美优先 n66/n77, 日本优先 n77, 中国大陆/亚太/欧洲默认优先 n1/n41/n78。
+	// 中国大陆 (MCC 460): 2515–2675MHz 全段均为 TDD n41, 3400–3600MHz 全段均为 n78。
+	if mcc == "460" {
+		if arfcn >= 499200 && arfcn <= 537999 {
+			return "n41", 2600
+		}
+		if arfcn >= 620000 && arfcn <= 653333 {
+			return "n78", 3500
+		}
+	}
+
+	// 北美与日本重叠频段精准消歧:
+	//   - 北美 AWS 优先 n66; 美国 3.55–3.7GHz CBRS 优先 n48, 其余 3.45/3.7GHz C-Band 为 n77;
+	//   - 日本 3.6–4.1GHz (ARFCN >= 640000) 为 n77, 保留 3.3–3.6GHz (620000..639999) 给 n78!
 	if isNorthAmerica && arfcn >= 422000 && arfcn <= 440000 {
 		return "n66", 2100
 	}
-	if (isNorthAmerica || isJapan) && arfcn >= 620000 && arfcn <= 680000 {
+	if isUS && arfcn >= 636667 && arfcn <= 646666 {
+		return "n48", 3600
+	}
+	if isNorthAmerica && arfcn >= 620000 && arfcn <= 680000 {
 		return "n77", 3700
 	}
+	if isJapan {
+		if arfcn >= 640000 && arfcn <= 680000 {
+			return "n77", 3700
+		}
+		if arfcn >= 620000 && arfcn < 640000 {
+			return "n78", 3500
+		}
+	}
+	if mcc != "" && !isNorthAmerica && arfcn >= 620000 && arfcn <= 653333 {
+		return "n78", 3500
+	}
+
 	for _, b := range nrDownlinkBands {
 		if arfcn >= b.LoARFCN && arfcn <= b.HiARFCN {
 			return b.Band, b.FreqMHz
@@ -272,19 +306,22 @@ func normalizeCarrierAndMOCN(alphaLong, alphaShort, mccmnc, primaryBand, bandCom
 
 // describeBandTrait 将冷冰冰的频段代号翻译成普通用户秒懂的物理覆盖与网速特性说明。
 func describeBandTrait(primaryBand, bandCombo string, totalBWMHz, caCount int, isWifi bool) string {
-	if isWifi {
-		switch primaryBand {
-		case "6GHz":
-			return "Wi-Fi 6E/7 6GHz 超宽频段 · 干扰极少、近距速率极高，穿墙衰减较快"
-		case "5GHz":
-			return "5GHz 高速频段 · 信道干净网速快，隔两堵墙后信号衰减明显"
-		default:
-			return "2.4GHz 穿墙频段 · 覆盖远穿墙稳，但易受蓝牙与邻居家路由器同频干扰"
-		}
-	}
 	bwSuffix := ""
 	if totalBWMHz > 0 {
 		bwSuffix = "（总带宽 " + strconv.Itoa(totalBWMHz) + "MHz）"
+	}
+	if isWifi {
+		if caCount >= 2 && bandCombo != "" {
+			return "Wi-Fi 7 MLO 多链路聚合 " + bandCombo + bwSuffix + " · 高频极速与中低频穿墙并发收发，抗抖动显著增强"
+		}
+		switch primaryBand {
+		case "6GHz":
+			return "Wi-Fi 6E/7 6GHz 超宽频段" + bwSuffix + " · 干扰极少、近距速率极高，穿墙衰减较快"
+		case "5GHz":
+			return "5GHz 高速频段" + bwSuffix + " · 信道干净网速快，隔两堵墙后信号衰减明显"
+		default:
+			return "2.4GHz 穿墙频段" + bwSuffix + " · 覆盖远穿墙稳，但易受蓝牙与邻居家路由器同频干扰"
+		}
 	}
 	if caCount >= 2 && bandCombo != "" {
 		if strings.Contains(bandCombo, "n41") && strings.Contains(bandCombo, "n28") {
@@ -299,20 +336,20 @@ func describeBandTrait(primaryBand, bandCombo string, totalBWMHz, caCount int, i
 		return "多载波聚合通道 " + bandCombo + bwSuffix + " · 多条射频车道并行收发，网速上限与抗抖动显著提升"
 	}
 	switch primaryBand {
-	case "n28", "B28", "B5", "B8", "n5", "n8", "n20", "B20", "n71":
+	case "n28", "B28", "B5", "B8", "n5", "n8", "n26", "B26", "n20", "B20", "n71", "B12", "B17":
 		return "700–900MHz 黄金低频穿墙频段" + bwSuffix + " · 室内深处、电梯与地下车库信号稳，单载波峰值带宽适中"
 	case "n41":
 		return "2.6GHz 移动/广电主力高速频段" + bwSuffix + " · 兼顾百兆级高速吞吐与良好的城区室内覆盖"
-	case "n78", "n77":
-		return "3.5GHz 电信/联通黄金主力频段" + bwSuffix + " · 百兆大带宽网速极快，室内深处隔墙略有衰减"
+	case "n78", "n77", "n48", "B48":
+		return "3.5GHz 主力大容量高速频段" + bwSuffix + " · 百兆大带宽网速极快，室内深处隔墙略有衰减"
 	case "n79":
 		return "4.9GHz 高频超大容量频段" + bwSuffix + " · 体育馆、商场与交通枢纽专享高速车道，穿墙能力较弱"
 	case "n1", "B1", "n3", "B3", "n66", "B66":
 		return "1.8–2.1GHz 中频均衡频段" + bwSuffix + " · 远距覆盖与上下行对称度均衡，常见于城区稳态覆盖与电联补盲"
-	case "B40", "n40", "B41", "B38", "n38", "B39", "n39", "B34", "n34":
+	case "B40", "n40", "B41", "B38", "n38", "n7", "B7", "B39", "n39", "B34", "n34":
 		return "2.3–2.6GHz 室内分布与容量频段" + bwSuffix + " · 常见于写字楼、商场室分微基站覆盖"
 	default:
-		if strings.HasPrefix(primaryBand, "n25") || strings.HasPrefix(primaryBand, "n26") {
+		if len(primaryBand) == 4 && (strings.HasPrefix(primaryBand, "n25") || strings.HasPrefix(primaryBand, "n26")) {
 			return "毫米波超高频极速频段" + bwSuffix + " · 近距视距千兆峰值，遮挡易衰减"
 		}
 		return ""

@@ -187,6 +187,8 @@ func dnsTKReasonText(r string) string {
 		return "DNAT 规则在命中但转发器收不到查询(防火墙 / 内核路径异常)"
 	case "no_upstream":
 		return "找不到可用的上游解析器"
+	case "fakeip_blackhole":
+		return "上游返回未共享进热点路由的 VPN Fake-IP(198.18.0.0/15), 防黑洞自动回退"
 	}
 	return r
 }
@@ -704,6 +706,7 @@ type dnsTakeover struct {
 	lastCheck    int64
 	selftestMS   float64
 	prevStats    dnsFwdStats
+	prevUpStats  dnsFwdStats
 	prevPkts     int64
 	havePrev     bool
 	cfg          dnsTKConf
@@ -724,18 +727,21 @@ type dnsTakeover struct {
 	wakeCh       chan struct{}
 	tickerActive atomic.Bool
 
+	badFakeIPUntil map[string]time.Time
+
 	// 可替换(测试)
-	runScript    func(args ...string) (int, string)
-	probe        func(addr string, timeout time.Duration) (time.Duration, int, error)
-	ifaceAddrs   func(iface string) (v4, v6 []string)
-	hotspotIface func() string
-	systemDNS    func() []string
-	upstreamSig  func(hotspotIface string) string
-	blockSources func(now time.Time) *dnsBlockSet
-	emitAlert    func(a alert.Alert)
-	now          func() time.Time
-	activityHook func() (<-chan struct{}, Activity)
-	tickInterval time.Duration
+	runScript            func(args ...string) (int, string)
+	probe                func(addr string, timeout time.Duration) (time.Duration, int, error)
+	ifaceAddrs           func(iface string) (v4, v6 []string)
+	hotspotIface         func() string
+	systemDNS            func() []string
+	upstreamSig          func(hotspotIface string) string
+	hotspotSharedTUNHook func(hotspotIface string) bool
+	blockSources         func(now time.Time) *dnsBlockSet
+	emitAlert            func(a alert.Alert)
+	now                  func() time.Time
+	activityHook         func() (<-chan struct{}, Activity)
+	tickInterval         time.Duration
 }
 
 var dnsTKReg = struct {
@@ -1417,8 +1423,236 @@ func (t *dnsTakeover) probeHealthy(addr string, timeout time.Duration) (time.Dur
 	return rtt, nil
 }
 
+func isLikelyVPNTableOrDev(name string) bool {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if s == "" {
+		return false
+	}
+	for _, pfx := range []string{
+		"tun", "utun", "wg", "ppp", "clash", "mihomo", "sing",
+		"meta", "vpn", "box", "nekobox", "v2ray", "xray", "tailscale",
+	} {
+		if strings.HasPrefix(s, pfx) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLikelySystemOrPhysTable(name string) bool {
+	s := strings.ToLower(strings.TrimSpace(name))
+	switch s {
+	case "", "local", "main", "default", "local_network", "legacy_system", "legacy_network":
+		return true
+	}
+	for _, pfx := range []string{
+		"rmnet", "ccmni", "wlan", "ap", "softap", "swlan",
+		"eth", "usb", "rndis", "ncm", "dummy", "bt-pan", "p2p",
+	} {
+		if strings.HasPrefix(s, pfx) {
+			return true
+		}
+	}
+	return false
+}
+
+func ipRouteTableRoutesViaTUN(tbl string) bool {
+	ipBin := resolveDataplaneSystemBin("ip")
+	if ipBin == "" || tbl == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	cmd := hardenCmd(exec.CommandContext(ctx, ipBin, "-4", "route", "show", "table", tbl))
+	cmd.Env = subprocEnvWithFallbackPath()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	for _, ln := range strings.Split(string(out), "\n") {
+		fs := strings.Fields(strings.TrimSpace(ln))
+		for i := 0; i+1 < len(fs); i++ {
+			if fs[i] == "dev" && isLikelyVPNTableOrDev(fs[i+1]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hotspotIfaceSharedIntoTUN 判断热点下游口流量(或 198.18.0.0/15 Fake-IP 段)是否已通过 ip rule 显式路由进 TUN/VPN 表。
+// 若仅本机 uidrange 走 VPN 而热点口 iif <iface> 仍走 rmnet_data*/wlan* 物理路由表, 返回 false(此时下发 198.18.0.0/15 必致黑洞)。
+func hotspotIfaceSharedIntoTUN(iface string) bool {
+	iface = strings.ToLower(strings.TrimSpace(iface))
+	if iface == "" || v6ReadLiveIPRulesFn == nil {
+		return false
+	}
+	rules, _, ok := v6ReadLiveIPRulesFn()
+	if !ok || len(rules) == 0 {
+		return false
+	}
+	fakeProbeIP := net.IPv4(198, 18, 0, 1)
+	for _, rawLn := range rules {
+		fs := strings.Fields(strings.ToLower(strings.TrimSpace(rawLn)))
+		if len(fs) == 0 {
+			continue
+		}
+		hasUIDRange := false
+		hasOIF := false
+		hasNonZeroFwmark := false
+		iifVal := ""
+		toVal := ""
+		tblVal := ""
+		for i := 0; i < len(fs); i++ {
+			switch fs[i] {
+			case "uidrange":
+				hasUIDRange = true
+			case "oif":
+				hasOIF = true
+			case "iif":
+				if i+1 < len(fs) {
+					iifVal = fs[i+1]
+					i++
+				}
+			case "to":
+				if i+1 < len(fs) {
+					toVal = fs[i+1]
+					i++
+				}
+			case "fwmark":
+				if i+1 < len(fs) {
+					valPart, _, _ := strings.Cut(fs[i+1], "/")
+					if v, pErr := strconv.ParseUint(valPart, 0, 32); pErr != nil || v != 0 {
+						hasNonZeroFwmark = true
+					}
+					i++
+				}
+			case "lookup", "table":
+				if i+1 < len(fs) {
+					tblVal = fs[i+1]
+					i++
+				}
+			}
+		}
+		if hasUIDRange || hasOIF || hasNonZeroFwmark || tblVal == "" || tblVal == "local" {
+			continue
+		}
+		if iifVal != "" && iifVal != iface {
+			continue
+		}
+		explicitFakeIPDst := false
+		if toVal != "" && toVal != "all" {
+			if _, ipn, err := net.ParseCIDR(toVal); err == nil && ipn != nil {
+				if !ipn.Contains(fakeProbeIP) {
+					continue
+				}
+				ones, _ := ipn.Mask.Size()
+				if ones >= 15 {
+					explicitFakeIPDst = true
+				}
+			} else if ip := net.ParseIP(toVal); ip == nil || !ip.Equal(fakeProbeIP) {
+				continue
+			} else {
+				explicitFakeIPDst = true
+			}
+		}
+		if explicitFakeIPDst || isLikelyVPNTableOrDev(tblVal) {
+			return true
+		}
+		if iifVal == iface {
+			if isLikelySystemOrPhysTable(tblVal) {
+				return false
+			}
+			if ipRouteTableRoutesViaTUN(tblVal) {
+				return true
+			}
+			return false
+		}
+	}
+	return false
+}
+
+func (t *dnsTakeover) isHotspotSharedIntoTUN(iface string) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	hook := t.hotspotSharedTUNHook
+	t.mu.Unlock()
+	if hook != nil {
+		return hook(iface)
+	}
+	return hotspotIfaceSharedIntoTUN(iface)
+}
+
+func (t *dnsTakeover) isUpstreamFakeIPQuarantined(up string, now time.Time) bool {
+	if t == nil || up == "" {
+		return false
+	}
+	t.mu.Lock()
+	until, bad := t.badFakeIPUntil[up]
+	if bad && !now.Before(until) {
+		delete(t.badFakeIPUntil, up)
+		bad = false
+	}
+	t.mu.Unlock()
+	return bad
+}
+
+func (t *dnsTakeover) hasActiveFakeIPQuarantine(now time.Time) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for up, until := range t.badFakeIPUntil {
+		if now.Before(until) {
+			return true
+		}
+		delete(t.badFakeIPUntil, up)
+	}
+	return false
+}
+
+func (t *dnsTakeover) shouldRejectUntetheredFakeIP() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	kind := t.upstreamKind
+	yielding := t.yieldTProxy
+	iface := t.iface
+	t.mu.Unlock()
+	if yielding || kind == "" || kind == "custom" {
+		return false
+	}
+	if iface == "" && t.hotspotIface != nil {
+		iface = t.hotspotIface()
+	}
+	return !t.isHotspotSharedIntoTUN(iface)
+}
+
+func (t *dnsTakeover) onFakeIPRejected() {
+	if t == nil {
+		return
+	}
+	now := t.now()
+	t.mu.Lock()
+	curUp := t.upstream
+	if curUp != "" && t.upstreamKind != "custom" {
+		if t.badFakeIPUntil == nil {
+			t.badFakeIPUntil = make(map[string]time.Time, 4)
+		}
+		t.badFakeIPUntil[curUp] = now.Add(5 * time.Minute)
+		t.upCheckedAt = time.Time{}
+	}
+	t.mu.Unlock()
+	t.wake()
+}
+
 // chooseUpstream custom > tether(各 v4 地址 :53)> system。返回 ("", "") = 都不通
 func (t *dnsTakeover) chooseUpstream(cfg dnsTKConf, v4 []string) (string, string) {
+	now := t.now()
 	ok := func(addr string) bool {
 		_, err := t.probeHealthy(addr, dnsTKProbeTimeout)
 		return err == nil
@@ -1429,8 +1663,16 @@ func (t *dnsTakeover) chooseUpstream(cfg dnsTKConf, v4 []string) (string, string
 		}
 		return "", ""
 	}
+	iface := ""
+	if t.hotspotIface != nil {
+		iface = t.hotspotIface()
+	}
+	sharedTUN := t.isHotspotSharedIntoTUN(iface)
 	for _, a := range v4 {
 		up := net.JoinHostPort(a, "53")
+		if !sharedTUN && t.isUpstreamFakeIPQuarantined(up, now) {
+			continue
+		}
 		if ok(up) {
 			return up, "tether"
 		}
@@ -1443,7 +1685,13 @@ func (t *dnsTakeover) chooseUpstream(cfg dnsTKConf, v4 []string) (string, string
 		if local[s] {
 			continue
 		}
+		if !sharedTUN && isFakeIPAddr(net.ParseIP(s)) {
+			continue
+		}
 		up := net.JoinHostPort(s, "53")
+		if !sharedTUN && t.isUpstreamFakeIPQuarantined(up, now) {
+			continue
+		}
 		if ok(up) {
 			return up, "system"
 		}
@@ -1562,7 +1810,7 @@ func (t *dnsTakeover) tickLocked() {
 		return
 	}
 
-	// 3. 上游: 没选过 / 切网触发了 onFlush 重置 / 非 tether 每分钟重探(优先回到 tether)
+	// 3. 上游: 没选过 / 切网或 Fake-IP 隔离触发重置 / 非 tether 每分钟重探(优先回到 tether)
 	t.mu.Lock()
 	up, kind, checked := t.upstream, t.upstreamKind, t.upCheckedAt
 	t.mu.Unlock()
@@ -1574,14 +1822,22 @@ func (t *dnsTakeover) tickLocked() {
 		(kind != "tether" && now.Sub(checked) > time.Minute) {
 		nu, nk := t.chooseUpstream(cfg, v4)
 		fwd.SetUpstream(nu)
+		stNow := fwd.Stats()
 		t.mu.Lock()
+		if nu != up {
+			t.prevUpStats = stNow
+		}
 		t.upCheckedAt = now
 		t.upstream, t.upstreamKind = nu, nk
 		up = t.upstream
 		t.mu.Unlock()
 	}
 	if up == "" {
-		t.failOpenLocked("no_upstream", true)
+		reason := "no_upstream"
+		if cfg.Upstream == "" && t.hasActiveFakeIPQuarantine(now) {
+			reason = "fakeip_blackhole"
+		}
+		t.failOpenLocked(reason, true)
 		return
 	}
 
@@ -1633,19 +1889,42 @@ func (t *dnsTakeover) tickLocked() {
 	st := fwd.Stats()
 	in := dnsHealthIn{SelfOK: perr == nil, DPkts: -1}
 	t.mu.Lock()
-	if t.havePrev {
-		in.DUp = st.Upstream - t.prevStats.Upstream
-		in.DUpErr = st.UpstreamErrs - t.prevStats.UpstreamErrs
-		in.DClient = st.Queries - t.prevStats.Queries
-		if cok && t.prevPkts >= 0 && pkts >= t.prevPkts {
-			in.DPkts = pkts - t.prevPkts
+	if !t.havePrev {
+		t.prevStats = st
+		t.prevUpStats = st
+		t.havePrev = true
+		if cok {
+			t.prevPkts = pkts
+		} else {
+			t.prevPkts = -1
 		}
-	}
-	t.prevStats, t.havePrev = st, true
-	if cok {
-		t.prevPkts = pkts
 	} else {
-		t.prevPkts = -1
+		if st.Upstream < t.prevUpStats.Upstream || st.UpstreamErrs < t.prevUpStats.UpstreamErrs {
+			t.prevUpStats = st
+		} else {
+			in.DUp = st.Upstream - t.prevUpStats.Upstream
+			in.DUpErr = st.UpstreamErrs - t.prevUpStats.UpstreamErrs
+			// 仅当累计满 20 次上游查询判定窗才推进基线, 防止稀疏流量每轮 <20 次永远无法触发 upstream_errors
+			if in.DUp >= 20 {
+				t.prevUpStats = st
+			}
+		}
+
+		if st.Queries < t.prevStats.Queries || !cok || t.prevPkts < 0 || pkts < t.prevPkts {
+			t.prevStats = st
+			if cok {
+				t.prevPkts = pkts
+			} else {
+				t.prevPkts = -1
+			}
+		} else {
+			in.DClient = st.Queries - t.prevStats.Queries
+			in.DPkts = pkts - t.prevPkts
+			if in.DClient > 0 || in.DPkts >= 10 {
+				t.prevStats = st
+				t.prevPkts = pkts
+			}
+		}
 	}
 	t.mu.Unlock()
 	if ok, reason := dnsHealthEval(in); !ok {
@@ -1668,6 +1947,7 @@ func (t *dnsTakeover) onForwarderFlush() {
 	t.names.clear()
 	t.mu.Lock()
 	t.upCheckedAt = time.Time{}
+	t.badFakeIPUntil = nil
 	t.mu.Unlock()
 	t.wake()
 }
@@ -1680,6 +1960,8 @@ func (t *dnsTakeover) openForwarder(listen []string) (*dnsForwarder, []string, e
 		nf.macOf, nf.blocked, nf.onLog, nf.onAnswer = t.macOf, t.blocked, t.onLog, t.names.record
 		nf.onFlush = t.onForwarderFlush
 		nf.netSig = t.currentUpstreamSig
+		nf.rejectFakeIP = t.shouldRejectUntetheredFakeIP
+		nf.onFakeIPReject = t.onFakeIPRejected
 		return nf
 	}
 	nf := mk()
@@ -1994,6 +2276,7 @@ func actionDNSTakeoverSet(s *server, p map[string]string) actionResp {
 	// 用户主动操作: 清掉 fail-open 退避与礼让冷却, 立刻重试并唤醒休眠对账循环
 	t.mu.Lock()
 	t.retryAt, t.yieldUntil, t.backoff = time.Time{}, time.Time{}, dnsTKBackoffMin
+	t.badFakeIPUntil = nil
 	t.mu.Unlock()
 	t.tickLocked()
 	t.wake()

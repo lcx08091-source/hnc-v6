@@ -414,14 +414,32 @@ resolve_restore_bin() {
     command -v "$restore_name" 2>/dev/null || return 1
 }
 
+_aq_probe_wait_bin() {
+    local _b="$1" _rc
+    "$_b" -w 2 -t filter -L -n >/dev/null 2>&1
+    _rc=$?
+    if [ "$_rc" -eq 2 ]; then
+        "$_b" -w -t filter -L -n >/dev/null 2>&1
+        _rc=$?
+        if [ "$_rc" -eq 2 ]; then
+            printf '%s\n' "$_b"
+        else
+            printf '%s -w\n' "$_b"
+        fi
+    else
+        # rc=0 或 rc=4(短暂 xtables 锁竞争超时)等非语法错误: 保持 -w 2 绝不误剥!
+        printf '%s -w 2\n' "$_b"
+    fi
+}
+
 probe_ipv6() {
     [ "$_IPV6_PROBED" = 1 ] && return 0
     _IPV6_PROBED=1
     if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v iptables >/dev/null 2>&1; then
-        iptables -w 2 -t mangle -L -n >/dev/null 2>&1 || IPT="iptables"
+        IPT=$(_aq_probe_wait_bin iptables)
     fi
     if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -w 2 -t mangle -L -n >/dev/null 2>&1 || IP6T="ip6tables"
+        IP6T=$(_aq_probe_wait_bin ip6tables)
     fi
     IPT_RESTORE_BIN=$(resolve_restore_bin "$IPT" "iptables-restore" "${HNC_IPT_RESTORE:-}" "${HNC_IPT:-}")
     if command -v "${IP6T%% *}" >/dev/null 2>&1 && $IP6T -t mangle -L -n >/dev/null 2>&1; then
@@ -431,12 +449,16 @@ probe_ipv6() {
 }
 
 run_restore_noflush() {
-    local rbin=$1 batch=$2
+    local rbin=$1 batch=$2 _rc
     [ -n "$rbin" ] && [ -s "$batch" ] || return 1
-    if $rbin -w 2 --noflush < "$batch" 2>/dev/null; then
-        return 0
+    $rbin -w 2 --noflush < "$batch" 2>/dev/null
+    _rc=$?
+    [ "$_rc" -eq 0 ] && return 0
+    if [ "$_rc" -eq 2 ]; then
+        $rbin -w --noflush < "$batch" 2>/dev/null && return 0
+        $rbin --noflush < "$batch" 2>/dev/null && return 0
     fi
-    $rbin --noflush < "$batch" 2>/dev/null
+    return 1
 }
 
 replay_qos_batch_fallback() {

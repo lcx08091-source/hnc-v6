@@ -180,8 +180,9 @@ function loadAppTime(mac, force) {
 }
 function paintAppTime(mac) {
   var d = devBy(mac); if (!d) return;
-  $$('[data-dev="' + mac + '"] [data-at], [data-side="' + mac + '"] [data-at]').forEach(function (el) { el.innerHTML = appTimeInner(d); });
-  $$('[data-dev="' + mac + '"] [data-cb], [data-side="' + mac + '"] [data-cb]').forEach(function (el) { el.innerHTML = catBlockInner(d); });
+  var sel = cssEscMac(mac);
+  $$('[data-dev="' + sel + '"] [data-at], [data-side="' + sel + '"] [data-at]').forEach(function (el) { morph(el, appTimeInner(d)); });
+  $$('[data-dev="' + sel + '"] [data-cb], [data-side="' + sel + '"] [data-cb]').forEach(function (el) { morph(el, catBlockInner(d)); });
 }
 function atNeed(d) { if (!S.appTime[d.mac] && (S.open['at-' + d.mac] || S.open['cb-' + d.mac])) setTimeout(function () { loadAppTime(d.mac); }, 0); }
 function appTimeInner(d) {
@@ -893,8 +894,65 @@ function renderDevices(anim1) {
   var p = $('#p-devices');
   // 已有内容时就地更新(批量模式切换 / 过滤 / 重连): 不丢滚动位置和展开状态, 不重放入场动画
   if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h;
+  syncDirtyBwControls(p);
   placeSegs(p); paintHero(false); drawSpark(); paintFresh(); renderOffloadBanner(); paintOnlineHours();
   if (anim1) stagger($('.wrap .wrap', p));
+}
+function syncDirtyBwControls(root) {
+  if (!root) return;
+  var boxes = (root.matches && (root.matches('[data-dev]') || root.matches('[data-side]'))) ? [root] : $$('[data-dev], [data-side]', root);
+  boxes.forEach(function (box) {
+    var dnInp = $('[data-f="down"]', box), upInp = $('[data-f="up"]', box);
+    var dnDirty = !!(dnInp && (dnInp.getAttribute('data-dirty') === '1' || dnInp === document.activeElement));
+    var upDirty = !!(upInp && (upInp.getAttribute('data-dirty') === '1' || upInp === document.activeElement));
+    if (!dnDirty && !upDirty) return;
+    [['down', dnInp], ['up', upInp]].forEach(function (it) {
+      var f = it[0], inp = it[1];
+      if (!inp || inp.disabled) return;
+      var raw = String(inp.value || '').trim(), v = parseFloat(raw) || 0;
+      var card = inp.closest('.bw-card'), clr = $('[data-bw-clr="' + f + '"]', box), eq = $('[data-bw-eq="' + f + '"]', box);
+      if (card) card.classList.toggle('has-val', v > 0);
+      if (clr) clr.hidden = !raw.length;
+      if (eq) eq.textContent = v > 0 ? '≈ ' + trim0((v * 8).toFixed(1)) + ' Mbps' : '当前不限速';
+    });
+    if (dnInp) {
+      var dnRaw = String(dnInp.value || '').trim(), dnV = parseFloat(dnRaw) || 0;
+      $$('[data-lcc-preset]', box).forEach(function (b) {
+        var pv = parseFloat(b.getAttribute('data-lcc-preset')) || 0;
+        b.classList.toggle('on', pv === 0 ? !dnV : (dnV > 0 && Math.abs(dnV - pv) < 0.05));
+      });
+      var upV = upInp && !upInp.disabled ? (parseFloat(upInp.value) || 0) : 0;
+      var apBtn = $('[data-act="apply-limit"]', box);
+      if (apBtn) {
+        apBtn.textContent = dnV > 0 ? ('应用限速 (' + trim0(dnV.toFixed(1)) + ' MB/s)') : (upV > 0 ? ('应用限速 (↑' + trim0(upV.toFixed(1)) + ' MB/s)') : '应用（恢复不限速）');
+      }
+    }
+  });
+}
+function clearDevDirty(mac) {
+  var sel = mac ? cssEscMac(mac) : '';
+  var els = sel ? $$('.dev[data-dev="' + sel + '"], [data-side="' + sel + '"]') : [];
+  if (els.length) {
+    els.forEach(function (cardEl) {
+      if (typeof clearDirtyInputs === 'function') clearDirtyInputs(cardEl || document);
+      else $$('[data-dirty]', cardEl).forEach(function (inp) { inp.removeAttribute('data-dirty'); });
+    });
+  } else if (!mac) {
+    var root = $('#p-devices') || document;
+    if (typeof clearDirtyInputs === 'function') clearDirtyInputs(root);
+    else $$('[data-dirty]', root).forEach(function (inp) { inp.removeAttribute('data-dirty'); });
+  }
+}
+function resetCleanDevInputs(mac) {
+  var sel = mac ? cssEscMac(mac) : '';
+  var els = sel ? $$('.dev[data-dev="' + sel + '"], [data-side="' + sel + '"]') : $$('#p-devices [data-dev], #p-devices [data-side]');
+  els.forEach(function (cardEl) {
+    $$('input[data-f]', cardEl).forEach(function (inp) {
+      if (inp.getAttribute('data-dirty') === '1' || inp === document.activeElement) return;
+      var attrV = inp.getAttribute('value') || '';
+      if (inp.value !== attrV) inp.value = attrV;
+    });
+  });
 }
 /* 列表刷新: 就地 morph(卡片按 data-dev 复用) + FLIP —— 位置变了的卡片从旧位置平滑移过去, 新卡片淡入 */
 function renderDevList(animate) {
@@ -902,10 +960,10 @@ function renderDevList(animate) {
   var before = {}, flip = !animate && motionOn() && list.firstElementChild;
   if (flip) $$('#dev-list > .dev').forEach(function (c) { before[c.getAttribute('data-dev')] = c.getBoundingClientRect().top; });
   // 卡片元素复用 → 正在输入的框、焦点、光标位置天然保留(此前整表 innerHTML 要先快照再还原)
-  morph(list, devListHtml()); placeSegs(list); paintOnlineHours(); paintSimBanner();
+  morph(list, devListHtml()); syncDirtyBwControls(list); placeSegs(list); paintOnlineHours(); paintSimBanner();
   var lo = $('#list-on'); if (lo) lo.textContent = (S.hotspot.active === false && !simOn()) ? 0 : S.devices.filter(function (d) { return d.online; }).length;
   var lf = $('#list-hs-flows'); if (lf) lf.textContent = devHotspotFlows();
-  if (wide()) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); placeSegs(sd); } }
+  if (wide()) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); syncDirtyBwControls(sd); placeSegs(sd); } }
   if (animate) { stagger(list); return; }
   if (flip) $$('#dev-list > .dev').forEach(function (c) {
     var m = c.getAttribute('data-dev'), y0 = before[m];
@@ -956,8 +1014,8 @@ function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge 
 function refreshCard(mac) {
   var d = devBy(mac); if (!d) return;
   var el = document.querySelector('.dev[data-dev="' + cssEscMac(mac) + '"]');
-  if (el) { el = morphOuter(el, devCard(d)); placeSegs(el); paintOnlineHours(); }
-  if (wide() && S.sel === mac) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); placeSegs(sd); } }
+  if (el) { el = morphOuter(el, devCard(d)); syncDirtyBwControls(el); placeSegs(el); paintOnlineHours(); }
+  if (wide() && S.sel === mac) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); syncDirtyBwControls(sd); placeSegs(sd); } }
 }
 
 /* ═════════════════════ 设备操作 ═════════════════════ */
@@ -990,7 +1048,10 @@ function devAct(mac, fn, okMsg, src, undoOpt) {
     return loadDevices().catch(function () {});
   }).then(sheetSettled).then(function () {
     setBusy(mac, false); pend(src, false);
-    refreshCard(mac); updateStatsCounters(); freezeList(5600);
+    if (ok && undoOpt && undoOpt.clearAllDirty) clearDevDirty(mac);
+    refreshCard(mac);
+    if (ok) resetCleanDevInputs(mac);
+    updateStatsCounters(); freezeList(5600);
     if (ok && msg) {
       if (undoOpt && typeof undoOpt.undo === 'function' && typeof undoToast === 'function') {
         undoToast(msg, undoOpt.undo, undoOpt);
@@ -1082,13 +1143,18 @@ function tplDesc(t) {
   if (t.delay || t.jitter || t.loss) a.push('延迟 ' + t.delay + 'ms' + (t.jitter ? ' ±' + t.jitter : '') + (t.loss ? ' · 丢包 ' + t.loss + '%' : '')); else a.push('无延迟');
   return a.join(' · ');
 }
+var _tplApplying = false;
 function applyTemplate(targets, t) {
+  if (_tplApplying) { toast('正在应用限速模板，请稍候', 'warn'); return Promise.resolve(false); }
+  if (!targets || !targets.length || !t) return Promise.resolve(false);
+  _tplApplying = true;
+  freezeList(1500);
   var ok = 0, fail = 0, skipped = 0, wantDelay = t.delay > 0 || t.jitter > 0 || t.loss > 0;
   toast('正在把「' + t.name + '」应用到 ' + targets.length + ' 台…');
   var chain = Promise.resolve();
   targets.forEach(function (d) {
     chain = chain.then(function () {
-      setBusy(d.mac, true);
+      setBusy(d.mac, true); freezeList(1500);
       return doLimit(d, t.down, t.up).then(function () {
         if (wantDelay) {
           if (!(d.sim || netemOk()) || d.sqm || d.appQos) { skipped++; return; }
@@ -1101,7 +1167,12 @@ function applyTemplate(targets, t) {
   return chain.then(function () {
     toast('「' + t.name + '」已应用 ' + ok + '/' + targets.length + ' 台' + (fail ? ' · 失败 ' + fail : '') + (skipped ? ' · ' + skipped + ' 台跳过延迟（已开低延迟/应用优先级或不支持 netem）' : ''), fail ? 'warn' : 'ok');
     return loadDevices().catch(function () {});
-  }).then(function () { if (S.page === 'devices') renderDevList(false); });
+  }).then(function () {
+    targets.forEach(function (d) { clearDevDirty(d.mac); });
+    freezeList(1500);
+    if (S.page === 'devices') renderDevList(false);
+    targets.forEach(function (d) { resetCleanDevInputs(d.mac); });
+  }).then(function () { _tplApplying = false; }, function (e) { _tplApplying = false; throw e; });
 }
 function tplSheet(targets, manage) {
   var rows = S.templates.map(function (t, i) {
@@ -1155,7 +1226,7 @@ function deleteTemplate(name) {
 /* ═════════════════════ 全局操作 ═════════════════════ */
 function globalRefresh(msg) {
   return Promise.all([loadLive().catch(function () {}), loadDevices().catch(function () {})]).then(function () {
-    if (S.page === 'devices') { renderDevList(false); paintHero(true); paintFresh(); }
+    if (S.page === 'devices') { clearDevDirty(); renderDevList(false); resetCleanDevInputs(); paintHero(true); paintFresh(); }
     if (msg) toast(msg);
   });
 }

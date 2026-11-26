@@ -73,15 +73,28 @@ run() {
     return $_rc
 }
 
-if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ]; then
-    iptables -w 2 -L INPUT -n >/dev/null 2>&1 || {
-        iptables -L INPUT -n >/dev/null 2>&1 && IPT="iptables"
-    }
+_wg_probe_wait_bin() {
+    local _b="$1" _rc
+    "$_b" -w 2 -t filter -L INPUT -n >/dev/null 2>&1
+    _rc=$?
+    if [ "$_rc" -eq 2 ]; then
+        "$_b" -w -t filter -L INPUT -n >/dev/null 2>&1
+        _rc=$?
+        if [ "$_rc" -eq 2 ]; then
+            printf '%s\n' "$_b"
+        else
+            printf '%s -w\n' "$_b"
+        fi
+    else
+        # rc=0 或 rc=4(短暂 xtables 锁竞争超时)等非语法错误: 保持 -w 2 绝不误剥!
+        printf '%s -w 2\n' "$_b"
+    fi
+}
+if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ] && command -v iptables >/dev/null 2>&1; then
+    IPT=$(_wg_probe_wait_bin iptables)
 fi
 if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ] && command -v ip6tables >/dev/null 2>&1; then
-    ip6tables -w 2 -L INPUT -n >/dev/null 2>&1 || {
-        ip6tables -L INPUT -n >/dev/null 2>&1 && IP6T="ip6tables"
-    }
+    IP6T=$(_wg_probe_wait_bin ip6tables)
 fi
 
 v6=0

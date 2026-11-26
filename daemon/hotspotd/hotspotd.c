@@ -233,8 +233,9 @@ static int send_all_deadline(int fd, const void *buf, size_t len, int64_t deadli
             int wait_ms = (rem_ms > 500LL) ? 500 : (int)rem_ms;
             struct pollfd pfd = { .fd = fd, .events = POLLOUT, .revents = 0 };
             int prc = poll(&pfd, 1, wait_ms);
+            if (prc == 0) continue;
             if (prc < 0 && errno == EINTR) continue;
-            if (prc <= 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+            if (prc < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
                 return -1;
             continue;
         }
@@ -265,6 +266,7 @@ static void handle_client(int cfd) {
 
     char req[64] = {0};
     size_t got = 0;
+    int has_nl = 0;
     while (got < sizeof(req) - 1 && g_running) {
         int64_t rem_ms = rd_deadline_ms - mono_ms_now();
         if (rem_ms <= 0) break;
@@ -273,7 +275,12 @@ static void handle_client(int cfd) {
         if (n > 0) {
             got += (size_t)n;
             req[got] = '\0';
-            if (strchr(req, '\n') != NULL) break;
+            char *nl = strchr(req, '\n');
+            if (nl != NULL) {
+                *nl = '\0';
+                has_nl = 1;
+                break;
+            }
             continue;
         }
         if (n == 0) break;
@@ -282,15 +289,20 @@ static void handle_client(int cfd) {
             int wait_ms = (rem_ms > 500LL) ? 500 : (int)rem_ms;
             struct pollfd pfd = { .fd = cfd, .events = POLLIN, .revents = 0 };
             int prc = poll(&pfd, 1, wait_ms);
+            if (prc == 0) continue;
             if (prc < 0 && errno == EINTR) continue;
-            if (prc <= 0 || (pfd.revents & (POLLERR | POLLNVAL)))
+            if (prc < 0 || (pfd.revents & (POLLERR | POLLNVAL)))
                 break;
             continue;
         }
         break;
     }
     if (got == 0 || !g_running) { close(cfd); return; }
-    req[got] = '\0';
+    if (!has_nl) {
+        (void)send_all_deadline(cfd, "ERR:incomplete command\n", 23, tot_deadline_ms);
+        close(cfd);
+        return;
+    }
     /* 去尾部空白 */
     for (int i = (int)strlen(req)-1; i >= 0 && (req[i]=='\n'||req[i]=='\r'||req[i]==' '); i--)
         req[i] = '\0';

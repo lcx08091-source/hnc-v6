@@ -1,8 +1,8 @@
 /* HNC WebUI · settings.js —— 设置页: VPN 检测 / 随机 MAC 合并、加密 DNS、统计健康、全部设置条目、模拟环境、外观与动效、自检报告、更新日志 */
 'use strict';
 
-var HNC_UI_VER = 'v6.1.0-rc.9';
-var HNC_UI_VC = '6009309';
+var HNC_UI_VER = 'v6.1.0-rc.10';
+var HNC_UI_VC = '6009310';
 var HNC_UI_CODE = HNC_UI_VC;
 var LG_VARIANT_FALLBACK_LABELS = { pure: '纯透无框', prism: '棱镜色散', dew: '凝脂水滴' };
 var LG_VARIANT_FALLBACK_DESCS = {
@@ -565,7 +565,7 @@ function renderSettings(anim1) {
   groups.push(['全局带宽整形', autorateFoldHtml(c) + sFold('gs', ['purple', 'layers'], '固定总带宽整形（静态上限）', '适用于 Wi-Fi 中继或信号恒定场景；开启固定上限会自动停用 5G 自适应',
     '<div class="grid2"><label class="field">下行上限' + inp('gs-down', rateToMbps(c.global_shaper_down), 'Mbps', 'type="number" min="0" step="0.1"') + '</label><label class="field">上行上限' + inp('gs-up', rateToMbps(c.global_shaper_up), 'Mbps', 'type="number" min="0" step="0.1"') + '</label></div>' +
     '<div class="note">填宽带/流量套餐实测速度的 85~90%。当前队列：' + sqmLabel() + (htbOk() ? '' : ' · <b>内核不支持 HTB，无法启用</b>') + '</div><button class="btn pri press" data-act="gs-apply">应用</button>',
-    toggle(gsOn && !(c.autorate && c.autorate.enabled), 'data-set="gs" aria-label="全局带宽整形"' + (htbOk() ? '' : ' disabled'))) + aqmRowHtml(c)]);
+    toggle(gsOn, 'data-set="gs" aria-label="全局带宽整形"' + (htbOk() ? '' : ' disabled'))) + aqmRowHtml(c)]);
   var fx = c.flywheel_exclude_user || [];
   groups.push(['飞轮排除名单', sFold('fw', ['cyan', 'shield'], '不参与规则学习的应用', 'VPN / 代理会代理别的应用流量，排除后不污染规则 · ' + fx.length + ' 个',
     '<div class="chips">' + (fx.length ? fx.map(function (p) { return '<span class="chip">' + esc(p) + '<button class="linkish danger" data-fw-del="' + esc(p) + '" aria-label="移除">×</button></span>'; }).join('') : '<span class="note">还没有手动排除的应用（内置名单已包含常见 VPN / 代理）</span>') + '</div>' +
@@ -1273,19 +1273,23 @@ function setToggleCfg(kind, el) {
     case 'aq': run(api.action('alert_config_set', { section: 'monthly_quota', enabled: String(on), limit_gb: String(num($('#aq-gb') && $('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct') && $('#aq-pct').value, 80))) }).then(done()).then(reloadAlertCfg)); return;
     case 'aa': run(api.action('alert_config_set', { section: 'anomaly_traffic', enabled: String(on), ratio: String(num($('#aa-ratio') && $('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb') && $('#aa-mb').value, 50))) }).then(done()).then(reloadAlertCfg)); return;
     case 'autorate':
-      run(api.action('autorate_set', {
-        autorate_enabled: String(on),
-        down_min_mbps: String(num($('#ar-dmin') && $('#ar-dmin').value, 24)),
-        down_max_mbps: String(num($('#ar-dmax') && $('#ar-dmax').value, 320)),
-        up_min_mbps: String(num($('#ar-umin') && $('#ar-umin').value, 8)),
-        up_max_mbps: String(num($('#ar-umax') && $('#ar-umax').value, 80)),
-        rtt_delta_ms: String(num($('#ar-delta') && $('#ar-delta').value, 25))
-      }).then(done(on ? '5G 自适应总带宽已开启' : '5G 自适应总带宽已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
+      var hadStaticGs = !!(on && S.cfg && S.cfg.global_shaper_enabled === true);
+      var arPre = hadStaticGs ? api.action('global_shaper_set', { enabled: false }) : Promise.resolve();
+      run(arPre.then(function () {
+        return api.action('autorate_set', {
+          autorate_enabled: String(on),
+          down_min_mbps: String(num($('#ar-dmin') && $('#ar-dmin').value, 24)),
+          down_max_mbps: String(num($('#ar-dmax') && $('#ar-dmax').value, 320)),
+          up_min_mbps: String(num($('#ar-umin') && $('#ar-umin').value, 8)),
+          up_max_mbps: String(num($('#ar-umax') && $('#ar-umax').value, 80)),
+          rtt_delta_ms: String(num($('#ar-delta') && $('#ar-delta').value, 25))
+        });
+      }).then(done(on ? (hadStaticGs ? '5G 自适应总带宽已开启（已自动关闭旧静态总限速）' : '5G 自适应总带宽已开启') : '5G 自适应总带宽已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
     case 'client-iso':
       run(api.action('client_isolation_set', { enabled: String(on) }).then(done(on ? '热点客户端互访隔离已开启' : '热点客户端互访隔离已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
     case 'gs':
       if (on) { var gw = el.closest('[data-foldkey]'); if (gw && !gw.classList.contains('open')) foldToggle(gw, 'gs'); el.setAttribute('aria-checked', 'false'); toast('填好上限后点「应用」启用'); return; }
-      run(api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
+      run(api.action('global_shaper_set', { enabled: false }).then(done('全局带宽整形已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
     case 'remote': run(api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); })).then(function () { if (S.page === 'settings') renderSettings(false); }); return;
     case 'appshared': run(api.action('app_limit_shared_ips_set', { enabled: String(on) }).then(function () { S.appLimitShared = on; toast(on ? '已包含共享 IP · 共用同一云服务器的其他应用也可能一并被限速' : '已恢复默认：跳过与其他应用共用的服务器 IP，避免误伤'); return loadAppLimits(); })); return;
     case 'certprobe': run(api.action('discover_cert_probe_set', { enabled: String(on) }).then(done())); return;
@@ -1341,7 +1345,18 @@ function exportRulesJson() {
     $('#rj-copy').onclick = function () { copyText(txt).then(function (ok) { toast(ok ? '已复制 rules.json' : '复制失败', ok ? 'ok' : 'err'); }); };
     var fn = 'hnc-rules-' + today() + '.json';
     if ($('#rj-dl')) $('#rj-dl').onclick = function () { var u = URL.createObjectURL(new Blob([txt], { type: 'application/json' })), a = document.createElement('a'); a.href = u; a.download = fn; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function () { URL.revokeObjectURL(u); }, 3000); };
-    if ($('#rj-save')) $('#rj-save').onclick = function () { shell('mkdir -p /sdcard/Download && cp ' + sq(HNC_DIR + '/data/rules.json') + ' ' + sq('/sdcard/Download/' + fn) + ' && echo ok').then(function () { toast('已存到 /sdcard/Download/' + fn); }, function (e) { toast(errText(e), 'err'); }); };
+    if ($('#rj-save')) $('#rj-save').onclick = function () {
+      var srcFile = sq(HNC_DIR + '/data/rules.json');
+      var dstFile = sq('/sdcard/Download/' + fn);
+      var tmpFile = sq('/sdcard/Download/.' + fn + '.tmp');
+      var sedExpr = sq('s/("([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk]|hotspot_pass)"[[:space:]]*:[[:space:]]*)"([^"\\\\]|\\\\.)*"/\\1"<redacted>"/g');
+      shell('mkdir -p /sdcard/Download && sed -E ' + sedExpr + ' < ' + srcFile + ' > ' + tmpFile + ' && [ -s ' + tmpFile + ' ] && mv -f ' + tmpFile + ' ' + dstFile + ' && echo ok').then(function () {
+        toast('已脱敏存到 /sdcard/Download/' + fn);
+      }, function (e) {
+        shell('rm -f ' + tmpFile).catch(function () {});
+        toast(errText(e), 'err');
+      });
+    };
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
 function debugBundle(btn) {
@@ -3049,7 +3064,7 @@ function setVaultConfirmAndRestore(parsed, srcLabel) {
     { safe: false }
   ).then(function (ok) {
     if (!ok) return false;
-    return api.post('/api/backup', parsed, { timeout: 12000 }).then(function (res) {
+    return api.post('/api/backup', parsed, { timeout: 60000, maxTime: 58 }).then(function (res) {
       if (res && res.ok === false) throw new Error(res.error || '配置恢复失败');
       var restoredCnt = num(res && res.restored_count, cnt);
       setVaultSyncMeta(res && res.sha256 ? res.sha256 : sha, cnt, restoredCnt);

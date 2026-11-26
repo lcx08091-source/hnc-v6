@@ -17,6 +17,18 @@ if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${H
 fi
 unset _he _he_loaded
 
+# 提前读取持久化的 tether_offload_disabled 原值(在 cleanup.sh 与删目录之前捕获!)
+ORIG_VAL=""
+if [ -f "$HNC/data/orig_tether_offload_disabled" ]; then
+    ORIG_VAL=$(tr -d ' \t\r\n' < "$HNC/data/orig_tether_offload_disabled" 2>/dev/null)
+elif [ -f "$HNC/run/orig_tether_offload_disabled" ]; then
+    ORIG_VAL=$(tr -d ' \t\r\n' < "$HNC/run/orig_tether_offload_disabled" 2>/dev/null)
+fi
+case "$ORIG_VAL" in
+    0|1|null) ;;
+    *[!0-9]*|"") ORIG_VAL="" ;;
+esac
+
 # 清 tc / iptables / 停 daemon（不依赖 +x 位，回退支持模块目录内 cleanup.sh）
 if [ -f "$HNC/bin/cleanup.sh" ]; then
     HNC_DIR="$HNC" HNC_UNINSTALL=1 HNC_ALLOW_FULL_STOP=1 sh "$HNC/bin/cleanup.sh" all 2>/dev/null
@@ -52,9 +64,67 @@ for _v6f in "$HNC"/data/v6_*.json; do
 done
 unset _bf _v6f _v6bn _BACKUP_DIR
 
-# 删除运行状态 (pid / lock / pair pending / bpf 状态)
+# 删除运行状态 (pid / lock / pair pending / bpf 状态) 与压制备份文件
 umount -l "$HNC/run" 2>/dev/null || true
 rm -rf "$HNC/run" 2>/dev/null
+rm -f "$HNC/data/orig_tether_offload_disabled" "$HNC/data/offload_suppressed_by_hnc" 2>/dev/null || true
+
+# 还原用户原 tether_offload_disabled 设置:
+# 若在 post-fs-data 阶段卸载导致 system_server 尚未就绪(settings 失败或 boot_completed!=1),
+# 派生脱离模块目录的后台进程等待 sys.boot_completed=1 后 100% 还原用户手机设置!
+if [ -n "$ORIG_VAL" ] && [ "$ORIG_VAL" != "1" ]; then
+    _SETTINGS_CMD="${HNC_SETTINGS_BIN:-settings}"
+    _restored_sync=0
+    if [ "${HNC_TEST_MODE:-0}" = "1" ] || [ -n "${HNC_SETTINGS_BIN:-}" ] || [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
+        if command -v "$_SETTINGS_CMD" >/dev/null 2>&1; then
+            if [ "$ORIG_VAL" = "null" ]; then
+                if "$_SETTINGS_CMD" delete global tether_offload_disabled >/dev/null 2>&1; then
+                    _v_chk=$("$_SETTINGS_CMD" get global tether_offload_disabled 2>/dev/null | tr -d ' \t\r\n')
+                    case "$_v_chk" in null|"") _restored_sync=1 ;; esac
+                fi
+            else
+                if "$_SETTINGS_CMD" put global tether_offload_disabled "$ORIG_VAL" >/dev/null 2>&1; then
+                    _v_chk=$("$_SETTINGS_CMD" get global tether_offload_disabled 2>/dev/null | tr -d ' \t\r\n')
+                    [ "$_v_chk" = "$ORIG_VAL" ] && _restored_sync=1
+                fi
+            fi
+        fi
+    fi
+    if [ "$_restored_sync" = "0" ]; then
+        _U_SH="/system/bin/sh"
+        [ -x "$_U_SH" ] || _U_SH="sh"
+        if [ "${HNC_TEST_MODE:-0}" != "1" ] || [ -n "${HNC_SETTINGS_BIN:-}" ]; then
+            (
+                cd / 2>/dev/null || true
+                nohup "$_U_SH" -c '
+                    orig="$1"; hnc_d="$2"; sbin="$3"; poll="${4:-2}"
+                    export PATH="/system/bin:/system/xbin:/vendor/bin:${PATH:-}"
+                    i=0
+                    while [ "$i" -lt 90 ] && [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
+                        sleep "$poll"
+                        i=$((i + 1))
+                    done
+                    j=0
+                    while [ "$j" -lt 10 ]; do
+                        if [ "$orig" = "null" ]; then
+                            "$sbin" delete global tether_offload_disabled >/dev/null 2>&1
+                            v=$("$sbin" get global tether_offload_disabled 2>/dev/null | tr -d " \t\r\n")
+                            case "$v" in null|"") rm -f "$hnc_d/data/orig_tether_offload_disabled" "$hnc_d/data/offload_suppressed_by_hnc" 2>/dev/null; exit 0 ;; esac
+                        else
+                            "$sbin" put global tether_offload_disabled "$orig" >/dev/null 2>&1
+                            v=$("$sbin" get global tether_offload_disabled 2>/dev/null | tr -d " \t\r\n")
+                            if [ "$v" = "$orig" ]; then rm -f "$hnc_d/data/orig_tether_offload_disabled" "$hnc_d/data/offload_suppressed_by_hnc" 2>/dev/null; exit 0; fi
+                        fi
+                        sleep "$poll"
+                        j=$((j + 1))
+                    done
+                ' _ "$ORIG_VAL" "$HNC" "$_SETTINGS_CMD" "${HNC_UNINSTALL_POLL_SEC:-2}" </dev/null >/dev/null 2>&1 &
+            )
+        fi
+    fi
+    unset _SETTINGS_CMD _restored_sync _v_chk _U_SH
+fi
+unset ORIG_VAL
 
 # 不删 /data/local/hnc/ 本身 - 让用户手动删 (保留 logs 供排查)
 echo "HNC uninstalled. Config backed up to /data/local/hnc_backup/"

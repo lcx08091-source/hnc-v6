@@ -309,6 +309,33 @@ if ! valid_mac "$MAC"; then
     emit_err "invalid mac: $MAC"
 fi
 
+has_device_or_v6_online() {
+    local _m _if="${2:-}" _n6
+    _m=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    if [ -f "$DEVICES" ] && tr -d '\r\n' < "$DEVICES" 2>/dev/null | tr 'A-Z' 'a-z' | grep -qF "\"$_m\""; then
+        return 0
+    fi
+    if [ -s "$HNC_DIR/run/devices.flat" ] && tr 'A-Z' 'a-z' < "$HNC_DIR/run/devices.flat" 2>/dev/null | grep -qF "$_m"; then
+        return 0
+    fi
+    if [ -n "$_if" ] && command -v ip >/dev/null 2>&1; then
+        _n6=$(ip -6 neigh show dev "$_if" 2>/dev/null)
+        [ -z "$_n6" ] && _n6=$(ip neigh show dev "$_if" 2>/dev/null)
+        if printf '%s\n' "$_n6" | awk -v m="$_m" 'tolower($0) ~ ("lladdr " m) && $1 ~ /:/ && $NF != "FAILED" && $NF != "INCOMPLETE" {found=1; exit} END{exit !found}'; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+is_mac_blacklisted() {
+    local _m
+    [ -f "$RULES" ] || return 1
+    _m=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    tr -d '\r\n' < "$RULES" 2>/dev/null | grep -oiE '"blacklist"[[:space:]]*:[[:space:]]*\[[^]]*\]' \
+        | tr 'A-Z' 'a-z' | grep -qF "\"$_m\""
+}
+
 case "$CMD" in
     limit)
         DN_MBPS=$1
@@ -319,10 +346,10 @@ case "$CMD" in
             emit_err "invalid rate: down='$DN_MBPS' up='$UP_MBPS' (expected non-negative number)"
         fi
         IP=$(get_ip "$MAC")
-        if [ -z "$IP" ]; then
+        IFACE=$(sh "$DETECT" iface 2>/dev/null)
+        if [ -z "$IP" ] && ! has_device_or_v6_online "$MAC" "$IFACE"; then
             emit_err "device not found in devices.json (mac=$MAC, 设备可能离线或还没被探到)"
         fi
-        IFACE=$(sh "$DETECT" iface 2>/dev/null)
         if [ -z "$IFACE" ] || { [ "$IFACE" = "wlan0" ] && ! is_authoritative_wlan0_ap; }; then
             emit_err "no active hotspot iface (got '$IFACE')"
         fi
@@ -337,12 +364,12 @@ case "$CMD" in
         fi
         sh "$JSON_SET" device "$MAC" last_seen_persist "$(now_ts)" >> "$LOG" 2>&1 || log "WARN: failed to update last_seen_persist for $MAC"
         gate_unlock
-        log "limit mac=$MAC ip=$IP mid=$MID dn=${DN_MBPS}mbps up=${UP_MBPS}mbps iface=$IFACE"
-        # 1. iptables mark
-        sh "$IPT" mark "$IP" "$MAC" "$MID" >> "$LOG" 2>&1 \
+        log "limit mac=$MAC ip=${IP:-(v6-only)} mid=$MID dn=${DN_MBPS}mbps up=${UP_MBPS}mbps iface=$IFACE"
+        # 1. iptables mark (纯 IPv6 设备无 IPv4 时传 "-" 挂载 L2 MAC + IPv6 下行正交标记)
+        sh "$IPT" mark "${IP:--}" "$MAC" "$MID" >> "$LOG" 2>&1 \
             || emit_err "iptables mark failed (mid=$MID, see apply.log)"
         # 2. tc set_limit (内部在 HNC_MARK 已就位后同步执行一次 v6_sync.sh, 无需下方再次重复派发)
-        TC_OUT=$(sh "$TC" set_limit "$IFACE" "$MID" "$DN_MBPS" "$UP_MBPS" "$IP" 2>&1)
+        TC_OUT=$(HNC_CLIENT_MAC="$MAC" sh "$TC" set_limit "$IFACE" "$MID" "$DN_MBPS" "$UP_MBPS" "$IP" 2>&1)
         TC_RC=$?
         [ -n "$TC_OUT" ] && log "tc set_limit output rc=$TC_RC: $TC_OUT"
         [ -x "$HNC_DIR/bin/hnc_clsact_sync.sh" ] && \
@@ -376,9 +403,9 @@ case "$CMD" in
                 if [ "$HAS_DELAY" = "0" ] && [ "$HAS_SUBCLASS" = "0" ]; then
                     sh "$TC" remove "$IFACE" "$MID" >> "$LOG" 2>&1 || true
                     sh "$IPT" unmark "$IP" "$MAC" "$MID" >> "$LOG" 2>&1 || log "rollback iptables unmark warn (mid=$MID)"
-                    notify_offload "$MAC" 0
+                    is_mac_blacklisted "$MAC" || notify_offload "$MAC" 0
                 fi
-                js_set_dev ip "$IP"
+                [ -n "$IP" ] && js_set_dev ip "$IP"
                 js_set_dev down_mbps 0
                 js_set_dev up_mbps 0
                 js_set_dev limit_enabled false
@@ -393,7 +420,7 @@ case "$CMD" in
         notify_offload "$MAC" 1
         [ -s "$HNC_DIR/data/app_limits.flat" ] && : > "$HNC_DIR/run/app_limit.dirty" 2>/dev/null || true
         # 3. 写 rules.json
-        js_set_dev ip "$IP"
+        [ -n "$IP" ] && js_set_dev ip "$IP"
         js_set_dev down_mbps "$DN_MBPS"
         js_set_dev up_mbps "$UP_MBPS"
         js_set_dev limit_enabled true
@@ -417,7 +444,10 @@ case "$CMD" in
     alloc_mid)
         IP=$(get_ip "$MAC")
         if [ -z "$IP" ]; then
-            emit_err "device not found in devices.json (mac=$MAC)"
+            _am_if=$(sh "$DETECT" iface 2>/dev/null)
+            if ! has_device_or_v6_online "$MAC" "$_am_if"; then
+                emit_err "device not found in devices.json (mac=$MAC)"
+            fi
         fi
         gate_lock || emit_err "gate_lock timeout (5s)"
         if ! MID=$(get_or_assign_mid "$MAC"); then
@@ -430,8 +460,8 @@ case "$CMD" in
         fi
         sh "$JSON_SET" device "$MAC" last_seen_persist "$(now_ts)" >> "$LOG" 2>&1 || log "WARN: failed to update last_seen_persist for $MAC"
         gate_unlock
-        log "alloc_mid mac=$MAC ip=$IP mid=$MID"
-        sh "$IPT" mark "$IP" "$MAC" "$MID" >> "$LOG" 2>&1 \
+        log "alloc_mid mac=$MAC ip=${IP:-(v6-only)} mid=$MID"
+        sh "$IPT" mark "${IP:--}" "$MAC" "$MID" >> "$LOG" 2>&1 \
             || emit_err "iptables mark failed (mid=$MID)"
         echo "$MID"
         ;;
@@ -446,6 +476,8 @@ case "$CMD" in
             js_set_dev up_mbps 0
             js_set_dev limit_enabled false
             js_set_dev_flush
+            mkdir -p "$HNC_DIR/run" 2>/dev/null || true
+            : > "$HNC_DIR/run/app_limit.dirty" 2>/dev/null || true
             if [ -n "$JSON_FAILED" ]; then
                 log "clear mac=$MAC (no-mid path) partial JSON write failed: $JSON_FAILED"
                 echo "error: partial_json_fail=$JSON_FAILED"
@@ -475,7 +507,7 @@ case "$CMD" in
 
         if [ "$HAS_DELAY" = "1" ] || [ "$HAS_SUBCLASS" = "1" ]; then
             if [ -n "$IFACE" ] && { [ "$IFACE" != "wlan0" ] || is_authoritative_wlan0_ap; }; then
-                sh "$TC" set_limit "$IFACE" "$MID" 0 0 "$IP" >> "$LOG" 2>&1 \
+                HNC_CLIENT_MAC="$MAC" sh "$TC" set_limit "$IFACE" "$MID" 0 0 "$IP" >> "$LOG" 2>&1 \
                     || log "tc set_limit clear-rate warn (mid=$MID, delay preserved)"
             else
                 log "clear warn: no active iface, preserved iptables mark because delay is still enabled"
@@ -485,7 +517,7 @@ case "$CMD" in
             if [ -n "$IFACE" ] && { [ "$IFACE" != "wlan0" ] || is_authoritative_wlan0_ap; }; then
                 sh "$TC" remove "$IFACE" "$MID" >> "$LOG" 2>&1 || log "tc remove warn (mid=$MID may not be applied)"
             fi
-            notify_offload "$MAC" 0
+            is_mac_blacklisted "$MAC" || notify_offload "$MAC" 0
             UNMARK_IP=$IP
             [ -n "$UNMARK_IP" ] || UNMARK_IP=$(get_rule_ip "$MAC")
             valid_ipv4 "$UNMARK_IP" || UNMARK_IP=""
@@ -495,6 +527,9 @@ case "$CMD" in
         js_set_dev up_mbps 0
         js_set_dev limit_enabled false
         js_set_dev_flush
+        # 触发 apply_app_limits 重算并抬高单应用 1:9eXX 兜底 ceil(消除旧整机限速 ceil 残留钳制)
+        mkdir -p "$HNC_DIR/run" 2>/dev/null || true
+        : > "$HNC_DIR/run/app_limit.dirty" 2>/dev/null || true
         if [ -n "$JSON_FAILED" ]; then
             log "clear applied (tc/iptables OK) but partial JSON write failed: $JSON_FAILED"
             echo "error: partial_json_fail=$JSON_FAILED"
@@ -519,12 +554,17 @@ case "$CMD" in
             sh "$IPT" blacklist_add "" "$MAC" >> "$LOG" 2>&1 \
                 || emit_err "iptables blacklist_add failed (mac-only path, see apply.log)"
         fi
+        # 通知 offload 调度器立即压制并踢除该 MAC 的硬件快路径存量流, 使其回落软件 FORWARD/HNC_CTRL 阻断
+        notify_offload "$MAC" 1
         _bl_json_ok=1
         sh "$JSON_SET" bl_add "$MAC" >/dev/null 2>&1 || _bl_json_ok=0
         if [ -n "$IP" ]; then
             sh "$JSON_SET" device "$MAC" blocked_ip "$IP" >> "$LOG" 2>&1 || _bl_json_ok=0
         fi
         if [ "$_bl_json_ok" = "1" ]; then
+            if [ -f "$HNC_DIR/bin/hnc_clsact_sync.sh" ]; then
+                sh "$HNC_DIR/bin/hnc_clsact_sync.sh" >> "$LOG" 2>&1 || true
+            fi
             log "bl_add OK"
             echo "ok"
         else
@@ -557,6 +597,14 @@ case "$CMD" in
             if [ -n "$BLOCKED_IP" ]; then
                 sh "$JSON_SET" device "$MAC" blocked_ip "" >> "$LOG" 2>&1 \
                     || log "WARN: failed to clear blocked_ip for $MAC"
+            fi
+            if [ -f "$HNC_DIR/bin/hnc_clsact_sync.sh" ]; then
+                sh "$HNC_DIR/bin/hnc_clsact_sync.sh" >> "$LOG" 2>&1 || true
+            fi
+            _bl_le=$(sh "$JSON_SET" device_get "$MAC" limit_enabled 2>/dev/null)
+            _bl_de=$(sh "$JSON_SET" device_get "$MAC" delay_enabled 2>/dev/null)
+            if [ "$_bl_le" != "true" ] && [ "$_bl_de" != "true" ]; then
+                notify_offload "$MAC" 0
             fi
             log "bl_del OK"
             echo "ok"

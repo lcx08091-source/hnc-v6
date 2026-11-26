@@ -49,26 +49,46 @@ function renderStats(anim1) {
 S.puPeriod = 'cycle'; S.pu = {};
 var PU_C = { cell: 'var(--blue)', wifi: 'var(--cyan)', hotspot: 'var(--orange)', local: 'var(--green)' };
 function loadPhoneUsage(period, force) {
-  var c = S.pu[period];
-  if (c && !force && Date.now() - c.at < 60000) return Promise.resolve(c);
+  var c = S.pu[period], dk = new Date().toDateString();
+  if (c && !force && c.dk === dk && Date.now() - c.at < 60000) return Promise.resolve(c);
   return api.get('/api/phone_usage', { period: period }, { timeout: 10000 }).then(function (r) {
-    S.pu[period] = { at: Date.now(), r: r };
+    S.pu[period] = { at: Date.now(), dk: dk, r: r };
     if (r && r.config) {
       S.puCfg = r.config;
       var st = $('#pu-set');
       if (st) st._filled = false;
     }
   })
-    .catch(function (e) { S.pu[period] = { at: Date.now(), err: e && e.status === 404 ? '当前后端还没有本机流量统计（需要新版 hnc_httpd）' : errText(e) }; })
+    .catch(function (e) { S.pu[period] = { at: Date.now(), dk: dk, err: e && e.status === 404 ? '当前后端还没有本机流量统计（需要新版 hnc_httpd）' : errText(e) }; })
     .then(function () { return S.pu[period]; });
 }
-function md(ts) { var d = new Date(num(ts) * 1000); return (d.getMonth() + 1) + '/' + d.getDate(); }
+function parseYMD(s) {
+  var m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(s == null ? '' : s).trim());
+  return m ? { y: +m[1], m: +m[2], d: +m[3] } : null;
+}
+function md(ts, minusOneDay) {
+  var ymd = parseYMD(ts);
+  if (ymd) {
+    if (minusOneDay) {
+      var prev = new Date(ymd.y, ymd.m - 1, ymd.d - 1, 12, 0, 0);
+      return (prev.getMonth() + 1) + '/' + prev.getDate();
+    }
+    return ymd.m + '/' + ymd.d;
+  }
+  var sec = num(ts);
+  if (!sec) return '';
+  var d = new Date((minusOneDay ? sec - 86400 : sec) * 1000);
+  return (d.getMonth() + 1) + '/' + d.getDate();
+}
 function puBodyHtml() {
   var c = S.pu[S.puPeriod];
   if (!c) return '<div class="note">加载中…</div>';
   if (c.err) return '<div class="note ' + (/新版/.test(c.err) ? '' : 'err') + '">' + esc(c.err) + '</div>';
   var r = c.r || {}, cfg = r.config || {}, warn = num(cfg.warn_percent, 80), t = r.totals || {}, g = function (k) { return num(t[k] && t[k].total); };
-  var h = '<div class="pu-cyc">' + (r.cycle_start ? '计费周期 ' + md(r.cycle_start) + ' – ' + md(num(r.cycle_end) - 1) + ' · 每月 ' + num(r.billing_day || cfg.billing_day, 1) + ' 号起算' : '') + (S.puPeriod !== 'cycle' && r.since ? ' · 当前查看 ' + md(r.since) + ' 起' : '') + '</div>';
+  var cycStart = r.cycle_start_date ? md(r.cycle_start_date) : (r.cycle_start ? md(r.cycle_start) : '');
+  var cycEnd = r.cycle_end_inclusive ? md(r.cycle_end_inclusive) : (r.cycle_end_date ? md(r.cycle_end_date, true) : (r.cycle_end ? md(num(r.cycle_end) - 1) : ''));
+  var sinceRaw = r.since_date || (S.puPeriod !== 'today' && Array.isArray(r.by_day) && r.by_day[0] && r.by_day[0].date) || r.since;
+  var h = '<div class="pu-cyc">' + (cycStart ? '计费周期 ' + cycStart + ' – ' + cycEnd + ' · 每月 ' + num(r.billing_day || cfg.billing_day, 1) + ' 号起算' : '') + (S.puPeriod !== 'cycle' && sinceRaw ? ' · 当前查看 ' + md(sinceRaw) + ' 起' : '') + '</div>';
   h += calHtml(r);   // 与系统统计对账
   var rawMaxSlots = num(r.max_slots || r.modem_count || (r.sources && (r.sources.max_slots || r.sources.modem_count)));
   var maxSlots = rawMaxSlots > 0 ? rawMaxSlots : 2;
@@ -135,7 +155,7 @@ function puBodyHtml() {
   '</div>';
   // 每天(今天按小时)堆叠: 蜂窝本机 / Wi-Fi 本机 / 热点。上游量含热点, 热点按蜂窝:Wi-Fi 比例从两者里扣掉, 三段相加 = 上游总量
   var rows = S.puPeriod === 'today' && Array.isArray(r.by_hour) ? r.by_hour.map(function (x) { return { l: pad2(num(x.h)) + ':00', c: num(x.cell), w: num(x.wifi), hs: num(x.hotspot) }; })
-    : (r.by_day || []).map(function (x) { return { l: String(x.date || '').slice(5), c: num(x.cell), w: num(x.wifi), hs: num(x.hotspot) }; });
+    : (r.by_day || []).map(function (x) { var ymd = parseYMD(x.date); return { l: ymd ? (pad2(ymd.m) + '-' + pad2(ymd.d)) : String(x.date || '').slice(5), c: num(x.cell), w: num(x.wifi), hs: num(x.hotspot) }; });
   if (rows.length) {
     rows.forEach(function (x) { var up = x.c + x.w, hs2 = Math.min(x.hs, up), k = up ? x.c / up : 0; x.cl = Math.max(0, x.c - hs2 * k); x.wl = Math.max(0, x.w - hs2 * (1 - k)); x.hh = hs2; x.t = x.cl + x.wl + x.hh; });
     var mx = Math.max.apply(null, rows.map(function (x) { return x.t; }).concat([1])), every = Math.max(1, Math.ceil(rows.length / 5));
@@ -215,31 +235,31 @@ function statsBody() {
 var RANGE_DAYS = { today: 1, week: 7, month: 30 };
 S.appUsage = {};
 function loadAppUsage(days, force) {
-  var c = S.appUsage[days];
-  if (c && !force && Date.now() - c.at < 60000) return Promise.resolve(c.d);
-  return api.get('/api/app_usage', { days: days }, { timeout: 12000 }).then(function (r) { S.appUsage[days] = { at: Date.now(), d: r }; return r; })
-    .catch(function (e) { S.appUsage[days] = { at: 0, d: null, err: errText(e) }; return null; });
+  var c = S.appUsage[days], dk = new Date().toDateString();
+  if (c && !force && c.dk === dk && Date.now() - c.at < 60000) return Promise.resolve(c.d);
+  return api.get('/api/app_usage', { days: days }, { timeout: 12000 }).then(function (r) { S.appUsage[days] = { at: Date.now(), dk: dk, d: r }; return r; })
+    .catch(function (e) { S.appUsage[days] = { at: 0, dk: '', d: null, err: errText(e) }; return null; });
 }
 /* 按应用的真实流量(横条): 未识别 / 局域网 / SDK·CDN 用灰色, 真应用彩色 */
 function appUsageBars(r, max) {
   var apps = (r.by_app || []).map(function (a) { return { id: a.id, n: a.name || a.id, v: num(a.up) + num(a.down), t: num(a.active_sec), inf: num(a.inferred_bytes), gray: a.id === '_unknown' || a.id === '_local' || a.sdk }; });
   var tot = num(r.total_up) + num(r.total_down);
   if (!tot) return '';
-  var top = apps.slice(0, max || 8), rest = sum(apps.slice(max || 8), function (a) { return a.v; }); if (rest > 0) top.push({ n: '其他', v: rest, gray: true });
+  var top = apps.slice(0, max || 8), rest = sum(apps.slice(max || 8), function (a) { return a.v; }); if (rest > 0) top.push({ id: '_rest', n: '其他', v: rest, gray: true });
   var mx = Math.max.apply(null, top.map(function (a) { return a.v; }).concat([1])), unk = apps.filter(function (a) { return a.n === '未识别'; })[0], pal = activeHistColors();
-  return '<div class="note" style="margin-bottom:6px;color:var(--text-2)">合计 ↓ ' + bytes(r.total_down) + ' · ↑ ' + bytes(r.total_up) + (unk ? ' · 未识别占 ' + Math.round(unk.v / tot * 100) + '%' : '') + (num(r.inferred_bytes) > 0 ? ' · 其中 ' + bytes(r.inferred_bytes) + ' 为推测归属' : '') + '</div>' +
-    top.map(function (a, i) { return '<div class="hbar"><span class="n" style="color:var(--text-1);font-weight:600"' + (a.id === TUNNEL_ID ? ' title="VPN/代理隧道：隧道里的应用看不到，按协议特征归到这里"' : '') + '>' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-3)' : pal[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v" style="color:var(--text-2)">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%' + (a.t >= 60 && !a.gray && a.id !== TUNNEL_ID ? '<small style="color:var(--text-2)">使用 ' + fmtDur(a.t) + '</small>' : '') + (a.inf > 0 ? '<small style="color:var(--text-2)" title="目的地址没有域名，按同一时刻建连的应用推测">含推测 ' + bytes(a.inf) + '</small>' : '') + '</span></div>'; }).join('');
+  return '<div class="note" style="margin-bottom:6px;color:var(--text-2)" data-mkey="aub-sum">合计 ↓ ' + bytes(r.total_down) + ' · ↑ ' + bytes(r.total_up) + (unk ? ' · 未识别占 ' + Math.round(unk.v / tot * 100) + '%' : '') + (num(r.inferred_bytes) > 0 ? ' · 其中 ' + bytes(r.inferred_bytes) + ' 为推测归属' : '') + '</div>' +
+    top.map(function (a, i) { return '<div class="hbar" data-mkey="aub:' + esc(a.id || a.n || i) + '"><span class="n" style="color:var(--text-1);font-weight:600"' + (a.id === TUNNEL_ID ? ' title="VPN/代理隧道：隧道里的应用看不到，按协议特征归到这里"' : '') + '>' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-3)' : pal[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v" style="color:var(--text-2)">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%' + (a.t >= 60 && !a.gray && a.id !== TUNNEL_ID ? '<small style="color:var(--text-2)">使用 ' + fmtDur(a.t) + '</small>' : '') + (a.inf > 0 ? '<small style="color:var(--text-2)" title="目的地址没有域名，按同一时刻建连的应用推测">含推测 ' + bytes(a.inf) + '</small>' : '') + '</span></div>'; }).join('');
 }
 function paintStatsApps() {
   var el = $('#st-apps'); if (!el) return;
   var t = $('#st-apps-t'); if (t) t.textContent = RANGE_T[S.statsRange] + ' · 真实流量';
   var c = S.appUsage[RANGE_DAYS[S.statsRange]];
-  if (!c) { el.innerHTML = '<div class="note">加载中…</div>'; return; }
+  if (!c) { morph(el, '<div class="note">加载中…</div>'); return; }
   var r = c.d;
-  if (!r) { el.innerHTML = '<div class="note err">' + esc(c.err || '加载失败') + '</div>'; return; }
-  if (r.readable === false) { el.innerHTML = '<div class="note warn">读不到内核连接表，按应用统计不可用（总量统计不受影响）</div>'; return; }
+  if (!r) { morph(el, '<div class="note err">' + esc(c.err || '加载失败') + '</div>'); return; }
+  if (r.readable === false) { morph(el, '<div class="note warn">读不到内核连接表，按应用统计不可用（总量统计不受影响）</div>'); return; }
   var h = appUsageBars(r, 8);
-  el.innerHTML = h || '<div class="note">' + (r.acct === false ? '内核连接字节计数还没打开，已尝试打开，新连接开始计入' : '这段时间还没有按应用统计的流量记录') + '</div>';
+  morph(el, h || '<div class="note">' + (r.acct === false ? '内核连接字节计数还没打开，已尝试打开，新连接开始计入' : '这段时间还没有按应用统计的流量记录') + '</div>');
 }
 var statsRefreshSeq = 0, puRefreshSeq = 0;
 function refreshStats() {
@@ -250,14 +270,13 @@ function refreshStats() {
       paintDay(); renderBars();
       loadAppUsage(RANGE_DAYS[S.statsRange]).then(function () { if (seq === statsRefreshSeq) paintStatsApps(); });
     })
-    .catch(function (e) { if (seq !== statsRefreshSeq) return; var b = $('#bars'); if (b) b.innerHTML = '<div class="empty" style="position:absolute;inset:0;display:grid;place-items:center">' + esc(errText(e)) + '</div>'; });
+    .catch(function (e) { if (seq !== statsRefreshSeq) return; var b = $('#bars'); if (b) morph(b, '<div class="empty" style="position:absolute;inset:0;display:grid;place-items:center">' + esc(errText(e)) + '</div>'); });
 }
 function paintDay() {
   var t = S.stats.today || [], w = S.stats.week || [];
   var rx = sum(t, function (b) { return num(b.rx); }), tx = sum(t, function (b) { return num(b.tx); });
   tween($('#day-rx'), gb(rx), 2); tween($('#day-tx'), gb(tx), 2);
-  var d = new Date(Date.now() - 86400000), k1 = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()), k2 = pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
-  var y = w.filter(function (b) { return b.label === k1 || b.label === k2 || b.label === k1.replace(/-/g, ''); })[0] || (w.length > 1 ? w[w.length - 2] : null);
+  var y = w.length >= 2 ? w[w.length - 2] : null;
   [['#day-rx-tr', rx, y && num(y.rx)], ['#day-tx-tr', tx, y && num(y.tx)]].forEach(function (x) {
     var el = $(x[0]); if (!el) return;
     if (!x[2]) { el.textContent = '昨日无数据'; el.className = 'tr'; el.style.color = 'var(--text-3)'; return; }
@@ -272,20 +291,24 @@ function renderBars() {
   $('#chart-title').textContent = RANGE_T[S.statsRange];
   var tots = data.map(function (b) { return num(b.rx) + num(b.tx); }), mx = Math.max.apply(null, tots.concat([0]));
   if (!data.length || !mx) {
-    bars.innerHTML = '<div class="empty" style="position:absolute;inset:0;display:grid;place-items:center;padding-left:30px">暂无采样数据</div>';
-    $('#axis').innerHTML = ''; var tb0 = $('#tbl'); if (tb0) tb0.innerHTML = '<div class="empty">暂无数据</div>'; return;
+    morph(bars, '<div class="empty" style="position:absolute;inset:0;display:grid;place-items:center;padding-left:30px">暂无采样数据</div>');
+    morph($('#axis'), ''); var tb0 = $('#tbl'); if (tb0) morph(tb0, '<div class="empty">暂无数据</div>'); return;
   }
   var top = niceTop(gb(mx)), grid = '';
   [0, .5, 1].forEach(function (k) { grid += '<div class="gridl" style="bottom:' + (k * 100) + '%"></div><div class="gridt" style="bottom:calc(' + (k * 100) + '% - 6px)">' + trim0((top * k).toFixed(2)) + (k === 1 ? 'G' : '') + '</div>'; });
-  bars.innerHTML = grid + data.map(function (b, i) {
+  morph(bars, grid + data.map(function (b, i) {
     var r = gb(b.rx) / top * 100, t = gb(b.tx) / top * 100;
-    return '<div class="bcol" data-i="' + i + '"><div class="bar tx" style="--i:' + i + ';height:' + (b.tx > 0 ? Math.max(t, .8) : 0).toFixed(2) + '%"></div><div class="bar rx" style="--i:' + i + ';height:' + (b.rx > 0 ? Math.max(r, .8) : 0).toFixed(2) + '%"></div></div>';
-  }).join('');
+    return '<div class="bcol" data-i="' + i + '" data-mkey="bc:' + i + '"><div class="bar tx" style="--i:' + i + ';height:' + (b.tx > 0 ? Math.max(t, .8) : 0).toFixed(2) + '%"></div><div class="bar rx" style="--i:' + i + ';height:' + (b.rx > 0 ? Math.max(r, .8) : 0).toFixed(2) + '%"></div></div>';
+  }).join(''));
   var every = Math.ceil(data.length / 7);
-  $('#axis').innerHTML = data.map(function (b, i) { return '<span>' + (i % every === 0 ? esc(String(b.label).replace(/^\d{4}-/, '')) : '') + '</span>'; }).join('');
+  morph($('#axis'), data.map(function (b, i) {
+    if (i % every !== 0) return '<span></span>';
+    var ymd = parseYMD(b.label);
+    return '<span>' + esc(ymd ? (pad2(ymd.m) + '-' + pad2(ymd.d)) : String(b.label).replace(/^\d{4}-/, '')) + '</span>';
+  }).join(''));
   var tot = sum(tots);
-  $('#tbl').innerHTML = '<table><thead><tr><th>' + (S.statsRange === 'today' ? '时段' : '日期') + '</th><th>下行</th><th>上行</th><th>合计</th><th>占比</th></tr></thead><tbody>' +
-    data.map(function (b, i) { var s = tots[i]; if (!s) return ''; return '<tr><td class="lb">' + esc(b.label) + '</td><td>' + bytes(b.rx) + '</td><td>' + bytes(b.tx) + '</td><td>' + bytes(s) + '</td><td class="pct"><i style="width:' + (s / mx * 100).toFixed(0) + '%"></i><span>' + (s / tot * 100).toFixed(1) + '%</span></td></tr>'; }).join('') + '</tbody></table>';
+  morph($('#tbl'), '<table><thead><tr><th>' + (S.statsRange === 'today' ? '时段' : '日期') + '</th><th>下行</th><th>上行</th><th>合计</th><th>占比</th></tr></thead><tbody>' +
+    data.map(function (b, i) { var s = tots[i]; if (!s) return ''; return '<tr><td class="lb">' + esc(b.label) + '</td><td>' + bytes(b.rx) + '</td><td>' + bytes(b.tx) + '</td><td>' + bytes(s) + '</td><td class="pct"><i style="width:' + (s / mx * 100).toFixed(0) + '%"></i><span>' + (s / tot * 100).toFixed(1) + '%</span></td></tr>'; }).join('') + '</tbody></table>');
 }
 function barTip(col) {
   var bars = $('#bars'), b = (S.stats[S.statsRange] || [])[+col.getAttribute('data-i')]; if (!b) return;
@@ -329,9 +352,9 @@ function loadDpi(full) {
   return Promise.all(ps).then(function () { if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); paintAppsDot(); });
 }
 function loadDpiHist(days, force) {
-  var c = S.dpiHist[days];
-  if (c && !force && Date.now() - c.at < 300000) return Promise.resolve(c.d);
-  return api.get('/api/dpi_history', { days: days }, { timeout: 12000 }).then(function (r) { S.dpiHist[days] = { at: Date.now(), d: r }; return r; }).catch(function (e) { S.dpiHist[days] = { at: 0, d: null, err: errText(e) }; });
+  var c = S.dpiHist[days], dk = new Date().toDateString();
+  if (c && !force && c.dk === dk && Date.now() - c.at < 300000) return Promise.resolve(c.d);
+  return api.get('/api/dpi_history', { days: days }, { timeout: 12000 }).then(function (r) { S.dpiHist[days] = { at: Date.now(), dk: dk, d: r }; return r; }).catch(function (e) { S.dpiHist[days] = { at: 0, dk: '', d: null, err: errText(e) }; });
 }
 function loadProcHealth() {
   return api.get('/api/proc_health', null, { timeout: 9000 }).then(function (r) { S.proc = r; S.procHealthOk = true; }).catch(function () { S.proc = null; S.procHealthOk = false; });
@@ -352,7 +375,7 @@ function hsMonthRankHtml() {
   var mx = list[0].v || 1, tot = sum(all, function (x) { return x.v; }) || 1, pal = activeHistColors();
   return list.map(function (x, i) {
     var rk = (i < 9 ? '0' : '') + (i + 1);
-    return '<button type="button" class="hbar hbar-btn press' + (x.online ? '' : ' is-offline') + '" data-jump-mac="' + esc(x.mac) + '" title="' + (x.online ? '当前在线 · 点击定位到该设备' : '当前离线 · 点击定位到历史记录') + '">' +
+    return '<button type="button" class="hbar hbar-btn press' + (x.online ? '' : ' is-offline') + '" data-mkey="hmr:' + esc(x.mac) + '" data-jump-mac="' + esc(x.mac) + '" title="' + (x.online ? '当前在线 · 点击定位到该设备' : '当前离线 · 点击定位到历史记录') + '">' +
       '<span class="n"><em class="rk-idx">' + rk + '</em><i class="rk-dot ' + (x.online ? 'on' : 'off') + '" aria-hidden="true"></i><span class="rk-nm">' + esc(x.name) + '</span></span>' +
       '<span><i class="b" style="display:block;width:' + Math.max(2, x.v / mx * 100).toFixed(1) + '%;background:' + pal[i % 8] + '"></i></span>' +
       '<span class="v">' + bytes(x.v) + ' · ' + Math.round(x.v / tot * 100) + '%</span>' +
@@ -491,35 +514,61 @@ function paintDpi() {
   var badge = !r ? ['加载中', 'b-gray'] : !dpiAlive ? ['DPI 引擎未运行', 'b-gray'] : ok ? ['运行中', 'b-ok'] : [health, 'b-warn'];
   var inactiveMsg = S.dpiErr || (r && r.error) || (r && r.stale ? 'DPI 引擎未运行（状态快照已陈旧）' : 'DPI 引擎未运行');
   var hsStandby = S.hotspot.active === false || !!(st && st.mode === 'waiting');
-  var pr = S.probe;
+  var pr = S.probe, ur = st && st.unidentified_ratio;
   var apIf = !hsStandby ? ([st && st.interface, S.hotspot && S.hotspot.iface, pr && pr.ap_iface].filter(function (x) { return !isNonApProbeIface(x); })[0] || '待绑定') : '';
-  hero.innerHTML = '<div class="glass dpihero">' +
+  var ringHtml = '';
+  if (dpiAlive && ur && ur.total_bytes) {
+    var cov = clamp(1 - num(ur.ratio), 0, 1), rr = 18, cc = 2 * Math.PI * rr;
+    var strokeCol = cov < 0.5 ? 'var(--orange)' : 'var(--green)';
+    ringHtml = '<div class="dpi-ring-wrap" id="dpi-cov-ring" data-animated="1">' +
+      '<svg class="dpi-ring-svg" viewBox="0 0 44 44">' +
+        '<circle cx="22" cy="22" r="' + rr + '" fill="none" stroke="var(--stroke-2)" stroke-width="4.2"/>' +
+        '<circle cx="22" cy="22" r="' + rr + '" fill="none" stroke="' + strokeCol + '" stroke-width="4.2" stroke-dasharray="' + cc.toFixed(1) + '" stroke-dashoffset="' + ((1 - cov) * cc).toFixed(1) + '" stroke-linecap="round"/>' +
+      '</svg>' +
+      '<div class="dpi-ring-txt"><div class="num dpi-ring-pct">' + Math.round(cov * 100) + '%</div><div class="dpi-ring-lbl">识别覆盖率</div></div>' +
+    '</div>';
+  }
+  var oldHeroCard = $('#dpihero-card', hero) || $('.dpihero', hero);
+  var savedOptics = {};
+  if (oldHeroCard && oldHeroCard.style) {
+    ['--hyalite', '--hyalite-edge', '--prism-hi', '--prism-lo', '--spot-x', '--spot-y'].forEach(function (vp) {
+      var vv = oldHeroCard.style.getPropertyValue(vp);
+      if (vv) savedOptics[vp] = vv;
+    });
+  }
+  morph(hero, '<div class="glass dpihero" id="dpihero-card" data-mkey="dpihero">' +
     '<div class="dpihero-eyebrow"><span class="l">主力识别通道 · 五层被动感知</span><span class="badge ' + badge[1] + ' dpihero-badge">' + (badge[1] === 'b-ok' ? '<span class="breathe"></span>&nbsp;' : '') + esc(badge[0]) + '</span></div>' +
-    '<div class="top"><div class="dpihero-mode-wrap"><div class="mode">' + esc(st ? (hsStandby ? '热点待机中 · 本机抓包就绪' : (MODE_T[st.mode] || st.mode || '—')) : inactiveMsg) + '</div></div><div id="dpi-ring-slot" class="dpi-ring-slot"></div></div>' +
+    '<div class="top"><div class="dpihero-mode-wrap"><div class="mode">' + esc(st ? (hsStandby ? '热点待机中 · 本机抓包就绪' : (MODE_T[st.mode] || st.mode || '—')) : inactiveMsg) + '</div></div><div id="dpi-ring-slot" class="dpi-ring-slot">' + ringHtml + '</div></div>' +
     (st ? '<div class="note" style="margin-top:6px">' + esc(hsStandby ? '热点待机中 · 本机抓包就绪' : apIf) + ' · 运行 ' + hms(st.uptime_s) + (st.stall_seconds ? ' · 停滞 ' + st.stall_seconds + ' 秒' : '') + (st.blind_reason ? ' · ' + esc(st.blind_reason) : '') + ' · 客户端 ' + num(st.client_count) + '</div>' : '<div class="note" style="margin-top:6px">DPI 引擎未运行，暂不引用陈旧快照伪造实时活跃占比</div>') +
     '<div class="grid">' + [['packets', '已抓包', 'var(--blue)'], ['dns_events', 'DNS 事件', 'var(--cyan)'], ['tls_events', 'TLS 事件', 'var(--purple)'], ['kernel_drops', '内核丢包', 'var(--red)']].map(function (x) {
-      return '<div><div class="n num">' + (dpiAlive ? fmtN(s[x[0]]) : '—') + '</div><div class="l">' + x[1] + '</div>' + (dpiAlive ? sparkSvg(S.dpiSpark[x[0]], x[2]) : '<svg class="spark-mini" width="100" height="26"></svg>') + '</div>'; }).join('') + '</div>' +
+      return '<div data-mkey="dpim:' + x[0] + '"><div class="n num">' + (dpiAlive ? fmtN(s[x[0]]) : '—') + '</div><div class="l">' + x[1] + '</div>' + (dpiAlive ? sparkSvg(S.dpiSpark[x[0]], x[2]) : '<svg class="spark-mini" width="100" height="26"></svg>') + '</div>'; }).join('') + '</div>' +
     '<div class="dpi-algo-bar">' +
       '<span class="dpi-algo-pill"><b>零样本</b> 8跳 CNAME 穿透</span>' +
       '<span class="dpi-algo-pill"><b>零样本</b> 120ms 时间因果突发传播</span>' +
       '<span class="dpi-algo-pill"><b>抗会话裂变</b> TLSFP + QUIC 几何特征</span>' +
       '<span class="dpi-algo-pill"><b>K≥1 少样本</b> IDF-Jaccard + SPLT 原型</span>' +
-    '</div></div>';
+    '</div></div>');
+  var curHeroCard = $('#dpihero-card', hero);
+  if (curHeroCard && curHeroCard.style) {
+    Object.keys(savedOptics).forEach(function (vp) {
+      if (!curHeroCard.style.getPropertyValue(vp)) curHeroCard.style.setProperty(vp, savedOptics[vp]);
+    });
+  }
   var stSlot = $('#dpi-studio-slot');
   if (stSlot && !stSlot.contains(document.activeElement) && typeof selfStudioCardHtml === 'function') { morph(stSlot, selfStudioCardHtml()); placeSegs(stSlot); }
   // 状态
-  var ur = st && st.unidentified_ratio, p = S.proc;
-  $('#dpi-status').innerHTML = !dpiAlive ? stRow('DPI 引擎', esc(inactiveMsg), '') +
+  var p = S.proc;
+  morph($('#dpi-status'), !dpiAlive ? stRow('DPI 引擎', esc(inactiveMsg), '') +
     (p ? stRow('进程健康', esc(p.status || '—'), /ok|healthy/i.test(p.status) ? 'ok' : 'warn', p.counts ? 'dpid ' + num(p.counts.hnc_dpid) + ' · httpd ' + num(p.counts.hnc_httpd) + ' · hotspotd ' + num(p.counts.hotspotd) + ' · watchdog ' + num(p.counts.watchdog_main) + ' · launcher ' + num(p.counts.dpid_guard_main) : esc(p.detail || '')) : '') :
     stRow('健康度', esc(health), ok ? 'ok' : 'warn') + stRow('规则库', fmtDpiRuleVersionHtml(st.l3_rule_version, st.dfp_enabled), '') +
     stRow('识别覆盖', ur && ur.total_bytes ? Math.round((1 - num(ur.ratio)) * 100) + '%' : '—', '', ur && ur.total_bytes ? '已识别 ' + bytes(ur.identified_bytes) + ' / ' + bytes(ur.total_bytes) : '按字节') +
     stRow('去重域名', num(st.unique_sni) + ' SNI · ' + num(st.unique_hostnames) + ' 主机名 · ' + num(st.unique_ja4) + ' 种指纹', '') +
     (st.evidence_summary && st.evidence_summary.total ? stRow('识别依据统计', num(st.evidence_summary.total) + ' 条', '', Object.keys(st.evidence_summary.by_source || {}).map(function (k) { var zh = { sni: 'TLS域名', dns: 'DNS解析', cname: 'CNAME链', quic: 'QUIC握手', ja4: '协议指纹', fp: '学习指纹', burst: '并发关联', proto: '流量形态', ip: '已知IP' }[k] || k; return esc(zh) + ' ' + esc(st.evidence_summary.by_source[k]); }).join(' · ')) : '') +
     stRow('重新绑定', num(st.rebind_count) + ' 次', '', '<button class="linkish" data-act="dpi-rebind">立即重新绑定</button>') +
-    (p ? stRow('进程健康', esc(p.status || '—'), /ok|healthy/i.test(p.status) ? 'ok' : 'warn', p.counts ? 'dpid ' + num(p.counts.hnc_dpid) + ' · httpd ' + num(p.counts.hnc_httpd) + ' · hotspotd ' + num(p.counts.hotspotd) + ' · watchdog ' + num(p.counts.watchdog_main) + ' · launcher ' + num(p.counts.dpid_guard_main) : esc(p.detail || '')) : '');
+    (p ? stRow('进程健康', esc(p.status || '—'), /ok|healthy/i.test(p.status) ? 'ok' : 'warn', p.counts ? 'dpid ' + num(p.counts.hnc_dpid) + ' · httpd ' + num(p.counts.hnc_httpd) + ' · hotspotd ' + num(p.counts.hotspotd) + ' · watchdog ' + num(p.counts.watchdog_main) + ' · launcher ' + num(p.counts.dpid_guard_main) : esc(p.detail || '')) : ''));
   // 五层抓包与流量感知矩阵探测
   var l4St = dpiL4ProbeState();
-  $('#dpi-probe').innerHTML = (!pr ? '' :
+  morph($('#dpi-probe'), (!pr ? '' :
     stRow('L1 · AF_PACKET + cBPF 旁路抓头', !dpiAlive ? 'DPI 引擎未运行' : (pr.af_packet_available ? (hsStandby ? '热点待机中 · 本机抓包就绪' : '就绪 · 零改包') : '受限 · 自动降级'), !dpiAlive ? '' : (pr.af_packet_available ? 'ok' : 'warn'), '只抓 DNS / TLS / QUIC 握手包头（384B），不解密正文 · ' + (hsStandby ? '热点待机中 · 本机抓包就绪' : '接口 ' + esc(apIf))) +
     stRow('L2 · nf_conntrack 内核连接对账', pr.conntrack_readable ? '可读 · 全字节' : '不可读', pr.conntrack_readable ? 'ok' : 'warn', '即使 AF_PACKET 受限仍可按连接表统计真实上下行字节 · ' + esc(pr.conntrack_path || '/proc/net/nf_conntrack')) +
     dpiL3ProbeRow(pr, hsStandby)) +
@@ -527,7 +576,7 @@ function paintDpi() {
       ? stRow('L4 · /proc/net UID 本机真值对齐', 'DPI 引擎未运行', '', 'DPI 引擎未运行，暂不展示陈旧 L4 实时协议分布') +
         stRow('L5 · 被动终端栈与密文几何画像', 'DPI 引擎未运行', '', 'DPI 引擎未运行，暂不展示陈旧 L5 协议特征与活跃占比')
       : stRow('L4 · /proc/net UID 本机真值对齐', l4St.v, l4St.cls, l4St.s) +
-        stRow('L5 · 被动终端栈与密文几何画像', st && st.dfp_enabled !== false ? '已启用' : '基础模式', 'ok', 'DHCP Option 55/60 + mDNS + JA4 + 8 包 SPLT 序列应对 ECH/无域名流'));
+        stRow('L5 · 被动终端栈与密文几何画像', st && st.dfp_enabled !== false ? '已启用' : '基础模式', 'ok', 'DHCP Option 55/60 + mDNS + JA4 + 8 包 SPLT 序列应对 ECH/无域名流')));
   paintDpiHist(); paintClients(); paintUnknown(); paintUnkTraffic(); paintIdent(); paintDiscEntry();
   if (S.open.deval) {
     var evEl0 = $('#eval-body');
@@ -543,27 +592,27 @@ function paintDpi() {
 /* 未识别流量(按字节) —— 连接表里没被规则库认出来的域名 / IP */
 S.dpiUnk = {};
 function loadDpiUnk(days, force) {
-  var c = S.dpiUnk[days];
-  if (c && !force && Date.now() - c.at < 120000) return Promise.resolve(c);
-  return api.get('/api/dpi_unknown', { days: days }, { timeout: 10000 }).then(function (r) { S.dpiUnk[days] = { at: Date.now(), r: r }; })
-    .catch(function (e) { S.dpiUnk[days] = { at: Date.now(), err: e && e.status === 404 ? '当前后端还不支持（需要新版 hnc_httpd）' : errText(e) }; });
+  var c = S.dpiUnk[days], dk = new Date().toDateString();
+  if (c && !force && c.dk === dk && Date.now() - c.at < 120000) return Promise.resolve(c);
+  return api.get('/api/dpi_unknown', { days: days }, { timeout: 10000 }).then(function (r) { S.dpiUnk[days] = { at: Date.now(), dk: dk, r: r }; })
+    .catch(function (e) { S.dpiUnk[days] = { at: Date.now(), dk: dk, err: e && e.status === 404 ? '当前后端还不支持（需要新版 hnc_httpd）' : errText(e) }; });
 }
 function paintUnkTraffic() {
   var el = $('#dpi-unk2'); if (!el) return;
   var c = S.dpiUnk[S.dpiDays];
-  if (!c) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
-  if (c.err) { el.innerHTML = '<div class="note" style="padding:12px 14px">' + esc(c.err) + '</div>'; return; }
+  if (!c) { morph(el, '<div class="empty">加载中…</div>'); return; }
+  if (c.err) { morph(el, '<div class="note" style="padding:12px 14px">' + esc(c.err) + '</div>'); return; }
   var r = c.r || {}, items = (r.items || []).slice(0, 20), tot = num(r.total_unknown_bytes), tb = num(r.tunnel_bytes), ib = num(r.inferred_bytes);
   // 已从「未识别」里分出去的两块 —— VPN/代理隧道、共现推断
   var split = tb > 0 || ib > 0 ? '<div class="note" style="padding:10px 14px 0">另有 ' + [tb > 0 ? '<b>' + bytes(tb) + '</b> 已归为 ' + ico('tunnel', 'tun-i') + 'VPN 隧道' : '', ib > 0 ? '<b>' + bytes(ib) + '</b> 为推测归属（按同一时刻建连的应用）' : ''].filter(Boolean).join('、') + '，不算在未识别里</div>' : '';
-  if (!items.length) { el.innerHTML = split + '<div class="empty">' + (tot ? '有 ' + bytes(tot) + ' 未识别流量，但没记下去向' : uiSvg('check') + ' 这段时间的流量已全部精准识别') + '</div>'; return; }
-  el.innerHTML = split + '<div class="note" style="padding:10px 14px 0">' + ({ 1: '今日', 3: '近 3 天', 7: '近 7 天' }[S.dpiDays] || '') + '未识别共 ' + bytes(tot) + ' · 下面是最多的 ' + items.length + ' 个去向</div>' +
+  if (!items.length) { morph(el, split + '<div class="empty">' + (tot ? '有 ' + bytes(tot) + ' 未识别流量，但没记下去向' : uiSvg('check') + ' 这段时间的流量已全部精准识别') + '</div>'); return; }
+  morph(el, split + '<div class="note" style="padding:10px 14px 0">' + ({ 1: '今日', 3: '近 3 天', 7: '近 7 天' }[S.dpiDays] || '') + '未识别共 ' + bytes(tot) + ' · 下面是最多的 ' + items.length + ' 个去向</div>' +
     items.map(function (u) {
       var ds = devNames(u.macs || []);
-      return '<div class="client unk2"><div class="top"><span class="nm">' + esc(u.name_or_ip) + '</span><span class="pill-count">' + bytes(u.bytes) + '</span></div>' +
+      return '<div class="client unk2" data-mkey="unk2:' + esc(u.name_or_ip) + '"><div class="top"><span class="nm">' + esc(u.name_or_ip) + '</span><span class="pill-count">' + bytes(u.bytes) + '</span></div>' +
         '<div class="sub">' + (u.kind === 'ip' ? 'IP（没抓到域名）' : '域名') + (u.sample && u.sample !== u.name_or_ip ? ' · 例 <span class="mono">' + esc(u.sample) + '</span>' : '') + ' · ' + num(u.devices, ds.length) + ' 台设备' + (ds.length ? '：' + esc(ds.slice(0, 3).join('、')) + (ds.length > 3 ? ' 等' : '') : '') + '</div></div>';
     }).join('') +
-    '<div class="note" style="padding:8px 14px 12px">可在 <button class="linkish" data-act="disc-open" style="font-size:inherit">新发现的应用</button> 里把它们加进规则库</div>';
+    '<div class="note" style="padding:8px 14px 12px">可在 <button class="linkish" data-act="disc-open" style="font-size:inherit">新发现的应用</button> 里把它们加进规则库</div>');
 }
 var HIST_COLORS = ['#007AFF', '#AF52DE', '#34C759', '#FF9500', '#FF2D55', '#32ADE6', '#5856D6', '#8E8E93'];
 function paintDpiHist() {
@@ -572,26 +621,26 @@ function paintDpiHist() {
   var au = S.appUsage[S.dpiDays], ar = au && au.d;
   if (ar && num(ar.total_up) + num(ar.total_down) > 0) {
     var hrs0 = ar.by_hour || [], hm0 = Math.max.apply(null, hrs0.map(function (h) { return num(h.up) + num(h.down); }).concat([1]));
-    el.innerHTML = appUsageBars(ar, 7) + (S.dpiDays === 1 && hrs0.length ? '<div class="note" style="margin-top:10px">按小时分布</div><div class="mini-bars">' + hrs0.map(function (h, i) { var v = num(h.up) + num(h.down); return '<i title="' + i + ':00 · ' + bytes(v) + '" style="height:' + Math.max(1.5, v / hm0 * 100).toFixed(1) + '%;animation-delay:' + i * 15 + 'ms"></i>'; }).join('') + '</div><div class="mini-axis"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>' : '') +
-      '<div class="note" style="margin-top:8px">真实流量 · 来自内核连接表</div>';
+    morph(el, appUsageBars(ar, 7) + (S.dpiDays === 1 && hrs0.length ? '<div class="note" style="margin-top:10px" data-mkey="dh-hr-lbl">按小时分布</div><div class="mini-bars" data-mkey="dh-hr-bars">' + hrs0.map(function (h, i) { var v = num(h.up) + num(h.down); return '<i data-mkey="mb:' + i + '" title="' + i + ':00 · ' + bytes(v) + '" style="height:' + Math.max(1.5, v / hm0 * 100).toFixed(1) + '%;animation-delay:' + i * 15 + 'ms"></i>'; }).join('') + '</div><div class="mini-axis" data-mkey="dh-hr-ax"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>' : '') +
+      '<div class="note" style="margin-top:8px" data-mkey="dh-src-note">真实流量 · 来自内核连接表</div>');
     return;
   }
   var c = S.dpiHist[S.dpiDays];
-  if (!c) { el.innerHTML = '<div class="note">加载中…</div>'; return; }
-  var r = c.d; if (!r) { el.innerHTML = '<div class="note err">' + esc(c.err || '加载失败') + '</div>'; return; }
+  if (!c) { morph(el, '<div class="note">加载中…</div>'); return; }
+  var r = c.d; if (!r) { morph(el, '<div class="note err">' + esc(c.err || '加载失败') + '</div>'); return; }
   var apps = (r.by_app || []).map(function (a) { return { id: a.app_id || a.id, n: a.name || a.app_id || '未知', v: num(a.rx) + num(a.tx) }; }).sort(function (a, b) { return b.v - a.v; });
   var tot = num(r.total_rx) + num(r.total_tx);
-  if (!tot) { el.innerHTML = '<div class="note">这段时间没有 DPI 流量记录</div>'; return; }
-  var top = apps.slice(0, 7), rest = sum(apps.slice(7), function (a) { return a.v; }); if (rest > 0) top.push({ n: '其他', v: rest, gray: true });
+  if (!tot) { morph(el, '<div class="note">这段时间没有 DPI 流量记录</div>'); return; }
+  var top = apps.slice(0, 7), rest = sum(apps.slice(7), function (a) { return a.v; }); if (rest > 0) top.push({ id: '_rest', n: '其他', v: rest, gray: true });
   var mx = top.length ? top[0].v : 1, pal = activeHistColors();
   var hrs = r.by_hour || [], hm = Math.max.apply(null, hrs.map(function (h) { return num(h.rx) + num(h.tx); }).concat([1]));
-  el.innerHTML = '<div class="note" style="margin-bottom:6px;color:var(--text-2)">合计 ↓ ' + bytes(r.total_rx) + ' · ↑ ' + bytes(r.total_tx) + ' · ' + num(r.sample_count) + ' 个采样</div>' +
-    top.map(function (a, i) { return '<div class="hbar"><span class="n" style="color:var(--text-1);font-weight:600">' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-3)' : pal[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v" style="color:var(--text-2)">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%</span></div>'; }).join('') +
-    (hrs.length ? '<div class="note" style="margin-top:10px">按小时分布</div><div class="mini-bars">' + hrs.map(function (h, i) { var v = num(h.rx) + num(h.tx); return '<i title="' + i + ':00 · ' + bytes(v) + '" style="height:' + Math.max(1.5, v / hm * 100).toFixed(1) + '%;animation-delay:' + i * 15 + 'ms"></i>'; }).join('') + '</div><div class="mini-axis"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>' : '');
+  morph(el, '<div class="note" style="margin-bottom:6px;color:var(--text-2)" data-mkey="dh-sum">合计 ↓ ' + bytes(r.total_rx) + ' · ↑ ' + bytes(r.total_tx) + ' · ' + num(r.sample_count) + ' 个采样</div>' +
+    top.map(function (a, i) { return '<div class="hbar" data-mkey="dhb:' + esc(a.id || a.n || i) + '"><span class="n" style="color:var(--text-1);font-weight:600">' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-3)' : pal[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v" style="color:var(--text-2)">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%</span></div>'; }).join('') +
+    (hrs.length ? '<div class="note" style="margin-top:10px" data-mkey="dh-hr-lbl">按小时分布</div><div class="mini-bars" data-mkey="dh-hr-bars">' + hrs.map(function (h, i) { var v = num(h.rx) + num(h.tx); return '<i data-mkey="mb:' + i + '" title="' + i + ':00 · ' + bytes(v) + '" style="height:' + Math.max(1.5, v / hm * 100).toFixed(1) + '%;animation-delay:' + i * 15 + 'ms"></i>'; }).join('') + '</div><div class="mini-axis" data-mkey="dh-hr-ax"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>' : ''));
 }
 function paintClients() {
   var el = $('#dpi-clients'); if (!el) return;
-  if (!isDpiEngineAlive()) { el.innerHTML = '<div class="empty">DPI 引擎未运行</div>'; return; }
+  if (!isDpiEngineAlive()) { morph(el, '<div class="empty">DPI 引擎未运行</div>'); return; }
   var st = S.dpi && S.dpi.available && S.dpi.state, cl = st && st.clients ? Object.keys(st.clients).map(function (k) { return st.clients[k]; }) : [];
   var now = Date.now() / 1000;
   cl = cl.filter(function (c) {
@@ -599,15 +648,15 @@ function paintClients() {
     if (S.dpiFilter === 'high') return (c.top_apps || []).some(function (a) { return a.confidence === 'high'; });
     return true;
   }).sort(function (a, b) { return num(b.last_seen) - num(a.last_seen); });
-  if (!cl.length) { el.innerHTML = '<div class="empty">' + (st ? '没有符合条件的设备' : '等待 dpid 数据…') + '</div>'; return; }
-  el.innerHTML = cl.slice(0, 30).map(function (c) {
+  if (!cl.length) { morph(el, '<div class="empty">' + (st ? '没有符合条件的设备' : '等待 dpid 数据…') + '</div>'); return; }
+  morph(el, cl.slice(0, 30).map(function (c, idx) {
     var d = c.client_mac ? devBy(c.client_mac) : null, ips = c.client_ips && c.client_ips.length ? c.client_ips : [c.client_ip];
-    return '<div class="client"><div class="top"><span class="nm">' + esc(d ? d.name : (c.last_hostname || c.client_mac || c.client_ip)) + (c.sim || (d && d.sim) ? ' <span class="badge b-sim">模拟</span>' : '') + '</span><span class="pill-count">' + ago(c.last_seen) + '</span></div>' +
+    return '<div class="client" data-mkey="cl:' + esc(c.client_mac || c.client_ip || idx) + '"><div class="top"><span class="nm">' + esc(d ? d.name : (c.last_hostname || c.client_mac || c.client_ip)) + (c.sim || (d && d.sim) ? ' <span class="badge b-sim">模拟</span>' : '') + '</span><span class="pill-count">' + ago(c.last_seen) + '</span></div>' +
       (d && d.idText ? '<div class="sub">' + d.icon + ' ' + esc(d.idText) + '</div>' : '') +
       '<div class="sub mono">' + esc(ips.slice(0, 2).join(' · ')) + (ips.length > 2 ? ' +' + (ips.length - 2) : '') + ' · DNS ' + num(c.dns_events) + ' · TLS ' + num(c.tls_events) + (c.rx_bytes || c.tx_bytes ? ' · ↓' + bytes(c.rx_bytes) + ' ↑' + bytes(c.tx_bytes) : '') + '</div>' +
       (c.last_sni ? '<div class="sub mono">最近 ' + esc(c.last_sni) + '</div>' : '') +
       ((c.top_apps || []).length ? '<div class="apps">' + c.top_apps.slice(0, 6).map(function (a) { return '<span class="badge ' + (a.id === TUNNEL_ID ? 'b-gray' : a.confidence === 'high' ? 'b-acc' : a.confidence === 'low' ? 'b-gray' : 'b-pur') + '">' + appNmH(a.id, a.name) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('') + '</div>' : '') + '</div>';
-  }).join('');
+  }).join(''));
 }
 function guessSuffix(host) {
   host = String(host || '').toLowerCase().replace(/^\*\.?/, '').replace(/:\d+$/, '').replace(/\.$/, '');
@@ -646,11 +695,11 @@ function loadDisc() { return api.getSafe('/api/discover', null, null).then(funct
 function discEntryHtml() {
   var r = S.disc, n = r && r.groups ? r.groups.length : 0;
   var named = r && r.groups ? r.groups.filter(function (g) { return g.guess && g.guess.src !== 'domain'; }).length : 0;
-  return '<button class="disc-entry press" data-act="disc-open"><span class="studio-orb disc-orb">' + studioSvg('discover') + '</span><span class="tx"><div class="t">新发现的应用</div><div class="s">' +
+  return '<button class="disc-entry press" data-act="disc-open" data-mkey="disc-entry-btn"><span class="studio-orb disc-orb">' + studioSvg('discover') + '</span><span class="tx"><div class="t">新发现的应用</div><div class="s">' +
     (!r ? '加载中…' : r.available === false ? '等 DPI 运行一段时间后，规则库认不出的应用会出现在这里' : n ? '规则库里没有的 ' + n + ' 个应用' + (named ? '，已认出 ' + named + ' 个是谁' : '') + ' · 点开确认' : '暂时没有 · 规则库都认得') +
     '</div></span>' + (n ? '<span class="n">' + n + '</span>' : '') + ico('right', 'chev') + '</button>';
 }
-function paintDiscEntry() { var el = $('#disc-entry'); if (el) el.innerHTML = discEntryHtml(); }
+function paintDiscEntry() { var el = $('#disc-entry'); if (el) morph(el, discEntryHtml()); }
 function discTags(g) {
   var t = '', gs = g.guess || {}, sg = g.suggest || {};
   if (sg.conflict) t += '<span class="dtag">建议有分歧</span>'; // v5.28 B2: 两个中等以上来源名字不同
@@ -777,21 +826,21 @@ function discAct(act) {
 function paintIdent() {
   var el = $('#dpi-ident'); if (!el) return;
   var ds = S.devices.filter(function (d) { return d.ident; }).sort(function (a, b) { return (b.online - a.online) || num(b.ident.confidence) - num(a.ident.confidence); });
-  if (!ds.length) { el.innerHTML = '<div class="empty">还没有识别结果 · 设备重新连接热点后会通过 DHCP / mDNS 自动识别</div>'; return; }
+  if (!ds.length) { morph(el, '<div class="empty">还没有识别结果 · 设备重新连接热点后会通过 DHCP / mDNS 自动识别</div>'); return; }
   var tot = S.devices.filter(function (d) { return d.online; }).length, got = ds.filter(function (d) { return d.online; }).length;
-  el.innerHTML = '<div class="note" style="padding:10px 14px 0">在线 ' + tot + ' 台，已识别 ' + got + ' 台</div>' + ds.slice(0, 30).map(function (d) {
+  morph(el, '<div class="note" style="padding:10px 14px 0" data-mkey="id-sum">在线 ' + tot + ' 台，已识别 ' + got + ' 台</div>' + ds.slice(0, 30).map(function (d) {
     var c = num(d.ident.confidence);
-    return '<div class="client"><div class="top"><span class="nm">' + d.icon + ' ' + esc(d.name) + (d.sim ? ' <span class="badge b-sim">模拟</span>' : '') + '</span><span class="pill-count">' + c + '%</span></div>' +
+    return '<div class="client" data-mkey="id:' + esc(d.mac) + '"><div class="top"><span class="nm">' + d.icon + ' ' + esc(d.name) + (d.sim ? ' <span class="badge b-sim">模拟</span>' : '') + '</span><span class="pill-count">' + c + '%</span></div>' +
       '<div class="sub">' + esc(d.idText || '—') + (d.online ? '' : ' · 离线') + '</div>' +
       (d.ident.evidence && d.ident.evidence.length ? '<div class="sub mono">' + esc(d.ident.evidence.slice(0, 3).map(function (e) { return (EV_SRC[e.src] || e.src) + ' ' + e.detail; }).join(' · ')) + '</div>' : '') + '</div>';
-  }).join('');
+  }).join(''));
 }
 function paintUnknown() {
   var el = $('#dpi-unknown'); if (!el) return;
   var unk = unknownHints(), list = unk || domainHints();
   var tt = $('#dpi-unknown-t'); if (tt) tt.textContent = unk ? '自动标注公共 CDN / SDK · 避免误绑单应用' : '高频域名观察 · 自动识别公共基础设施';
-  if (!list) { el.innerHTML = '<div class="empty">等待 dpid 数据…</div>'; return; }
-  if (!list.length) { el.innerHTML = '<div class="empty">还没有抓到未识别域名</div>'; return; }
+  if (!list) { morph(el, '<div class="empty">等待 dpid 数据…</div>'); return; }
+  if (!list.length) { morph(el, '<div class="empty">还没有抓到未识别域名</div>'); return; }
   var sharedCnt = 0;
   var enriched = list.map(function (u) {
     var inf = typeof classifyInfraHost === 'function' ? classifyInfraHost(u.n) : null;
@@ -799,16 +848,16 @@ function paintUnknown() {
     return { u: u, inf: inf };
   });
   var shown = S.hideSharedUnk ? enriched.filter(function (x) { return !(x.inf && x.inf.shared); }) : enriched;
-  var bar = '<div class="sni-row" style="justify-content:space-between;background:var(--input)">' +
+  var bar = '<div class="sni-row" data-mkey="unk-bar" style="justify-content:space-between;background:var(--input)">' +
     '<span style="font-size:12px;color:var(--text-2)">共 ' + enriched.length + ' 个域名，已自动豁免 <b>' + sharedCnt + '</b> 个公共 CDN/SDK</span>' +
     '<button type="button" class="wp-mpill press' + (S.hideSharedUnk ? ' on' : '') + '" data-act="toggle-hide-shared">' +
       (S.hideSharedUnk ? '已隐藏公共 CDN (' + sharedCnt + ')' : '隐藏公共 CDN/SDK') +
     '</button></div>';
-  el.innerHTML = bar + (shown.length ? shown.map(function (x) {
+  morph(el, bar + (shown.length ? shown.map(function (x) {
     var u = x.u, inf = x.inf, isSh = inf && inf.shared;
-    return '<div class="sni-row' + (isSh ? ' is-shared-infra' : '') + '"><span class="dw"><span class="d" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' + esc(u.n) + ' ' + (inf ? infraBadgeHtml(inf) : '') + '</span><span class="c">' + Object.keys(u.k).join('/') + ' · ' + u.c + ' 次 · 后缀 ' + esc(guessSuffix(u.n)) + (isSh ? ' · 多应用共用基础设施' : '') + '</span></span>' +
+    return '<div class="sni-row' + (isSh ? ' is-shared-infra' : '') + '" data-mkey="sni:' + esc(u.n) + '"><span class="dw"><span class="d" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' + esc(u.n) + ' ' + (inf ? infraBadgeHtml(inf) : '') + '</span><span class="c">' + Object.keys(u.k).join('/') + ' · ' + u.c + ' 次 · 后缀 ' + esc(guessSuffix(u.n)) + (isSh ? ' · 多应用共用基础设施' : '') + '</span></span>' +
       (isSh ? '<span class="badge b-gray">已豁免</span>' : '<button class="btn sec press" data-rule-tpl="' + esc(u.n) + '">生成规则</button>') + '</div>';
-  }).join('') : '<div class="empty">过滤公共 CDN/SDK 后暂无剩余未知专属域名</div>');
+  }).join('') : '<div class="empty">过滤公共 CDN/SDK 后暂无剩余未知专属域名</div>'));
 }
 function mergeCustomDpiRules(existingRaw, incomingObj) {
   var exObj = existingRaw;
@@ -883,7 +932,8 @@ function ruleTemplate(host) {
       if (!cur || !Array.isArray(cur.rules)) return;
       var merged = mergeCustomDpiRules(r.rules, cur);
       ta.value = JSON.stringify(merged, null, 2);
-      ta.dataset.needsMerge = '1';
+      ta.dataset.exported = '1';
+      delete ta.dataset.needsMerge;
     });
   }
   toast('已加入规则模板（' + suf + '），改好 app / category 后点「保存并重载」');
@@ -897,10 +947,11 @@ function rulesAct(act) {
       ta.value = typeof r.rules === 'string' ? r.rules : JSON.stringify(r.rules || r, null, 2);
       ta.dataset.exported = '1';
       delete ta.dataset.needsMerge;
+      delete ta.dataset.mergeImport;
       rulesOut('已读取 · 来源 ' + (r.source || '—') + ' · ' + (ta.value.length / 1024).toFixed(1) + ' KB');
     }).catch(function (e) { rulesOut(errText(e), 'err'); });
   }
-  if (act === 'rules-import') {
+  if (act === 'rules-import' || act === 'rules-append') {
     var txt = ta.value.trim(); if (!txt) { toast('先粘贴规则 JSON', 'warn'); return; }
     var parsed;
     try { parsed = JSON.parse(txt); } catch (e) { rulesOut('JSON 格式错误：' + e.message, 'err'); return; }
@@ -912,24 +963,31 @@ function rulesAct(act) {
       toast('请先移除共享或非法域名：' + badDom.host, 'warn');
       return;
     }
-    var shouldMerge = ta.dataset.exported !== '1' || ta.dataset.needsMerge === '1';
-    var desc = '将与当前已有自定义规则按 id 原子合并保存（保留既有自定义规则，内置规则不受影响），dpid 随后自动重载。';
+    var explicitAppend = act === 'rules-append' || ta.dataset.mergeImport === '1';
+    var pendingTplMerge = !explicitAppend && ta.dataset.needsMerge === '1';
+    var desc = explicitAppend
+      ? '将与当前已有自定义规则按 id 追加合并保存（保留既有自定义规则，内置规则不受影响），dpid 随后自动重载。'
+      : '将以编辑器当前内容全量保存自定义规则库（已删除的自定义条目不会复活，内置规则不受影响），dpid 随后自动重载。';
     return confirmSheet('保存自定义规则库？', desc, '保存', { safe: true }).then(function (ok) {
       if (!ok) return;
       rulesOut('保存中…');
-      var prep = shouldMerge
+      var prep = pendingTplMerge
         ? api.getSafe('/api/dpi_rules', null, null).then(function (r0) {
-            var finObj = (r0 && r0.rules) ? mergeCustomDpiRules(r0.rules, parsed) : parsed;
-            var finTxt = JSON.stringify(finObj, null, 2);
-            if (finTxt.length > 512 * 1024) throw new Error('合并后超过 512 KB');
-            if (ta && ta.isConnected) { ta.value = finTxt; ta.dataset.exported = '1'; delete ta.dataset.needsMerge; }
-            return finTxt;
+            if (r0 && r0.rules) {
+              var finObj = mergeCustomDpiRules(r0.rules, parsed);
+              var finTxt = JSON.stringify(finObj, null, 2);
+              if (finTxt.length > 512 * 1024) throw new Error('合并后超过 512 KB');
+              if (ta && ta.isConnected) { ta.value = finTxt; ta.dataset.exported = '1'; delete ta.dataset.needsMerge; }
+              return { txt: finTxt, merge: false };
+            }
+            return { txt: txt, merge: true };
           })
-        : Promise.resolve(txt);
-      return prep.then(function (sendTxt) {
-        return api.post('/api/dpi_rules', { rules: sendTxt, merge: true }, { timeout: 30000, maxTime: 28 });
+        : Promise.resolve({ txt: txt, merge: explicitAppend });
+      return prep.then(function (payload) {
+        return api.post('/api/dpi_rules', { rules: payload.txt, merge: payload.merge }, { timeout: 30000, maxTime: 28 });
       }).then(function (r) {
         if (r.ok === false) throw new Error(r.error || '导入失败');
+        if (ta && ta.isConnected) { ta.dataset.exported = '1'; delete ta.dataset.needsMerge; delete ta.dataset.mergeImport; }
         rulesOut(r.detail || '已保存');
         toast('规则库已保存并重载');
       }).catch(function (e) { rulesOut(errText(e), 'err'); });

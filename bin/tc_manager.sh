@@ -889,7 +889,7 @@ ensure_device_class() {
     # 当成命令执行, 每次 ensure_device_class 都报 command not found 污染 stderr.
     # 还活着是因为没开 set -e. 合并进上一行注释即可.
     local u32_ok=0
-    if [ -n "$ip" ]; then
+    if [ -n "$ip" ] && [ "$ip" != "-" ] && [ "${ip#*:}" = "$ip" ]; then
         if [ "$direction" = "src" ]; then
             tc_filter_u32_src "$dev" "$prio" "$ip" "1:$class_id" && u32_ok=1 || \
                 log_error "ensure_device_class: u32 src filter failed dev=$dev ip=$ip class=1:$class_id"
@@ -1029,7 +1029,7 @@ tune_leaf_netem_limit() {
 # tc `police` works — common on vendor wifi drivers / GKI without act_mirred),
 # limit per-client uplink with an ingress police filter matched by src IP on the
 # hotspot iface. No IFB redirect needed. Best-effort: any failure falls back to
-# downlink-only (same as before this path existed). IPv4 only for now.
+# downlink-only (same as before this path existed). IPv4 + pure-IPv6 dual-stack.
 ensure_ingress_qdisc() {
     local iface=$1
     tc qdisc show dev "$iface" 2>/dev/null | grep -qE 'qdisc (ingress|clsact) ffff:' && return 0
@@ -1045,7 +1045,7 @@ _ingress_filter_parent() {
         echo "parent ffff:"
     fi
 }
-# v5.38.0: 双栈化无 IFB 机型的 ingress police 上行限速 (补齐 IPv6 邻居全局单播源地址过滤, 彻底堵住 GKI 6.1/6.6 无 IFB 时 IPv6 上行 100% 逃逸漏洞)
+# v5.38.0+: 双栈化无 IFB 机型的 ingress police 上行限速 (支持 IPv4 与纯 IPv6 设备, 彻底堵住 GKI 6.1/6.6 无 IFB 时上行逃逸漏洞)
 # 计算 police 突发桶字节数: burst = max(rate_bytes_per_sec / 8, 65536), 确保 >= 64KB 容纳 GRO/TSO 超大帧!
 police_burst_bytes() {
     awk -v r="$1" 'BEGIN {
@@ -1061,8 +1061,29 @@ police_burst_bytes() {
     }'
 }
 
+_resolve_mac_by_mid() {
+    local _mid="$1"
+    [ -n "$_mid" ] && [ -f "$RULES_FILE" ] || return 0
+    tr -d '\r\n' < "$RULES_FILE" 2>/dev/null | awk -v want="$_mid" '
+    {
+        s = $0
+        while (match(s, /"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^{}]*\}/)) {
+            blk = substr(s, RSTART, RLENGTH)
+            s = substr(s, RSTART + RLENGTH)
+            if (match(blk, /"mark_id"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+                seg = substr(blk, RSTART, RLENGTH)
+                sub(/.*:[[:space:]]*/, "", seg)
+                if (seg == want) {
+                    print tolower(substr(blk, 2, 17))
+                    exit
+                }
+            }
+        }
+    }'
+}
+
 set_uplink_police() {
-    local iface=$1 class_id=$2 ip=$3 rate=$4
+    local iface=$1 class_id=$2 ip=${3:-} rate=$4 hint_mac=${5:-}
     [ -n "$rate" ] || return 1
     local _mid; _mid=$(_mark_for_class_id "$class_id")
     local _dmark; _dmark=$(hnc_dev_mark_hex "$_mid") || return 1
@@ -1075,16 +1096,39 @@ set_uplink_police() {
 
     clear_uplink_police "$iface" "$class_id" "$_ing_parent"
 
+    local _ip4="" _mac="" _direct_v6="" _v6 _n6_out _v6_list="" _seen_v6=" "
+    case "$ip" in
+        ""|"-") ;;
+        [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])
+            _mac=$(printf '%s' "$ip" | tr 'A-Z' 'a-z')
+            ;;
+        *:*)
+            _direct_v6="${ip%%/*}"
+            ;;
+        *)
+            _ip4="$ip"
+            ;;
+    esac
+    if [ -z "$_mac" ]; then
+        for _hm in "$hint_mac" "${HNC_CLIENT_MAC:-}"; do
+            case "$_hm" in
+                [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])
+                    _mac=$(printf '%s' "$_hm" | tr 'A-Z' 'a-z')
+                    break
+                    ;;
+            esac
+        done
+    fi
+
     local _any_ok=0
-    if [ -n "$ip" ]; then
+    if [ -n "$_ip4" ]; then
         # shellcheck disable=SC2086
-        tc filter add dev "$iface" $_ing_parent protocol ip prio "$prio" u32             match ip src "$ip/32" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1
+        tc filter add dev "$iface" $_ing_parent protocol ip prio "$prio" u32             match ip src "$_ip4/32" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1
     fi
 
     # 解析该客户端 MAC 并为所有全局单播 IPv6 邻居挂载 u32 ip6 src police
-    local _mac="" _v6 _n6_out
-    if [ -n "$ip" ] && [ -f "$DEVICES_FILE" ]; then
-        _mac=$(tr -d '\r\n' < "$DEVICES_FILE" 2>/dev/null | awk -v t="$ip" '
+    if [ -z "$_mac" ] && [ -n "$_ip4" ] && [ -f "$DEVICES_FILE" ]; then
+        _mac=$(tr -d '\r\n' < "$DEVICES_FILE" 2>/dev/null | awk -v t="$_ip4" '
             {
                 s = $0
                 while (match(s, /"[0-9a-fA-F:]{17}"[[:space:]]*:[[:space:]]*\{[^{}]*\}/)) {
@@ -1097,18 +1141,48 @@ set_uplink_police() {
                 }
             }')
     fi
-    if [ -z "$_mac" ] && [ -n "$ip" ] && command -v ip >/dev/null 2>&1; then
-        _mac=$(ip -4 neigh show dev "$iface" to "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="lladdr"){print tolower($(i+1)); exit}}')
+    if [ -z "$_mac" ] && [ -n "$_ip4" ] && command -v ip >/dev/null 2>&1; then
+        _mac=$(ip -4 neigh show dev "$iface" to "$_ip4" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="lladdr"){print tolower($(i+1)); exit}}')
     fi
-    if [ -n "$_mac" ] && command -v ip >/dev/null 2>&1; then
+    if [ -z "$_mac" ] && [ -z "$_ip4" ]; then
+        _mac=$(_resolve_mac_by_mid "$_mid")
+    fi
+
+    if { [ -n "$_mac" ] || [ -n "$_direct_v6" ]; } && command -v ip >/dev/null 2>&1; then
         if ! _n6_out=$(ip -6 neigh show dev "$iface" 2>/dev/null) || { [ -z "$_n6_out" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
             _n6_out=$(ip neigh show dev "$iface" 2>/dev/null)
         fi
-        for _v6 in $(printf '%s\n' "$_n6_out" | awk -v m="$_mac" 'tolower($0) ~ ("lladdr " m) && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $NF != "FAILED" && $NF != "INCOMPLETE" {print $1}'); do
-            # shellcheck disable=SC2086
-            tc filter add dev "$iface" $_ing_parent protocol ipv6 prio "$prio6" u32                 match ip6 src "${_v6}/128" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
-        done
+        if [ -z "$_mac" ] && [ -n "$_direct_v6" ] && [ -n "$_n6_out" ]; then
+            _mac=$(printf '%s\n' "$_n6_out" | awk -v t="$_direct_v6" 'tolower($1) == tolower(t) {for(i=2;i<NF;i++) if($i=="lladdr"){print tolower($(i+1)); exit}}')
+        fi
+        if [ -n "$_mac" ] && [ -n "$_n6_out" ]; then
+            _v6_list=$(printf '%s\n' "$_n6_out" | awk -v m="$_mac" 'tolower($0) ~ ("lladdr " m) && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $1 != "::" && $NF != "FAILED" && $NF != "INCOMPLETE" {print $1}')
+        fi
     fi
+    if [ -z "$_v6_list" ] && [ -n "$_mac" ] && [ -f "$DEVICES_FILE" ]; then
+        _v6_list=$(tr -d '\r\n' < "$DEVICES_FILE" 2>/dev/null | awk -v m="$_mac" '
+            {
+                s = tolower($0)
+                if (match(s, "\"" tolower(m) "\"[[:space:]]*:[[:space:]]*\\{[^{}]*\\}")) {
+                    blk = substr(s, RSTART, RLENGTH)
+                    while (match(blk, /"[0-9a-f:]{3,39}"/)) {
+                        cand = substr(blk, RSTART + 1, RLENGTH - 2)
+                        if (cand ~ /:/ && cand != tolower(m) && cand !~ /^(fe80:|ff)/ && cand != "::1" && cand != "::") print cand
+                        blk = substr(blk, RSTART + RLENGTH)
+                    }
+                }
+            }')
+    fi
+    for _v6 in $_direct_v6 $_v6_list; do
+        [ -n "$_v6" ] || continue
+        case "$_seen_v6" in *" $_v6 "*) continue ;; esac
+        _seen_v6="${_seen_v6}${_v6} "
+        # shellcheck disable=SC2086
+        tc filter add dev "$iface" $_ing_parent protocol ipv6 prio "$prio6" u32             match ip6 src "${_v6}/128" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
+    done
+
+    # 若既无 IPv4、又无 MAC、又无 IPv6 地址, 拒绝空挂假成功
+    [ -n "$_ip4" ] || [ -n "$_mac" ] || [ "$_seen_v6" != " " ] || return 1
 
     # 双栈正交 fw 掩码兜底 (配合 pref 1 clsact L2 MAC 打标器覆盖临时 IPv6 轮换!)
     # shellcheck disable=SC2086
@@ -2306,10 +2380,10 @@ set_limit() {
             # capability_probe already detected (uplink_mode=police) before giving
             # up on uplink. Per-client police by src IP on the hotspot iface — no
             # IFB needed. IPv4 only; best-effort → falls back to downlink-only.
-            if [ "$(cap_uplink_mode_value 2>/dev/null)" = "police" ] && [ -n "$ip" ] && \
+            if [ "$(cap_uplink_mode_value 2>/dev/null)" = "police" ] && \
                ensure_ingress_qdisc "$iface" && \
-               set_uplink_police "$iface" "$class_id" "$ip" "$(mbps_to_rate "$up_mbps")" "$(burst_for_rate "$up_mbps")"; then
-                log "  Ingress(police) src=$ip @ ${up_mbps}M (IFB unavailable → police fallback)"
+               set_uplink_police "$iface" "$class_id" "$ip" "$(mbps_to_rate "$up_mbps")" "${HNC_CLIENT_MAC:-}"; then
+                log "  Ingress(police) src=${ip:-(v6-only)} @ ${up_mbps}M (IFB unavailable → police fallback)"
                 echo "LIMIT_APPLY_MODE=full_police"
                 _maybe_v6_sync_in_set_limit
                 return 0
@@ -2875,14 +2949,14 @@ restore_rules() {
             continue
         fi
 
-        log "Restoring: $mac mark=$mark_id ip=$ip dn=${down}M up=${up}M delay=${delay}ms loss=${loss}%"
-        sh "$HNC_DIR/bin/iptables_manager.sh" mark "$ip" "$mac" "$mark_id"
+        log "Restoring: $mac mark=$mark_id ip=${ip:-(v6-only)} dn=${down}M up=${up}M delay=${delay}ms loss=${loss}%"
+        sh "$HNC_DIR/bin/iptables_manager.sh" mark "${ip:--}" "$mac" "$mark_id"
         mark_rc=$?
         if [ "$mark_rc" -ne 0 ]; then
             restore_side_fail=$((restore_side_fail + 1))
             log_error "restore_rules: iptables mark failed for $mac rc=$mark_rc (counted, continuing)"
         fi
-        if set_all "$iface" "$mark_id" "${down:-0}" "${up:-0}" "${delay:-0}" "${jitter:-0}" "${loss:-0}" "$ip"; then
+        if HNC_CLIENT_MAC="$mac" set_all "$iface" "$mark_id" "${down:-0}" "${up:-0}" "${delay:-0}" "${jitter:-0}" "${loss:-0}" "$ip"; then
             restore_fail_streak=0
         else
             restore_fail_streak=$((restore_fail_streak + 1))
@@ -3296,9 +3370,9 @@ case "$1" in
         tc_action_unlock
         exit $rc ;;
     set_uplink_police)
-        # $2=iface $3=mark_id $4=ip $5=rate
+        # $2=iface $3=mark_id $4=ip $5=rate [$6=mac]
         tc_action_lock set_uplink_police || exit 12
-        _validate_mark_id "$3" && set_uplink_police "$2" "$(_class_id_for_mark "$3")" "$4" "$5"
+        _validate_mark_id "$3" && set_uplink_police "$2" "$(_class_id_for_mark "$3")" "$4" "$5" "$6"
         rc=$?
         tc_action_unlock
         exit $rc ;;

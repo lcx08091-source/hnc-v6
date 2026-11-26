@@ -1943,10 +1943,25 @@ func buildDeviceFirewallRestorePayloads(
 
 	markedList, blockedList := collectFirewallDesiredState(hncDir, mac, ipv4, mid, enableMark, enableBlock)
 
+	var neighMap map[string][]net.IP
+	neighLoaded := false
+	if (len(markedList) > 0 || len(blockedList) > 0) && nativeCollectDevIPv6Fn == nil && nativeDumpIPv6NeighFn != nil {
+		var allow map[int]bool
+		if iface != "" {
+			if idx, nErr := nlIfaceIndexByName(iface); nErr == nil && idx > 0 {
+				allow = map[int]bool{idx: true}
+			}
+		}
+		if nm, dErr := nativeDumpIPv6NeighFn(allow); dErr == nil {
+			neighMap = nm
+		}
+		neighLoaded = true
+	}
+
 	var v4 bytes.Buffer
 	var v6 bytes.Buffer
 
-	// 1. *mangle 表: 原子刷新 HNC_MARK
+	// 1. *mangle 表: 原子刷新 HNC_MARK (双栈含下行目的地址打标, 严防下行包无设备标被 1:8010 prio 4/5 误抢)
 	v4.WriteString("*mangle\n:HNC_MARK - [0:0]\n")
 	v6.WriteString("*mangle\n:HNC_MARK - [0:0]\n")
 	for _, d := range markedList {
@@ -1961,6 +1976,9 @@ func buildDeviceFirewallRestorePayloads(
 			fmt.Fprintf(&v4, "-A HNC_MARK -d %s/32 -j MARK --set-xmark %s\n", d.ipv4, xmark)
 		}
 		fmt.Fprintf(&v6, "-A HNC_MARK -m mac --mac-source %s -m mark --mark %s -j MARK --set-xmark %s\n", d.mac, zeroMatch, xmark)
+		for _, ip6 := range collectDeviceIPv6AddrsWithNeigh(hncDir, iface, d.mac, neighMap, neighLoaded) {
+			fmt.Fprintf(&v6, "-A HNC_MARK -d %s/128 -j MARK --set-xmark %s\n", ip6, xmark)
+		}
 	}
 	v4.WriteString("COMMIT\n")
 	v6.WriteString("COMMIT\n")
@@ -1984,6 +2002,9 @@ func buildDeviceFirewallRestorePayloads(
 		}
 		fmt.Fprintf(&v6, "-A HNC_CTRL -m mac --mac-source %s -p udp --dport 443 -j DROP\n", b.mac)
 		fmt.Fprintf(&v6, "-A HNC_CTRL -m mac --mac-source %s -j DROP\n", b.mac)
+		for _, ip6 := range collectDeviceIPv6AddrsWithNeigh(hncDir, iface, b.mac, neighMap, neighLoaded) {
+			fmt.Fprintf(&v6, "-A HNC_CTRL -d %s/128 -j DROP\n", ip6)
+		}
 	}
 	v4.WriteString("COMMIT\n")
 	v6.WriteString("COMMIT\n")
@@ -2808,13 +2829,294 @@ func deviceHasNonDelaySecondaryOwner(hncDir, iface, mac string, mid int) bool {
 	return deviceHasSecondaryQdiscOwner(hncDir, iface, mac, mid, cleanDM)
 }
 
+var (
+	nlResolveIfaceIndexFn  = nlIfaceIndexByName
+	nlDumpClassesForRuleFn = nlDumpHTBClassStats
+	nlEnsureFWBaseHooksFn  = ensureFirewallBaseHooksLinked
+	nlUpsertDevHTBFn       = nlUpsertDeviceHTBWithDir
+	nlDeleteDevHTBFn       = nlDeleteDeviceHTB
+	nlPipeFirewallOnlyFn   = pipeNativeFirewallOnly
+	nlOpenRuleSocketFn     = openRTNetlinkSocket
+	nlSendSingleRtnlAckFn  = rtnlSendAndWaitAck
+)
+
+func restoreDeviceMapSnapshot(hncDir, mac string, prevDM map[string]interface{}, prevExisted bool) {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	if hncDir == "" || !macRE.MatchString(mac) {
+		return
+	}
+	_ = rulesStore.Mutate(hncDir, func(root map[string]interface{}) error {
+		devs, ok := root["devices"].(map[string]interface{})
+		if !ok {
+			devs = map[string]interface{}{}
+			root["devices"] = devs
+		}
+		for k := range devs {
+			if strings.EqualFold(k, mac) {
+				delete(devs, k)
+			}
+		}
+		if prevExisted && prevDM != nil {
+			if cp, ok := deepCloneJSONValue(prevDM).(map[string]interface{}); ok {
+				devs[mac] = cp
+			}
+		}
+		return nil
+	})
+}
+
+func deleteDeviceRuleField(hncDir, mac, field string) {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	field = strings.TrimSpace(field)
+	if hncDir == "" || field == "" || !macRE.MatchString(mac) {
+		return
+	}
+	_ = rulesStore.Mutate(hncDir, func(root map[string]interface{}) error {
+		if devs, ok := root["devices"].(map[string]interface{}); ok {
+			for k, raw := range devs {
+				if strings.EqualFold(k, mac) {
+					if dm, ok := raw.(map[string]interface{}); ok {
+						delete(dm, field)
+					}
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// nlRefreshAppLimitDefaultClassIfPresent 当设备持有 app_limits 二级子树(且未开 app_qos)且内核已建 1:9eXX 默认兜底子类时,
+// 原地同步更新 1:9eXX 的 rate/ceil 至最新父设备速率上限, 消除清整机限速或改速后 1:9eXX 悬空旧低速 ceil 的窗口。
+func nlRefreshAppLimitDefaultClassIfPresent(
+	hncDir, iface, mac string,
+	ifidx int,
+	parentMinor uint16,
+	mid int,
+	parentCeilBps uint64,
+	dm map[string]interface{},
+) {
+	if ifidx <= 0 || mid < 1 || mid > 99 || parentCeilBps == 0 {
+		return
+	}
+	if !deviceHasAppLimitsForMAC(hncDir, iface, mac, mid) {
+		return
+	}
+	if anyToRuleBool(dm["app_qos"]) {
+		return
+	}
+	if cidStr := classIDStringForMid(mid); cidStr != "" {
+		if stateFileHasDevClass(filepath.Join(hncDir, "run", "app_qos.state"), iface, cidStr) {
+			return
+		}
+	}
+	defMinor := v6AppLimitDefBase + uint16(mid)
+	defClassID := fmt.Sprintf("1:%x", defMinor)
+	classes, err := nlDumpClassesForRuleFn(ifidx)
+	if err != nil || len(classes) == 0 {
+		return
+	}
+	if _, exists := classes[defClassID]; !exists {
+		return
+	}
+	defRate := parentCeilBps / 2
+	if defRate < 125_000 {
+		defRate = 125_000
+	}
+	if defRate > parentCeilBps {
+		defRate = parentCeilBps
+	}
+	fd, sErr := nlOpenRuleSocketFn()
+	if sErr != nil {
+		return
+	}
+	defer nlCloseSocket(fd)
+	seq := rtnlNextSeq()
+	msg := buildHTBClassUpsertMsg(
+		seq, ifidx,
+		rtnlHtbRootMaj|uint32(parentMinor),
+		rtnlHtbRootMaj|uint32(defMinor),
+		defRate, parentCeilBps,
+		0, 0, 0, 2, readPschedTickInUsec(),
+	)
+	_ = nlSendSingleRtnlAckFn(fd, msg, seq)
+}
+
+func isDeviceCurrentlyOnlineForLimit(hncDir, iface, mac string) (string, bool) {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	if hncDir == "" || !macRE.MatchString(mac) {
+		return "", false
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "data", "devices.json")); err == nil && len(b) > 0 {
+		var raw map[string]map[string]interface{}
+		if json.Unmarshal(b, &raw) == nil {
+			for k, dev := range raw {
+				if !strings.EqualFold(strings.TrimSpace(k), mac) || dev == nil {
+					continue
+				}
+				onlVal, hasOnl := dev["online"]
+				if hasOnl && !anyToRuleBool(onlVal) {
+					break
+				}
+				ip := strings.TrimSpace(anyToRuleString(dev["ip"]))
+				if !validStrictIPv4(ip) {
+					ip = ""
+				}
+				if hasOnl || ip != "" {
+					return ip, true
+				}
+			}
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "devices.flat")); err == nil && len(b) > 0 {
+		for _, ln := range strings.Split(strings.ToLower(string(b)), "\n") {
+			for _, f := range strings.Fields(ln) {
+				if f == mac {
+					return "", true
+				}
+			}
+		}
+	}
+	if iface != "" && len(collectDeviceIPv6Addrs(hncDir, iface, mac)) > 0 {
+		return "", true
+	}
+	return "", false
+}
+
+var (
+	dpPendingLimitMu       sync.Mutex
+	dpPendingLimitLastSig  = make(map[string]string, 2)
+	dpPendingLimitInFlight atomic.Bool
+)
+
+func buildPendingLimitWatchSig(hncDir string) string {
+	var sb strings.Builder
+	sb.Grow(96)
+	for _, rel := range []string{"run/hnc_state", "data/devices.json", "run/devices.flat", "data/rules.json"} {
+		sb.WriteByte('|')
+		if st, err := os.Stat(filepath.Join(hncDir, rel)); err == nil {
+			sb.WriteString(strconv.FormatInt(st.Size(), 10))
+			sb.WriteByte('@')
+			sb.WriteString(strconv.FormatInt(st.ModTime().UnixNano(), 10))
+		} else {
+			sb.WriteByte('-')
+		}
+	}
+	return sb.String()
+}
+
+// syncPendingOnlineDeviceLimits 扫描离线预设限速(limit_pending_sync=true)设备, 一旦检测到上线即自动补挂内核流控。
+func syncPendingOnlineDeviceLimits(hncDir string) int {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" || !useNativeDataplane(hncDir) {
+		return 0
+	}
+	iface := readHotspotIfaceName(hncDir)
+	if iface == "" {
+		return 0
+	}
+	root, err := rulesStore.ReadAll(hncDir)
+	if err != nil {
+		return 0
+	}
+	devs, ok := root["devices"].(map[string]interface{})
+	if !ok || len(devs) == 0 {
+		return 0
+	}
+	type pendingItem struct {
+		mac  string
+		down string
+		up   string
+	}
+	var items []pendingItem
+	for rawMAC, rawObj := range devs {
+		mac := strings.ToLower(strings.TrimSpace(rawMAC))
+		dm, ok := rawObj.(map[string]interface{})
+		if !ok || !macRE.MatchString(mac) || !anyToRuleBool(dm["limit_pending_sync"]) {
+			continue
+		}
+		if !anyToRuleBool(dm["limit_enabled"]) {
+			deleteDeviceRuleField(hncDir, mac, "limit_pending_sync")
+			continue
+		}
+		if _, online := isDeviceCurrentlyOnlineForLimit(hncDir, iface, mac); !online {
+			continue
+		}
+		dn := strings.TrimSpace(anyToRuleString(dm["down_mbps"]))
+		up := strings.TrimSpace(anyToRuleString(dm["up_mbps"]))
+		if dn == "" {
+			dn = "0"
+		}
+		if up == "" {
+			up = "0"
+		}
+		items = append(items, pendingItem{mac: mac, down: dn, up: up})
+	}
+	applied := 0
+	for _, it := range items {
+		if detail, ok := tryNativeRuleSet(hncDir, it.mac, it.down, it.up); ok && detail == "limit applied" {
+			applied++
+			continue
+		}
+		if _, sErr := os.Stat(filepath.Join(hncDir, "bin", "apply_device_rule.sh")); sErr == nil {
+			if rc, _ := runBin(hncDir, "apply_device_rule.sh", "limit", it.mac, it.down, it.up); rc == 0 {
+				rulesStore.Invalidate(hncDir)
+				deleteDeviceRuleField(hncDir, it.mac, "limit_pending_sync")
+				applied++
+			}
+		}
+	}
+	return applied
+}
+
+func syncPendingOnlineDeviceLimitsAsync(hncDir string) {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" || !useNativeDataplane(hncDir) {
+		return
+	}
+	if readHotspotIfaceName(hncDir) == "" {
+		return
+	}
+	sig := buildPendingLimitWatchSig(hncDir)
+	dpPendingLimitMu.Lock()
+	if dpPendingLimitLastSig[hncDir] == sig {
+		dpPendingLimitMu.Unlock()
+		return
+	}
+	dpPendingLimitLastSig[hncDir] = sig
+	dpPendingLimitMu.Unlock()
+
+	root, err := rulesStore.ReadAll(hncDir)
+	if err != nil {
+		return
+	}
+	hasPending := false
+	if devs, ok := root["devices"].(map[string]interface{}); ok {
+		for _, rawObj := range devs {
+			if dm, ok := rawObj.(map[string]interface{}); ok && anyToRuleBool(dm["limit_pending_sync"]) {
+				hasPending = true
+				break
+			}
+		}
+	}
+	if !hasPending {
+		return
+	}
+	if !dpPendingLimitInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func(dir string) {
+		defer dpPendingLimitInFlight.Store(false)
+		_ = syncPendingOnlineDeviceLimits(dir)
+	}(hncDir)
+}
+
 // tryNativeResetDeviceRateToDefault 在保留 HNC_MARK 打标与根 fw/u32 过滤器的前提下,
 // 将设备下行 1:<cid> 速率恢复为默认 1000mbit(不发 RTM_DELTCLASS, 避免撞子类 -EBUSY)。
 func tryNativeResetDeviceRateToDefault(hncDir, iface, mac, ip string, mid int) bool {
 	if !useNativeDataplane(hncDir) || mid < 1 || mid > 99 {
 		return false
 	}
-	ifidx, err := nlIfaceIndexByName(iface)
+	ifidx, err := nlResolveIfaceIndexFn(iface)
 	if err != nil || ifidx <= 0 {
 		return false
 	}
@@ -2826,10 +3128,15 @@ func tryNativeResetDeviceRateToDefault(hncDir, iface, mac, ip string, mid int) b
 	if lErr != nil {
 		return false
 	}
-	defer unlock()
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
 
 	markVal, markMask := readDeviceMarkSpec(hncDir, mid)
-	if err := nlUpsertDeviceHTBWithDir(
+	if err := nlUpsertDevHTBFn(
 		hncDir, ifidx, minor,
 		DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 		DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
@@ -2837,10 +3144,15 @@ func tryNativeResetDeviceRateToDefault(hncDir, iface, mac, ip string, mid int) b
 	); err != nil {
 		return false
 	}
+	dm, _, _ := rulesStore.GetDeviceMap(hncDir, mac)
+	nlRefreshAppLimitDefaultClassIfPresent(hncDir, iface, mac, ifidx, minor, mid, DefaultHTBRootRateBps, dm)
 	if validStrictIPv4(ip) {
 		ensureNativeIPv4StatsRule(resolveIptablesRestoreBin("iptables"), ip)
 	}
-	_ = mac
+	locked = false
+	unlock()
+
+	markAppLimitsDirtyIfNeeded(hncDir)
 	return true
 }
 
@@ -2889,22 +3201,43 @@ func pipeNativeFirewallOnly(hncDir, iface, mac, ipv4 string, mid int, enableMark
 }
 
 // tryNativeRuleSet 尝试通过 Go 原生 RTNetlink + 双栈 iptables-restore --noflush 执行单设备调速。
-// 任何前置条件未就绪或内核返回错误时返回 ("", false), 由调用方无缝回退 apply_device_rule.sh。
+//   - 若热点未开启或设备当前离线, 原子持久化限速预设(limit_pending_sync=true)并返回 ("limit preset saved", true), 待上线后自动补挂;
+//   - 在线执行中任何内核步骤失败均严格回滚 rulesStore 至调用前快照再返回 ("", false), 杜绝脏基线残留。
 func tryNativeRuleSet(hncDir, mac, dnMbps, upMbps string) (string, bool) {
 	if !useNativeDataplane(hncDir) {
 		return "", false
 	}
-	iface := readHotspotIfaceName(hncDir)
-	if iface == "" || !ensureFirewallBaseHooksLinked() {
-		return "", false
-	}
-	ifidx, err := nlIfaceIndexByName(iface)
-	if err != nil || ifidx <= 0 {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	if !macRE.MatchString(mac) {
 		return "", false
 	}
 	dnBps, err1 := mbpsStrToBytesPerSec(dnMbps)
 	upBps, err2 := mbpsStrToBytesPerSec(upMbps)
 	if err1 != nil || err2 != nil || (dnBps == 0 && upBps == 0) {
+		return "", false
+	}
+
+	iface := readHotspotIfaceName(hncDir)
+	liveIP, devOnline := isDeviceCurrentlyOnlineForLimit(hncDir, iface, mac)
+	if iface == "" || !devOnline {
+		unlockPreset, pErr := acquireNativeDataplaneLock(hncDir, "preset_limit")
+		if pErr != nil {
+			return "", false
+		}
+		defer unlockPreset()
+		mid, uErr := rulesStore.UpdateDeviceLimit(hncDir, mac, "", dnMbps, upMbps, true)
+		if uErr != nil || mid < 1 || mid > 99 {
+			return "", false
+		}
+		_ = rulesStore.SetDeviceField(hncDir, mac, "limit_pending_sync", true)
+		return "limit preset saved", true
+	}
+
+	if !nlEnsureFWBaseHooksFn() {
+		return "", false
+	}
+	ifidx, err := nlResolveIfaceIndexFn(iface)
+	if err != nil || ifidx <= 0 {
 		return "", false
 	}
 
@@ -2922,10 +3255,10 @@ func tryNativeRuleSet(hncDir, mac, dnMbps, upMbps string) (string, bool) {
 	ifbIdx := 0
 	usePoliceUplink := false
 	if upBps > 0 {
-		idx, uErr := nlIfaceIndexByName("ifb0")
+		idx, uErr := nlResolveIfaceIndexFn("ifb0")
 		if uErr == nil && idx > 0 {
 			// 确认 ifb0 根树与重定向已由首次建链就绪, 否则交由脚本完成首次 clsact+mirred 挂载
-			upClasses, dErr := nlDumpHTBClassStats(idx)
+			upClasses, dErr := nlDumpClassesForRuleFn(idx)
 			if dErr != nil || len(upClasses) == 0 {
 				return "", false
 			}
@@ -2944,71 +3277,99 @@ func tryNativeRuleSet(hncDir, mac, dnMbps, upMbps string) (string, bool) {
 		}
 	}
 
-	ip := lookupCurrentDeviceIP(hncDir, mac)
+	prevDM, prevExisted, _ := rulesStore.GetDeviceMap(hncDir, mac)
+	rollback := func(fwTouched bool) {
+		restoreDeviceMapSnapshot(hncDir, mac, prevDM, prevExisted)
+		if fwTouched {
+			rMid, rKeep := deviceActiveMarkInStore(hncDir, mac)
+			rBlocked := rulesStore.IsBlacklisted(hncDir, mac)
+			rIP := liveIP
+			if rIP == "" {
+				rIP = strings.TrimSpace(anyToRuleString(prevDM["ip"]))
+			}
+			rIP = filterActiveSubnetIPv4(iface, rIP)
+			_ = nlPipeFirewallOnlyFn(hncDir, iface, mac, rIP, rMid, rKeep, rBlocked)
+		}
+	}
+
+	ip := liveIP
+	if ip == "" {
+		ip = lookupCurrentDeviceIP(hncDir, mac)
+	}
 	mid, err := rulesStore.UpdateDeviceLimit(hncDir, mac, ip, dnMbps, upMbps, true)
 	if err != nil || mid < 1 || mid > 99 {
+		rollback(false)
 		return "", false
 	}
+	deleteDeviceRuleField(hncDir, mac, "limit_pending_sync")
+
 	if ip == "" {
 		ip, _ = rulesStore.GetDeviceField(hncDir, mac, "ip")
 	}
 	ip = filterActiveSubnetIPv4(iface, ip)
 	minor, err := htbClassMinorForMid(mid)
 	if err != nil {
+		rollback(false)
 		return "", false
 	}
 	markVal, markMask := readDeviceMarkSpec(hncDir, mid)
 	alreadyBlocked := rulesStore.IsBlacklisted(hncDir, mac)
 
-	if err := pipeNativeFirewallOnly(hncDir, iface, mac, ip, mid, true, alreadyBlocked); err != nil {
+	if err := nlPipeFirewallOnlyFn(hncDir, iface, mac, ip, mid, true, alreadyBlocked); err != nil {
+		rollback(false)
 		return "", false
 	}
 	if validStrictIPv4(ip) {
 		ensureNativeIPv4StatsRule(resolveIptablesRestoreBin("iptables"), ip)
 	}
 
+	curDM, _, _ := rulesStore.GetDeviceMap(hncDir, mac)
 	if dnBps > 0 {
-		if err := nlUpsertDeviceHTBWithDir(hncDir, ifidx, minor, dnBps, dnBps, 0, 0, 0, markVal, markMask, ip, false); err != nil {
+		if err := nlUpsertDevHTBFn(hncDir, ifidx, minor, dnBps, dnBps, 0, 0, 0, markVal, markMask, ip, false); err != nil {
+			rollback(true)
 			return "", false
 		}
+		nlRefreshAppLimitDefaultClassIfPresent(hncDir, iface, mac, ifidx, minor, mid, dnBps, curDM)
 	} else {
-		dm, _, _ := rulesStore.GetDeviceMap(hncDir, mac)
-		if deviceHasSecondaryQdiscOwner(hncDir, iface, mac, mid, dm) {
+		if deviceHasSecondaryQdiscOwner(hncDir, iface, mac, mid, curDM) {
 			// 存在 delay / sqm / app_qos / app_limits 二级子树持有者:
-			// 保留 HNC_MARK 与根 fw/u32 过滤器, 仅将 1:<cid> 自身速率恢复为默认 1000mbit!
-			if err := nlUpsertDeviceHTBWithDir(
+			// 保留 HNC_MARK 与根 fw/u32 过滤器, 仅将 1:<cid> 自身及 1:9eXX 恢复为默认 1000mbit!
+			if err := nlUpsertDevHTBFn(
 				hncDir, ifidx, minor,
 				DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 				DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 				markVal, markMask, ip, false,
 			); err != nil {
+				rollback(true)
 				return "", false
 			}
+			nlRefreshAppLimitDefaultClassIfPresent(hncDir, iface, mac, ifidx, minor, mid, DefaultHTBRootRateBps, curDM)
 		} else {
-			_ = nlDeleteDeviceHTB(ifidx, minor, markVal, markMask)
+			_ = nlDeleteDevHTBFn(ifidx, minor, markVal, markMask)
 		}
 	}
 
 	if upBps > 0 && ifbIdx > 0 {
-		if err := nlUpsertDeviceHTBWithDir(hncDir, ifbIdx, minor, upBps, upBps, 0, 0, 0, markVal, markMask, ip, true); err != nil {
+		if err := nlUpsertDevHTBFn(hncDir, ifbIdx, minor, upBps, upBps, 0, 0, 0, markVal, markMask, ip, true); err != nil {
+			rollback(true)
 			return "", false
 		}
 	} else if upBps > 0 && usePoliceUplink {
 		if applyNativeIngressPolice(hncDir, iface, mid, mac, ip, upBps, markVal, markMask) != nil {
+			rollback(true)
 			return "", false
 		}
 	} else if upBps == 0 {
-		dm, _, _ := rulesStore.GetDeviceMap(hncDir, mac)
-		if idx, uErr := nlIfaceIndexByName("ifb0"); uErr == nil && idx > 0 {
-			if deviceHasDelayOwner(dm) {
-				_ = nlUpsertDeviceHTBWithDir(
+		if idx, uErr := nlResolveIfaceIndexFn("ifb0"); uErr == nil && idx > 0 {
+			if deviceHasDelayOwner(curDM) {
+				_ = nlUpsertDevHTBFn(
 					hncDir, idx, minor,
 					DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 					DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 					markVal, markMask, ip, true,
 				)
 			} else {
-				_ = nlDeleteDeviceHTB(idx, minor, markVal, markMask)
+				_ = nlDeleteDevHTBFn(idx, minor, markVal, markMask)
 			}
 		} else if polSup, polKnown := readCapabilityBool(hncDir, "uplink_police_supported"); polKnown && polSup {
 			clearNativeIngressPolice(iface, mid)
@@ -3028,11 +3389,28 @@ func tryNativeRuleClear(hncDir, mac string) bool {
 	if !useNativeDataplane(hncDir) {
 		return false
 	}
-	iface := readHotspotIfaceName(hncDir)
-	if iface == "" || !ensureFirewallBaseHooksLinked() {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	if !macRE.MatchString(mac) {
 		return false
 	}
-	ifidx, err := nlIfaceIndexByName(iface)
+	iface := readHotspotIfaceName(hncDir)
+	if iface == "" {
+		unlockOff, lErr := acquireNativeDataplaneLock(hncDir, "clear_limit_offline")
+		if lErr != nil {
+			return false
+		}
+		defer unlockOff()
+		if _, err := rulesStore.UpdateDeviceLimit(hncDir, mac, "", "0", "0", false); err != nil {
+			return false
+		}
+		deleteDeviceRuleField(hncDir, mac, "limit_pending_sync")
+		markAppLimitsDirtyIfNeeded(hncDir)
+		return true
+	}
+	if !nlEnsureFWBaseHooksFn() {
+		return false
+	}
+	ifidx, err := nlResolveIfaceIndexFn(iface)
 	if err != nil || ifidx <= 0 {
 		return false
 	}
@@ -3048,7 +3426,7 @@ func tryNativeRuleClear(hncDir, mac string) bool {
 		}
 	}()
 
-	prevDM, _, _ := rulesStore.GetDeviceMap(hncDir, mac)
+	prevDM, prevExisted, _ := rulesStore.GetDeviceMap(hncDir, mac)
 	mid := anyToRuleInt(prevDM["mark_id"])
 	ip := lookupCurrentDeviceIP(hncDir, mac)
 	if ip == "" {
@@ -3059,12 +3437,23 @@ func tryNativeRuleClear(hncDir, mac string) bool {
 	if _, err := rulesStore.UpdateDeviceLimit(hncDir, mac, ip, "0", "0", false); err != nil {
 		return false
 	}
+	deleteDeviceRuleField(hncDir, mac, "limit_pending_sync")
 
 	curDM, _, _ := rulesStore.GetDeviceMap(hncDir, mac)
 	keepSecondary := deviceHasSecondaryQdiscOwner(hncDir, iface, mac, mid, curDM)
 	alreadyBlocked := rulesStore.IsBlacklisted(hncDir, mac)
 
-	if err := pipeNativeFirewallOnly(hncDir, iface, mac, ip, mid, keepSecondary && mid >= 1 && mid <= 99, alreadyBlocked); err != nil {
+	rollback := func(fwTouched bool) {
+		restoreDeviceMapSnapshot(hncDir, mac, prevDM, prevExisted)
+		if fwTouched {
+			rMid, rKeep := deviceActiveMarkInStore(hncDir, mac)
+			rBlocked := rulesStore.IsBlacklisted(hncDir, mac)
+			_ = nlPipeFirewallOnlyFn(hncDir, iface, mac, ip, rMid, rKeep, rBlocked)
+		}
+	}
+
+	if err := nlPipeFirewallOnlyFn(hncDir, iface, mac, ip, mid, keepSecondary && mid >= 1 && mid <= 99, alreadyBlocked); err != nil {
+		rollback(false)
 		return false
 	}
 
@@ -3072,35 +3461,38 @@ func tryNativeRuleClear(hncDir, mac string) bool {
 		if minor, mErr := htbClassMinorForMid(mid); mErr == nil {
 			markVal, markMask := readDeviceMarkSpec(hncDir, mid)
 			if keepSecondary {
-				// 保留根 fw/u32 过滤器与二级子树, 仅将 1:<cid> 自身速率恢复为默认 1000mbit(禁发 RTM_DELTCLASS)
-				if err := nlUpsertDeviceHTBWithDir(
+				// 保留根 fw/u32 过滤器与二级子树, 将 1:<cid> 自身及已存在的 1:9eXX 同步恢复为默认 1000mbit(禁发 RTM_DELTCLASS)
+				if err := nlUpsertDevHTBFn(
 					hncDir, ifidx, minor,
 					DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 					DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 					markVal, markMask, ip, false,
 				); err != nil {
+					rollback(true)
 					return false
 				}
-				if ifbIdx, uErr := nlIfaceIndexByName("ifb0"); uErr == nil && ifbIdx > 0 {
+				nlRefreshAppLimitDefaultClassIfPresent(hncDir, iface, mac, ifidx, minor, mid, DefaultHTBRootRateBps, curDM)
+				if ifbIdx, uErr := nlResolveIfaceIndexFn("ifb0"); uErr == nil && ifbIdx > 0 {
 					if deviceHasDelayOwner(curDM) {
-						_ = nlUpsertDeviceHTBWithDir(
+						_ = nlUpsertDevHTBFn(
 							hncDir, ifbIdx, minor,
 							DefaultHTBRootRateBps, DefaultHTBRootRateBps,
 							DefaultHTBRootBurstB, DefaultHTBRootBurstB, DefaultHTBRootQuantumB,
 							markVal, markMask, ip, true,
 						)
 					} else {
-						_ = nlDeleteDeviceHTB(ifbIdx, minor, markVal, markMask)
+						_ = nlDeleteDevHTBFn(ifbIdx, minor, markVal, markMask)
 					}
 				} else {
 					clearNativeIngressPolice(iface, mid)
 				}
 			} else {
-				if err := nlDeleteDeviceHTB(ifidx, minor, markVal, markMask); err != nil {
+				if err := nlDeleteDevHTBFn(ifidx, minor, markVal, markMask); err != nil {
+					rollback(true)
 					return false
 				}
-				if ifbIdx, uErr := nlIfaceIndexByName("ifb0"); uErr == nil && ifbIdx > 0 {
-					_ = nlDeleteDeviceHTB(ifbIdx, minor, markVal, markMask)
+				if ifbIdx, uErr := nlResolveIfaceIndexFn("ifb0"); uErr == nil && ifbIdx > 0 {
+					_ = nlDeleteDevHTBFn(ifbIdx, minor, markVal, markMask)
 				} else {
 					clearNativeIngressPolice(iface, mid)
 				}
@@ -3112,22 +3504,35 @@ func tryNativeRuleClear(hncDir, mac string) bool {
 	unlock()
 
 	syncNativeDataplaneSideEffects(hncDir, mac)
-	if !keepSecondary {
+	if !keepSecondary && !alreadyBlocked {
 		notifyOffloadLimit(hncDir, mac, false)
 	}
 	return true
 }
 
-// tryNativeBlacklistSet 尝试通过双栈 iptables-restore --noflush 原子增删黑名单(完整保留设备限速打标)。
+// tryNativeBlacklistSet 尝试通过双栈 iptables-restore --noflush 原子增删黑名单(完整保留设备限速打标),
+// 并在释放数据面锁后立即联动踢除硬件加速快路径与同步 eBPF clsact 黑名单映射。
 func tryNativeBlacklistSet(hncDir, mac string, blocked bool) bool {
-	if !useNativeDataplane(hncDir) || !ensureFirewallBaseHooksLinked() {
+	if !useNativeDataplane(hncDir) || !nlEnsureFWBaseHooksFn() {
+		return false
+	}
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	if !macRE.MatchString(mac) {
 		return false
 	}
 	unlock, lockErr := acquireNativeDataplaneLock(hncDir, "blacklist_set")
 	if lockErr != nil {
 		return false
 	}
-	defer unlock()
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
+
+	wasBlocked := rulesStore.IsBlacklisted(hncDir, mac)
+	prevBlockedIP, _ := rulesStore.GetDeviceField(hncDir, mac, "blocked_ip")
 
 	if err := rulesStore.SetBlacklist(hncDir, mac, blocked); err != nil {
 		return false
@@ -3140,12 +3545,31 @@ func tryNativeBlacklistSet(hncDir, mac string, blocked bool) bool {
 	if blocked && validStrictIPv4(ip) {
 		_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", ip)
 	}
-	if err := pipeNativeFirewallOnly(hncDir, readHotspotIfaceName(hncDir), mac, ip, mid, keepMark, blocked); err != nil {
+	if err := nlPipeFirewallOnlyFn(hncDir, readHotspotIfaceName(hncDir), mac, ip, mid, keepMark, blocked); err != nil {
+		_ = rulesStore.SetBlacklist(hncDir, mac, wasBlocked)
+		if prevBlockedIP != "" {
+			_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", prevBlockedIP)
+		} else if blocked {
+			_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", "")
+		}
 		return false
 	}
 	if !blocked {
 		_ = rulesStore.SetDeviceField(hncDir, mac, "blocked_ip", "")
 	}
+
+	locked = false
+	unlock()
+
+	if _, sErr := os.Stat(filepath.Join(hncDir, "bin", "hnc_ipc")); sErr == nil {
+		if blocked {
+			notifyOffloadLimit(hncDir, mac, true)
+		} else if !keepMark {
+			notifyOffloadLimit(hncDir, mac, false)
+		}
+	}
+	syncNativeDataplaneSideEffects(hncDir, mac)
+	triggerOffloadGuardApplyAsync(hncDir)
 	return true
 }
 
@@ -4309,6 +4733,10 @@ func isGlobalUnicastOrULAIPv6(ip net.IP) bool {
 }
 
 func collectDeviceIPv6Addrs(hncDir, iface, mac string) []string {
+	return collectDeviceIPv6AddrsWithNeigh(hncDir, iface, mac, nil, false)
+}
+
+func collectDeviceIPv6AddrsWithNeigh(hncDir, iface, mac string, neighMap map[string][]net.IP, neighLoaded bool) []string {
 	if nativeCollectDevIPv6Fn != nil {
 		return nativeCollectDevIPv6Fn(hncDir, iface, mac)
 	}
@@ -4335,20 +4763,21 @@ func collectDeviceIPv6Addrs(hncDir, iface, mac string) []string {
 	}
 
 	// 1. 优先采用经状态优先级(REACHABLE > DELAY/PROBE/PERMANENT > STALE)与确认时间排好序的实时活跃邻居
-	var allow map[int]bool
-	if iface != "" {
-		if idx, err := nlIfaceIndexByName(iface); err == nil && idx > 0 {
-			allow = map[int]bool{idx: true}
+	if !neighLoaded && nativeDumpIPv6NeighFn != nil {
+		var allow map[int]bool
+		if iface != "" {
+			if idx, err := nlIfaceIndexByName(iface); err == nil && idx > 0 {
+				allow = map[int]bool{idx: true}
+			}
+		}
+		if nm, err := nativeDumpIPv6NeighFn(allow); err == nil {
+			neighMap = nm
 		}
 	}
-	if nativeDumpIPv6NeighFn != nil {
-		if neighMap, err := nativeDumpIPv6NeighFn(allow); err == nil {
-			for _, ip6 := range neighMap[cm] {
-				if isGlobalUnicastOrULAIPv6(ip6) {
-					if !addAddr(ip6.String()) {
-						return out
-					}
-				}
+	for _, ip6 := range neighMap[cm] {
+		if isGlobalUnicastOrULAIPv6(ip6) {
+			if !addAddr(ip6.String()) {
+				return out
 			}
 		}
 	}
@@ -4559,4 +4988,5 @@ func init() {
 		return nlBatchDumpClassesFn(fd, ifindex)
 	}
 	v6ClearIngressPoliceFn = clearNativeIngressPolice
+	dpSyncPendingLimitsHook = syncPendingOnlineDeviceLimitsAsync
 }

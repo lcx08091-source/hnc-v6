@@ -162,12 +162,24 @@ func activityPoke() {
 
 // ─── WebUI 活跃度 ─────────────────────────────────────────────────
 
-var webuiLastHit atomic.Int64 // unix nano; 0 = 从未
+var (
+	powerMonoEpoch = time.Now()
+	webuiLastHit   atomic.Int64 // time.Since(powerMonoEpoch).Nanoseconds() + 1; 0 = 从未
+)
+
+func powerMonoHitTick() int64 {
+	ns := time.Since(powerMonoEpoch).Nanoseconds() + 1
+	if ns <= 0 {
+		return 1
+	}
+	return ns
+}
 
 // powerNoteAPIHit 记一次鉴权通过的请求; 从「不活跃」变「活跃」时立即重探, 让 UI 相关循环马上提速。
-func powerNoteAPIHit(now time.Time) {
-	prev := webuiLastHit.Swap(now.UnixNano())
-	if prev == 0 || now.UnixNano()-prev > int64(webuiActiveWindow) {
+func powerNoteAPIHit(_ time.Time) {
+	cur := powerMonoHitTick()
+	prev := webuiLastHit.Swap(cur)
+	if prev <= 0 || cur-prev > int64(webuiActiveWindow) {
 		if a := activityNow(); !a.WebUIActive {
 			activityPoke()
 		}
@@ -197,13 +209,16 @@ func activityTouchMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func webuiState(now time.Time) (active bool, agoS int64, sse int) {
+func webuiState(_ time.Time) (active bool, agoS int64, sse int) {
 	sse = int(sseConns.Load())
 	agoS = -1
 	if last := webuiLastHit.Load(); last > 0 {
-		agoS = (now.UnixNano() - last) / int64(time.Second)
-		if agoS < 0 {
-			agoS = 0
+		cur := powerMonoHitTick()
+		if cur >= last {
+			agoS = (cur - last) / int64(time.Second)
+		} else {
+			webuiLastHit.CompareAndSwap(last, 0)
+			agoS = -1
 		}
 	}
 	active = sse > 0 || (agoS >= 0 && agoS < int64(webuiActiveWindow/time.Second))
@@ -497,7 +512,7 @@ const errNoScreenKey = powerErr("screen state key not found")
 // activityHotspot 热点口: 先认 HNC 记录的口(hnc_state/iface.cache/iface_detect/rules)且有私网 IPv4,
 // 再扫系统接口里名字明确是 AP 的口(ap0/swlan0/softap0…)。wlanN 这种可能是 STA 的口不扫, 防误判。
 func (s *server) activityHotspot() (bool, string) {
-	if s.simActive() {
+	if s.simHasOnline() {
 		return true, "sim"
 	}
 	if ifc := s.currentHotspotIface(); ifc != "" && ifaceIPv4(ifc) != "" {
@@ -546,7 +561,7 @@ func (s *server) activityClients(now time.Time) int {
 			n = countOnlineClients(m, float64(now.Unix()), activityOnlineWindow)
 		}
 	}
-	if n == 0 && s.simActive() {
+	if n == 0 && s.simHasOnline() {
 		n = 1
 	}
 	return n

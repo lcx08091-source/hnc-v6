@@ -730,4 +730,332 @@ mActiveDataSubId = 1
 	}
 }
 
+func TestSignalRC10RMX5010CellInfoNoOverwriteAndNestedPlmn(t *testing.T) {
+	// 1. P1-05 / C-16: 真机 RMX5010 主服务小区 mSignalStrength (-84 dBm, SINR 19 dB, PCI 412)
+	//    后跟含内嵌 mAdditionalPlmns = {} 的未注册强邻区 (-75 dBm, PCI 777) 与已注册缓存 (-93 dBm, PCI 399):
+	//    绝不得发生 9dB 错盖, 也绝不得因 mAdditionalPlmns = {} 提前闭合泄漏邻区 PCI/频段!
+	rmxDump := `
+mActiveDataSubId = 1
+  Phone Id = 0
+    mSubId = 1
+    mDataConnectionState = 2
+    mServiceState={mOperatorAlphaLong = 中国移动, mOperatorNumeric = 46000, mAccessTechnology = NR, isEnDcAvailable = false, CellIdentityNr:{ mPci = 412 mTac = 20481 mAdditionalPlmns = {} mNrArfcn = 504990 mBands = [41] }}
+    mSignalStrength=SignalStrength:{ mNr=CellSignalStrengthNr:{ csiRsrp = -84 ssRsrp = -84 ssRsrq = -9 ssSinr = 19 level = 4 } }
+    mCellInfo=[CellInfoNr:{mRegistered=NO mTimeStamp=991 CellIdentityNr:{ mPci = 777 mTac = 20481 mAdditionalPlmns = {46015} mNrArfcn = 633984 mBands = [78] } CellSignalStrengthNr:{ csiRsrp = -75 ssRsrp = -75 ssRsrq = -6 ssSinr = 28 }}, CellInfoNr:{mRegistered=YES mTimeStamp=990 CellIdentityNr:{ mPci = 399 mTac = 20481 mAdditionalPlmns = {} mNrArfcn = 504990 mBands = [41] } CellSignalStrengthNr:{ csiRsrp = -93 ssRsrp = -93 ssRsrq = -12 ssSinr = 11 }}]
+    mPreciseDataConnectionStates={InterfaceName: rmnet_data2}
+`
+	st := parseTelephonyRegistryDump(rmxDump, "rmnet_data2", 1800500000)
+	if !st.Available || st.RAT != "5G SA" {
+		t.Fatalf("expected 5G SA Available=true, got avail=%v rat=%q", st.Available, st.RAT)
+	}
+	if st.RSRPdBm != -84 || st.RSRQdB != -9 || st.SINRdB != 19 || !st.HasSINR || !st.HasRSRQ {
+		t.Fatalf("mCellInfo must NOT overwrite primary mSignalStrength (-84/-9/19), got rsrp=%d rsrq=%d sinr=%d",
+			st.RSRPdBm, st.RSRQdB, st.SINRdB)
+	}
+	if !st.HasPCI || st.PCI != 412 || st.Band != "n41" {
+		t.Fatalf("nested mAdditionalPlmns={} must not leak neighbor PCI=777/n78 or stale PCI=399, got pci=%d(%v) band=%q",
+			st.PCI, st.HasPCI, st.Band)
+	}
 
+	// 2. 当主 mSignalStrength 未提取到有效值(全 2147483647)时, 启用已注册 CellInfo fallback (-93 dBm / SINR 11), 仍严格屏蔽未注册邻区 (-75 dBm)!
+	rmxFallbackDump := strings.Replace(
+		rmxDump,
+		"ssRsrp = -84 ssRsrq = -9 ssSinr = 19",
+		"ssRsrp = 2147483647 ssRsrq = 2147483647 ssSinr = 2147483647",
+		1,
+	)
+	stFb := parseTelephonyRegistryDump(rmxFallbackDump, "rmnet_data2", 1800500010)
+	if !stFb.Available || stFb.RSRPdBm != -93 || stFb.SINRdB != 11 {
+		t.Fatalf("expected registered CellInfo fallback (-93 dBm, SINR 11) when primary mSignalStrength unavailable, got avail=%v rsrp=%d sinr=%d",
+			stFb.Available, stFb.RSRPdBm, stFb.SINRdB)
+	}
+}
+
+func TestSignalRC10DualSimSubIDCellBandwidthsAndRFBandTables(t *testing.T) {
+	// 1. P1-06 / C-17: Android 16 ColorOS 16 Phone Id 块无 mSubId=, 依靠底部 mDefaultPhoneId/mDefaultSubId 或 phoneUsage isub 映射回填 SubID,
+	//    并在 QCRIL mPhysicalChannelConfigList 带宽全 0 时用 ServiceState mCellBandwidths=[100000, 100000] 兜底 5G-A 双百兆带宽!
+	dualNoSubDump := `
+mActiveDataSubId = 2
+  Phone Id = 0
+    mDataConnectionState = 0
+    mServiceState={mOperatorAlphaLong = 中国移动, mOperatorNumeric = 46000, mAccessTechnology = LTE, mCellBandwidths = [20000]}
+    mSignalStrength={mLte=CellSignalStrengthLte: rssi=-61 rsrp=-80 rsrq=-7 rssnr=24}
+  Phone Id = 1
+    mDataConnectionState = 0
+    mServiceState={mOperatorAlphaLong = 中国联通, mOperatorNumeric = 46001, mAccessTechnology = NR, mCellBandwidths = [100000, 100000]}
+    mTelephonyDisplayInfo={network = NR, overrideNetworkType = NR_ADVANCED}
+    CellIdentityNr:{ mPci = 256 mAdditionalPlmns = {} mNrArfcn = 633984 mBands = [78] }
+    mSignalStrength={mNr=CellSignalStrengthNr:{ csiRsrp = -86 ssRsrp = -85 ssRsrq = -9 ssSinr = 20 level = 4 }}
+    mPhysicalChannelConfigList=[{mConnectionStatus=PrimaryServing,mNetworkType=NR,mBand=78,mDownlinkChannelNumber=633984,mCellBandwidthDownlinkKhz=0},{mConnectionStatus=SecondaryServing,mNetworkType=NR,mBand=78,mDownlinkChannelNumber=637334,mCellBandwidthDownlinkKhz=0}]
+mDefaultSubId=2
+mDefaultPhoneId=1
+`
+	stDef := parseTelephonyRegistryDump(dualNoSubDump, "", 1800600000)
+	if !stDef.Available || stDef.Slot != 2 || stDef.SubID != 2 || stDef.Carrier != "中国联通" {
+		t.Fatalf("expected Slot=2 SubID=2 中国联通 via mDefaultPhoneId/mDefaultSubId, got slot=%d sub=%d carrier=%q",
+			stDef.Slot, stDef.SubID, stDef.Carrier)
+	}
+	if !stDef.Is5GA || stDef.BandwidthMHz != 100 || stDef.BWMHz != 100 || stDef.TotalBWMHz != 200 || stDef.BandCombo != "n78+n78" {
+		t.Fatalf("expected mCellBandwidths fallback 100/200MHz n78+n78 5G-A, got is5ga=%v bw=%d/%d total=%d combo=%q",
+			stDef.Is5GA, stDef.BandwidthMHz, stDef.BWMHz, stDef.TotalBWMHz, stDef.BandCombo)
+	}
+
+	// 去掉底部 mDefault*, 走 phoneUsage 内存 isub 槽位映射回填 SubID (验证活跃智能切卡 ActiveDataSubId=2)
+	noFooterDump := strings.Split(dualNoSubDump, "mDefaultSubId")[0]
+	s, _, dir := newV6TestMux(t)
+	pu := s.phoneUsage()
+	pu.mu.Lock()
+	pu.maxSlots = 2
+	pu.simSlotsKnown = true
+	pu.simSlots = map[int]puSIM{
+		1: {Slot: 1, SubID: 1, Carrier: "中国移动", Source: "isub"},
+		2: {Slot: 2, SubID: 2, Carrier: "中国联通", Source: "isub"},
+	}
+	pu.mu.Unlock()
+	slotMap := sigCachedSlotSubIDs(s)
+	stIsub := parseTelephonyRegistryDumpWithSubMap(noFooterDump, "", 1800600005, slotMap)
+	if !stIsub.Available || stIsub.Slot != 2 || stIsub.SubID != 2 || stIsub.Carrier != "中国联通" {
+		t.Fatalf("expected phoneUsage isub map backfill to pick Slot=2 SubID=2, got slot=%d sub=%d carrier=%q",
+			stIsub.Slot, stIsub.SubID, stIsub.Carrier)
+	}
+
+	// 验证 mCellBandwidths=[0, 0] 全隐时严守带宽为 0, 绝不捏造假带宽
+	zeroBWDump := strings.Replace(dualNoSubDump, "mCellBandwidths = [100000, 100000]", "mCellBandwidths = [0, 0]", 1)
+	stZeroBW := parseTelephonyRegistryDump(zeroBWDump, "", 1800600008)
+	if stZeroBW.BandwidthMHz != 0 || stZeroBW.BWMHz != 0 || stZeroBW.TotalBWMHz != 0 {
+		t.Fatalf("all-zero mCellBandwidths must stay 0 MHz, got bw=%d/%d total=%d",
+			stZeroBW.BandwidthMHz, stZeroBW.BWMHz, stZeroBW.TotalBWMHz)
+	}
+
+	// 2. C-18: CellIdentity.mBands 优先于 ARFCN 查表 + n26/n38/n7/n41/n48/n77/n78 频段消歧
+	if b, _ := nrBandFromARFCN(172500, "310260"); b != "n26" {
+		t.Fatalf("expected 172500 -> n26, got %q", b)
+	}
+	if b, _ := nrBandFromARFCN(175000, ""); b != "n5" {
+		t.Fatalf("expected narrow n5 before superset n26 on 175000, got %q", b)
+	}
+	if b, _ := nrBandFromARFCN(518000, "26201"); b != "n38" {
+		t.Fatalf("expected European 518000 -> n38 (not swallowed by n41), got %q", b)
+	}
+	if b, _ := nrBandFromARFCN(530000, "26201"); b != "n7" {
+		t.Fatalf("expected European 530000 -> n7 (not swallowed by n41), got %q", b)
+	}
+	if b, _ := nrBandFromARFCN(527400, "46000"); b != "n41" {
+		t.Fatalf("China MCC 460 must keep 527400 -> n41, got %q", b)
+	}
+	if b, _ := nrBandFromARFCN(640000, "310410"); b != "n48" {
+		t.Fatalf("expected US CBRS 640000 -> n48, got %q", b)
+	}
+	if b, _ := nrBandFromARFCN(640000, "46011"); b != "n78" {
+		t.Fatalf("expected CN 640000 -> n78, got %q", b)
+	}
+	if b, _ := nrBandFromARFCN(633984, "44010"); b != "n78" {
+		t.Fatalf("expected Japan 3.5GHz 633984 -> n78 (not swallowed by n77), got %q", b)
+	}
+	if b, _ := nrBandFromARFCN(650000, "44010"); b != "n77" {
+		t.Fatalf("expected Japan 3.7GHz 650000 -> n77, got %q", b)
+	}
+	// 当 PhysicalChannelConfig mBand=0 时优先采信 CellIdentity mBands=[77] 而非默认 ARFCN 表 n78
+	explicitBandDump := `
+mActiveDataSubId=1
+  Phone Id=0
+    mSubId=1
+    mServiceState={mOperatorAlphaLong=Roaming, mOperatorNumeric=45400, accessNetworkTechnology=NR}
+    CellIdentityNr:{ mPci = 120 mNrArfcn = 633984 mBands = [77] }
+    mSignalStrength={mNr=CellSignalStrengthNr:{ ssRsrp = -82 ssRsrq = -8 ssSinr = 20 }}
+    mPhysicalChannelConfigList=[{mConnectionStatus=PrimaryServing,mNetworkType=NR,mBand=0,mDownlinkChannelNumber=633984,mCellBandwidthDownlinkKhz=100000}]
+`
+	stExpBand := parseTelephonyRegistryDump(explicitBandDump, "", 1800600020)
+	if stExpBand.Band != "n77" {
+		t.Fatalf("expected CellIdentity mBands=[77] to take precedence over ARFCN table n78, got %q", stExpBand.Band)
+	}
+
+	// 3. C-18: 切卡(Slot/SubID)与切路由(BSSIDTag)立即清空历史环与乒乓切换计数
+	mon := newSignalMonitor(dir)
+	var cur hostSignalStatus
+	mon.sampleFn = func(_ *server) hostSignalStatus { return cur }
+
+	cur = hostSignalStatus{
+		Available: true, Mode: "cellular", RAT: "5G SA", Slot: 1, SubID: 1,
+		Band: "n41", PCI: 100, HasPCI: true, RSRPdBm: -82, Bars: 4, Quality: "excellent", RFCeilingFactor: 1.0,
+		UpdatedAt: 1800700000,
+	}
+	_ = mon.Refresh(s)
+	cur.PCI = 200
+	cur.UpdatedAt = 1800700010
+	stSlot1 := mon.Refresh(s)
+	if len(stSlot1.History) != 2 || stSlot1.HandoverCount != 1 {
+		t.Fatalf("expected 2 history points and 1 handover on Slot 1, got hist=%d ho=%d", len(stSlot1.History), stSlot1.HandoverCount)
+	}
+
+	// 切换到卡2 (Slot=2, SubID=2, PCI=300, Band=n78) -> 历史环必须重置为 1 点且 HandoverCount 归零!
+	cur.Slot = 2
+	cur.SubID = 2
+	cur.Band = "n78"
+	cur.PCI = 300
+	cur.RSRPdBm = -90
+	cur.UpdatedAt = 1800700020
+	stSlot2 := mon.Refresh(s)
+	if len(stSlot2.History) != 1 || stSlot2.HandoverCount != 0 {
+		t.Fatalf("SIM switch Slot 1->2 must clear history & handover count, got hist=%d ho=%d", len(stSlot2.History), stSlot2.HandoverCount)
+	}
+
+	// Wi-Fi 漫游切换 BSSIDTag -> 同样清空历史环
+	cur = hostSignalStatus{
+		Available: true, Mode: "wifi_sta", RAT: "Wi-Fi 中继", Band: "5GHz", BSSIDTag: "a1b2c3d4",
+		WifiRSSIdBm: -52, Bars: 4, Quality: "excellent", RFCeilingFactor: 1.0, UpdatedAt: 1800700030,
+	}
+	_ = mon.Refresh(s)
+	cur.WifiRSSIdBm = -56
+	cur.UpdatedAt = 1800700038
+	if stW1 := mon.Refresh(s); len(stW1.History) != 2 {
+		t.Fatalf("expected 2 history points on same AP, got %d", len(stW1.History))
+	}
+	cur.BSSIDTag = "e5f60718"
+	cur.WifiRSSIdBm = -65
+	cur.UpdatedAt = 1800700046
+	if stW2 := mon.Refresh(s); len(stW2.History) != 1 {
+		t.Fatalf("Wi-Fi BSSIDTag switch must reset history to 1 point, got %d", len(stW2.History))
+	}
+}
+
+func TestSignalRC10Wifi7MLOPreferHighBandAndFourElements(t *testing.T) {
+	// 1. P1-07 / C-19: AOSP 内联 Affiliated MLO Links (首条 Link 0 为 2.4GHz 保底链, Link 1 为 5GHz 160MHz 2882Mbps 活跃链, Link 2 为 6GHz IDLE 休眠链)
+	mloInline := `Wifi is enabled
+Wifi is connected to "BE7200_MLO"
+WifiInfo: SSID: "BE7200_MLO", BSSID: 8c:a6:df:aa:bb:cc, MAC: 02:00:00:00:00:00, Wi-Fi standard: 8, RSSI: -54, Link speed: 288Mbps, Tx Link speed: 288Mbps, Rx Link speed: 288Mbps, Frequency: 2437MHz, Noise: -91, MLO Information: , AP MLD Address: 8c:a6:df:aa:bb:c0, AP MLO Link Id: 0, AP MLO Affiliated links: [MloLink{linkId=0, mloMacAddress=8c:a6:df:aa:bb:c1, state=MLO_LINK_STATE_ACTIVE, band=2.4 GHz, channel=6, channelWidth=40, rssi=-54, rxLinkSpeedMbps=288, txLinkSpeedMbps=288}, MloLink{linkId=1, mloMacAddress=8c:a6:df:aa:bb:c2, state=MLO_LINK_STATE_ACTIVE, band=5 GHz, channel=149, channelWidth=160, rssi=-61, rxLinkSpeedMbps=2401, txLinkSpeedMbps=2882}, MloLink{linkId=2, mloMacAddress=8c:a6:df:aa:bb:c3, state=MLO_LINK_STATE_IDLE, band=6 GHz, channel=37, rssi=-127, rxLinkSpeedMbps=-1, txLinkSpeedMbps=-1}]
+`
+	st := parseWifiStatusOutput(mloInline, "wlan1", 1800800000)
+	if !st.Available || st.Mode != "wifi_sta" || st.RAT != "Wi-Fi 中继" {
+		t.Fatalf("expected Available=true Mode='wifi_sta' RAT='Wi-Fi 中继', got %+v", st)
+	}
+	if st.WifiGen != "Wi-Fi 7" || st.DisplayRAT != "Wi-Fi 7 MLO" {
+		t.Fatalf("expected WifiGen='Wi-Fi 7' DisplayRAT='Wi-Fi 7 MLO', got gen=%q disp=%q", st.WifiGen, st.DisplayRAT)
+	}
+	if st.Band != "5GHz" || st.BandCombo != "5GHz+2.4GHz" || st.Channel != 149 || st.FreqMHz != 5745 {
+		t.Fatalf("expected MLO primary 5GHz ch149 (5745MHz) combo 5GHz+2.4GHz, got band=%q combo=%q ch=%d freq=%d",
+			st.Band, st.BandCombo, st.Channel, st.FreqMHz)
+	}
+	if st.BandwidthMHz != 160 || st.BWMHz != 160 || st.TotalBWMHz != 200 || st.WifiLinkMbps != 2882 {
+		t.Fatalf("expected bw=160 totalBW=200 speed=2882Mbps, got bw=%d/%d total=%d speed=%d",
+			st.BandwidthMHz, st.BWMHz, st.TotalBWMHz, st.WifiLinkMbps)
+	}
+	if len(st.Carriers) != 2 || !st.Carriers[0].IsPrimary || st.Carriers[0].Band != "5GHz" || st.Carriers[1].Band != "2.4GHz" {
+		t.Fatalf("unexpected MLO carriers: %+v", st.Carriers)
+	}
+	if !st.HasSINR || st.SINRdB != 30 { // -61 - (-91) = 30 dB
+		t.Fatalf("expected SNR=30dB HasSINR=true, got sinr=%d has=%v", st.SINRdB, st.HasSINR)
+	}
+	if len(st.BSSIDTag) != 8 || strings.Contains(strings.ToLower(st.BSSIDTag), "8c:a6") {
+		t.Fatalf("expected 8-hex anonymized bssid_tag without raw MAC, got %q", st.BSSIDTag)
+	}
+	jb, _ := json.Marshal(st)
+	if strings.Contains(strings.ToLower(string(jb)), "8c:a6:df") {
+		t.Fatalf("JSON output must NEVER expose plaintext BSSID/MLD MAC: %s", string(jb))
+	}
+
+	// 2. 多行缩进 Affiliated MLO Links: 6GHz > 5GHz > 2.4GHz 及同频最高速率优选
+	mloMultiline := `Wifi is connected to "TriBand_BE96"
+  BSSID: aa:bb:cc:11:22:33
+  Wi-Fi standard: 11be
+  RSSI: -50
+  Link speed: 286 Mbps
+  Frequency: 2412 MHz
+  Affiliated MLO Links:
+    Link 0:
+      State: ACTIVE
+      Band: 2.4 GHz
+      Channel: 1
+      Channel width: 40 MHz
+      RSSI: -50
+      Tx Link speed: 286 Mbps
+    Link 1:
+      State: ACTIVE
+      Band: 5 GHz
+      Channel: 44
+      Channel width: 160 MHz
+      RSSI: -58
+      Tx Link speed: 2402 Mbps
+    Link 2:
+      State: ACTIVE
+      Band: 6 GHz
+      Channel: 69
+      Channel width: 320 MHz
+      RSSI: -64
+      Tx Link speed: 5764 Mbps
+`
+	st6G := parseWifiStatusOutput(mloMultiline, "wlan0", 1800800010)
+	if st6G.Band != "6GHz" || st6G.Channel != 69 || st6G.FreqMHz != 6295 || st6G.BWMHz != 320 || st6G.BandCombo != "6GHz+5GHz+2.4GHz" || st6G.WifiLinkMbps != 5764 {
+		t.Fatalf("expected 6GHz ch69 320MHz 5764Mbps preferred over 5GHz & 2.4GHz, got %+v", st6G)
+	}
+}
+
+func TestSignalRC10ZeroDbSINRAndScreenOff90sThrottle(t *testing.T) {
+	// 1. P1-09: 0 dB 真实临界 SINR / LTESINR / Wi-Fi SNR 必须置 has_sinr=true 且顶层 JSON 显式保留 "sinr_db":0 与 "has_rsrq"
+	stWifiZeroSNR := parseWifiStatusOutput("Wifi is connected\nBSSID: 10:20:30:40:50:60\nWi-Fi standard: 6\nRSSI: -86\nNoise: -86\nFrequency: 5180 MHz\nChannel bandwidth: 80 MHz\n", "wlan1", 1800900000)
+	if !stWifiZeroSNR.HasSINR || stWifiZeroSNR.SINRdB != 0 || stWifiZeroSNR.WifiGen != "Wi-Fi 6" || stWifiZeroSNR.Channel != 36 || stWifiZeroSNR.BWMHz != 80 {
+		t.Fatalf("expected Wi-Fi RSSI==Noise -> SNR=0dB HasSINR=true Wi-Fi 6 ch36 80MHz, got %+v", stWifiZeroSNR)
+	}
+	jbWifi, err := json.Marshal(stWifiZeroSNR)
+	if err != nil {
+		t.Fatalf("marshal wifi zero SNR: %v", err)
+	}
+	rawWifiJSON := string(jbWifi)
+	for _, wantFrag := range []string{`"sinr_db":0`, `"has_sinr":true`, `"has_rsrq":false`, `"wifi_gen":"Wi-Fi 6"`, `"channel":36`, `"bw_mhz":80`} {
+		if !strings.Contains(rawWifiJSON, wantFrag) {
+			t.Fatalf("expected %s in JSON, got %s", wantFrag, rawWifiJSON)
+		}
+	}
+
+	// LTE rssnr=0 在 NSA 缺 NR ssSinr 时同样置 HasSINR=true 且顶层输出 "sinr_db":0, "lte_sinr_db":0
+	nsaZeroLTESINR := `
+mActiveDataSubId=1
+  Phone Id=0
+    mSubId=1
+    mServiceState={mOperatorAlphaLong=China Telecom, mOperatorNumeric=46011, accessNetworkTechnology=LTE, isEnDcAvailable=true}
+    mTelephonyDisplayInfo={network=LTE, overrideNetwork=NR_NSA}
+    mSignalStrength={mLte=CellSignalStrengthLte: rssi=-75 rsrp=-98 rsrq=-13 rssnr=0, mNr=CellSignalStrengthNr:{ csiRsrp = 2147483647 ssRsrp = -102 ssRsrq = -14 ssSinr = 2147483647 }}
+`
+	stNSA0 := parseTelephonyRegistryDump(nsaZeroLTESINR, "rmnet_data0", 1800900010)
+	if !stNSA0.HasSINR || !stNSA0.HasLTESINR || stNSA0.SINRdB != 0 || stNSA0.LTESINRdB != 0 || !stNSA0.HasRSRQ {
+		t.Fatalf("expected 0 dB LTESINRdB to set HasSINR=true & HasLTESINR=true, got sinr=%d(%v) lteSinr=%d(%v) hasRSRQ=%v",
+			stNSA0.SINRdB, stNSA0.HasSINR, stNSA0.LTESINRdB, stNSA0.HasLTESINR, stNSA0.HasRSRQ)
+	}
+
+	// 2. C-21: 熄屏带载 (!act.ScreenOn && act.ScreenKnown) 缓存 TTL 放宽至 90s 并严禁落入 8s 高频档
+	bgScreenOff := Activity{
+		Known:         true,
+		Level:         lvlBackground,
+		ScreenOn:      false,
+		ScreenKnown:   true,
+		HotspotActive: true,
+		ClientsOnline: 3,
+	}
+	if ttl := signalTTLForActivity(bgScreenOff); ttl != 90*time.Second {
+		t.Fatalf("expected 90s TTL for screen-off background load, got %v", ttl)
+	}
+	// 即使 WebUIActive 残留 true 或 Known 尚未就绪, 只要明确熄屏(!ScreenOn && ScreenKnown)绝不落入 8s 档
+	screenOffResidualUI := Activity{
+		Known:         true,
+		Level:         lvlActive,
+		ScreenOn:      false,
+		ScreenKnown:   true,
+		HotspotActive: true,
+		ClientsOnline: 2,
+		WebUIActive:   true,
+	}
+	if ttl := signalTTLForActivity(screenOffResidualUI); ttl != 90*time.Second {
+		t.Fatalf("screen-off must NEVER drop into 8s active polling even with residual WebUIActive, got %v", ttl)
+	}
+	screenOnActive := Activity{
+		Known:         true,
+		Level:         lvlActive,
+		ScreenOn:      true,
+		ScreenKnown:   true,
+		HotspotActive: true,
+		ClientsOnline: 2,
+	}
+	if ttl := signalTTLForActivity(screenOnActive); ttl != 8*time.Second {
+		t.Fatalf("expected 8s TTL when screen is ON and active, got %v", ttl)
+	}
+}

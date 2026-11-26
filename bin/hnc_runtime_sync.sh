@@ -176,9 +176,13 @@ fi
 
 _sync_tree "$MODDIR/bin" "$HNC_DIR/bin" 755
 _sync_tree "$MODDIR/webroot" "$HNC_DIR/webroot" 644
-if [ -f "$MODDIR/module.prop" ]; then
+_mod_bn=$(basename "$MODDIR" 2>/dev/null)
+if [ -e "$MODDIR/update" ] && [ -n "$_mod_bn" ] && [ -d "${HNC_MODULES_UPDATE_ROOT:-/data/adb/modules_update}/$_mod_bn" ]; then
+    echo "runtime sync: live update staged at ${HNC_MODULES_UPDATE_ROOT:-/data/adb/modules_update}/$_mod_bn, deferring module.prop/runtime_version bump until reboot"
+elif [ -f "$MODDIR/module.prop" ]; then
     _sync_file "$MODDIR/module.prop" "$HNC_DIR/module.prop" 644
 fi
+unset _mod_bn
 
 if [ "$_need_dpid_restart" = "1" ] && [ -s "$D_RUN" ] && _files_same "$D_MOD" "$D_RUN"; then
     _dp_proot="${HNC_PROC_ROOT:-/proc}"

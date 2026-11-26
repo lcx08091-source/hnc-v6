@@ -130,7 +130,7 @@ static __always_inline void copy_mac_key(struct mac_key *key, const __u8 *addr)
 static __always_inline void account_dev_stats(struct __sk_buff *skb, __u32 mark_val, int is_rx)
 {
     __u32 dev_bits = mark_val & HNC_MARK_DEV_MASK;
-    if ((dev_bits & HNC_MARK_DEV_VALID) == 0U)
+    if ((dev_bits & HNC_MARK_DEV_VALID) == 0U || dev_bits == HNC_DEV_MARK_DROP)
         return;
 
     __u32 slot = (dev_bits >> 16) & 0x7fU;
@@ -345,7 +345,7 @@ static __always_inline int apply_dev_mark_and_stats(struct __sk_buff *skb,
                                                     __u16 h_proto,
                                                     __u32 l3_off)
 {
-    if (mark_val == HNC_MARK_DROP)
+    if ((mark_val & HNC_DEV_MARK_MASK) == HNC_DEV_MARK_DROP)
         return TC_ACT_SHOT;
     if ((mark_val & HNC_MARK_DEV_MASK) != 0U) {
         skb->mark = (skb->mark & ~HNC_MARK_DEV_MASK) | (mark_val & HNC_MARK_DEV_MASK);
@@ -554,6 +554,9 @@ static __always_inline int parse_l2_hdr(struct __sk_buff *skb, int use_src_mac,
 SEC("tc")
 int hnc_clsact_ingress(struct __sk_buff *skb)
 {
+    if ((skb->mark & HNC_DEV_MARK_MASK) == HNC_DEV_MARK_DROP)
+        return TC_ACT_SHOT;
+
     struct mac_key key = { .pad = 0 };
     __u16 h_proto = 0;
     __u32 l3_off = 14;
@@ -561,12 +564,16 @@ int hnc_clsact_ingress(struct __sk_buff *skb)
     if (parse_l2_hdr(skb, 1, &key, &h_proto, &l3_off) < 0)
         return TC_ACT_UNSPEC;
 
+    __u32 *m_mac = bpf_map_lookup_elem(&mac_mark_map, &key);
+    __u32 mac_mark = m_mac ? *m_mac : 0U;
+    if ((mac_mark & HNC_DEV_MARK_MASK) == HNC_DEV_MARK_DROP)
+        return TC_ACT_SHOT;
+
     if (h_proto == bpf_htons(ETH_P_IPV6) && is_ipv6_ndp_ctrl(skb, l3_off))
         return TC_ACT_UNSPEC;
 
-    __u32 *m_mac = bpf_map_lookup_elem(&mac_mark_map, &key);
-    if (m_mac && *m_mac != 0)
-        return apply_dev_mark_and_stats(skb, *m_mac, 1, h_proto, l3_off);
+    if (mac_mark != 0U)
+        return apply_dev_mark_and_stats(skb, mac_mark, 1, h_proto, l3_off);
 
     if (h_proto == bpf_htons(ETH_P_IP)) {
         __u32 ip_off = l3_off & 0x3eU;
@@ -607,27 +614,34 @@ int hnc_clsact_ingress(struct __sk_buff *skb)
 SEC("tc_egress")
 int hnc_clsact_egress(struct __sk_buff *skb)
 {
-    if (skb->mark == HNC_MARK_DROP)
+    if ((skb->mark & HNC_DEV_MARK_MASK) == HNC_DEV_MARK_DROP)
         return TC_ACT_SHOT;
-
-    if ((skb->mark & HNC_MARK_DEV_VALID) != 0) {
-        account_dev_stats(skb, skb->mark, 0);
-        return TC_ACT_UNSPEC;
-    }
 
     struct mac_key key = { .pad = 0 };
     __u16 h_proto = 0;
     __u32 l3_off = 14;
 
-    if (parse_l2_hdr(skb, 0, &key, &h_proto, &l3_off) < 0)
+    if (parse_l2_hdr(skb, 0, &key, &h_proto, &l3_off) < 0) {
+        if ((skb->mark & HNC_MARK_DEV_VALID) != 0U)
+            account_dev_stats(skb, skb->mark, 0);
         return TC_ACT_UNSPEC;
+    }
+
+    __u32 *m_mac = bpf_map_lookup_elem(&mac_mark_map, &key);
+    __u32 mac_mark = m_mac ? *m_mac : 0U;
+    if ((mac_mark & HNC_DEV_MARK_MASK) == HNC_DEV_MARK_DROP)
+        return TC_ACT_SHOT;
+
+    if ((skb->mark & HNC_MARK_DEV_VALID) != 0U) {
+        account_dev_stats(skb, skb->mark, 0);
+        return TC_ACT_UNSPEC;
+    }
 
     if (h_proto == bpf_htons(ETH_P_IPV6) && is_ipv6_ndp_ctrl(skb, l3_off))
         return TC_ACT_UNSPEC;
 
-    __u32 *m_mac = bpf_map_lookup_elem(&mac_mark_map, &key);
-    if (m_mac && *m_mac != 0)
-        return apply_dev_mark_and_stats(skb, *m_mac, 0, h_proto, l3_off);
+    if (mac_mark != 0U)
+        return apply_dev_mark_and_stats(skb, mac_mark, 0, h_proto, l3_off);
 
     return TC_ACT_UNSPEC;
 }

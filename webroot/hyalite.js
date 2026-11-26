@@ -148,13 +148,12 @@
      with a folding slope. The centre stays clear while the edge concentrates the backdrop into a
      coloured band; the folding is confined to that narrow rim, where blur and dispersion cover the
      staircase Chromium's nearest-neighbour sampler leaves behind. */
-  const DEFAULTS = { bevel: 37, thickness: 59, slope: 2.7, shape: 'squircle', blur: 1, dispersion: 1.6,
+  const DEFAULTS = { bevel: 37, thickness: 59, slope: 2.7, shape: 'squircle', blur: 1, edgeBlur: null, dispersion: 1.6,
                      shade: 0.46, rim: 1.76, edgeW: 8, sat: 0.86, edge: 0.32, light: -140, smooth: 1,
                      materialize: 0, settle: 0, self: false };
   const LIMITS = { bevel: [1, 400], thickness: [0, 400], slope: [0.2, 4], blur: [0, 64], dispersion: [0, 8],
                    shade: [0, 2], rim: [0, 4], edgeW: [0.5, 64], sat: [0, 3], edge: [0, 2], light: [-180, 180],
                    smooth: [0, 4], materialize: [0, 10000], settle: [0, 10000] };
-  const SHAPES = ['circle', 'squircle', 'lip'];
   /* Ratios inside `shade` and `rim`, and the three constants that came out of the same tuning pass.
      They are deliberately not options: the *balance* between them is what took the tuning, and two
      knobs that have to move together are worse than one. Change them here if you disagree.
@@ -164,6 +163,17 @@
   const GLOW = 0.40 / 1.76;        // the wide Fresnel glow, as a share of `rim`
   const SHARP = 44;                // exponent of the tight specular line
   const LIP = 0.3;                 // how far the lip profile dips in the middle
+  /* Bevel surface height H(x): x = 0 at the outer rim (lowest), 1 at the inner edge where it meets
+     the slab. Only H' matters for the tilt; H itself gives the glass left above the ray. */
+  const Hc = (t) => Math.sqrt(Math.max(0, 1 - (1 - t) * (1 - t)));            // quarter circle
+  const Hs = (t) => Math.pow(Math.max(0, 1 - Math.pow(1 - t, 4)), 0.25);      // squircle — Apple's
+  const SHAPES = {
+    circle: Hc,
+    squircle: Hs,
+    /* A raised rim over a shallow dip: sin^2(pi*t)*cos(pi*t) has zero value and derivative at t = 0 and 1. */
+    lip: (t) => Hc(t) + LIP * Math.pow(Math.sin(Math.PI * t), 2) * Math.cos(Math.PI * t),
+  };
+  Object.assign(SHAPES, { pill: SHAPES.squircle });
   const AA_SLOPE = 0.3;            // rule 4: the ring blur is fully on where the inner pass still stretches ≥ ~1.4×
   const LIVE_MIN_MS = 90;          // live mode: at most one rebuild per this many ms while the size keeps moving
   const MAX_MAP_PX = 320000;       // ≈ 565×565: larger elements get a downsampled map
@@ -190,8 +200,18 @@
       const v = +s[k], lim = LIMITS[k];
       s[k] = Number.isFinite(v) ? Math.min(lim[1], Math.max(lim[0], v)) : DEFAULTS[k];
     }
+    if ('edgeBlur' in s) {
+      if (s.edgeBlur === null || s.edgeBlur === undefined || s.edgeBlur === '') s.edgeBlur = null;
+      else {
+        const eb = +s.edgeBlur;
+        s.edgeBlur = Number.isFinite(eb) ? Math.min(64, Math.max(0, eb)) : null;
+      }
+    }
     if ('self' in s) s.self = !!s.self;
-    if ('shape' in s && SHAPES.indexOf(s.shape) < 0) s.shape = DEFAULTS.shape;
+    if ('shape' in s) {
+      if (!Object.prototype.hasOwnProperty.call(SHAPES, s.shape)) s.shape = DEFAULTS.shape;
+      else if (s.shape === 'pill') s.shape = 'squircle';
+    }
     return s;
   }
 
@@ -217,17 +237,8 @@
     };
   }
 
-  /* Bevel surface height H(x): x = 0 at the outer rim (lowest), 1 at the inner edge where it meets
-     the slab. Only H' matters for the tilt; H itself gives the glass left above the ray. */
-  const Hc = (t) => Math.sqrt(Math.max(0, 1 - (1 - t) * (1 - t)));            // quarter circle
-  const Hs = (t) => Math.pow(Math.max(0, 1 - Math.pow(1 - t, 4)), 0.25);      // squircle — Apple's
   function heightFn(shape) {
-    if (shape !== 'lip') return shape === 'squircle' ? Hs : Hc;
-    /* A raised rim over a shallow dip. The perturbation has to reach zero in *both* value and
-       slope at each end, or the bevel does not meet the slab and the join shows as a crease:
-       sin²(πt)·cos(πt) is 0 with 0 derivative at t = 0 and 1, and changes sign in the middle —
-       which is what tips the surface back the other way and gives the second pair of bands. */
-    return (t) => Hc(t) + LIP * Math.pow(Math.sin(Math.PI * t), 2) * Math.cos(Math.PI * t);
+    return Object.prototype.hasOwnProperty.call(SHAPES, shape) ? SHAPES[shape] : Hs;
   }
   /* Fresnel reflectance, unpolarised average: → 1 at grazing incidence, 0.04 head-on. */
   function fresnel(a) {
@@ -406,6 +417,8 @@
                                                 xChannelSelector: 'R', yChannelSelector: 'G' }));
       return f;
     }
+    const eb = (o.edgeBlur !== null && o.edgeBlur !== undefined) ? o.edgeBlur : o.blur;
+    const splitEdgeBlur = eb < o.blur - 0.05;
     f.appendChild(prim('feGaussianBlur', { in: 'SourceGraphic', stdDeviation: o.blur, result: 'softA' }));
     /* Rule 7: the backdrop handed to a reference filter stops dead at the element's box, so the blur
        fades its outermost rows into transparency. The dispersion pass sums three premultiplied
@@ -416,10 +429,20 @@
        feColorMatrix works on unpremultiplied colour, so pinning alpha to 1 here keeps the blurred
        colour and simply drops the fade — the rows are extended, not darkened. */
     f.appendChild(prim('feColorMatrix', { in: 'softA', type: 'matrix', values: '1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 0 1', result: 'soft' }));
-    let src = 'soft', scale = S;
+    let dispSrc = 'soft';
+    if (splitEdgeBlur) {
+      if (eb > 0) {
+        f.appendChild(prim('feGaussianBlur', { in: 'SourceGraphic', stdDeviation: eb, result: 'edgeSoftA' }));
+        f.appendChild(prim('feColorMatrix', { in: 'edgeSoftA', type: 'matrix', values: '1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 0 1', result: 'edgeSoft' }));
+      } else {
+        f.appendChild(prim('feColorMatrix', { in: 'SourceGraphic', type: 'matrix', values: '1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 0 1', result: 'edgeSoft' }));
+      }
+      dispSrc = 'edgeSoft';
+    }
+    let src = dispSrc, scale = S;
     if (map.twoPass && o.smooth > 0) {                             // rule 4: inner pass, ring blur, then the outer pass
       f.appendChild(image(map.inner.url, 'inner'));
-      f.appendChild(prim('feDisplacementMap', { in: 'soft', in2: 'inner', scale: (2 * map.inner.maxd).toFixed(2),
+      f.appendChild(prim('feDisplacementMap', { in: dispSrc, in2: 'inner', scale: (2 * map.inner.maxd).toFixed(2),
                                                 xChannelSelector: 'R', yChannelSelector: 'G', result: 'bent' }));
       f.appendChild(prim('feGaussianBlur', { in: 'bent', stdDeviation: o.smooth, result: 'bentSoft' }));
       f.appendChild(prim('feColorMatrix', { in: 'inner', type: 'matrix', values: '0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 1 0 0', result: 'ring' }));
@@ -448,6 +471,27 @@
       f.appendChild(prim('feDisplacementMap', { in: src, in2: 'map', scale: scale.toFixed(2),
                                                 xChannelSelector: 'R', yChannelSelector: 'G', result: 'glass' }));
     }
+    let glassOut = 'glass';
+    if (splitEdgeBlur) {
+      for (const [ch, row] of [['R', '1 0 0 0 0'], ['G', '0 1 0 0 0']]) {
+        f.appendChild(prim('feColorMatrix', { in: 'map', type: 'matrix',
+          values: `0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  ${row}`, result: 'ebRg' + ch }));
+        const tf = prim('feComponentTransfer', { in: 'ebRg' + ch, result: 'ebM' + ch });
+        tf.appendChild(prim('feFuncA', { type: 'table', tableValues: '1 0 1' }));
+        f.appendChild(tf);
+      }
+      f.appendChild(prim('feComposite', { in: 'ebMR', in2: 'ebMG', operator: 'arithmetic', k1: 0, k2: 1, k3: 1, k4: 0, result: 'ebRaw' }));
+      const ebBoost = prim('feComponentTransfer', { in: 'ebRaw', result: 'ebRing' });
+      ebBoost.appendChild(prim('feFuncA', { type: 'linear', slope: 8, intercept: -0.08 }));
+      f.appendChild(ebBoost);
+      const ebInv = prim('feComponentTransfer', { in: 'ebRing', result: 'ebRingInv' });
+      ebInv.appendChild(prim('feFuncA', { type: 'table', tableValues: '1 0' }));
+      f.appendChild(ebInv);
+      f.appendChild(prim('feComposite', { in: 'glass', in2: 'ebRing', operator: 'in', result: 'ebIn' }));
+      f.appendChild(prim('feComposite', { in: 'soft', in2: 'ebRingInv', operator: 'in', result: 'ebOut' }));
+      f.appendChild(prim('feComposite', { in: 'ebIn', in2: 'ebOut', operator: 'arithmetic', k1: 0, k2: 1, k3: 1, k4: 0, result: 'glassMerged' }));
+      glassOut = 'glassMerged';
+    }
     /* The edge profile lives in the map's blue channel, signed around 128. Below neutral it darkens,
        and it has to darken by *multiplying*: subtracting would drive an already dark backdrop
        negative. feBlend multiply is used rather than feComposite arithmetic because arithmetic
@@ -457,7 +501,7 @@
     const sh = prim('feComponentTransfer', { in: 'edgeRGB', result: 'shadeLayer' });
     for (const ch of ['R', 'G', 'B']) sh.appendChild(prim('feFunc' + ch, { type: 'table', tableValues: '0 1 1' }));
     f.appendChild(sh);
-    f.appendChild(prim('feBlend', { in: 'glass', in2: 'shadeLayer', mode: 'multiply', result: 'shaded' }));
+    f.appendChild(prim('feBlend', { in: glassOut, in2: 'shadeLayer', mode: 'multiply', result: 'shaded' }));
     /* Saturation, inside the bevel ring only. Folding shows the same backdrop twice and dispersion
        pulls the channels apart, which together muddy the colour along the rim; pulling saturation
        down there cleans it without touching the centre (rule 1 of the recipe: never restyle what is
@@ -600,13 +644,16 @@
     if (W < 4 || H < 4) return;                       // not laid out yet / hidden
     const radii = radiiOf(el, W, H);
     const o = st.opts;
-    const key = `${W}x${H}|${radii.join(',')}|${o.bevel}|${o.thickness}|${o.slope}|${o.shape}|${o.shade}|${o.rim}|${o.edgeW}|${o.sat}|${o.blur}|${o.dispersion}|${o.light}|${o.smooth}|${o.self ? 'self' : 'back'}`;
+    const eb = (o.edgeBlur !== null && o.edgeBlur !== undefined) ? o.edgeBlur : o.blur;
+    const key = `${W}x${H}|${radii.join(',')}|${o.bevel}|${o.thickness}|${o.slope}|${o.shape}|${o.shade}|${o.rim}|${o.edgeW}|${o.sat}|${o.blur}|${eb}|${o.dispersion}|${o.light}|${o.smooth}|${o.self ? 'self' : 'back'}`;
     st.w = W; st.h = H;
     let rec;
     if (key === st.key) rec = filters.get(key);       // same geometry (e.g. back from a settle): just re-point
     else { rec = acquire(key, W, H, radii, o); if (st.key) release(st.key); st.key = key; }
     if (!rec) return;
-    el.style.setProperty(VAR_EDGE, o.self ? 'none' : edgeShadow(o));
+    const es = o.self ? '' : edgeShadow(o);
+    if (es && es !== 'none') el.style.setProperty(VAR_EDGE, es);
+    else el.style.removeProperty(VAR_EDGE);
     if (ramp > 0 && !reducedMotion()) materialize(el, st, rec, ramp);
     else el.style.setProperty(VAR, `url(#${rec.id})`);
   }

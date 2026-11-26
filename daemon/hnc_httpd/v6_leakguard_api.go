@@ -2395,6 +2395,7 @@ func (e *leakGuardEngine) snapshotPayloadFiltered(scopeFilter string) map[string
 		}
 	}
 
+	var windowHits int64
 	out := make([]LeakEvent, 0, len(list))
 	for i := len(list) - 1; i >= 0; i-- {
 		ev := list[i]
@@ -2431,12 +2432,17 @@ func (e *leakGuardEngine) snapshotPayloadFiltered(scopeFilter string) map[string
 			}
 		}
 
+		hc := ev.HitCount
+		if hc <= 0 {
+			hc = 1
+		}
 		if scopeFilter == leakScopeHotspot && ev.Origin != leakOriginHotspot {
 			continue
 		}
 		if scopeFilter == leakScopeHost && ev.Origin != leakOriginHost {
 			continue
 		}
+		windowHits += hc
 		out = append(out, ev)
 	}
 
@@ -2460,6 +2466,7 @@ func (e *leakGuardEngine) snapshotPayloadFiltered(scopeFilter string) map[string
 		"ok":                   true,
 		"scope":                scopeFilter,
 		"events":               out,
+		"window_hits":          windowHits,
 		"total_hits":           totalHits,
 		"host_hits":            hostHits,
 		"hotspot_hits":         hotspotHits,
@@ -2473,6 +2480,7 @@ func (e *leakGuardEngine) snapshotPayloadFiltered(scopeFilter string) map[string
 		"undo_stack":           undoStack,
 		"undo_count":           len(undoStack),
 		"stats": map[string]any{
+			"window_hits":          windowHits,
 			"total_hits":           totalHits,
 			"host_hits":            hostHits,
 			"hotspot_hits":         hotspotHits,
@@ -2485,6 +2493,18 @@ func (e *leakGuardEngine) snapshotPayloadFiltered(scopeFilter string) map[string
 		},
 		"config": cfg,
 	}
+}
+
+func (e *leakGuardEngine) windowHitsLocked() int64 {
+	var sum int64
+	for i := range e.events {
+		hc := e.events[i].HitCount
+		if hc <= 0 {
+			hc = 1
+		}
+		sum += hc
+	}
+	return sum
 }
 
 func (e *leakGuardEngine) summary() map[string]any {
@@ -2506,6 +2526,7 @@ func (e *leakGuardEngine) summary() map[string]any {
 	copy(list, e.events)
 	e.mu.Unlock()
 
+	var windowHits int64
 	devSet := make(map[string]bool)
 	appSet := make(map[string]bool)
 	blockedHostSet := make(map[string]bool)
@@ -2518,6 +2539,11 @@ func (e *leakGuardEngine) summary() map[string]any {
 		}
 	}
 	for _, ev := range list {
+		hc := ev.HitCount
+		if hc <= 0 {
+			hc = 1
+		}
+		windowHits += hc
 		if normalizeLeakOrigin(ev.Origin) == leakOriginHost {
 			if ak := hostAppIdentityKey(ev); ak != "" {
 				appSet[ak] = true
@@ -2553,6 +2579,7 @@ func (e *leakGuardEngine) summary() map[string]any {
 	}
 
 	return map[string]any{
+		"window_hits":          windowHits,
 		"total_hits":           totalHits,
 		"host_hits":            e.hostHits.Load(),
 		"hotspot_hits":         e.hotspotHits.Load(),
@@ -2979,6 +3006,7 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 	}
 	normUID, normPkg := sanitizeLeakAppIdentityParams(req.UID, req.Pkg)
 	eng := s.v6State().leakGuard
+	eng.syncFromDisk()
 
 	switch act {
 	case "add":
@@ -3023,6 +3051,7 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 			rule = eng.ignoreRules[existsIdx]
 		}
 		purged, purgedIDs := eng.purgeIgnoredEventsWithIDsLocked()
+		winHits := eng.windowHitsLocked()
 		rulesOut := make([]dpidlg.IgnoreRule, len(eng.ignoreRules))
 		copy(rulesOut, eng.ignoreRules)
 		saveErr := eng.saveStateLocked()
@@ -3038,6 +3067,7 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 			"action":        "add",
 			"rule":          rule,
 			"purged_events": purged,
+			"window_hits":   winHits,
 			"ignore_rules":  rulesOut,
 		})
 
@@ -3079,6 +3109,7 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 			eng.ignoredSeenIDs = make(map[string]int64)
 			eng.hasEventsStat = false
 		}
+		winHits := eng.windowHitsLocked()
 		rulesOut := make([]dpidlg.IgnoreRule, len(eng.ignoreRules))
 		copy(rulesOut, eng.ignoreRules)
 		saveErr := eng.saveStateLocked()
@@ -3087,11 +3118,18 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write whitelist failed", "detail": saveErr.Error()})
 			return
 		}
+		if removed > 0 {
+			eng.syncFromDisk()
+			eng.mu.Lock()
+			winHits = eng.windowHitsLocked()
+			eng.mu.Unlock()
+		}
 		eng.notifySSEChanged()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":           true,
 			"action":       "remove",
 			"removed":      removed,
+			"window_hits":  winHits,
 			"ignore_rules": rulesOut,
 		})
 
@@ -3101,17 +3139,25 @@ func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
 		eng.ignoreRules = nil
 		eng.ignoredSeenIDs = make(map[string]int64)
 		eng.hasEventsStat = false
+		winHits := eng.windowHitsLocked()
 		saveErr := eng.saveStateLocked()
 		eng.mu.Unlock()
 		if saveErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write whitelist failed", "detail": saveErr.Error()})
 			return
 		}
+		if removed > 0 {
+			eng.syncFromDisk()
+			eng.mu.Lock()
+			winHits = eng.windowHitsLocked()
+			eng.mu.Unlock()
+		}
 		eng.notifySSEChanged()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":           true,
 			"action":       "clear",
 			"removed":      removed,
+			"window_hits":  winHits,
 			"ignore_rules": []dpidlg.IgnoreRule{},
 		})
 

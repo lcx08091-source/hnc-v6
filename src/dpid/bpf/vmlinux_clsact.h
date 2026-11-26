@@ -24,11 +24,14 @@ typedef signed int __s32;
 
 /* Orthogonal v5.40.0 skb->mark bitfields:
  *   [15:0]  0x0000ffffU : Reserved untouched for Android netd netId / permission bits
- *   [23:16] 0x00ff0000U : HNC per-device slot mark (0x00800000U | (mid << 16))
+ *   [23:16] 0x00ff0000U : HNC per-device slot mark (0x00800000U | (mid << 16)),
+ *                         with 0x00ff0000U (slot 127) reserved as orthogonal drop sentinel
  *   [31:24] 0xff000000U : Reserved untouched for HNC App/QoS tier marks
  */
 #define HNC_MARK_DEV_MASK   0x00ff0000U
+#define HNC_DEV_MARK_MASK   HNC_MARK_DEV_MASK
 #define HNC_MARK_DEV_VALID  0x00800000U
+#define HNC_DEV_MARK_DROP   0x00ff0000U
 #define HNC_MARK_DROP       0xffffffffU
 
 /* EtherTypes */

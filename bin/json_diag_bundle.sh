@@ -4,6 +4,7 @@
 # without modifying live JSON files. Safe to run from Termux/root:
 #   su -c 'sh /data/local/hnc/bin/json_diag_bundle.sh'
 
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 set +e
 
 HNC="${HNC:-${HNC_DIR:-/data/local/hnc}}"
@@ -118,12 +119,18 @@ for f in "$RUN"/tc_state.*.txt "$RUN"/capabilities*.json "$RUN"/capabilities*.lo
   [ -e "$f" ] && copy_if_exists "$f" "$OUT/run/$(basename "$f")"
 done
 
+redact_stream() {
+  sed -E \
+    -e 's/("([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk]|hotspot_pass)"[[:space:]]*:[[:space:]]*)"([^"\\]|\\.)*"/\1"<redacted>"/g' \
+    -e 's/(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk]|hotspot_pass)[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1<redacted>/g' \
+    -e 's/(X-HNC-Local-Admin:[[:space:]]*)[^[:space:]]+/\1<redacted>/g'
+}
+
 copy_redacted_json() {
   src="$1"; dst="$2"
   [ -f "$src" ] || return 0
   mkdir -p "$(dirname "$dst")" 2>/dev/null
-  sed -E 's/("(password|pass|secret|token|pin|psk|hotspot_pass)"[[:space:]]*:[[:space:]]*)"([^"\\]|\\.)*"/\1"<redacted>"/g' \
-    "$src" > "$dst" 2>/dev/null
+  redact_stream < "$src" > "$dst" 2>/dev/null
 }
 
 # Backup inventory and small latest backup samples for recovery debugging.
@@ -157,12 +164,12 @@ for f in rules.json device_names.json templates.json devices.json; do
   fi
 done
 
-# Recent logs: limited tail only.
+# Recent logs: limited tail only (redacted to prevent credential/hotspot_pass leaks).
 mkdir -p "$OUT/log_tail" 2>/dev/null
 for lf in "$LOGS"/*.log; do
   [ -f "$lf" ] || continue
   bn="$(basename "$lf")"
-  tail -n 300 "$lf" > "$OUT/log_tail/$bn.tail.txt" 2>/dev/null
+  tail -n 300 "$lf" 2>/dev/null | redact_stream > "$OUT/log_tail/$bn.tail.txt" 2>/dev/null
 done
 
 # Produce machine-readable manifest.
@@ -183,13 +190,22 @@ done
   echo "}"
 } > "$OUT/manifest.json"
 
-# Pack automatically.
-cd "$OUT_BASE" 2>/dev/null && tar -czf "hnc-json-debug-$TS.tar.gz" "hnc-json-debug-$TS" 2>/dev/null
-
-cat <<EOF2
+# Pack automatically and remove plaintext temp directory from /sdcard/Download on success.
+ARCHIVE="$OUT_BASE/hnc-json-debug-$TS.tar.gz"
+if (cd "$OUT_BASE" 2>/dev/null && { tar -czf "$ARCHIVE" "hnc-json-debug-$TS" 2>/dev/null || { [ -x /system/bin/tar ] && PATH="/system/bin:$PATH" /system/bin/tar -czf "$ARCHIVE" "hnc-json-debug-$TS" 2>/dev/null; }; }) && [ -s "$ARCHIVE" ]; then
+  rm -rf "$OUT" 2>/dev/null
+  chmod 644 "$ARCHIVE" 2>/dev/null
+  cat <<EOF2
+HNC JSON debug bundle created:
+  $ARCHIVE
+EOF2
+else
+  rm -f "$ARCHIVE" 2>/dev/null
+  cat <<EOF2
 HNC JSON debug bundle created:
   $OUT
 
 Send this file if present:
-  $OUT_BASE/hnc-json-debug-$TS.tar.gz
+  $ARCHIVE
 EOF2
+fi

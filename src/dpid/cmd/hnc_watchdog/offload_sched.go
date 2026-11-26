@@ -307,6 +307,24 @@ type clsactSched struct {
 	repairs int // 修复调用次数(测试断言用)
 }
 
+// clsactEgressExpected 严格对齐 daemon/clsact_ctl/main.c read_egress_state:
+// 当 <run>/clsact_egress.<iface> 含 expected=1 时, 要求 EgressBPF 同样在线才算 ok。
+func clsactEgressExpected(runPath, iface string) bool {
+	if runPath == "" || iface == "" || strings.Contains(iface, "..") || strings.ContainsRune(iface, '/') {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(runPath, "clsact_egress."+iface))
+	if err != nil {
+		return false
+	}
+	for _, raw := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(raw), "expected=1") {
+			return true
+		}
+	}
+	return false
+}
+
 // checkClsact 优先使用纯 Go netlink RTM_GETTFILTER + bpffs stat 检查 clsact 状态
 // (省去每 10s 一次的 hnc_clsact_ctl check 子进程, 少 360 次/小时 fork);
 // 仅在网卡查询或 netlink 权限不可用时回退 execClsactCheck。
@@ -316,7 +334,8 @@ func checkClsact(iface string) string {
 	}
 	if ni, err := netInterfaceByNameFn(iface); err == nil && ni != nil && ni.Index > 0 && nlClsactBPFCheckFn != nil {
 		if st, nlErr := nlClsactBPFCheckFn(ni.Index, clsactMapPinPath); nlErr == nil {
-			if st.OK() {
+			egExpected := clsactEgressExpected(offloadRunDir, iface)
+			if st.OK() && (!egExpected || st.EgressBPF) {
 				return `{"ok":true,"qdisc":true,"bpf_filter":true,"map":true}`
 			}
 			return `{"ok":false}`

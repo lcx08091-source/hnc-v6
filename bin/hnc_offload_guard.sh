@@ -19,12 +19,15 @@ elif [ -f "${0%/*}/hnc_env.sh" ]; then
     . "${0%/*}/hnc_env.sh"
 fi
 RUN="$HNC_DIR/run"
-RULES="$HNC_DIR/data/rules.json"
-APP_LIMITS_FLAT="$HNC_DIR/data/app_limits.flat"
+DATA_DIR="$HNC_DIR/data"
+RULES="$DATA_DIR/rules.json"
+APP_LIMITS_FLAT="$DATA_DIR/app_limits.flat"
 LOG_FILE="$HNC_DIR/logs/offload_guard.log"
 STATUS="$RUN/offload_guard.json"
 STATE="$RUN/offload_guard.state"
 CLSACT_FLAG="$RUN/offload_guard.clsact"
+ORIG_TETHER_DATA="$DATA_DIR/orig_tether_offload_disabled"
+SUPPRESSED_FLAG_DATA="$DATA_DIR/offload_suppressed_by_hnc"
 ORIG_TETHER_FILE="$RUN/orig_tether_offload_disabled"
 IPC="$HNC_DIR/bin/hnc_ipc"
 CTL="$HNC_DIR/bin/hnc_clsact_ctl"
@@ -36,7 +39,7 @@ RESTORE_AFTER="${HNC_GUARD_RESTORE_AFTER:-3}"
 IDLE_INTERVAL="${HNC_GUARD_IDLE_INTERVAL:-300}"
 IFB_IFACE="${IFB_IFACE:-ifb0}"
 
-mkdir -p "$RUN" "$HNC_DIR/logs" 2>/dev/null
+mkdir -p "$RUN" "$DATA_DIR" "$HNC_DIR/logs" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [offload-guard] $*" >> "$LOG_FILE" 2>/dev/null; }
 now_s() { date +%s 2>/dev/null || echo 0; }
 strip_ws() { tr -d ' \t\r\n'; }
@@ -101,6 +104,23 @@ has_active_policy() {
     if [ -s "$APP_LIMITS_FLAT" ] && grep -v '^[[:space:]]*#' "$APP_LIMITS_FLAT" 2>/dev/null | grep -q '[^[:space:]]'; then
         return 0
     fi
+    if [ -s "$RUN/conn_blocks.flat" ] && grep -v '^[[:space:]]*#' "$RUN/conn_blocks.flat" 2>/dev/null | grep -q '[^[:space:]]'; then
+        return 0
+    fi
+    if [ -s "$RUN/conn_blocks.dns" ] && grep -v '^[[:space:]]*#' "$RUN/conn_blocks.dns" 2>/dev/null | grep -q '[^[:space:]]'; then
+        return 0
+    fi
+    if [ -s "$DATA_DIR/conn_blocks.json" ]; then
+        local _cbf
+        _cbf=$(tr -d '\r\n' < "$DATA_DIR/conn_blocks.json" 2>/dev/null)
+        printf '%s' "$_cbf" | grep -qE '"items"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{' && return 0
+        printf '%s' "$_cbf" | grep -qE '"mac"[[:space:]]*:[[:space:]]*"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"' && return 0
+    fi
+    if [ -s "$DATA_DIR/encdns.json" ]; then
+        local _edf
+        _edf=$(tr -d '\r\n' < "$DATA_DIR/encdns.json" 2>/dev/null)
+        printf '%s' "$_edf" | grep -qE ':[[:space:]]*"(dot|strict)"' && return 0
+    fi
     [ -f "$RULES" ] || return 1
     local flat
     flat=$(tr -d '\r\n' < "$RULES" 2>/dev/null)
@@ -163,10 +183,25 @@ st_save() {
 
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\r\n'; }
 
+has_orig_tether_backup() {
+    [ -f "$ORIG_TETHER_DATA" ] || [ -f "$ORIG_TETHER_FILE" ] || [ -f "$SUPPRESSED_FLAG_DATA" ]
+}
+
+_sync_orig_tether_mirror() {
+    local _val="$1" _rtmp="${ORIG_TETHER_FILE}.tmp.$$"
+    [ -n "$_val" ] || return 0
+    mkdir -p "$RUN" 2>/dev/null || true
+    if printf '%s\n' "$_val" > "$_rtmp" 2>/dev/null && [ -s "$_rtmp" ]; then
+        mv -f "$_rtmp" "$ORIG_TETHER_FILE" 2>/dev/null || rm -f "$_rtmp" 2>/dev/null || true
+    else
+        rm -f "$_rtmp" 2>/dev/null || true
+    fi
+}
+
 is_tether_offload_disabled() {
     local _fb=${1:-0}
     if [ "${HNC_TEST_MODE:-0}" = "1" ] && [ -z "${HNC_SETTINGS_BIN:-}" ]; then
-        [ "$_fb" = "1" ] || [ "${MTK_TETHER_SUPPRESSED:-0}" = "1" ] || [ -f "$ORIG_TETHER_FILE" ]
+        [ "$_fb" = "1" ] || [ "${MTK_TETHER_SUPPRESSED:-0}" = "1" ] || has_orig_tether_backup
         return $?
     fi
     if command -v "$SETTINGS_BIN" >/dev/null 2>&1; then
@@ -177,7 +212,7 @@ is_tether_offload_disabled() {
             return 1
         fi
     fi
-    [ "$_fb" = "1" ] || [ "${MTK_TETHER_SUPPRESSED:-0}" = "1" ] || [ -f "$ORIG_TETHER_FILE" ]
+    [ "$_fb" = "1" ] || [ "${MTK_TETHER_SUPPRESSED:-0}" = "1" ] || has_orig_tether_backup
 }
 
 write_status() {
@@ -192,35 +227,51 @@ write_status() {
     fi
 }
 
-# Android Settings.Global.tether_offload_disabled 三态(null/0/1)无损备份与恢复
+# Android Settings.Global.tether_offload_disabled 三态(null/0/1)持久化无损备份(data/ 主备 + run/ 镜像)与恢复
 tether_hal_suppress() {
     if [ "${HNC_TEST_MODE:-0}" = "1" ] && [ -z "${HNC_SETTINGS_BIN:-}" ]; then
         return 0
     fi
     command -v "$SETTINGS_BIN" >/dev/null 2>&1 || return 0
-    if [ ! -f "$ORIG_TETHER_FILE" ]; then
-        local _raw _otmp="${ORIG_TETHER_FILE}.tmp.$$"
+    mkdir -p "$DATA_DIR" "$RUN" 2>/dev/null || true
+    if [ -f "$ORIG_TETHER_DATA" ]; then
+        # 持久化备份已存在: 严禁覆盖(防压制态重启后把系统残留的 1 当用户原值写进去!), 仅补齐 run/ 镜像与标记
+        local _existing
+        _existing=$(strip_ws < "$ORIG_TETHER_DATA" 2>/dev/null)
+        [ -n "$_existing" ] && [ ! -f "$ORIG_TETHER_FILE" ] && _sync_orig_tether_mirror "$_existing"
+        [ -f "$SUPPRESSED_FLAG_DATA" ] || { printf '1\n' > "$SUPPRESSED_FLAG_DATA" 2>/dev/null || true; }
+    elif [ -f "$ORIG_TETHER_FILE" ]; then
+        # 热升级过渡态: run/ 已有原值备份而 data/ 尚未落盘, 直接提升至 data/ 绝不重读被压成 1 的系统值
+        local _legacy _dtmp="${ORIG_TETHER_DATA}.tmp.$$"
+        _legacy=$(strip_ws < "$ORIG_TETHER_FILE" 2>/dev/null)
+        if [ -n "$_legacy" ] && printf '%s\n' "$_legacy" > "$_dtmp" 2>/dev/null && [ -s "$_dtmp" ]; then
+            chmod 600 "$_dtmp" 2>/dev/null || true
+            mv -f "$_dtmp" "$ORIG_TETHER_DATA" 2>/dev/null || rm -f "$_dtmp" 2>/dev/null || true
+            printf '1\n' > "$SUPPRESSED_FLAG_DATA" 2>/dev/null || true
+        else
+            rm -f "$_dtmp" 2>/dev/null || true
+        fi
+    else
+        local _raw _dtmp="${ORIG_TETHER_DATA}.tmp.$$"
         _raw=$("$SETTINGS_BIN" get global tether_offload_disabled 2>/dev/null | strip_ws)
         case "$_raw" in
-            0|1|null)
-                if printf '%s\n' "$_raw" > "$_otmp" 2>/dev/null && [ -s "$_otmp" ]; then
-                    mv -f "$_otmp" "$ORIG_TETHER_FILE" 2>/dev/null || { rm -f "$_otmp" 2>/dev/null; return 0; }
-                else
-                    rm -f "$_otmp" 2>/dev/null
-                    return 0
-                fi
-                log "backed up orig tether_offload_disabled=$_raw"
-                ;;
             "")
                 return 0
                 ;;
-            *)
-                if printf '%s\n' "$_raw" > "$_otmp" 2>/dev/null && [ -s "$_otmp" ]; then
-                    mv -f "$_otmp" "$ORIG_TETHER_FILE" 2>/dev/null || { rm -f "$_otmp" 2>/dev/null; return 0; }
+            0|1|null|*)
+                if printf '%s\n' "$_raw" > "$_dtmp" 2>/dev/null && [ -s "$_dtmp" ]; then
+                    chmod 600 "$_dtmp" 2>/dev/null || true
+                    if ! mv -f "$_dtmp" "$ORIG_TETHER_DATA" 2>/dev/null; then
+                        rm -f "$_dtmp" 2>/dev/null
+                        return 0
+                    fi
                 else
-                    rm -f "$_otmp" 2>/dev/null
+                    rm -f "$_dtmp" 2>/dev/null
                     return 0
                 fi
+                printf '1\n' > "$SUPPRESSED_FLAG_DATA" 2>/dev/null || true
+                _sync_orig_tether_mirror "$_raw"
+                log "backed up orig tether_offload_disabled=$_raw (persisted to data/ + mirrored to run/)"
                 ;;
         esac
     fi
@@ -233,14 +284,22 @@ tether_hal_suppress() {
 
 tether_hal_restore() {
     MTK_TETHER_SUPPRESSED=0
-    [ -f "$ORIG_TETHER_FILE" ] || return 0
+    has_orig_tether_backup || return 0
     if [ "${HNC_TEST_MODE:-0}" = "1" ] && [ -z "${HNC_SETTINGS_BIN:-}" ]; then
-        rm -f "$ORIG_TETHER_FILE" 2>/dev/null
+        rm -f "$ORIG_TETHER_DATA" "$SUPPRESSED_FLAG_DATA" "$ORIG_TETHER_FILE" 2>/dev/null
         return 0
     fi
     command -v "$SETTINGS_BIN" >/dev/null 2>&1 || return 0
-    local _orig _rc=0
-    _orig=$(strip_ws < "$ORIG_TETHER_FILE" 2>/dev/null)
+    local _orig="" _rc=0
+    if [ -f "$ORIG_TETHER_DATA" ]; then
+        _orig=$(strip_ws < "$ORIG_TETHER_DATA" 2>/dev/null)
+    elif [ -f "$ORIG_TETHER_FILE" ]; then
+        _orig=$(strip_ws < "$ORIG_TETHER_FILE" 2>/dev/null)
+    fi
+    if [ -z "$_orig" ]; then
+        rm -f "$ORIG_TETHER_DATA" "$SUPPRESSED_FLAG_DATA" "$ORIG_TETHER_FILE" 2>/dev/null
+        return 0
+    fi
     case "$_orig" in
         1)
             # 用户原本就是 1, 严禁改回 0!
@@ -255,10 +314,12 @@ tether_hal_restore() {
             log "deleted tether_offload_disabled to restore null"
             ;;
         *)
-            [ -n "$_orig" ] && { "$SETTINGS_BIN" put global tether_offload_disabled "$_orig" >/dev/null 2>&1 || _rc=1; }
+            "$SETTINGS_BIN" put global tether_offload_disabled "$_orig" >/dev/null 2>&1 || _rc=1
             ;;
     esac
-    [ "$_rc" -eq 0 ] && rm -f "$ORIG_TETHER_FILE" 2>/dev/null
+    if [ "$_rc" -eq 0 ]; then
+        rm -f "$ORIG_TETHER_DATA" "$SUPPRESSED_FLAG_DATA" "$ORIG_TETHER_FILE" 2>/dev/null
+    fi
     return 0
 }
 
@@ -288,11 +349,17 @@ slowpath_disable() {
 slowpath_restore_ipc_only() {
     [ -x "$IPC" ] || return 0
     "$IPC" OFFLOAD_RESTORE_GLOBAL >/dev/null 2>&1 || return 0
-    local mac
-    for mac in $(tr -d '\r\n' < "$RULES" 2>/dev/null \
-                 | grep -oE '"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"[[:space:]]*:[[:space:]]*\{[^{}]*\}' \
-                 | grep -E '"limit_enabled"[[:space:]]*:[[:space:]]*true' \
-                 | grep -oE '^"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"' | tr -d '"' | tr 'A-F' 'a-f'); do
+    local mac flat
+    flat=$(tr -d '\r\n' < "$RULES" 2>/dev/null)
+    for mac in $( {
+        printf '%s\n' "$flat" \
+            | grep -oE '"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"[[:space:]]*:[[:space:]]*\{[^{}]*\}' \
+            | grep -E '"(limit_enabled|delay_enabled)"[[:space:]]*:[[:space:]]*true' \
+            | grep -oE '^"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"'
+        printf '%s\n' "$flat" \
+            | grep -oE '"blacklist"[[:space:]]*:[[:space:]]*\[[^]]*\]' \
+            | grep -oE '"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"'
+    } | tr -d '"' | tr 'A-F' 'a-f' | sort -u); do
         "$IPC" OFFLOAD_NOTIFY_LIMIT "$mac" 1 >/dev/null 2>&1 || true
     done
 }
@@ -407,7 +474,7 @@ tick() {
 
     [ -z "$_explicit_ifc" ] && [ "$mode" != on ] && [ "$policy_on" = 0 ] && hwnat_restore
     if [ "$mode" = off ]; then
-        if [ "$fb" = 1 ] || [ -f "$CLSACT_FLAG" ] || [ -f "$ORIG_TETHER_FILE" ]; then
+        if [ "$fb" = 1 ] || [ -f "$CLSACT_FLAG" ] || has_orig_tether_backup; then
             do_restore "$ifc"
             log "mode=off: fallback restored"
         fi
@@ -508,7 +575,7 @@ tick() {
             st_save 0 0 0
             do_restore "$ifc"
             log "fallback OFF (offload=$state, calm=$calm)"
-        elif [ -f "$ORIG_TETHER_FILE" ]; then
+        elif has_orig_tether_backup; then
             tether_hal_restore
         fi
         fb=0; since=0; calm=0; sp="n/a"; cl="off"

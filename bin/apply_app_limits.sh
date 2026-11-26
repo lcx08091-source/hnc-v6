@@ -95,16 +95,104 @@ fi
 
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
+_al_probe_wait_bin() {
+    local _b="$1" _rc
+    "$_b" -w 2 -t filter -L -n >/dev/null 2>&1
+    _rc=$?
+    if [ "$_rc" -eq 2 ]; then
+        "$_b" -w -t filter -L -n >/dev/null 2>&1
+        _rc=$?
+        if [ "$_rc" -eq 2 ]; then
+            printf '%s\n' "$_b"
+        else
+            printf '%s -w\n' "$_b"
+        fi
+    else
+        # rc=0 或 rc=4(短暂 xtables 锁竞争超时)等非语法错误: 保持 -w 2 绝不误剥!
+        printf '%s -w 2\n' "$_b"
+    fi
+}
 if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v iptables >/dev/null 2>&1; then
-    iptables -w 2 -t mangle -L -n >/dev/null 2>&1 || IPT="iptables"
+    IPT=$(_al_probe_wait_bin iptables)
 fi
 if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
-    ip6tables -w 2 -t mangle -L -n >/dev/null 2>&1 || IP6T="ip6tables"
+    IP6T=$(_al_probe_wait_bin ip6tables)
 fi
 IPV6_OK=0
 if command -v "${IP6T%% *}" >/dev/null 2>&1 && $IP6T -t mangle -L -n >/dev/null 2>&1; then
     IPV6_OK=1
 fi
+
+command -v hnc_fwd_insert_pos >/dev/null 2>&1 || {
+    hnc_fwd_insert_pos() {
+        local _c="$1" _t="$2" _p
+        [ -n "$_c" ] && [ -n "$_t" ] || { echo 1; return 0; }
+        _p=$($_c -t filter -S FORWARD 2>/dev/null | awk -v target="$_t" '
+            BEGIN {
+                ord["HNC_SCALPEL"]=1; ord["HNC_ISOLATE"]=2; ord["HNC_CTRL"]=3
+                ord["HNC_WHITELIST"]=4; ord["HNC_QUIC"]=5; ord["HNC_QUIC_APPLIM"]=6
+                ord["HNC_ENCDNS"]=7; ord["HNC_CONNBLK_DNS"]=8; ord["HNC_CONNBLK"]=9
+                t_ord = ord[target] + 0; idx = 0; last_pred = 0
+            }
+            $1 == "-A" && $2 == "FORWARD" {
+                idx++; ch = ""
+                for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") { ch = $(i+1); break }
+                if (ch != "" && (ch in ord) && ord[ch] < t_ord) last_pred = idx
+            }
+            END { printf "%d\n", last_pred + 1 }
+        ' 2>/dev/null)
+        case "$_p" in ''|*[!0-9]*|0) _p=1 ;; esac
+        printf '%s\n' "$_p"
+    }
+}
+
+ensure_quic_fwd_hook() {
+    local _T="$1" _st _qpos _k
+    [ -n "$_T" ] || return 0
+    _st=$($_T -t filter -S FORWARD 2>/dev/null | awk -v target="$CHAIN_QUIC" '
+        BEGIN {
+            ord["HNC_SCALPEL"]=1; ord["HNC_ISOLATE"]=2; ord["HNC_CTRL"]=3
+            ord["HNC_WHITELIST"]=4; ord["HNC_QUIC"]=5; ord["HNC_QUIC_APPLIM"]=6
+            ord["HNC_ENCDNS"]=7; ord["HNC_CONNBLK_DNS"]=8; ord["HNC_CONNBLK"]=9
+            t_ord = ord[target] + 0; idx = 0; cnt = 0; t_idx = 0; max_pred = 0; min_succ = 0
+        }
+        $1 == "-A" && $2 == "FORWARD" {
+            idx++; ch = ""
+            for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") { ch = $(i+1); break }
+            if (ch == target) { cnt++; t_idx = idx }
+            else if (ch != "" && (ch in ord)) {
+                if (ord[ch] < t_ord) max_pred = idx
+                else if (ord[ch] > t_ord && min_succ == 0) min_succ = idx
+            }
+        }
+        END {
+            if (idx == 0) { print "probe_check"; exit }
+            if (cnt == 0) { print "missing"; exit }
+            if (cnt > 1 || (max_pred > 0 && t_idx < max_pred) || (min_succ > 0 && t_idx > min_succ)) {
+                print "misordered"; exit
+            }
+            print "ok"
+        }
+    ' 2>/dev/null)
+    case "$_st" in
+        ok) return 0 ;;
+        probe_check)
+            if ! $_T -t filter -C FORWARD -j "$CHAIN_QUIC" 2>/dev/null; then
+                _qpos=$(hnc_fwd_insert_pos "$_T" "$CHAIN_QUIC")
+                $_T -t filter -I FORWARD "$_qpos" -j "$CHAIN_QUIC" 2>/dev/null
+            fi
+            ;;
+        misordered)
+            for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j "$CHAIN_QUIC" 2>/dev/null || break; done
+            _qpos=$(hnc_fwd_insert_pos "$_T" "$CHAIN_QUIC")
+            $_T -t filter -I FORWARD "$_qpos" -j "$CHAIN_QUIC" 2>/dev/null
+            ;;
+        *)
+            _qpos=$(hnc_fwd_insert_pos "$_T" "$CHAIN_QUIC")
+            $_T -t filter -I FORWARD "$_qpos" -j "$CHAIN_QUIC" 2>/dev/null
+            ;;
+    esac
+}
 
 resolve_restore_bin() {
     local base_cmd=$1 restore_name=$2 env_override=$3 custom_ipt=$4 _bin _dir
@@ -133,15 +221,26 @@ IP6T_RESTORE_BIN=""
 [ "$IPV6_OK" = 1 ] && IP6T_RESTORE_BIN=$(resolve_restore_bin "$IP6T" "ip6tables-restore" "${HNC_IP6T_RESTORE:-}" "${HNC_IP6T:-}")
 
 run_restore_noflush() {
-    local rbin=$1 batch=$2 _drop="${2}.drop" _rc=1
+    local rbin=$1 batch=$2 _drop="${2}.drop" _rc=1 _rrc
     [ -n "$rbin" ] && [ -s "$batch" ] || return 1
-    if $rbin -w 2 --noflush < "$batch" 2>/dev/null || $rbin --noflush < "$batch" 2>/dev/null; then
+    $rbin -w 2 --noflush < "$batch" 2>/dev/null
+    _rrc=$?
+    if [ "$_rrc" -eq 0 ]; then
         return 0
+    elif [ "$_rrc" -eq 2 ]; then
+        $rbin -w --noflush < "$batch" 2>/dev/null && return 0
+        $rbin --noflush < "$batch" 2>/dev/null && return 0
     fi
     if grep -q -- '-j REJECT' "$batch" 2>/dev/null; then
         if sed -e 's/-j REJECT --reject-with [^ ]*/-j DROP/g' -e 's/-j REJECT$/-j DROP/g' "$batch" > "$_drop" 2>/dev/null; then
-            if $rbin -w 2 --noflush < "$_drop" 2>/dev/null || $rbin --noflush < "$_drop" 2>/dev/null; then
+            $rbin -w 2 --noflush < "$_drop" 2>/dev/null
+            _rrc=$?
+            if [ "$_rrc" -eq 0 ]; then
                 _rc=0
+            elif [ "$_rrc" -eq 2 ]; then
+                if $rbin -w --noflush < "$_drop" 2>/dev/null || $rbin --noflush < "$_drop" 2>/dev/null; then
+                    _rc=0
+                fi
             fi
         fi
         rm -f "$_drop" 2>/dev/null
@@ -415,7 +514,11 @@ if [ "$HAD_DIRTY" = 0 ] && [ -s "$LIMITS_FLAT" ] && { [ -s "$IP_APP_FLAT" ] || [
        && tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "htb 1:" \
        && app_classes_alive; then
         heal_postrouting_before_save "$IPT" "$CHAIN_DOWN"
-        [ "$IPV6_OK" = 1 ] && heal_postrouting_before_save "$IP6T" "$CHAIN_DOWN"
+        ensure_quic_fwd_hook "$IPT"
+        if [ "$IPV6_OK" = 1 ]; then
+            heal_postrouting_before_save "$IP6T" "$CHAIN_DOWN"
+            ensure_quic_fwd_hook "$IP6T"
+        fi
         al_unlock
         exit 0
     fi
@@ -489,7 +592,7 @@ rules_dev_info() {
 }
 
 alloc_ephemeral_mid() {
-    local mac=$1 used_extra="$2" used lb start k cand
+    local mac=$1 used_extra="$2" cur_le="${3:-false}" used lb start k cand _ts
     used=$(awk '
     {
         s = $0
@@ -507,6 +610,19 @@ $used_extra"
     while [ "$k" -lt 99 ]; do
         cand=$(((start - 1 + k) % 99 + 1))
         if ! printf '%s\n' "$used" | grep -qx "$cand"; then
+            # 若运行环境存在可执行的 json_set.sh, 将分配到的 mid 持久化至 rules.json(limit_enabled: false),
+            # 彻底避免后续 apply_device_rule.sh 为其它设备哈希探测分配时撞上同一 mid; 沙箱无 json_set.sh 时保持原回退。
+            if [ -x "$HNC_DIR/bin/json_set.sh" ]; then
+                _ts=$(date +%s 2>/dev/null || echo 0)
+                if [ "$cur_le" = "true" ]; then
+                    HNC="$HNC_DIR" HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/json_set.sh" device "$mac" mark_id "$cand" >/dev/null 2>&1 || true
+                elif [ -x "$HNC_DIR/bin/json_set_batch.sh" ]; then
+                    HNC="$HNC_DIR" HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/json_set_batch.sh" device "$mac" mark_id "$cand" limit_enabled false last_seen_persist "$_ts" >/dev/null 2>&1 || true
+                else
+                    HNC="$HNC_DIR" HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/json_set.sh" device "$mac" mark_id "$cand" >/dev/null 2>&1 || true
+                    HNC="$HNC_DIR" HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/json_set.sh" device "$mac" limit_enabled false >/dev/null 2>&1 || true
+                fi
+            fi
             echo "$cand"
             return 0
         fi
@@ -1223,7 +1339,7 @@ ensure_parent_device_ready() {
     fi
     case "$mid" in ''|*[!0-9]*) mid="" ;; esac
     if [ -z "$mid" ] || [ "$mid" -lt 1 ] || [ "$mid" -gt 99 ]; then
-        mid=$(alloc_ephemeral_mid "$mac" "$ALLOC_MIDS") || return 1
+        mid=$(alloc_ephemeral_mid "$mac" "$ALLOC_MIDS" "$le") || return 1
         ALLOC_MIDS="$ALLOC_MIDS
 $mid"
     fi
@@ -1297,6 +1413,7 @@ $mid"
         echo "-A $CHAIN_UP -i $IFACE -m mac --mac-source $mac -m mark --mark 0x0/$DEV_MASK -j MARK --set-xmark ${dmark}/${DEV_MASK}"
         echo "-A $CHAIN_DOWN -m mark --mark ${dmark}/${DEV_MASK} -g $sub"
         [ -n "$v4" ] && echo "-A $CHAIN_DOWN -d $v4 -g $sub"
+        echo "-A $sub -m mark --mark 0x0/$DEV_MASK -j MARK --set-xmark ${dmark}/${DEV_MASK}"
     } >> "$V4_RULES"
 
     if [ "$IPV6_OK" = 1 ]; then
@@ -1307,6 +1424,7 @@ $mid"
             for v6 in $v6s; do
                 echo "-A $CHAIN_DOWN -d $v6 -g $sub"
             done
+            echo "-A $sub -m mark --mark 0x0/$DEV_MASK -j MARK --set-xmark ${dmark}/${DEV_MASK}"
         } >> "$V6_RULES"
     fi
 
@@ -1556,9 +1674,7 @@ if [ "$applied" -gt 0 ] && [ "$batch_top_inited" = 1 ]; then
     if ! run_restore_noflush "$IPT_RESTORE_BIN" "$V4_BATCH"; then
         replay_al_batch_fallback "$IPT" "$V4_BATCH" mangle
     fi
-    if ! $IPT -t filter -C FORWARD -j "$CHAIN_QUIC" 2>/dev/null; then
-        $IPT -t filter -I FORWARD 1 -j "$CHAIN_QUIC" 2>/dev/null || $IPT -t filter -A FORWARD -j "$CHAIN_QUIC" 2>/dev/null || true
-    fi
+    ensure_quic_fwd_hook "$IPT"
 
     if [ "$IPV6_OK" = 1 ]; then
         {
@@ -1576,9 +1692,7 @@ if [ "$applied" -gt 0 ] && [ "$batch_top_inited" = 1 ]; then
         if ! run_restore_noflush "$IP6T_RESTORE_BIN" "$V6_BATCH"; then
             replay_al_batch_fallback "$IP6T" "$V6_BATCH" mangle
         fi
-        if ! $IP6T -t filter -C FORWARD -j "$CHAIN_QUIC" 2>/dev/null; then
-            $IP6T -t filter -I FORWARD 1 -j "$CHAIN_QUIC" 2>/dev/null || $IP6T -t filter -A FORWARD -j "$CHAIN_QUIC" 2>/dev/null || true
-        fi
+        ensure_quic_fwd_hook "$IP6T"
     fi
 
     ensure_top_hooks

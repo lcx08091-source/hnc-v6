@@ -1994,6 +1994,202 @@ func mergeDpiStateFallbackDevices(devMap map[string]any, dpiRaw any, nowUnix int
 	return copied
 }
 
+// readDpiShmSnapshotReadonly 无副作用只读获取当前 DPI SHM 活跃快照(若 CoreHub 已就绪则复用其 mmap 通道; 否则按需瞬时读取后立即释放 fd, 零驻留、零写盘)。
+func (s *server) readDpiShmSnapshotReadonly(now time.Time) dpiShmReadResult {
+	fallback := dpiShmReadResult{Source: "json_fallback", FallbackReason: "unconfigured"}
+	if s == nil || s.hncDir == "" {
+		return fallback
+	}
+	if v, ok := serverHubMap.Load(s); ok {
+		if hub, ok2 := v.(*CoreHub); ok2 && hub != nil && !hub.closed.Load() {
+			return hub.pollDpiShmVector(now)
+		}
+	}
+	runDir := filepath.Join(s.hncDir, "run")
+	shmPath := shm.FilePath(runDir)
+	fi, err := os.Stat(shmPath)
+	if err != nil || fi.IsDir() || fi.Size() != shm.FileSize {
+		fallback.FallbackReason = "standby_absent"
+		return fallback
+	}
+	r, err := shm.OpenReader(runDir)
+	if err != nil {
+		fallback.FallbackReason = "open_error"
+		return fallback
+	}
+	defer func() { _ = r.Close() }()
+
+	var snap shm.Snapshot
+	if err := r.ReadInto(&snap); err != nil {
+		fallback.FallbackReason = "read_error"
+		return fallback
+	}
+	hdr := snap.Header
+	if hdr.Seq == 0 || (hdr.UpdatedMonoNs <= 0 && hdr.UpdatedUnixNs <= 0) {
+		fallback.FallbackReason = "uninitialized"
+		return fallback
+	}
+	wallNow := time.Now()
+	checkNow := now
+	if checkNow.IsZero() {
+		checkNow = wallNow
+	}
+	wallSkew := checkNow.Sub(wallNow)
+	if wallSkew < 0 {
+		wallSkew = -wallSkew
+	}
+	var age time.Duration
+	if hdr.UpdatedMonoNs > 0 && wallSkew <= dpiShmFakeClockTolerance {
+		age = time.Duration(shm.MonotonicNs() - hdr.UpdatedMonoNs)
+	} else if hdr.UpdatedUnixNs > 0 {
+		age = checkNow.Sub(time.Unix(0, hdr.UpdatedUnixNs))
+	} else {
+		fallback.FallbackReason = "uninitialized"
+		return fallback
+	}
+	if age > dpiShmMaxStaleAge || age < -dpiShmMaxFutureSkew {
+		fallback.Stale = true
+		fallback.FallbackReason = "stale_snapshot"
+		return fallback
+	}
+	limit := int(hdr.DeviceCount)
+	if limit > len(snap.Devices) {
+		limit = len(snap.Devices)
+	}
+	var byMAC map[string]dpiShmDeviceLive
+	if limit > 0 {
+		byMAC = make(map[string]dpiShmDeviceLive, limit)
+		for i := 0; i < limit; i++ {
+			slot := &snap.Devices[i]
+			mac := normalizeShmMAC(slot.MACString())
+			if mac == "" {
+				continue
+			}
+			byMAC[mac] = dpiShmDeviceLive{
+				MAC:         mac,
+				IPv4:        cleanShmIP(slot.IPv4String()),
+				IPv6:        cleanShmIP(slot.IPv6String()),
+				RxBytes:     slot.RxBytes,
+				TxBytes:     slot.TxBytes,
+				ActiveFlows: slot.ActiveFlows,
+				Flags:       slot.Flags,
+			}
+		}
+	}
+	return dpiShmReadResult{
+		Valid:         true,
+		Attached:      true,
+		Mmapped:       r.IsMmapped(),
+		Seq:           hdr.Seq,
+		UpdatedMonoNs: hdr.UpdatedMonoNs,
+		UpdatedUnixNs: hdr.UpdatedUnixNs,
+		DeviceCount:   hdr.DeviceCount,
+		ActiveFlows:   hdr.ActiveFlows,
+		HotspotFlows:  hdr.ActiveFlows,
+		HostFlows:     hdr.HostFlows,
+		TotalLeaks:    hdr.TotalLeaks,
+		HeaderFlags:   hdr.Flags,
+		Source:        "shm_seqlock",
+		ByMAC:         byMAC,
+	}
+}
+
+// mergeLiveObservationsReadonly 纯内存只读叠加 SHM 活跃槽位(或回退 dpi_state.json), 绝不写 data/devices.json(严守 m4_owner 唯一写者铁律)。
+func (s *server) mergeLiveObservationsReadonly(devMap map[string]any, shmRes dpiShmReadResult, now time.Time) (map[string]any, map[string]bool) {
+	shmOnline := make(map[string]bool)
+	if shmRes.Valid {
+		if len(shmRes.ByMAC) == 0 {
+			return devMap, shmOnline
+		}
+		copied := make(map[string]any, len(devMap)+len(shmRes.ByMAC))
+		for k, v := range devMap {
+			if inner, ok := v.(map[string]any); ok {
+				cp := make(map[string]any, len(inner)+2)
+				for ik, iv := range inner {
+					cp[ik] = iv
+				}
+				copied[k] = cp
+			} else {
+				copied[k] = v
+			}
+		}
+		nowSecF := float64(now.Unix())
+		for mac, obs := range shmRes.ByMAC {
+			macKey := strings.ToLower(strings.TrimSpace(mac))
+			if macKey == "" {
+				continue
+			}
+			bestIP := obs.IPv4
+			if bestIP == "" {
+				bestIP = obs.IPv6
+			}
+			liveSlot := (obs.Flags&shm.FlagOnline) != 0 || obs.ActiveFlows > 0
+			if liveSlot {
+				shmOnline[macKey] = true
+			}
+			matchedKey := ""
+			for k := range copied {
+				if strings.EqualFold(strings.TrimSpace(k), macKey) {
+					matchedKey = k
+					break
+				}
+			}
+			if matchedKey != "" {
+				if dm, ok := copied[matchedKey].(map[string]any); ok {
+					curIP := strings.TrimSpace(asString(dm["ip"]))
+					if (curIP == "" || curIP == "-") && bestIP != "" {
+						dm["ip"] = bestIP
+					}
+					if liveSlot {
+						dm["last_seen"] = nowSecF
+					}
+				}
+			} else if liveSlot {
+				initIP := bestIP
+				if initIP == "" {
+					initIP = "-"
+				}
+				copied[macKey] = map[string]any{
+					"mac":       macKey,
+					"ip":        initIP,
+					"last_seen": nowSecF,
+				}
+			}
+		}
+		return copied, shmOnline
+	}
+	if s != nil && s.jsonCache != nil && s.hncDir != "" {
+		if dpiRaw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_state.json")); err == nil && dpiRaw != nil {
+			devMap = mergeDpiStateFallbackDevices(devMap, dpiRaw, now.Unix())
+		}
+	}
+	return devMap, shmOnline
+}
+
+// isDeviceEntryOnline 统一 /api/devices、/api/live、/api/vector_sync 与手术刀热点在线判定:
+//   - 若只读 SHM 槽位确认活跃(FlagOnline 或 ActiveFlows>0), 即使纯 IPv6 流量期间 IPv4 ARP 已老化亦判为在线;
+//   - 存在 last_seen 字段时严格要求 last_seen > 0 && now-last_seen <= 90 (activityOnlineWindow);
+//   - 仅在合成单测省略 last_seen 字段时回退检查显式 online 布尔值或有效 IP。
+func isDeviceEntryOnline(dm map[string]any, devIP string, nowUnix int64, shmLive bool) bool {
+	if shmLive {
+		return true
+	}
+	if dm == nil {
+		return false
+	}
+	if rawLS, hasLS := dm["last_seen"]; hasLS && rawLS != nil {
+		lastSeen, ok := toInt64(rawLS)
+		if !ok {
+			return false
+		}
+		return devIP != "-" && lastSeen > 0 && (nowUnix-lastSeen) <= activityOnlineWindow
+	}
+	if b, ok := dm["online"].(bool); ok {
+		return b && devIP != "-"
+	}
+	return devIP != "" && devIP != "-"
+}
+
 func buildVectorLiveSummary(s *server, now time.Time) VectorLiveSummary {
 	return buildVectorLiveSummaryInternal(s, now, dpiShmReadResult{}, false)
 }
@@ -2024,62 +2220,15 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 	}
 	s.rateMu.Unlock()
 
+	devicesPath := filepath.Join(s.hncDir, "data", "devices.json")
 	var devMap map[string]any
 	if s.jsonCache != nil {
-		if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "data", "devices.json")); err == nil {
+		if raw, err := s.jsonCache.read(devicesPath); err == nil {
 			devMap, _ = raw.(map[string]any)
 		}
 	}
-	if shmRes.Valid && len(shmRes.ByMAC) > 0 {
-		copied := make(map[string]any, len(devMap)+len(shmRes.ByMAC))
-		for k, v := range devMap {
-			if inner, ok := v.(map[string]any); ok {
-				cp := make(map[string]any, len(inner)+2)
-				for ik, iv := range inner {
-					cp[ik] = iv
-				}
-				copied[k] = cp
-			} else {
-				copied[k] = v
-			}
-		}
-		nowSecF := float64(now.Unix())
-		for mac, obs := range shmRes.ByMAC {
-			bestIP := obs.IPv4
-			if bestIP == "" {
-				bestIP = obs.IPv6
-			}
-			matchedKey := ""
-			for k := range copied {
-				if strings.EqualFold(strings.TrimSpace(k), mac) {
-					matchedKey = k
-					break
-				}
-			}
-			liveSlot := (obs.Flags&shm.FlagOnline) != 0 || obs.ActiveFlows > 0
-			if matchedKey != "" {
-				if dm, ok := copied[matchedKey].(map[string]any); ok {
-					if asString(dm["ip"]) == "" && bestIP != "" {
-						dm["ip"] = bestIP
-					}
-					if liveSlot {
-						dm["last_seen"] = nowSecF
-					}
-				}
-			} else if liveSlot {
-				copied[mac] = map[string]any{
-					"mac":       mac,
-					"ip":        bestIP,
-					"last_seen": nowSecF,
-				}
-			}
-		}
-		devMap = copied
-	} else if !shmRes.Valid && s.jsonCache != nil {
-		if dpiRaw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_state.json")); err == nil && dpiRaw != nil {
-			devMap = mergeDpiStateFallbackDevices(devMap, dpiRaw, now.Unix())
-		}
-	}
+	devMap, shmOnline := s.mergeLiveObservationsReadonly(devMap, shmRes, now)
+	devMap = s.mergeReadonlyNeighFallback(devicesPath, devMap, now.Unix())
 	var ruleDevs map[string]any
 	var blSet map[string]bool
 	if s.jsonCache != nil {
@@ -2121,9 +2270,8 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 			continue
 		}
 		seenMAC[macKey] = true
-		devIP := asString(dm["ip"])
-		lastSeen, _ := toInt64(dm["last_seen"])
-		isOnline := devIP != "" && (lastSeen == 0 || nowUnix-lastSeen <= activityOnlineWindow)
+		devIP := strings.TrimSpace(asString(dm["ip"]))
+		isOnline := isDeviceEntryOnline(dm, devIP, nowUnix, shmOnline[macKey])
 		if isOnline {
 			online++
 		}

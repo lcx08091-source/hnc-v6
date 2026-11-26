@@ -40,7 +40,8 @@ import (
 )
 
 const (
-	bpfMapPath = "/sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map"
+	bpfMapPath          = "/sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map"
+	bpfTetherAppMapPath = "/sys/fs/bpf/tethering/map_netd_app_uid_stats_map"
 
 	// bpf() syscall number: per-arch constant sysBPF in sysbpf_<arch>.go
 	// (v5.22: arm64 = 280, arm EABI = 386, amd64 = 321, 386 = 357).
@@ -55,9 +56,14 @@ const (
 	bpfFileFlagRdonly uint32 = 1 << 3
 )
 
+var bpfAppUIDMapCandidates = []string{
+	bpfMapPath,
+	bpfTetherAppMapPath,
+}
+
 // netdStatsKey holds the heap key buffer passed to bpf(2).
 // For map_netd_app_uid_stats_map (KeySize=4), the kernel reads/writes only UID;
-// trailing words accommodate legacy/variant 16/20/24-byte stats keys safely.
+// trailing words are kept for defensive heap buffer slack.
 type netdStatsKey struct {
 	UID uint32
 	Ext [5]uint32
@@ -89,39 +95,49 @@ type EBPFSampler struct {
 }
 
 func validAppUIDMapKeySize(sz uint32) bool {
-	return sz == 4 || sz == 16 || sz == 20 || sz == 24
+	return sz == 4
 }
 
 func validStatsValueSize(sz uint32) bool {
 	return sz >= 32 && sz <= uint32(unsafe.Sizeof(netdStatsValue{})) && sz%8 == 0
 }
 
-// NewEBPFSampler opens the pinned BPF map (preferring BPF_F_RDONLY) and
-// verifies its key/value sizes via BPF_OBJ_GET_INFO_BY_FD.
+// NewEBPFSampler opens the pinned BPF map (preferring BPF_F_RDONLY across
+// netd_shared and tethering Mainline paths) and verifies KeySize==4 and ValueSize.
 func NewEBPFSampler() (*EBPFSampler, error) {
-	if _, err := os.Stat(bpfMapPath); err != nil {
-		return nil, fmt.Errorf("bpf map not found: %w", err)
+	var lastErr error
+	for _, path := range bpfAppUIDMapCandidates {
+		if _, err := os.Stat(path); err != nil {
+			lastErr = fmt.Errorf("bpf map not found: %w", err)
+			continue
+		}
+		fd, err := bpfObjGetReadonlyCall(path)
+		if err != nil {
+			lastErr = fmt.Errorf("bpf(BPF_OBJ_GET, %s): %w", path, err)
+			continue
+		}
+		info, err := bpfObjGetInfoCall(fd)
+		if err != nil {
+			_ = syscall.Close(fd)
+			lastErr = fmt.Errorf("bpf(BPF_OBJ_GET_INFO_BY_FD, %s): %w", path, err)
+			continue
+		}
+		if !validAppUIDMapKeySize(info.KeySize) || !validStatsValueSize(info.ValueSize) {
+			_ = syscall.Close(fd)
+			lastErr = fmt.Errorf("app_uid_stats_map schema mismatch at %s: key=%d (want 4) value=%d (want 32..64)",
+				path, info.KeySize, info.ValueSize)
+			continue
+		}
+		return &EBPFSampler{
+			fd:        fd,
+			keySize:   info.KeySize,
+			valueSize: info.ValueSize,
+		}, nil
 	}
-
-	fd, err := bpfObjGetReadonlyCall(bpfMapPath)
-	if err != nil {
-		return nil, fmt.Errorf("bpf(BPF_OBJ_GET, %s): %w", bpfMapPath, err)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("bpf map not found")
 	}
-	info, err := bpfObjGetInfoCall(fd)
-	if err != nil {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("bpf(BPF_OBJ_GET_INFO_BY_FD, %s): %w", bpfMapPath, err)
-	}
-	if !validAppUIDMapKeySize(info.KeySize) || !validStatsValueSize(info.ValueSize) {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("app_uid_stats_map schema mismatch at %s: key=%d (want 4/16/20/24) value=%d (want 32..64)",
-			bpfMapPath, info.KeySize, info.ValueSize)
-	}
-	return &EBPFSampler{
-		fd:        fd,
-		keySize:   info.KeySize,
-		valueSize: info.ValueSize,
-	}, nil
+	return nil, lastErr
 }
 
 func (s *EBPFSampler) Source() string { return "ebpf" }

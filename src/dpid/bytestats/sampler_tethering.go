@@ -12,8 +12,10 @@
 package bytestats
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,36 +25,58 @@ import (
 	"unsafe"
 )
 
-// tetheringMapCandidates lists pinned BPF stats maps across Android 12–16 Mainline.
-var tetheringMapCandidates = []string{
-	"/sys/fs/bpf/tethering/map_tethering_stats_stats_value_map_A",
-	"/sys/fs/bpf/tethering/map_tethering_stats_stats_value_map_B",
-	"/sys/fs/bpf/tethering/map_netd_app_uid_stats_map",
-	"/sys/fs/bpf/tethering/map_netd_stats_map_A",
-	"/sys/fs/bpf/tethering/map_netd_stats_map_B",
-	"/sys/fs/bpf/tethering/map_offload_tether_stats_map",
+type tetheringMapPair struct {
+	pathA string
+	pathB string
 }
 
-// TetheringStatsSampler reads AOSP Mainline tethering stats from a pinned BPF map.
+// tetheringMapPairs lists active/standby Mainline per-UID stats map pairs across Android 12–16.
+// Deliberately excludes map_offload_tether_stats_map whose 4-byte key is upstream ifindex, NOT UID.
+var tetheringMapPairs = []tetheringMapPair{
+	{
+		pathA: "/sys/fs/bpf/tethering/map_tethering_stats_stats_value_map_A",
+		pathB: "/sys/fs/bpf/tethering/map_tethering_stats_stats_value_map_B",
+	},
+	{
+		pathA: "/sys/fs/bpf/tethering/map_netd_stats_map_A",
+		pathB: "/sys/fs/bpf/tethering/map_netd_stats_map_B",
+	},
+	{
+		pathA: "/sys/fs/bpf/netd_shared/map_netd_stats_map_A",
+		pathB: "/sys/fs/bpf/netd_shared/map_netd_stats_map_B",
+	},
+}
+
+// TetheringStatsSampler reads AOSP Mainline per-UID stats from pinned A/B BPF maps.
 type TetheringStatsSampler struct {
 	// Placed at offset 0 with atomic.Uint64 8-byte alignment guarantee on 32-bit ARM.
 	_   [0]atomic.Uint64
 	val tetheringStatsValue
 
-	// Heap-resident bpf(2) key buffers sized to max 24B key variant (v5.12 + v6.0.0).
-	key, next tetheringStatsKey
+	// Heap-resident bpf(2) key/name buffers sized to max 24B key variant (v5.12 + v6.0.0).
+	key, next    tetheringStatsKey
+	ifaceKey     uint32
+	ifaceNext    uint32
+	ifaceNameBuf [32]byte
 
-	fd        int
-	keySize   uint32
-	valueSize uint32
-	path      string
+	fd          int
+	fdB         int
+	ifaceNameFD int
+	keySize     uint32
+	valueSize   uint32
+	path        string
+	pathB       string
+	ifaceCache  map[uint32]string
 }
 
-// tetheringStatsKey accommodates 16, 20, or 24 byte Mainline Tethering BPF keys.
-// First uint32 carries uid / client key; trailing words hold tag/counterSet/ifindex/etc.
+// tetheringStatsKey accommodates 16, 20, or 24 byte Mainline Tethering/netd BPF keys:
+// {UID, Tag, CounterSet, IfaceIndex} followed by optional trailing words.
 type tetheringStatsKey struct {
-	UID uint32
-	Ext [5]uint32 // total = 24 bytes (>= max supported keySize 24)
+	UID        uint32
+	Tag        uint32
+	CounterSet uint32
+	IfaceIndex uint32
+	Ext        [2]uint32 // total = 24 bytes (>= max supported keySize 24)
 }
 
 // tetheringStatsValue accommodates 32, 40, or 48 byte Mainline stats values.
@@ -75,14 +99,51 @@ func validTetheringValueSize(sz uint32) bool {
 	return sz == 32 || sz == 40 || sz == 48
 }
 
-// discoverTetheringMap finds the AOSP tethering stats BPF map path.
-// Tries known Mainline paths first, then falls back to glob-based discovery
-// (excluding limit/quota control maps whose schema is unrelated to byte stats).
-func discoverTetheringMap() (string, error) {
-	for _, p := range tetheringMapCandidates {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
+func isForbiddenTetheringMapBase(base string) bool {
+	return strings.Contains(base, "limit") ||
+		strings.Contains(base, "offload") ||
+		strings.Contains(base, "app_uid") ||
+		strings.Contains(base, "iface") ||
+		strings.Contains(base, "counterset") ||
+		strings.Contains(base, "cookie") ||
+		strings.Contains(base, "uid_owner") ||
+		strings.Contains(base, "uid_permission")
+}
+
+func openValidatedTetheringFD(path string) (int, *bpfMapInfo, error) {
+	if path == "" {
+		return -1, nil, os.ErrNotExist
+	}
+	if _, err := os.Stat(path); err != nil {
+		return -1, nil, err
+	}
+	fd, err := bpfObjGetCall(path)
+	if err != nil {
+		return -1, nil, fmt.Errorf("bpf(BPF_OBJ_GET, %s): %w", path, err)
+	}
+	info, err := bpfObjGetInfoCall(fd)
+	if err != nil {
+		_ = syscall.Close(fd)
+		return -1, nil, fmt.Errorf("bpf(BPF_OBJ_GET_INFO_BY_FD, %s): %w", path, err)
+	}
+	if !validTetheringKeySize(info.KeySize) || !validTetheringValueSize(info.ValueSize) {
+		_ = syscall.Close(fd)
+		return -1, nil, fmt.Errorf(
+			"tethering map schema mismatch at %s: key=%d (want 16/20/24) value=%d (want 32/40/48) — refusing to guess uid layout",
+			path, info.KeySize, info.ValueSize)
+	}
+	return fd, info, nil
+}
+
+// discoverTetheringMapPairs returns candidate (A, B) map path pairs, excluding
+// offload_tether_stats_map (4B upstream ifindex key) and quota/limit control maps.
+func discoverTetheringMapPairs() []tetheringMapPair {
+	out := make([]tetheringMapPair, 0, len(tetheringMapPairs)+2)
+	seen := make(map[string]bool, 8)
+	for _, pair := range tetheringMapPairs {
+		seen[pair.pathA] = true
+		seen[pair.pathB] = true
+		out = append(out, pair)
 	}
 	for _, pat := range []string{
 		"/sys/fs/bpf/tethering/*stats*",
@@ -93,87 +154,221 @@ func discoverTetheringMap() (string, error) {
 			continue
 		}
 		for _, cand := range entries {
-			base := strings.ToLower(filepath.Base(cand))
-			if strings.Contains(base, "limit") {
+			if seen[cand] {
 				continue
 			}
-			return cand, nil
+			base := strings.ToLower(filepath.Base(cand))
+			if isForbiddenTetheringMapBase(base) {
+				continue
+			}
+			sibling := ""
+			if strings.HasSuffix(cand, "_A") {
+				sibling = strings.TrimSuffix(cand, "_A") + "_B"
+			} else if strings.HasSuffix(cand, "_B") {
+				sibling = strings.TrimSuffix(cand, "_B") + "_A"
+			}
+			seen[cand] = true
+			if sibling != "" {
+				seen[sibling] = true
+			}
+			out = append(out, tetheringMapPair{pathA: cand, pathB: sibling})
 		}
 	}
-	return "", fmt.Errorf("tethering stats map not found")
+	return out
 }
 
-// NewTetheringStatsSampler opens the AOSP Mainline tethering stats BPF map and
-// validates its keySize (16/20/24) and valueSize (32/40/48).
+// NewTetheringStatsSampler opens AOSP Mainline A/B stats BPF maps, validates
+// keySize (16/20/24) and valueSize (32/40/48), and attaches iface_index_name_map if available.
 func NewTetheringStatsSampler() (*TetheringStatsSampler, error) {
-	path, err := discoverTetheringMap()
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for _, pair := range discoverTetheringMapPairs() {
+		fdA, infoA, errA := openValidatedTetheringFD(pair.pathA)
+		fdB, infoB, errB := openValidatedTetheringFD(pair.pathB)
+		if fdA < 0 && fdB < 0 {
+			if errA != nil && !os.IsNotExist(errA) {
+				lastErr = errA
+			} else if errB != nil && !os.IsNotExist(errB) {
+				lastErr = errB
+			}
+			continue
+		}
+		s := &TetheringStatsSampler{
+			fd:          -1,
+			fdB:         -1,
+			ifaceNameFD: -1,
+			ifaceCache:  make(map[uint32]string, 16),
+		}
+		if fdA >= 0 {
+			s.fd = fdA
+			s.keySize = infoA.KeySize
+			s.valueSize = infoA.ValueSize
+			s.path = pair.pathA
+			if fdB >= 0 {
+				if infoB.KeySize == infoA.KeySize && infoB.ValueSize == infoA.ValueSize {
+					s.fdB = fdB
+					s.pathB = pair.pathB
+				} else {
+					_ = syscall.Close(fdB)
+				}
+			}
+		} else {
+			s.fd = fdB
+			s.keySize = infoB.KeySize
+			s.valueSize = infoB.ValueSize
+			s.path = pair.pathB
+		}
+		if ifFD, err := openValidatedNetdMap(altIfaceIndexNameMapPaths, validDetailIfaceNameSchema); err == nil {
+			s.ifaceNameFD = ifFD
+		}
+		return s, nil
 	}
-	fd, err := bpfObjGetCall(path)
-	if err != nil {
-		return nil, fmt.Errorf("bpf(BPF_OBJ_GET, %s): %w", path, err)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("tethering stats map not found")
 	}
-
-	info, err := bpfObjGetInfoCall(fd)
-	if err != nil {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("bpf(BPF_OBJ_GET_INFO_BY_FD, %s): %w", path, err)
-	}
-	if !validTetheringKeySize(info.KeySize) || !validTetheringValueSize(info.ValueSize) {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf(
-			"tethering map schema mismatch at %s: key=%d (want 16/20/24) value=%d (want 32/40/48) — refusing to guess uid layout",
-			path, info.KeySize, info.ValueSize)
-	}
-	return &TetheringStatsSampler{
-		fd:        fd,
-		keySize:   info.KeySize,
-		valueSize: info.ValueSize,
-		path:      path,
-	}, nil
+	return nil, lastErr
 }
 
 func (s *TetheringStatsSampler) Source() string { return "tethering_bpf" }
 
 func (s *TetheringStatsSampler) Close() error {
-	if s.fd > 0 {
-		err := syscall.Close(s.fd)
-		s.fd = 0
-		return err
+	var firstErr error
+	closeFD := func(fd *int) {
+		if *fd > 0 {
+			if err := syscall.Close(*fd); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		*fd = -1
 	}
-	return nil
+	closeFD(&s.fd)
+	closeFD(&s.fdB)
+	closeFD(&s.ifaceNameFD)
+	return firstErr
 }
 
-// Sample iterates the tethering stats map and aggregates per uid.
-func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
-	if s.fd <= 0 {
-		return nil, fmt.Errorf("sampler closed")
+func (s *TetheringStatsSampler) readIfaceNames() map[uint32]string {
+	out := make(map[uint32]string, 16)
+	if s.ifaceNameFD <= 0 {
+		return out
 	}
-	out := make(map[int]ByteCounts, 64)
+	s.ifaceKey, s.ifaceNext = 0, 0
+	first := true
+	for {
+		var keyPtr unsafe.Pointer
+		if !first {
+			keyPtr = unsafe.Pointer(&s.ifaceKey)
+		}
+		if err := bpfMapGetNextKeyCall(s.ifaceNameFD, keyPtr, unsafe.Pointer(&s.ifaceNext)); err != nil {
+			break
+		}
+		s.ifaceNameBuf = [32]byte{}
+		if err := bpfMapLookupElemCall(s.ifaceNameFD, unsafe.Pointer(&s.ifaceNext), unsafe.Pointer(&s.ifaceNameBuf[0])); err == nil {
+			raw := s.ifaceNameBuf[:]
+			if idx := bytes.IndexByte(raw, 0); idx >= 0 {
+				raw = raw[:idx]
+			}
+			if name := strings.TrimSpace(string(raw)); name != "" {
+				out[s.ifaceNext] = name
+				if s.ifaceCache != nil {
+					s.ifaceCache[s.ifaceNext] = name
+				}
+				putCachedNetdIfaceName(s.ifaceNext, name)
+			}
+		}
+		s.ifaceKey = s.ifaceNext
+		first = false
+	}
+	return out
+}
 
+func (s *TetheringStatsSampler) resolveIfaceName(ifindex uint32, ifaceNames map[uint32]string, missed map[uint32]bool) string {
+	if ifindex == 0 {
+		return ""
+	}
+	if name := ifaceNames[ifindex]; name != "" {
+		return name
+	}
+	if s.ifaceCache != nil {
+		if name := s.ifaceCache[ifindex]; name != "" {
+			ifaceNames[ifindex] = name
+			return name
+		}
+	}
+	if name, ok := getCachedNetdIfaceName(ifindex); ok && name != "" {
+		if s.ifaceCache != nil {
+			s.ifaceCache[ifindex] = name
+		}
+		ifaceNames[ifindex] = name
+		return name
+	}
+	if missed[ifindex] {
+		return ""
+	}
+	if ifc, err := net.InterfaceByIndex(int(ifindex)); err == nil && ifc != nil {
+		if name := strings.TrimSpace(ifc.Name); name != "" {
+			ifaceNames[ifindex] = name
+			if s.ifaceCache != nil {
+				s.ifaceCache[ifindex] = name
+			}
+			putCachedNetdIfaceName(ifindex, name)
+			return name
+		}
+	}
+	if name := strings.TrimSpace(lookupSysfsIfaceNameByIndex(ifindex)); name != "" {
+		ifaceNames[ifindex] = name
+		if s.ifaceCache != nil {
+			s.ifaceCache[ifindex] = name
+		}
+		putCachedNetdIfaceName(ifindex, name)
+		return name
+	}
+	missed[ifindex] = true
+	return ""
+}
+
+func (s *TetheringStatsSampler) accumulateFD(fd int, hasIfaceMap bool, ifaceNames map[uint32]string, missed map[uint32]bool, out map[int]ByteCounts) error {
+	if fd <= 0 {
+		return nil
+	}
 	key, next := &s.key, &s.next
 	*key, *next = tetheringStatsKey{}, tetheringStatsKey{}
 	first := true
 
 	for {
 		var keyPtr unsafe.Pointer
-		if first {
-			keyPtr = nil // NULL key → start at first entry
-		} else {
+		if !first {
 			keyPtr = unsafe.Pointer(key)
 		}
-		err := bpfMapGetNextKeyCall(s.fd, keyPtr, unsafe.Pointer(next))
+		err := bpfMapGetNextKeyCall(fd, keyPtr, unsafe.Pointer(next))
 		if err == syscall.ENOENT {
-			break // end of map
+			break
 		}
 		if err != nil {
-			// EINVAL on first iteration = kernel rejected key layout.
-			return out, fmt.Errorf("bpf(BPF_MAP_GET_NEXT_KEY): %w", err)
+			return fmt.Errorf("bpf(BPF_MAP_GET_NEXT_KEY): %w", err)
+		}
+
+		// Filter sentinel UIDs (-1 / -5), non-zero socket tags (which duplicate Tag==0),
+		// and invalid CounterSet (>1; only 0=DEFAULT and 1=FOREGROUND are valid).
+		if next.UID > 100_000_000 || next.Tag != 0 || next.CounterSet > 1 {
+			*key = *next
+			first = false
+			continue
+		}
+
+		ifName := s.resolveIfaceName(next.IfaceIndex, ifaceNames, missed)
+		if next.IfaceIndex > 0 && ifName == "" && hasIfaceMap {
+			*key = *next
+			first = false
+			continue
+		}
+		if ShouldExcludeNetdIface(ifName) {
+			*key = *next
+			first = false
+			continue
 		}
 
 		s.val = tetheringStatsValue{}
-		err = bpfMapLookupElemCall(s.fd, unsafe.Pointer(next), unsafe.Pointer(&s.val))
+		err = bpfMapLookupElemCall(fd, unsafe.Pointer(next), unsafe.Pointer(&s.val))
 		val := s.val
 		if err != nil {
 			*key = *next
@@ -181,15 +376,7 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 			continue
 		}
 
-		// Filter out special negative sentinel UIDs (-1 / -5 cast to uint32 > 100_000_000)
-		// safely on both 32-bit ARM and 64-bit ARM64 before converting to int.
-		if next.UID > 100_000_000 {
-			*key = *next
-			first = false
-			continue
-		}
 		uid := int(next.UID)
-
 		bc := out[uid]
 		bc.RxBytes += val.RxBytes
 		bc.RxPackets += val.RxPackets
@@ -200,7 +387,27 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 		*key = *next
 		first = false
 	}
+	return nil
+}
 
+// Sample iterates stats_map_A + stats_map_B (when both present) and aggregates per uid.
+func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
+	if s.fd <= 0 {
+		return nil, fmt.Errorf("sampler closed")
+	}
+	out := make(map[int]ByteCounts, 64)
+	hasIfaceMap := s.ifaceNameFD > 0
+	ifaceNames := s.readIfaceNames()
+	missed := make(map[uint32]bool, 4)
+
+	if err := s.accumulateFD(s.fd, hasIfaceMap, ifaceNames, missed, out); err != nil {
+		return out, err
+	}
+	if s.fdB > 0 {
+		if err := s.accumulateFD(s.fdB, hasIfaceMap, ifaceNames, missed, out); err != nil {
+			return out, err
+		}
+	}
 	return out, nil
 }
 

@@ -646,6 +646,8 @@ jobs:
             [ -f "$dst" ] || { echo "ERROR: armv7 $n has no arm64 counterpart at ${dst#$STAGE/}"; exit 1; }
             cp -f "$f" "$dst"; chmod 755 "$dst"
           done
+          # C-78②: update.json zipUrl 仅指向 -arm64.zip, 移除 32 位包内 updateJson= 防止管理器 OTA 误拉 arm64 包被 customize.sh 中止
+          sed -i '/^updateJson=/d' "$STAGE/module.prop"
           echo armeabi-v7a > "$STAGE/bin/hnc_pkg_abi"
           (cd "$STAGE" && zip -rqX "$GITHUB_WORKSPACE/$OUT7" .)
           rm -rf "$STAGE"
@@ -678,9 +680,11 @@ jobs:
           os.makedirs("build_rules", exist_ok=True)
           with open("build_rules/dpi_rules.json", "w", encoding="utf-8") as fh:
               json.dump(out, fh, ensure_ascii=False, separators=(",", ":"))
+          raw_sz = os.path.getsize("build_rules/dpi_rules.json")
+          assert raw_sz < 921600, f"build_rules/dpi_rules.json ({raw_sz} bytes) must remain < 921600 bytes"
           with zipfile.ZipFile("dpi-rules.zip", "w", zipfile.ZIP_DEFLATED) as zf:
               zf.write("build_rules/dpi_rules.json", "dpi_rules.json")
-          print("rules packaged:", len(out["rules"]), "entries, version", out["rules_version"])
+          print("rules packaged:", len(out["rules"]), "entries, size", raw_sz, "bytes, version", out["rules_version"])
           PY
           sha256sum dpi-rules.zip > dpi-rules.zip.sha256
           echo "DPI_RULES_VERSION=rules-${{ steps.version.outputs.version }}" >> $GITHUB_ENV

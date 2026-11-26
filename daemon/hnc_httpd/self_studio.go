@@ -426,9 +426,12 @@ func (s *server) apiSelfStudio(w http.ResponseWriter, r *http.Request) {
 	}
 	fcModelMu.RUnlock()
 
+	protoCnt := loadPrototypeStore(hncDir).AppCount()
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":           true,
-		"generated_at": now.Unix(),
+		"ok":             true,
+		"generated_at":   now.Unix(),
+		"prototype_apps": protoCnt,
 		"capture": map[string]interface{}{
 			"mode":                 curMode,
 			"enabled":              curMode != "off",
@@ -445,6 +448,7 @@ func (s *server) apiSelfStudio(w http.ResponseWriter, r *http.Request) {
 		"counters": map[string]interface{}{
 			"user_apps":        userApps,
 			"active_apps":      activeApps,
+			"prototype_apps":   protoCnt,
 			"samples_written":  samplesCnt,
 			"expanded_rules":   expRules,
 			"promoted_rules":   proRules,

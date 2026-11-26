@@ -1,4 +1,4 @@
-/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.9 · 智能护航、本机守护、隐私安检与连接排障中心
+/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.10 · 智能护航、本机守护、隐私安检与连接排障中心
  * 设计准则:
  *   1. 全站原语彻底收口: 统一复用 .hero.v6-hero、.cc-bento-row/.cc-tile、seg() 弹簧胶囊与 .sgrp.scard.glass.open 标准卡片，零孤岛私有大卡。
  *   2. 诚实三态与正交双连接: 严格区分热点待机/热点就绪无设备/热点活跃三态；热点连接数与本机连接数正交独立展示与检索。
@@ -190,6 +190,9 @@ var V6 = {
   apiSupported: { lg: true, v6: true },
   lg: {
     total_hits: 0,
+    window_hits: 0,
+    raw_total_hits: 0,
+    hit_offset: Math.max(0, Math.round(num(LS.get('hnc6.lg_hit_offset', 0), 0))),
     host_hits: 0,
     hotspot_hits: 0,
     hotspot_affected_devices: 0,
@@ -677,7 +680,7 @@ function v6MarkLeakGuardSeen() {
   if (typeof S !== 'undefined' && S.page === 'vector') v6RefreshNavBadges();
 }
 
-function v6RecalcLeakWatermark() {
+function v6RecalcLeakWatermark(data) {
   var sumHits = 0, hostHits = 0, hsHits = 0, devSeen = {}, appSeen = {};
   V6.lg.events.forEach(function (e) {
     var h = Math.max(1, num(e.hit_count, 1));
@@ -693,7 +696,16 @@ function v6RecalcLeakWatermark() {
       if (dk) devSeen[dk] = 1;
     }
   });
-  V6.lg.total_hits = sumHits;
+  var rawWin = (data && typeof data.window_hits === 'number')
+    ? data.window_hits
+    : (data && data.stats && typeof data.stats.window_hits === 'number' ? data.stats.window_hits : null);
+  var effHits = typeof rawWin === 'number' ? Math.max(0, Math.round(rawWin)) : sumHits;
+  V6.lg.window_hits = effHits;
+  V6.lg.total_hits = effHits;
+  if (V6.lg.raw_total_hits > 0) {
+    V6.lg.hit_offset = Math.max(0, V6.lg.raw_total_hits - effHits);
+    LS.set('hnc6.lg_hit_offset', String(V6.lg.hit_offset));
+  }
   V6.lg.host_hits = hostHits;
   V6.lg.hotspot_hits = hsHits;
   V6.lg.hotspot_affected_devices = Object.keys(devSeen).length;
@@ -846,7 +858,8 @@ function v6ApplyLeakGuardData(d, forceAccept) {
     V6.lg.undo_count = V6.lg.undo_stack.length;
   }
 
-  if (Array.isArray(d.events) || Array.isArray(d.items)) {
+  var hasEventsArr = Array.isArray(d.events) || Array.isArray(d.items);
+  if (hasEventsArr) {
     var rawArr = d.events || d.items || [];
     var batchCounts = {};
     rawArr.forEach(function (it) {
@@ -880,7 +893,50 @@ function v6ApplyLeakGuardData(d, forceAccept) {
 
   var rawTotalHits = d.total_hits != null ? d.total_hits : stats.total_hits;
   if (rawTotalHits != null) {
-    V6.lg.total_hits = Math.max(0, Math.round(num(rawTotalHits)));
+    var cumHits = Math.max(0, Math.round(num(rawTotalHits, 0)));
+    if (cumHits < num(V6.lg.hit_offset, 0)) {
+      V6.lg.hit_offset = 0;
+      LS.set('hnc6.lg_hit_offset', '0');
+    }
+    V6.lg.raw_total_hits = cumHits;
+  }
+  var rawWinHits = typeof d.window_hits === 'number'
+    ? d.window_hits
+    : (typeof stats.window_hits === 'number' ? stats.window_hits : null);
+  var rawBufCnt = typeof d.buffered_events === 'number'
+    ? d.buffered_events
+    : (typeof stats.buffered_events === 'number' ? stats.buffered_events : null);
+
+  if (typeof rawWinHits === 'number') {
+    var winHits = Math.max(0, Math.round(rawWinHits));
+    V6.lg.window_hits = winHits;
+    V6.lg.total_hits = winHits;
+    if (rawTotalHits != null) {
+      V6.lg.hit_offset = Math.max(0, V6.lg.raw_total_hits - winHits);
+      LS.set('hnc6.lg_hit_offset', String(V6.lg.hit_offset));
+    }
+  } else if (hasEventsArr) {
+    var evSumHits = 0;
+    V6.lg.events.forEach(function (e) {
+      evSumHits += Math.max(1, num(e.hit_count, 1));
+    });
+    V6.lg.window_hits = evSumHits;
+    V6.lg.total_hits = evSumHits;
+    if (rawTotalHits != null) {
+      V6.lg.hit_offset = Math.max(0, V6.lg.raw_total_hits - evSumHits);
+      LS.set('hnc6.lg_hit_offset', String(V6.lg.hit_offset));
+    }
+  } else if (rawTotalHits != null) {
+    if (rawBufCnt === 0) {
+      V6.lg.hit_offset = V6.lg.raw_total_hits;
+      LS.set('hnc6.lg_hit_offset', String(V6.lg.hit_offset));
+      V6.lg.window_hits = 0;
+      V6.lg.total_hits = 0;
+    } else {
+      var adjHits = Math.max(0, V6.lg.raw_total_hits - num(V6.lg.hit_offset, 0));
+      V6.lg.window_hits = adjHits;
+      V6.lg.total_hits = adjHits;
+    }
   }
   var rawHostHits = d.host_hits != null ? d.host_hits : stats.host_hits;
   if (rawHostHits != null) {
@@ -929,7 +985,7 @@ function v6ApplyLeakGuardData(d, forceAccept) {
     V6.lg.blocked_domains = V6.lg.hotspot_blocked_domains + V6.lg.self_blocked_domains;
   }
 
-  if ((Array.isArray(d.events) || Array.isArray(d.items)) && V6.lg.events.length === 0) {
+  if (hasEventsArr && V6.lg.events.length === 0) {
     LS.set('hnc6.lg_seen_hits', String(Math.max(0, num(V6.lg.total_hits, 0))));
   }
   v6SeenLeakHits();
@@ -969,6 +1025,8 @@ function v6PushStreamEvent(evObj) {
     V6.lg.events.length = V6.lg.capacity || 300;
   }
   V6.lg.total_hits = num(V6.lg.total_hits) + 1;
+  V6.lg.window_hits = V6.lg.total_hits;
+  if (V6.lg.raw_total_hits > 0) V6.lg.raw_total_hits += 1;
   if (tmpEv.origin === 'host') V6.lg.host_hits = num(V6.lg.host_hits) + 1;
   else V6.lg.hotspot_hits = num(V6.lg.hotspot_hits) + 1;
   var devSeen = {}, appSeen = {};
@@ -1331,7 +1389,7 @@ function v6NormScalpelFlowList(fl) {
   });
 }
 
-function v6ApplyScalpelData(r, isDrawerScoped) {
+function v6ApplyScalpelData(r, isDrawerScoped, fromDrawerFetch) {
   if (!r || typeof r !== 'object') return;
   if (typeof r.readable === 'boolean') V6.scalpel.readable = r.readable;
   if (!isDrawerScoped) {
@@ -1364,14 +1422,18 @@ function v6ApplyScalpelData(r, isDrawerScoped) {
   var tot = Math.max(0, Math.round(num(r.total, parsed.length)));
 
   if (isDrawerScoped) {
-    V6.scalpel.drawerFlows = parsed;
-    V6.scalpel.drawerTotal = tot;
+    if (!V6.scalpel.paused || !Array.isArray(V6.scalpel.drawerFlows)) {
+      V6.scalpel.drawerFlows = parsed;
+      V6.scalpel.drawerTotal = tot;
+    }
   } else {
     V6.scalpel.globalFlows = parsed;
     V6.scalpel.globalTotalFlows = tot;
-    if (V6.scalpel.open && !V6.scalpel.scopeMac && !V6.scalpel.scopeIp && V6.scalpel.scopeDomain === 'all') {
-      V6.scalpel.drawerFlows = parsed;
-      V6.scalpel.drawerTotal = tot;
+    if (!V6.scalpel.paused && V6.scalpel.open && !V6.scalpel.scopeMac && !V6.scalpel.scopeIp && V6.scalpel.scopeDomain === 'all') {
+      if (fromDrawerFetch || !Array.isArray(V6.scalpel.drawerFlows) || parsed.length >= V6.scalpel.drawerFlows.length) {
+        V6.scalpel.drawerFlows = parsed;
+        V6.scalpel.drawerTotal = tot;
+      }
     }
   }
 }
@@ -1847,7 +1909,7 @@ function v6DevicesStripHtml() {
 
   var goTarget = unreadLg > 0 ? 'go-privacy' : (!hsActive ? 'go-host' : 'go-vector');
   var ctaLabel = !hsActive && unreadLg <= 0 ? '本机守护 ' : '护航中心 ';
-  return '<div class="glass v6-dev-banner press" data-v6-act="' + goTarget + '" role="button" tabindex="0" aria-label="打开智能护航与本机守护">' +
+  return '<div class="glass v6-dev-banner press" data-mkey="v6-dev-banner" data-v6-act="' + goTarget + '" role="button" tabindex="0" aria-label="打开智能护航与本机守护">' +
     '<div class="v6-dev-banner-l">' +
       '<span class="v6-dot ' + dotCls + '"></span>' +
       '<span class="txt">' + escapeHtml(parts.join(' · ')) + '</span>' +
@@ -1858,7 +1920,12 @@ function v6DevicesStripHtml() {
 
 function v6RefreshDevicesBannerDom() {
   var m = document.getElementById('v6-dev-strip-mount');
-  if (m && S.page === 'devices') m.innerHTML = v6DevicesStripHtml();
+  if (!m || S.page !== 'devices') return;
+  var nextHtml = v6DevicesStripHtml();
+  if (m.firstElementChild && m._v6LastHtml === nextHtml) return;
+  m._v6LastHtml = nextHtml;
+  if (m.firstElementChild && typeof morph === 'function') morph(m, nextHtml);
+  else m.innerHTML = nextHtml;
 }
 
 /* 设置页折叠行内部简洁面板（嵌入标准 scard('scard-v6')） */
@@ -1938,27 +2005,27 @@ function v6RenderLatencyCompareHtml() {
   var incCnt = Math.round(num(bb.incident_count, 0));
 
   if (!hsActive) {
-    return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot idle"></span><span>当前未开启热点，网速护航队列处于零唤醒待机；开启热点后自动接管转发优先级</span></span></div>';
+    return '<div class="lgd-summary-line" data-mkey="v6-exp-lat"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot idle"></span><span>当前未开启热点，网速护航队列处于零唤醒待机；开启热点后自动接管转发优先级</span></span></div>';
   }
   if (onlineCnt <= 0 && !hasRealRtt) {
-    return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (ex.enabled ? 'ok' : 'idle') + '"></span><span>热点已开启，等待设备接入后自动守护游戏通话低延迟</span></span></div>';
+    return '<div class="lgd-summary-line" data-mkey="v6-exp-lat"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (ex.enabled ? 'ok' : 'idle') + '"></span><span>热点已开启，等待设备接入后自动守护游戏通话低延迟</span></span></div>';
   }
   if (!hasRealRtt && !(jitterMs > 0) && !(incCnt > 0)) {
-    return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (ex.enabled ? 'ok' : 'idle') + '"></span><span>当前网络通畅，暂无排队拥塞波动' + (ex.enabled ? '（优先护航待命中）' : '（开启后遇拥塞自动插队保护）') + '</span></span></div>';
+    return '<div class="lgd-summary-line" data-mkey="v6-exp-lat"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (ex.enabled ? 'ok' : 'idle') + '"></span><span>当前网络通畅，暂无排队拥塞波动' + (ex.enabled ? '（优先护航待命中）' : '（开启后遇拥塞自动插队保护）') + '</span></span></div>';
   }
   if (hasRealRtt) {
     var delta = Math.max(0, Math.round(curRtt - baseRtt));
     var congested = delta >= 25;
     var badgeCls = congested ? 'b-warn' : 'b-ok';
     var badgeTxt = congested ? ('排队增量 +' + delta + 'ms') : (ex.enabled ? '延迟平稳' : '当前平稳');
-    return '<div class="v6-lat-cmp">' +
+    return '<div class="v6-lat-cmp" data-mkey="v6-exp-lat">' +
       '<div class="v6-lat-top">' +
         '<div><b>实时延迟与拥塞观测</b><small>实测基线 ' + Math.round(baseRtt) + 'ms · 当前 ' + Math.round(curRtt) + 'ms' + (jitterMs > 0 ? (' · 抖动 ' + jitterMs.toFixed(1) + 'ms') : '') + '</small></div>' +
         '<span class="badge ' + badgeCls + '">' + badgeTxt + '</span>' +
       '</div>' +
     '</div>';
   }
-  return '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (incCnt > 0 ? 'warn' : 'ok') + '"></span><span>' + (incCnt > 0 ? ('近期已捕捉 ' + incCnt + ' 次短暂延迟波动' + (jitterMs > 0 ? (' · 最新抖动 ' + jitterMs.toFixed(1) + 'ms') : '')) : ('最新采样抖动 ' + jitterMs.toFixed(1) + 'ms · 当前网络整体平稳')) + '</span></span></div>';
+  return '<div class="lgd-summary-line" data-mkey="v6-exp-lat"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ' + (incCnt > 0 ? 'warn' : 'ok') + '"></span><span>' + (incCnt > 0 ? ('近期已捕捉 ' + incCnt + ' 次短暂延迟波动' + (jitterMs > 0 ? (' · 最新抖动 ' + jitterMs.toFixed(1) + 'ms') : '')) : ('最新采样抖动 ' + jitterMs.toFixed(1) + 'ms · 当前网络整体平稳')) + '</span></span></div>';
 }
 
 function v6HeroHeadlineInfo() {
@@ -2098,7 +2165,7 @@ function v6RenderHeroCardHtml() {
   var bSvg = typeof bentoSvg === 'function' ? bentoSvg : function (k) { return v6Svg(k === 'sqm' ? 'express' : k); };
 
   return '<div class="glass hero v6-hero" id="v6-hero-card">' +
-    '<div class="v6-hero-top">' +
+    '<div class="v6-hero-top" data-mkey="v6-hero-top">' +
       '<div class="v6-hero-headline">' +
         '<div class="v6-hero-title"><span class="v6-dot ' + hl.dot + '"></span><span>' + escapeHtml(hl.title) + '</span></div>' +
         '<div class="v6-hero-sub">' + escapeHtml(hl.sub) + '</div>' +
@@ -2110,7 +2177,7 @@ function v6RenderHeroCardHtml() {
     '</div>' +
     '<div class="v6-health-drawer" id="v6-health-drawer"' + (showHealth ? '' : ' hidden') + '>' + v6BulkheadHumanHtml() + '</div>' +
     v6RenderArbiterBarHtml() +
-    '<div class="v6-conn-pair" role="group" aria-label="正交双域活跃连接概览">' +
+    '<div class="v6-conn-pair" data-mkey="v6-conn-pair" role="group" aria-label="正交双域活跃连接概览">' +
       '<button type="button" class="v6-conn-pill press" data-v6-act="open-scalpel" data-scope="hotspot" data-mac="" data-ip="" data-name="">' +
         '<span class="v6-conn-pill-l"><span class="v6-dot ' + (hsActive && onlineCnt > 0 ? 'ok' : 'idle') + '"></span><span>热点连接</span></span>' +
         '<span class="v6-conn-pill-r"><span>' + hsConns + '</span>' + ico('right') + '</span>' +
@@ -2120,7 +2187,7 @@ function v6RenderHeroCardHtml() {
         '<span class="v6-conn-pill-r"><span>' + hostConns + '</span>' + ico('right') + '</span>' +
       '</button>' +
     '</div>' +
-    '<div class="cc-bento-row" role="group" aria-label="核心护航快捷控制">' +
+    '<div class="cc-bento-row" data-mkey="v6-bento-row" role="group" aria-label="核心护航快捷控制">' +
       '<button type="button" class="cc-tile sqm-tile press' + (V6.express.enabled ? ' on sqm-on' : '') + '" data-v6-tile="express">' +
         '<span class="cc-orb">' + bSvg('sqm') + '</span>' +
         '<span class="cc-txt"><b>游戏通话优先</b><small>' + escapeHtml(expSub) + '</small></span>' +
@@ -2239,7 +2306,7 @@ function v6RenderExpressCardHtml() {
     var cls = it.forced ? ' on' : (it.autoEscort && ex.enabled ? ' is-auto' : '');
     var dotCls = it.forced ? 'ok' : (it.autoEscort && ex.enabled ? 'acc' : '');
     var suffix = it.forced ? (it.online ? ' · 常驻优先' : ' · 离线常驻') : (it.autoEscort && ex.enabled ? ' · 自动护航中' : '');
-    return '<button type="button" class="v6-dev-pill press' + cls + '" data-v6-act="express-dev" data-mac="' + escapeHtml(it.mac) + '" title="点按切换该设备的常驻优先状态">' +
+    return '<button type="button" class="v6-dev-pill press' + cls + '" data-mkey="expdev-' + escapeHtml(it.mac) + '" data-v6-act="express-dev" data-mac="' + escapeHtml(it.mac) + '" title="点按切换该设备的常驻优先状态">' +
       '<span class="v6-dot ' + dotCls + '"></span><span>' + escapeHtml(it.name) + suffix + '</span>' +
     '</button>';
   }).join('') : '<div class="note" style="margin:0">当前暂无在线设备；设备连入热点后可点选固定为常驻优先</div>';
@@ -2285,7 +2352,8 @@ function v6RenderLeashCardHtml() {
   } else if (!v6IsHotspotActive() || !ul.sessions.length) {
     sessHtml = '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ok"></span><span>当前没有大体积后台更新在跑，日常小补丁将在 ' + ul.grace_mb + ' MB 高速额度内秒下完成</span></span></div>';
   } else {
-    sessHtml = '<div class="v6-flow-list">' + ul.sessions.map(function (s) {
+    var seenUlKeys = {};
+    sessHtml = '<div class="v6-flow-list">' + ul.sessions.map(function (s, idx) {
       var stBadge = s.paused
         ? '<span class="v6-mono-badge b-bad">已暂停下载</span>'
         : (s.bypass_once
@@ -2294,7 +2362,10 @@ function v6RenderLeashCardHtml() {
             ? '<span class="v6-mono-badge b-warn">已限幅 ' + trim0((s.applied_kbps / 1000).toFixed(1)) + ' Mbps</span>'
             : '<span class="v6-mono-badge b-acc">高速额度内（剩 ' + Math.max(0, Math.round(s.rem_mb)) + ' MB）</span>'));
       var srcTitle = s.vendor_label || s.dst_host;
-      return '<div class="v6-flow-item">' +
+      var ulKey = String(s.session_key || ((s.mac || s.src_ip || '') + '|' + (s.dst_host || s.dst_ip || idx)));
+      if (!ulKey || seenUlKeys[ulKey]) ulKey += '#' + idx;
+      seenUlKeys[ulKey] = 1;
+      return '<div class="v6-flow-item" data-mkey="ul-' + escapeHtml(ulKey) + '">' +
         '<div class="v6-flow-main">' +
           '<div class="v6-flow-t">' + stBadge + '<span>' + escapeHtml(s.devName) + ' · ' + escapeHtml(srcTitle) + '</span></div>' +
           '<div class="v6-flow-s">已下载 ' + s.down_mb.toFixed(0) + ' MB · ' + escapeHtml(s.dst_host) + ' · 当前 ' + (s.cur_kbps > 0 ? (trim0((s.cur_kbps / 1000).toFixed(2)) + ' Mbps') : '0 Mbps') + '</div>' +
@@ -2944,7 +3015,11 @@ function v6FetchHostAppFlows() {
     st.loading = false;
     st.err = errText(e);
     var box = document.getElementById('v6-host-sheet-flows');
-    if (box) box.innerHTML = v6HostAppFlowsInnerHtml();
+    if (box) {
+      var errHtml = v6HostAppFlowsInnerHtml();
+      if (box.firstElementChild && typeof morph === 'function') morph(box, errHtml);
+      else box.innerHTML = errHtml;
+    }
     var cnt = document.getElementById('v6-host-sheet-cnt');
     if (cnt) cnt.textContent = '读取失败';
   });
@@ -3022,6 +3097,7 @@ function v6OpenHostAppSheet(uid, pkg, appName, isSystem) {
   V6.host.appSheet.flows = [];
   V6.host.appSheet.loading = true;
   V6.host.appSheet.err = '';
+  if (!V6.host.fwLoadedAt && !V6.host.fwLoading) v6LoadHostFirewall(false);
   v6FetchHostAppFlows();
   v6StartHostAppSheetTimer();
 }
@@ -3408,8 +3484,11 @@ function v6FilterHostApps(list) {
   var q = String(V6.host.q || '').trim().toLowerCase();
   if (!q) return list;
   return list.filter(function (a) {
+    if (!a) return false;
     var doms = Array.isArray(a.top_domains) ? a.top_domains.join(' ') : '';
-    var hay = ((a.app_name || '') + ' ' + (a.package || '') + ' ' + a.uid + ' ' + doms).toLowerCase();
+    var wls = (a.top_wakelocks || []).map(function (w) { return (w && (w.tag || w.name || (typeof w === 'string' ? w : ''))) || ''; }).join(' ');
+    var als = (a.top_wakeup_alarms || []).map(function (al) { return (al && (al.tag || al.name || (typeof al === 'string' ? al : ''))) || ''; }).join(' ');
+    var hay = ((a.app_name || '') + ' ' + (a.package || '') + ' ' + a.uid + ' ' + doms + ' ' + wls + ' ' + als).toLowerCase();
     return hay.indexOf(q) >= 0;
   });
 }
@@ -3610,6 +3689,7 @@ function v6RenderHostFirewallModeHtml() {
   } else if (!findings.length) {
     findingsHtml = '<div class="lgd-summary-line"><span style="display:inline-flex;align-items:center;gap:7px"><span class="v6-dot ok"></span><span>当前未发现本机应用使用 80 明文端口、绕过代理直连 DNS 或已知追踪连接</span></span></div>';
   } else {
+    var seenPvfKeys = {};
     findingsHtml = '<div class="v6-flow-list">' + findings.slice(0, 30).map(function (f, idx) {
       var uid = Math.round(num(f.uid, 0));
       var pkg = v6CleanHostRealPkg(f.package);
@@ -3631,8 +3711,11 @@ function v6RenderHostFirewallModeHtml() {
       var curMode = v6HostUidMode(uid);
       var domBlocked = !!(f.domain && fw.blocked_set[String(f.domain).toLowerCase()]);
       var isBgState = (f.app_state === 'background' || f.app_state === 'bg' || f.current_state === 'background');
+      var pvfKey = uid + '|' + rType + '|' + targetStr;
+      if (seenPvfKeys[pvfKey]) pvfKey += '#' + idx;
+      seenPvfKeys[pvfKey] = 1;
 
-      return '<div class="v6-flow-item" data-mkey="hpvf-' + uid + '-' + idx + '">' +
+      return '<div class="v6-flow-item" data-mkey="hpvf-' + escapeHtml(pvfKey) + '">' +
         '<div class="v6-flow-main">' +
           '<div class="v6-flow-t">' + rBadge + '<span>' + escapeHtml(appNm) + '</span>' + (isBgState ? '<span class="v6-mono-badge">后台</span>' : '') + '</div>' +
           '<div class="v6-flow-s">' + escapeHtml(targetStr + (f.detail ? (' · ' + f.detail) : '')) + '</div>' +
@@ -3867,7 +3950,12 @@ function v6StreamModeBadgeHtml() {
 
 function v6UpdateStreamBadgeDom() {
   var el = document.getElementById('lgd-stream-mode');
-  if (el) el.innerHTML = v6StreamModeBadgeHtml();
+  if (!el) return;
+  var nextHtml = v6StreamModeBadgeHtml();
+  if (el.firstElementChild && el._v6LastHtml === nextHtml) return;
+  el._v6LastHtml = nextHtml;
+  if (el.firstElementChild && typeof morph === 'function') morph(el, nextHtml);
+  else el.innerHTML = nextHtml;
 }
 
 function v6FilteredLeakEvents() {
@@ -4045,12 +4133,16 @@ function v6RenderLeakGuardManagerBodyHtml() {
   var undoList = Array.isArray(lg.undo_stack) ? lg.undo_stack.slice(0, 10) : [];
   var wlList = Array.isArray(lg.whitelist) ? lg.whitelist : [];
 
-  var undoHtml = undoList.length ? ('<div class="v6-flow-list">' + undoList.map(function (u) {
+  var seenUndoKeys = {};
+  var undoHtml = undoList.length ? ('<div class="v6-flow-list">' + undoList.map(function (u, idx) {
     var subParts = [];
     if (u.also_ip) subParts.push('连带 IP ' + u.also_ip);
     if (u.device_name) subParts.push('范围 ' + u.device_name);
     if (u.timeStr) subParts.push(u.timeStr);
-    return '<div class="v6-flow-item">' +
+    var uKey = String(u.hasServerId ? u.id : ((u.target_scope || '') + '|' + (u.uid || 0) + '|' + (u.dst_host || '') + '|' + (u.ts || '')));
+    if (!uKey || seenUndoKeys[uKey]) uKey += '#' + idx;
+    seenUndoKeys[uKey] = 1;
+    return '<div class="v6-flow-item" data-mkey="lgundo-' + escapeHtml(uKey) + '">' +
       '<div class="v6-flow-main">' +
         '<div class="v6-flow-t"><span class="v6-mono-badge b-warn">已封禁</span><span class="mono">' + escapeHtml(u.dst_host) + '</span></div>' +
         (subParts.length ? '<div class="v6-flow-s">' + escapeHtml(subParts.join(' · ')) + '</div>' : '') +
@@ -4171,7 +4263,7 @@ function v6RenderScalpelCardHtml() {
   var hostConns = v6HostFlowCount();
   var onlineDevs = hsActive ? (S.devices || []).filter(function (d) { return d && d.online; }).slice(0, 10) : [];
   var devJumpHtml = onlineDevs.length ? onlineDevs.map(function (d) {
-    return '<button type="button" class="v6-dev-pill press" data-v6-act="open-scalpel" data-scope="hotspot" data-mac="' + escapeHtml(d.mac) + '" data-ip="' + escapeHtml(d.ip || '') + '" data-name="' + escapeHtml(d.name) + '">' +
+    return '<button type="button" class="v6-dev-pill press" data-mkey="scdev-' + escapeHtml(d.mac) + '" data-v6-act="open-scalpel" data-scope="hotspot" data-mac="' + escapeHtml(d.mac) + '" data-ip="' + escapeHtml(d.ip || '') + '" data-name="' + escapeHtml(d.name) + '">' +
       v6Svg('scalpel') + '<span>' + escapeHtml(d.name) + '</span>' +
     '</button>';
   }).join('') : '<span class="note">' + (hsActive ? '当前暂无在线热点设备' : '当前热点未开启（仍可清理本机应用活跃连接）') + '</span>';
@@ -4324,7 +4416,8 @@ function v6RenderBlackboxCardHtml() {
     '</div>';
   }
 
-  var incHtml = hasInc ? ('<div class="v6-flow-list">' + bb.incidents.slice(0, 5).map(function (inc) {
+  var seenBbKeys = {};
+  var incHtml = hasInc ? ('<div class="v6-flow-list">' + bb.incidents.slice(0, 5).map(function (inc, idx) {
     var dim = v6BlackboxDim(inc);
     var rawMs = num(inc.ts_unix_ms, inc.unix_ms);
     var ts = rawMs ? fmtClockTs(rawMs) : '--:--:--';
@@ -4332,7 +4425,10 @@ function v6RenderBlackboxCardHtml() {
     var subEvidence = v6BlackboxEvidenceLine(inc, dim);
     var dimLbl = String(inc.cause_label_zh || dim.label);
     var canLocate = v6ValidMac(inc.culprit_mac) && (inc.culprit_is_hog === true || (inc.culprit_is_hog !== false && dim.key !== 'cell_jitter' && dim.key !== 'thermal_throttle'));
-    return '<div class="v6-flow-item">' +
+    var bbKey = String(inc.id || inc.incident_id || ((rawMs || inc.ts || '') + '|' + dim.key + '|' + (inc.culprit_mac || inc.reason || '')));
+    if (!bbKey || seenBbKeys[bbKey]) bbKey += '#' + idx;
+    seenBbKeys[bbKey] = 1;
+    return '<div class="v6-flow-item" data-mkey="bbinc-' + escapeHtml(bbKey) + '">' +
       '<div class="v6-flow-main">' +
         '<div class="v6-flow-t">' +
           '<span class="v6-mono-badge mono">' + escapeHtml(ts) + '</span>' +
@@ -4429,7 +4525,10 @@ function renderVectorPage(anim1) {
 function v6RefreshHeroDom() {
   var m = document.getElementById('v6-hero-mount');
   if (!m || S.page !== 'vector') return;
-  morph(m, v6RenderHeroCardHtml());
+  var nextHtml = v6RenderHeroCardHtml();
+  if (m.firstElementChild && m._v6LastHtml === nextHtml) return;
+  m._v6LastHtml = nextHtml;
+  morph(m, nextHtml);
 }
 
 function v6RefreshActiveSubviewDom() {
@@ -4449,7 +4548,12 @@ function v6RefreshActiveSubviewDom() {
       if (gc) gc.textContent = '可撤销 ' + undoCnt + ' 条 · 白名单 ' + wlCnt + ' 项';
       var sl = document.getElementById('lgd-summary-line');
       if (sl) {
-        sl.innerHTML = v6LeakSummaryInnerHtml();
+        var nextSumHtml = v6LeakSummaryInnerHtml();
+        if (!sl.firstElementChild || sl._v6LastHtml !== nextSumHtml) {
+          sl._v6LastHtml = nextSumHtml;
+          if (sl.firstElementChild && typeof morph === 'function') morph(sl, nextSumHtml);
+          else sl.innerHTML = nextSumHtml;
+        }
       }
       var ha = document.getElementById('lgd-head-acts');
       if (ha) {
@@ -4562,7 +4666,7 @@ function v6FilteredScalpelDrawerFlows() {
   var hasDrawerArr = Array.isArray(V6.scalpel.drawerFlows);
   var src = (isDevScoped || V6.scalpel.scopeDomain !== 'all')
     ? (hasDrawerArr ? V6.scalpel.drawerFlows : [])
-    : (hasDrawerArr && V6.scalpel.drawerFlows.length ? V6.scalpel.drawerFlows : V6.scalpel.globalFlows);
+    : (hasDrawerArr ? V6.scalpel.drawerFlows : V6.scalpel.globalFlows);
   var domScope = isDevScoped ? 'hotspot' : (V6.scalpel.scopeDomain || 'all');
   var pf = V6.scalpel.protoFilter || 'ALL';
   var q = String(V6.scalpel.q || '').trim().toLowerCase();
@@ -4580,15 +4684,14 @@ function v6FilteredScalpelDrawerFlows() {
 }
 
 function v6ScalpelListHtml() {
-  var dLen = Array.isArray(V6.scalpel.drawerFlows) ? V6.scalpel.drawerFlows.length : 0;
-  var isSub = !!(V6.scalpel.scopeMac || V6.scalpel.scopeIp || V6.scalpel.scopeDomain !== 'all');
-  if (V6.scalpel.loading && (isSub ? !dLen : (!dLen && !V6.scalpel.globalFlows.length))) {
+  var hasDrawerArr = Array.isArray(V6.scalpel.drawerFlows);
+  var list = v6FilteredScalpelDrawerFlows();
+  if (V6.scalpel.loading && !hasDrawerArr && !list.length) {
     return '<div class="empty">正在读取实时活跃连接…</div>';
   }
   if (V6.scalpel.err) {
     return '<div class="note err">' + escapeHtml(V6.scalpel.err) + '</div>';
   }
-  var list = v6FilteredScalpelDrawerFlows();
   if (!list.length) {
     return '<div class="empty">' + (V6.scalpel.scopeDomain === 'hotspot' && !v6IsHotspotActive() ? '当前热点未开启，热点连接为 0' : '当前筛选范围内没有活跃连接') + '</div>';
   }
@@ -4600,9 +4703,16 @@ function v6ScalpelListHtml() {
     var titleMain = f.app_name ? (f.app_name + (f.dst_host ? ' · ' + f.dst_host : '')) : (f.dst_host || dstEp);
     var remMin = f.frozen ? Math.max(1, Math.ceil((f.frozen_until - Date.now() / 1000) / 60)) : 0;
     var isHost = f.scope === 'host';
-    var ownerBadge = !V6.scalpel.scopeMac
-      ? ('<span class="v6-mono-badge ' + (isHost ? 'b-acc' : '') + '">' + escapeHtml((isHost ? '本机 · ' : '') + f.devName) + '</span>')
+    var canJumpHostApp = isHost && f.uid >= 0;
+    var hostJumpAttrs = canJumpHostApp
+      ? (' role="button" tabindex="0" data-v6-act="host-app-open" data-uid="' + f.uid + '" data-pkg="' + escapeHtml(f.pkg || '') + '" data-name="' + escapeHtml(f.host_app_name || f.devName || '') + '" data-sys="' + (f.is_system ? '1' : '0') + '" style="cursor:pointer" title="点击打开该本机应用的联网防火墙与连接详情"')
       : '';
+    var ownerBadge = !V6.scalpel.scopeMac
+      ? ('<span class="v6-mono-badge ' + (isHost ? 'b-acc' : '') + (canJumpHostApp ? ' press' : '') + '"' + hostJumpAttrs + '>' + escapeHtml((isHost ? '本机 · ' : '') + f.devName) + '</span>')
+      : '';
+    var titleSpanHtml = canJumpHostApp
+      ? ('<span class="press"' + hostJumpAttrs + '>' + escapeHtml(titleMain) + '</span>')
+      : ('<span>' + escapeHtml(titleMain) + '</span>');
     var riskBadge = f.cleartext_risk === 'http_cleartext'
       ? '<span class="v6-mono-badge b-bad">HTTP明文</span>'
       : (f.cleartext_risk === 'dns_direct' ? '<span class="v6-mono-badge b-warn">直连DNS</span>' : '');
@@ -4612,7 +4722,7 @@ function v6ScalpelListHtml() {
         '<div class="v6-tuple-primary">' +
           '<span class="v6-mono-badge mono ' + pCls + '">' + escapeHtml(f.frozen ? ('冻结剩' + remMin + '分') : f.protoBadge) + '</span>' +
           riskBadge +
-          '<span>' + escapeHtml(titleMain) + '</span>' +
+          titleSpanHtml +
           ownerBadge +
         '</div>' +
         '<div class="ep">' + escapeHtml(srcEp + ' -> ' + dstEp) + (f.state && f.state !== 'ESTABLISHED' && f.state !== 'ASSURED' ? (' · ' + escapeHtml(f.state)) : '') + '</div>' +
@@ -4640,6 +4750,7 @@ function v6ScalpelDrawerBodyHtml() {
     ? ('活跃连接 · ' + (sc.devName || sc.scopeIp || sc.scopeMac))
     : (sc.scopeDomain === 'hotspot' ? '热点设备活跃连接' : (sc.scopeDomain === 'host' ? '本机应用活跃连接' : '全网活跃连接手术刀'));
   var shownCount = v6FilteredScalpelDrawerFlows().length;
+  var cntPillTxt = (sc.loading && !Array.isArray(sc.drawerFlows) && !shownCount) ? '读取中…' : ('共 ' + shownCount + ' 条');
   var pTabs = [['ALL', '全部'], ['TCP', 'TCP'], ['UDP', 'UDP / QUIC'], ['FROZEN', '冻结中']];
 
   return '<div class="v6-drawer-head">' +
@@ -4663,7 +4774,7 @@ function v6ScalpelDrawerBodyHtml() {
         }).join('') +
       '</div>' +
       '<div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap">' +
-        '<span class="v6-mono-badge" id="v6-sc-cnt-pill">共 ' + shownCount + ' 条</span>' +
+        '<span class="v6-mono-badge" id="v6-sc-cnt-pill">' + cntPillTxt + '</span>' +
         (isScoped ? '<button type="button" class="v6-mini-btn pri press" data-v6-act="scalpel-all-scope">看全网</button>' : '') +
         '<button type="button" class="v6-mini-btn' + (sc.paused ? ' warn' : '') + ' press" data-v6-act="scalpel-pause">' + (sc.paused ? '已暂停刷新' : '2秒自动刷新') + '</button>' +
       '</div>' +
@@ -4678,7 +4789,12 @@ function v6RefreshScalpelDrawerList() {
   var listEl = document.getElementById('v6-scalpel-list');
   if (listEl) morph(listEl, v6ScalpelListHtml());
   var cntEl = document.getElementById('v6-sc-cnt-pill');
-  if (cntEl) cntEl.textContent = '共 ' + v6FilteredScalpelDrawerFlows().length + ' 条';
+  if (cntEl) {
+    var shownLen = v6FilteredScalpelDrawerFlows().length;
+    cntEl.textContent = (V6.scalpel.loading && !Array.isArray(V6.scalpel.drawerFlows) && !shownLen)
+      ? '读取中…'
+      : ('共 ' + shownLen + ' 条');
+  }
   var scopeMount = document.getElementById('v6-sc-scope-mount');
   if (scopeMount) {
     var hsCnt = v6HotspotFlowCount(), hostCnt = v6HostFlowCount();
@@ -4711,12 +4827,13 @@ function v6FetchScalpelFlows() {
   return api.get(V6_API.scalpelFlows, params, { timeout: 7000 }).then(function (r) {
     if (!V6.scalpel.open || reqSeq !== V6.scalpel.reqSeq) return;
     V6.scalpel.loading = false;
+    if (V6.scalpel.paused && Array.isArray(V6.scalpel.drawerFlows)) return;
     if (r && (r.hotspot_flows != null || r.host_flows != null)) {
       V6.scalpel.hasSplitCounts = true;
       V6.scalpel.hotspotFlows = (!v6IsHotspotActive() || v6OnlineClientCount() <= 0) ? 0 : Math.max(0, Math.round(num(r.hotspot_flows, 0)));
       V6.scalpel.hostFlows = Math.max(0, Math.round(num(r.host_flows, 0)));
     }
-    v6ApplyScalpelData(r, isScopedReq);
+    v6ApplyScalpelData(r, isScopedReq, true);
     v6RefreshScalpelDrawerList();
     if (S.page === 'vector') {
       v6RefreshHeroDom();
@@ -4726,6 +4843,7 @@ function v6FetchScalpelFlows() {
   }).catch(function (e) {
     if (!V6.scalpel.open || reqSeq !== V6.scalpel.reqSeq) return;
     V6.scalpel.loading = false;
+    if (V6.scalpel.paused && Array.isArray(V6.scalpel.drawerFlows)) return;
     if (isDevScoped && reqMac && S.conn && S.conn[reqMac] && S.conn[reqMac].r) {
       var cr = S.conn[reqMac].r;
       V6.scalpel.drawerFlows = (cr.conns || []).map(function (c, idx) {
@@ -4803,6 +4921,8 @@ function openScalpelDrawer(mac, ip, devName, initialScope) {
   V6.scalpel.protoFilter = 'ALL';
   V6.scalpel.q = '';
   V6.scalpel.paused = false;
+  V6.scalpel.loading = true;
+  V6.scalpel.err = '';
   V6.scalpel.drawerFlows = null;
   V6.scalpel.drawerTotal = 0;
   V6.scalpel.open = true;
@@ -4938,6 +5058,10 @@ function v6ClearLeakGuard(btn) {
       V6.lg.events = [];
       V6.lg.hit_ledger = {};
       V6.lg.total_hits = 0;
+      V6.lg.window_hits = 0;
+      V6.lg.raw_total_hits = 0;
+      V6.lg.hit_offset = 0;
+      LS.set('hnc6.lg_hit_offset', '0');
       V6.lg.host_hits = 0;
       V6.lg.hotspot_hits = 0;
       V6.lg.hotspot_affected_devices = 0;
@@ -5061,7 +5185,7 @@ function v6AddLeakWhitelist(ev, hostVal, scopeVal, triggerEl) {
     }
     if (r) v6ApplyLeakGuardData(r, true);
     V6.lg.events = V6.lg.events.filter(function (x) { return !v6IsEventWhitelisted(x, V6.lg.whitelist); });
-    v6RecalcLeakWatermark();
+    v6RecalcLeakWatermark(r);
     v6RefreshHeroDom();
     v6RefreshActiveSubviewDom();
     v6RefreshDevicesBannerDom();
@@ -5114,7 +5238,7 @@ function v6RemoveLeakWhitelist(widOrIdx, triggerEl) {
 
   return busyWhile(triggerEl, api.post(V6_API.lgWhitelist, reqBody, { timeout: 8000 })).then(function (r) {
     if (r) v6ApplyLeakGuardData(r, true);
-    v6RecalcLeakWatermark();
+    v6RecalcLeakWatermark(r);
     v6RefreshHeroDom();
     v6RefreshActiveSubviewDom();
     v6RefreshDevicesBannerDom();
@@ -5515,7 +5639,26 @@ function v6CutFlow(flowObj, freeze15m, btn) {
     toast(freeze15m
       ? ('已断开并冻结 15 分钟：' + (flowObj.dst_host || payload.dst_ip))
       : ('已秒断连接：' + v6FmtHostPort(flowObj.dst_host || payload.dst_ip, payload.dport)));
-    if (V6.scalpel.open) v6FetchScalpelFlows();
+    if (V6.scalpel.open) {
+      if (V6.scalpel.paused) {
+        if (Array.isArray(V6.scalpel.drawerFlows)) {
+          if (freeze15m) {
+            var untilSec = Math.floor(Date.now() / 1000) + 900;
+            V6.scalpel.drawerFlows.forEach(function (x) {
+              if (x && x.id === flowObj.id) {
+                x.frozen = true;
+                x.frozen_until = untilSec;
+              }
+            });
+          } else {
+            V6.scalpel.drawerFlows = V6.scalpel.drawerFlows.filter(function (x) { return !x || x.id !== flowObj.id; });
+          }
+        }
+        v6RefreshScalpelDrawerList();
+      } else {
+        v6FetchScalpelFlows();
+      }
+    }
     if (V6.host.appSheet.open) v6FetchHostAppFlows();
     if (S.page === 'vector') v6LoadCockpitAll();
   }).catch(function (e) { toast(errText(e), 'err'); });
@@ -5759,7 +5902,7 @@ function v6ExportBackupBundle(actEl) {
   if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function' && typeof loadSecret === 'function') {
     var ksuVer = v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.9';
+      'v6.1.0-rc.10';
     var ksuFname = 'hnc-backup-' + ksuVer + '-' + Date.now() + '.json';
     var outPath = '/sdcard/Download/' + ksuFname;
     var runCurlSave = function (forceSec) {
@@ -5805,7 +5948,7 @@ function v6ExportBackupBundle(actEl) {
     var verTag = v6CleanBackupVer(bundle.module_version) ||
       v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.9';
+      'v6.1.0-rc.10';
     var fname = 'hnc-backup-' + verTag + '-' + Date.now() + '.json';
     try {
       var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
@@ -5966,6 +6109,8 @@ function v6BindEvents() {
           v6LoadHostTraffic(true);
         } else if (sk === 'v6-sc-scope') {
           V6.scalpel.scopeDomain = sv || 'all';
+          V6.scalpel.loading = true;
+          V6.scalpel.err = '';
           V6.scalpel.drawerFlows = null;
           V6.scalpel.drawerTotal = 0;
           v6RefreshScalpelDrawerList();
@@ -6077,6 +6222,8 @@ function v6BindEvents() {
         V6.healthOpen = !V6.healthOpen;
         var hd = document.getElementById('v6-health-drawer');
         if (hd) hd.hidden = !V6.healthOpen;
+        var hm = document.getElementById('v6-hero-mount');
+        if (hm) hm._v6LastHtml = '';
         break;
       case 'open-scalpel':
         openScalpelDrawer(
@@ -6094,11 +6241,15 @@ function v6BindEvents() {
         V6.scalpel.scopeIp = '';
         V6.scalpel.devName = '';
         V6.scalpel.scopeDomain = 'all';
+        V6.scalpel.loading = true;
+        V6.scalpel.err = '';
         V6.scalpel.drawerFlows = null;
         V6.scalpel.drawerTotal = 0;
         var bd0 = document.getElementById('v6-scalpel-body');
         if (bd0) {
-          bd0.innerHTML = v6ScalpelDrawerBodyHtml();
+          var nextBdHtml = v6ScalpelDrawerBodyHtml();
+          if (bd0.firstElementChild && typeof morph === 'function') morph(bd0, nextBdHtml);
+          else bd0.innerHTML = nextBdHtml;
           if (typeof placeSegs === 'function') placeSegs(bd0);
         }
         v6ResetScalpelScroll();

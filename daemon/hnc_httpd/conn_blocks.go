@@ -235,6 +235,62 @@ func (s *server) expandConnBlocks(f connBlockFile) []string {
 	return out
 }
 
+type offloadGuardAsyncSlot struct {
+	mu      sync.Mutex
+	running bool
+	pending bool
+}
+
+var (
+	offloadGuardAsyncSlots sync.Map // map[string]*offloadGuardAsyncSlot
+	offloadGuardAsyncWG    sync.WaitGroup
+)
+
+func triggerOffloadGuardApplyAsync(hncDir string) {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		return
+	}
+	script := filepath.Join(hncDir, "bin", "hnc_offload_guard.sh")
+	if st, err := os.Stat(script); err != nil || st.IsDir() {
+		return
+	}
+	raw, _ := offloadGuardAsyncSlots.LoadOrStore(hncDir, &offloadGuardAsyncSlot{})
+	slot := raw.(*offloadGuardAsyncSlot)
+	slot.mu.Lock()
+	if slot.running {
+		slot.pending = true
+		slot.mu.Unlock()
+		return
+	}
+	slot.running = true
+	slot.pending = false
+	offloadGuardAsyncWG.Add(1)
+	slot.mu.Unlock()
+
+	go func(dir string, sl *offloadGuardAsyncSlot) {
+		defer offloadGuardAsyncWG.Done()
+		for {
+			if st, err := os.Stat(filepath.Join(dir, "bin", "hnc_offload_guard.sh")); err == nil && !st.IsDir() {
+				_, _ = runBin(dir, "hnc_offload_guard.sh", "apply")
+			}
+			sl.mu.Lock()
+			if sl.pending {
+				sl.pending = false
+				sl.mu.Unlock()
+				continue
+			}
+			sl.running = false
+			sl.mu.Unlock()
+			return
+		}
+	}(hncDir, slot)
+}
+
+func waitOffloadGuardAsyncIdle() {
+	offloadGuardAsyncWG.Wait()
+}
+
 // connBlockSyncLocked 重新展开; 与现有 flat 不同(或 force)才写文件并跑脚本
 func (s *server) connBlockSyncLocked(force bool) (string, error) {
 	f := s.connBlocksEffective(time.Now())
@@ -257,6 +313,7 @@ func (s *server) connBlockSyncLocked(force bool) (string, error) {
 	if rc != 0 {
 		return out, os.ErrInvalid
 	}
+	triggerOffloadGuardApplyAsync(s.hncDir)
 	return out, nil
 }
 

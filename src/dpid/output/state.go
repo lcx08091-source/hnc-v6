@@ -675,16 +675,28 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 	}
 }
 
-// RecordTLS attributes a TLS ClientHello / QUIC Initial SNI (and optional JA4 / QTP) to a client.
-// Optional qtpOpt[0] carries the QUIC transport-parameter fingerprint (qtp1_...).
+// RecordTLS attributes a TLS ClientHello / QUIC Initial SNI (and optional JA4 / QTP / ALPN) to a client.
+// Optional qtpOpt[0] carries the QUIC transport-parameter fingerprint (qtp1_...);
+// optional qtpOpt[1] carries the primary ALPN protocol (e.g. "h2", "h3").
 func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts time.Time, qtpOpt ...string) {
 	host := normalizeName(sni)
 	if clientIP == "" && clientMAC == "" {
 		return
 	}
-	var qtp string
+	var qtp, alpn string
 	if len(qtpOpt) > 0 {
 		qtp = strings.TrimSpace(qtpOpt[0])
+	}
+	if len(qtpOpt) > 1 {
+		alpn = strings.TrimSpace(qtpOpt[1])
+	}
+	var alpns []string
+	if alpn != "" {
+		alpns = []string{alpn}
+	}
+	// Pre-warm compiled FP bundle outside w.mu so any 2s Stat/ReadFile never stalls capture lock.
+	if ja4 != "" || qtp != "" {
+		defaultCompiledFP.ensureLoaded()
 	}
 	isQUIC := strings.HasPrefix(ja4, "q") || qtp != ""
 	now := ts.Unix()
@@ -717,6 +729,7 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 	if host != "" || ja4 != "" || qtp != "" {
 		var r l3Rule
 		var ok bool
+		var echBlindHit bool
 		isBlindOrECH := IsECHBlindOrOuterSNI(host, IsECHOuterHost(host))
 		if host != "" {
 			c.LastSNI = host
@@ -727,7 +740,7 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 			}
 		}
 		if (!ok || strings.HasPrefix(r.ID, "_")) && (ja4 != "" || qtp != "") {
-			if cr, cok := MatchCompiledEncrypted(ja4, "", qtp, "", net.ParseIP(remoteIP), "", 0); cok {
+			if cr, cok := MatchCompiledEncrypted(ja4, alpn, qtp, "", net.ParseIP(remoteIP), "", 0); cok {
 				r = l3Rule{ID: cr.AppID, Name: cr.AppName, Category: cr.Category, Priority: PrioritySpecific, Verified: true}
 				ok = true
 				evid := "fp:" + ja4
@@ -751,12 +764,14 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 				IsUDP:     isQUIC,
 				OuterSNI:  host,
 				HasECHExt: IsECHOuterHost(host),
+				ALPNs:     alpns,
 				JA4:       ja4,
 				IPNames:   w.ipNames.Load(),
 				Now:       ts,
 			}); vok && verd.AppID != "" {
 				r = l3Rule{ID: verd.AppID, Name: verd.AppName, Category: verd.Category, Priority: PrioritySpecific, Verified: verd.Confidence >= 0.75}
 				ok = true
+				echBlindHit = true
 				evid := "ech:" + verd.AppID
 				if verd.RealHost != "" {
 					evid = verd.RealHost
@@ -770,7 +785,7 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 				}
 			}
 		}
-		if ok && r.ID != "" && !IsECHOuterHost(host) && ja4 != "" {
+		if ok && r.ID != "" && r.Verified && !isBlindOrECH && ja4 != "" {
 			DefaultECHBlindEngine.ObserveVerifiedFlow(r.ID, r.Name, r.Category, ja4, isQUIC, 443, nil, ts)
 		}
 		if !ok && host != "" && !isBlindOrECH {
@@ -781,17 +796,18 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		if ck == "" {
 			ck = clientIP
 		}
-		deterministicHit := ok && r.ID != "" && !strings.HasPrefix(r.ID, "_")
-		// BUG-011 (回移自 5.9.91 分叉): TLS 路径也写 IP→app 反查表 ——
-		// SNI 命中的远端 IP 不必等下一次 flow 命中才进表, 应用级限速
-		// (apply_app_limits.sh 读 ip_app_map) 不再因只靠 flow 路径而漏配。
+		deterministicHit := ok && r.ID != "" && !strings.HasPrefix(r.ID, "_") && (!isBlindOrECH || (r.Verified && !echBlindHit))
+		// BUG-011 + P1-19: 仅当 r.Verified && !isBlindOrECH 时写入全局 IPAppMap,
+		// 严禁将 >=0.30 未验证 ECH 盲猜或公共 ECH Anycast 外层 IP 写入 IPAppMap 误限速共享 CDN。
 		if deterministicHit && w.causal != nil {
 			w.causal.RecordAnchor(ck, ts.UnixMilli(), r, remoteIP, ja4, qtp)
 		}
-		if remoteIP != "" && w.IPAppMap != nil && ok && r.ID != "" {
-			w.IPAppMap.Record(remoteIP, r.ID, r.Name, r.Category, now, "tls")
-			// v5.9.7: 证据账本(TLS 源, log-odds=2.0)
-			if w.evidence != nil && c.ClientMAC != "" {
+		if ok && r.ID != "" && remoteIP != "" {
+			if r.Verified && !isBlindOrECH && w.IPAppMap != nil {
+				w.IPAppMap.Record(remoteIP, r.ID, r.Name, r.Category, now, "tls")
+			}
+			// v5.9.7: 证据账本(TLS 源, log-odds=2.0; 排除未验证 ECH 盲猜)
+			if (r.Verified || !isBlindOrECH) && w.evidence != nil && c.ClientMAC != "" {
 				evDetail := host
 				if evDetail == "" {
 					if ja4 != "" {

@@ -477,6 +477,10 @@ EOF
         [ "$HI_IFACE" != wlan0 ] && echo "$HI_IFACE" > "$_HI_RUN/iface.cache" 2>/dev/null
         return 0
     fi
+    if [ -f "$_HI_RUN/hotspot_iface" ]; then
+        rm -f "$_HI_RUN/hotspot_iface" 2>/dev/null || true
+        _hi_log "hotspot off -> removed stale hotspot_iface"
+    fi
     return 1
 }
 

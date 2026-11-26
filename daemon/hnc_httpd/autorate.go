@@ -25,12 +25,15 @@ const (
 	autorateDefaultUpMaxMbps   = 80.0
 	autorateDefaultDeltaMS     = 25.0
 
-	autorateActiveTick   = 2 * time.Second
-	autorateIdleTraffic  = 0.15
-	autorateHighLoad     = 0.75
-	autorateActiveBloat  = 0.25
-	autorateRefractory   = 1500 * time.Millisecond
-	autorateTuneDeadband = 0.03
+	autorateActiveTick        = 2 * time.Second
+	autorateIdleTraffic       = 0.15
+	autorateHighLoad          = 0.75
+	autorateActiveBloat       = 0.25
+	autorateRefractory        = 1500 * time.Millisecond
+	autorateTuneDeadband      = 0.03
+	autorateCalmMidMinTicks   = 4
+	autorateCalmMidDeltaRatio = 0.50
+	autorateCalmMidStepFactor = 1.04
 )
 
 var defaultAutorateReflectors = []string{
@@ -96,6 +99,7 @@ type autorateCtl struct {
 	appliedDown       float64
 	appliedUp         float64
 	refCursor         int
+	calmMidTicks      int
 	lastSignalRAT     string
 	lastUpstreamIface string
 }
@@ -234,6 +238,7 @@ func (c *autorateCtl) resetDisabledStateLocked(sleepReason string) {
 	c.appliedIface = ""
 	c.appliedDown = 0
 	c.appliedUp = 0
+	c.calmMidTicks = 0
 	c.st.State = "disabled"
 	c.st.SleepReason = sleepReason
 	c.st.ActualDownMbps = 0
@@ -315,6 +320,7 @@ func (c *autorateCtl) ApplyConfig(next autorateConfig, hotspotIface string) acti
 	srv := c.srv
 	c.cfg = next
 	c.syncStatusConfigLocked(next)
+	c.calmMidTicks = 0
 	c.st.CurDownMbps = initDown
 	c.st.CurUpMbps = initUp
 	if next.Enabled {
@@ -691,12 +697,33 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 				reason = "hotspot_off"
 			}
 			invalidateDP := false
+			idleMidDown := round2((cfg.DownMinMbps + cfg.DownMaxMbps) * 0.5)
+			idleMidUp := round2((cfg.UpMinMbps + cfg.UpMaxMbps) * 0.5)
+			var resetIface string
+			var resetDown, resetUp float64
+			needIdleResetTune := false
 			ctl.mu.Lock()
+			ctl.calmMidTicks = 0
+			if ctl.st.CurDownMbps > 0 && ctl.st.CurDownMbps < idleMidDown {
+				ctl.st.CurDownMbps = idleMidDown
+				needIdleResetTune = true
+			}
+			if ctl.st.CurUpMbps > 0 && ctl.st.CurUpMbps < idleMidUp {
+				ctl.st.CurUpMbps = idleMidUp
+				needIdleResetTune = true
+			}
 			if reason == "hotspot_off" && (ctl.st.SleepReason != "hotspot_off" || ctl.appliedIface != "") {
 				ctl.appliedIface = ""
 				ctl.appliedDown = 0
 				ctl.appliedUp = 0
 				invalidateDP = true
+				needIdleResetTune = false
+			} else if reason == "no_active_clients" && needIdleResetTune && ctl.appliedIface != "" {
+				resetIface = ctl.appliedIface
+				resetDown = ctl.st.CurDownMbps
+				resetUp = ctl.st.CurUpMbps
+			} else {
+				needIdleResetTune = false
 			}
 			ctl.st.State = "sleeping"
 			ctl.st.SleepReason = reason
@@ -710,6 +737,17 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 			ctl.mu.Unlock()
 			if reason == "hotspot_off" {
 				_, _ = s.shaperArbiter().UpdateAutorate(time.Now(), "", false, 0, 0, false)
+			} else if needIdleResetTune && resetIface != "" {
+				s.actionMu.Lock()
+				if _, aErr := s.shaperArbiter().UpdateAutorate(time.Now(), resetIface, true, resetDown, resetUp, false); aErr == nil {
+					ctl.mu.Lock()
+					if ctl.cfg.Enabled && ctl.appliedIface == resetIface {
+						ctl.appliedDown = resetDown
+						ctl.appliedUp = resetUp
+					}
+					ctl.mu.Unlock()
+				}
+				s.actionMu.Unlock()
 			}
 			if invalidateDP {
 				hncDir := ctl.hncDir
@@ -795,6 +833,7 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	curDown := ctl.st.CurDownMbps
 	curUp := ctl.st.CurUpMbps
 	baseRTT := ctl.st.BaseRTTMs
+	calmTicks := ctl.calmMidTicks
 	prevRAT := ctl.lastSignalRAT
 	prevUpstream := ctl.lastUpstreamIface
 	ctl.mu.RUnlock()
@@ -833,6 +872,7 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	var scaleUpInc, scaleDnInc uint64
 
 	if maxLoad < autorateIdleTraffic {
+		calmTicks = 0
 		newState = "idle_traffic"
 		nextDown = curDown + (midDown-curDown)*0.05
 		nextUp = curUp + (midUp-curUp)*0.05
@@ -858,6 +898,7 @@ func (s *server) autorateStep(cfg autorateConfig) {
 		deltaRTT = math.Max(0, ctl.fastRTT-baseRTT)
 
 		if deltaRTT > cfg.RTTDeltaMs {
+			calmTicks = 0
 			newState = "backoff"
 			if now.Sub(ctl.lastBackoffAt) >= autorateRefractory {
 				excess := math.Min(1.0, (deltaRTT-cfg.RTTDeltaMs)/cfg.RTTDeltaMs)
@@ -873,16 +914,42 @@ func (s *server) autorateStep(cfg autorateConfig) {
 				ctl.lastBackoffAt = now
 				scaleDnInc = 1
 			}
-		} else if deltaRTT <= 0.60*cfg.RTTDeltaMs {
-			if loadDown >= autorateHighLoad {
-				nextDown = math.Min(effDownMax, curDown*1.08+1.0)
-				scaleUpInc = 1
+		} else {
+			if deltaRTT <= 0.60*cfg.RTTDeltaMs {
+				if loadDown >= autorateHighLoad {
+					nextDown = math.Min(effDownMax, curDown*1.08+1.0)
+					scaleUpInc = 1
+				}
+				if loadUp >= autorateHighLoad {
+					nextUp = math.Min(effUpMax, curUp*1.08+0.5)
+					scaleUpInc = 1
+				}
 			}
-			if loadUp >= autorateHighLoad {
-				nextUp = math.Min(effUpMax, curUp*1.08+0.5)
-				scaleUpInc = 1
+			// 轻载死区慢回弹: maxLoad 处于 [0.15, 0.75) 且连续 >=4 轮无拥塞时向中位基线每轮温和回升 +4%
+			if maxLoad < autorateHighLoad && deltaRTT <= autorateCalmMidDeltaRatio*cfg.RTTDeltaMs {
+				calmTicks++
+				if calmTicks >= autorateCalmMidMinTicks {
+					if curDown < midDown {
+						candDown := math.Min(midDown, curDown*autorateCalmMidStepFactor)
+						if candDown > curDown {
+							nextDown = candDown
+							scaleUpInc = 1
+						}
+					}
+					if curUp < midUp {
+						candUp := math.Min(midUp, curUp*autorateCalmMidStepFactor)
+						if candUp > curUp {
+							nextUp = candUp
+							scaleUpInc = 1
+						}
+					}
+				}
+			} else {
+				calmTicks = 0
 			}
 		}
+	} else {
+		calmTicks = 0
 	}
 
 	nextDown = math.Max(ArbiterAutoFloorDownMbps, math.Max(cfg.DownMinMbps, math.Min(effDownMax, nextDown)))
@@ -948,6 +1015,7 @@ func (s *server) autorateStep(cfg autorateConfig) {
 		ctl.mu.Unlock()
 		return
 	}
+	ctl.calmMidTicks = calmTicks
 	ctl.st.State = newState
 	ctl.st.SleepReason = ""
 	ctl.st.HotspotIface = hotspotIface

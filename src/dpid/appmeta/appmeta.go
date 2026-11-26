@@ -70,6 +70,24 @@ func NewResolver(overrideFile string) *Resolver {
 //   - curated map (e.g. "com.tencent.mm" -> "微信")
 //   - cleaned-up package name (e.g. "com.example.foo" -> "Foo")
 //   - Empty pkg -> empty string (caller decides display, usually "uid=N")
+func isASCIIOnlyLabel(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func hasChineseLabel(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Resolver) Display(pkg string) string {
 	if pkg == "" {
 		return ""
@@ -84,14 +102,20 @@ func (r *Resolver) Display(pkg string) string {
 	live := r.live
 	r.mu.RUnlock()
 
+	curated, hasCurated := curatedLabels[pkg]
 	if live != nil {
 		if v, ok := live.get(pkg); ok {
-			return v
+			vt := strings.TrimSpace(v)
+			if vt != "" && !strings.EqualFold(vt, pkg) {
+				if !(isASCIIOnlyLabel(vt) && hasCurated && hasChineseLabel(curated)) {
+					return vt
+				}
+			}
 		}
 	}
 
-	if v, ok := curatedLabels[pkg]; ok {
-		return v
+	if hasCurated {
+		return curated
 	}
 	return prettyFallback(pkg)
 }

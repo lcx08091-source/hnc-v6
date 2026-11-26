@@ -270,6 +270,12 @@ func (e *thermoCruiseEngine) loadConfigLocked() {
 	if json.Unmarshal(b, &c) != nil {
 		return
 	}
+	if !math.IsNaN(c.Stage1TempC) && !math.IsInf(c.Stage1TempC, 0) &&
+		!math.IsNaN(c.Stage2TempC) && !math.IsInf(c.Stage2TempC, 0) &&
+		c.Stage1TempC >= 30.0 && c.Stage1TempC <= 70.0 &&
+		c.Stage2TempC >= c.Stage1TempC && c.Stage2TempC-c.Stage1TempC < 1.0-1e-6 {
+		c.Stage2TempC = math.Max(32.0, math.Min(75.0, math.Round((c.Stage1TempC+1.0)*10)/10))
+	}
 	if validThermoConfig(c) == "" {
 		e.cfg = c
 	}
@@ -296,8 +302,8 @@ func validThermoConfig(c ThermoCruiseConfig) string {
 	if math.IsNaN(c.Stage2TempC) || math.IsInf(c.Stage2TempC, 0) || c.Stage2TempC < 32.0 || c.Stage2TempC > 75.0 {
 		return "stage2_temp_c must be 32.0..75.0"
 	}
-	if c.Stage2TempC < c.Stage1TempC {
-		return "stage2_temp_c must be >= stage1_temp_c"
+	if c.Stage2TempC-c.Stage1TempC < 1.0-1e-6 {
+		return "stage2_temp_c must be >= stage1_temp_c + 1"
 	}
 	if c.LowBatPct < 1 || c.LowBatPct > 80 {
 		return "low_bat_pct must be 1..80"
@@ -568,8 +574,6 @@ func matchShellThermalZoneTier(rawType string) (tier int, normType string, ok bo
 		return 3, t, true
 	case strings.HasPrefix(t, "quiet_therm"):
 		return 4, t, true
-	case strings.HasPrefix(t, "xo_therm") || strings.HasPrefix(t, "xo-therm"):
-		return 5, t, true
 	default:
 		return 0, "", false
 	}

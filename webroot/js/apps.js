@@ -61,7 +61,9 @@ function selfStudioCardHtml() {
   var smp = num(cnt.samples_written, st.samples_today);
   var appCnt = num(cnt.user_apps, st.samples_apps);
   var fpUse = num(cnt.usable_fps, st.usable_fp);
-  var protoApps = num(st.prototype_apps, (st.last_distill && st.last_distill.prototype_apps) || appCnt);
+  var distObj = st.distill || st.last_distill || null;
+  var rawProtoApps = st.prototype_apps != null ? st.prototype_apps : (distObj && distObj.prototype_apps != null ? distObj.prototype_apps : appCnt);
+  var protoApps = num(rawProtoApps, appCnt);
   var domCnt = num(cnt.expanded_rules, st.auto_expanded_rules) + num(cnt.promoted_rules, st.auto_promoted_rules) + num(cnt.candidate_high, self.candidate_high);
   var suCnt = num(cnt.usable_startups, st.usable_startup);
   var ifList = [];
@@ -107,7 +109,7 @@ function selfStudioCardHtml() {
       '<div class="studio-m"><span class="l">冷启动与扩展规则</span><b class="num">' + (suCnt + domCnt) + '</b><small>启动 ' + suCnt + ' · 域名 ' + domCnt + '</small></div>' +
       '<div class="studio-m"><span class="l">双路真值网卡</span><b class="mono" style="font-size:12.5px">' + esc(ifTxt) + '</b><small>inotify 零轮询唤醒</small></div>' +
     '</div>' +
-    (st.last_distill && st.last_distill.ts ? '<div class="note" style="margin-top:4px">最近蒸馏：' + esc(ago(st.last_distill.ts)) + ' · 扫描 ' + num(st.last_distill.samples_read) + ' 条样本 · 专属指纹 ' + num(st.last_distill.exclusive_fps) + ' 个 · 少样本原型 ' + num(st.last_distill.prototype_apps, protoApps) + ' 个</div>' : '') +
+    (distObj && distObj.ts ? '<div class="note" style="margin-top:4px">最近蒸馏：' + esc(ago(distObj.ts)) + ' · 扫描 ' + num(distObj.samples_read) + ' 条样本 · 专属指纹 ' + num(distObj.exclusive_fps) + ' 个 · 少样本原型 ' + num(distObj.prototype_apps, protoApps) + ' 个</div>' : '') +
     '<div class="studio-actions studio-actions-2col">' +
       '<button type="button" class="btn pri press" data-act="studio-distill">立即蒸馏并同步热点</button>' +
       '<button type="button" class="btn sec press" data-act="studio-export">导出规则包</button>' +
@@ -137,7 +139,8 @@ function rulesPendingCount() {
 function appsPendingSig() {
   var cnt = rulesPendingCount();
   if (cnt <= 0) return '';
-  var g0 = S.disc && Array.isArray(S.disc.groups) && S.disc.groups[0] ? (S.disc.groups[0].key || S.disc.groups[0].suffix || '') : '';
+  var g = S.disc && Array.isArray(S.disc.groups) ? S.disc.groups[0] : null;
+  var g0 = g ? ((g.id || g.key || '') + '|' + (Array.isArray(g.suffixes) ? g.suffixes.join(',') : (g.suffix || ''))) : '';
   var c0 = '';
   if (S.self && Array.isArray(S.self.candidate_samples)) {
     var firstUnp = S.self.candidate_samples.filter(function (c) { return c && !c.promoted && c.tier !== 'shared'; })[0];
@@ -248,8 +251,8 @@ function appsSub() {
   if (S.appsSub !== 'rules') {
     var au = S.appUsage && S.appUsage[1] && S.appUsage[1].d;
     var hsHtml = (au && typeof appUsageBars === 'function' && (num(au.total_up) + num(au.total_down) > 0))
-      ? '<div class="sec"><span>热点客户端活跃应用 <small>今日全设备连接表真实字节</small></span><button class="linkish" data-act="go-dpi-studio">自训与覆盖率 ›</button></div>' +
-        '<div class="glass" style="padding:12px 14px">' + appUsageBars(au, 6) + '</div>'
+      ? '<div class="sec" data-mkey="apps-hs-sec"><span>热点客户端活跃应用 <small>今日全设备连接表真实字节</small></span><button class="linkish" data-act="go-dpi-studio">自训与覆盖率 ›</button></div>' +
+        '<div class="glass" data-mkey="apps-hs-bars" style="padding:12px 14px">' + appUsageBars(au, 6) + '</div>'
       : '';
 
     var allRows = appRows();

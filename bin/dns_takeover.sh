@@ -43,18 +43,31 @@ C_IN=HNC_DNSTK_IN
 log() { { echo "$(date '+%Y-%m-%d %H:%M:%S') [dns_takeover] $*" >> "$LOG"; } 2>/dev/null; }
 
 _IPT_RESOLVED=0
+_ipt_probe_wait_bin() {
+    local _b="$1" _rc
+    "$_b" -w 2 -t filter -L -n >/dev/null 2>&1
+    _rc=$?
+    if [ "$_rc" -eq 2 ]; then
+        "$_b" -w -t filter -L -n >/dev/null 2>&1
+        _rc=$?
+        if [ "$_rc" -eq 2 ]; then
+            printf '%s\n' "$_b"
+        else
+            printf '%s -w\n' "$_b"
+        fi
+    else
+        # rc=0 或 rc=4(短暂 xtables 锁竞争超时)等非语法错误: 保持 -w 2 绝不误剥!
+        printf '%s -w 2\n' "$_b"
+    fi
+}
 _ipt_resolve() {
     [ "$_IPT_RESOLVED" = "1" ] && return 0
     _IPT_RESOLVED=1
-    if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
-        iptables -w 2 -t filter -L -n >/dev/null 2>&1 || {
-            iptables -t filter -L -n >/dev/null 2>&1 && IPT="iptables"
-        }
+    if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v iptables >/dev/null 2>&1; then
+        IPT=$(_ipt_probe_wait_bin iptables)
     fi
     if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || {
-            ip6tables -t filter -L -n >/dev/null 2>&1 && IP6T="ip6tables"
-        }
+        IP6T=$(_ipt_probe_wait_bin ip6tables)
     fi
 }
 

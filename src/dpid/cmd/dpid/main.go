@@ -353,6 +353,57 @@ func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isU
 	}
 }
 
+func (t *shmRuntimeTracker) seedARPClient(macRaw, clientIP string, nowUnix int64) {
+	if t == nil {
+		return
+	}
+	macBytes, ok := shm.ParseMAC(macRaw)
+	if !ok || macBytes == ([6]byte{}) || macBytes[0]&0x01 != 0 || macBytes == ([6]byte{0x02, 0, 0, 0, 0, 0}) {
+		return
+	}
+	v4, _, isV4, _ := shm.ParseIPAddr(clientIP)
+	if !isV4 || v4 == ([4]byte{}) {
+		return
+	}
+	t.mu.Lock()
+	d := t.devs[macBytes]
+	if d == nil {
+		if len(t.devs) >= shm.MaxDevices {
+			t.mu.Unlock()
+			return
+		}
+		d = &shmDevEntry{
+			mac:   macBytes,
+			flows: make(map[uint64]int64, 16),
+			ipv6s: make(map[[16]byte]int64, 4),
+		}
+		t.devs[macBytes] = d
+	}
+	if nowUnix > d.lastSeen {
+		d.lastSeen = nowUnix
+	}
+	d.ipv4 = v4
+	t.mu.Unlock()
+}
+
+func seedSHMTrackerFromARP(t *shmRuntimeTracker, iface string, nowUnix int64) {
+	if t == nil || iface == "" {
+		return
+	}
+	b, err := os.ReadFile("/proc/net/arp")
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(b), "\n")
+	for i := 1; i < len(lines); i++ {
+		fields := strings.Fields(lines[i])
+		if len(fields) < 6 || fields[5] != iface || fields[2] == "0x0" || fields[3] == "00:00:00:00:00:00" {
+			continue
+		}
+		t.seedARPClient(fields[3], fields[0], nowUnix)
+	}
+}
+
 func (t *shmRuntimeTracker) markLeak(macRaw string) {
 	macBytes, ok := shm.ParseMAC(macRaw)
 	if ok {
@@ -614,10 +665,15 @@ func main() {
 		return
 	}
 
+	actReader = activity.NewReader(cfg.RunDir)
+
 	pr := probe.Run(probe.Options{IfaceOverride: cfg.Iface})
 	if fresh := resolveCurrentIface(cfg); fresh != "" && fresh != pr.APIface {
 		pr.APIface = fresh
 		pr.APIfaceSource = "ifacehint"
+	} else if pr.APIface == "wlan0" && !isWlan0AllowedAsAP(cfg.RunDir) {
+		pr.APIface = ""
+		pr.APIfaceSource = ""
 	}
 	if err := probe.WriteJSON(filepath.Join(cfg.RunDir, probeFileName), pr); err != nil {
 		log.Printf("WARN: write probe: %v", err)
@@ -653,7 +709,6 @@ func main() {
 	defer cancel()
 
 	output.SetCompiledFPPath(cfg.RunDir)
-	actReader = activity.NewReader(cfg.RunDir)
 
 	shmTracker := newSHMRuntimeTracker()
 
@@ -709,6 +764,9 @@ func main() {
 	// v6.0.0 Vector: LeakGuard 明文隐私嗅探引擎 + 16KB 双槽 seqcount_latch 共享内存快照。
 	leakEngine := leakguard.NewEngine(cfg.RunDir)
 	seedKnownARPClients(leakEngine)
+	if initAP := resolveCurrentIface(cfg); initAP != "" && isHotspotActiveOrUnknown(cfg.RunDir) {
+		seedSHMTrackerFromARP(shmTracker, initAP, time.Now().Unix())
+	}
 	leakEngine.SetIdleCheck(func() bool {
 		s := actReader.Get()
 		return s.OK && (!s.Hotspot || (s.Clients <= 0 && !s.WebUI))
@@ -1010,6 +1068,9 @@ func main() {
 		if cur := resolveCurrentIface(cfg); cur != "" {
 			return cur
 		}
+		if pr.APIface == "wlan0" && !isWlan0AllowedAsAP(cfg.RunDir) {
+			return ""
+		}
 		return pr.APIface
 	})
 
@@ -1267,6 +1328,7 @@ var (
 	ifaceNetsFn          = capture.InterfaceNets
 	ifaceByNameFn        = net.InterfaceByName
 	discoverAPFn         = capture.DiscoverAPCandidates
+	hasDefaultRouteFn    = capture.HasDefaultRoute
 	rebindHandleFn       = func(h captureRunner, newIface string) error { return h.Rebind(newIface) }
 	rebindCheckTickEvery = 15 * time.Second
 )
@@ -1342,6 +1404,12 @@ func runCapture(
 	wakeStandbyLoops func(),
 ) error {
 	iface := pr.APIface
+	if iface == "wlan0" && !isWlan0AllowedAsAP(cfg.RunDir) {
+		iface = ""
+	}
+	// main() already armed crashflag once when pr.APIface != ""; skip duplicate
+	// immediate arm on first open and on normal ErrRebound hot-swaps.
+	skipNextArmCrash := iface != ""
 	attempt := 0
 	var rebindCount atomic.Int64
 	// v5.22 + RC2: 接口暂时不在(开机热点未开/热点关了)时重试间隔 2s 起翻倍,
@@ -1353,10 +1421,13 @@ func runCapture(
 		}
 		if cur := resolveCurrentIface(cfg); cur != "" {
 			iface = cur
-		} else if iface != "" && !isIfaceAliveUp(iface) {
+		} else if iface != "" && (!isIfaceAliveUp(iface) || (iface == "wlan0" && !isWlan0AllowedAsAP(cfg.RunDir))) {
 			iface = ""
 		}
-		if iface != "" && !isHotspotActiveOrUnknown(cfg.RunDir) && !isIfaceAliveUp(iface) {
+		if iface != "" && !isHotspotActiveOrUnknown(cfg.RunDir) && (!isIfaceAliveUp(iface) || iface == "wlan0") {
+			iface = ""
+		}
+		if iface == "wlan0" && !isWlan0AllowedAsAP(cfg.RunDir) {
 			iface = ""
 		}
 
@@ -1365,6 +1436,7 @@ func runCapture(
 			sw.SetMode(string(ModeBlind), "no hotspot iface detected", "", pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 			_ = sw.Flush()
 			clearCrashFlag(cfg.RunDir)
+			skipNextArmCrash = false
 			retry = activity.CaptureRetryBackoff(retry, actReader.Get())
 			cont, woken := sleepOrWake(ctx, retry, wakeCaptureCh)
 			if !cont {
@@ -1388,6 +1460,7 @@ func runCapture(
 				sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 				_ = sw.Flush()
 				clearCrashFlag(cfg.RunDir)
+				skipNextArmCrash = false
 				retry = activity.CaptureRetryBackoff(retry, actReader.Get())
 				cont, woken := sleepOrWake(ctx, retry, wakeCaptureCh)
 				if !cont {
@@ -1403,21 +1476,27 @@ func runCapture(
 			return fmt.Errorf("open capture: %w", err)
 		}
 		retry = 0
-		armCrashFlag(cfg.RunDir)
+		if !skipNextArmCrash {
+			armCrashFlag(cfg.RunDir)
+		}
+		skipNextArmCrash = false
 		refreshHotspotContext(iface)
+		seedSHMTrackerFromARP(shmTracker, iface, time.Now().Unix())
+
+		attemptCtx, attemptCancel := context.WithCancel(ctx)
+		var attemptWG sync.WaitGroup
 
 		// Launch rebind-check goroutine for this capture attempt.
-		// It monitors iface/ifindex/subnet changes and zero-packet conditions.
+		// It monitors iface/ifindex/subnet changes, zero-packet conditions,
+		// and single-chip wlan0 STA eviction when hotspot turns off.
 		rebindCtx, rebindCancel := context.WithCancel(ctx)
 		var rebindWG sync.WaitGroup
 		rebindWG.Add(1)
 		go func() {
 			defer rebindWG.Done()
-			rebindCheckLoop(rebindCtx, h, cfg, pr, sw, &rebindCount)
+			rebindCheckLoop(rebindCtx, h, cfg, pr, sw, &rebindCount, attemptCancel)
 		}()
 
-		attemptCtx, attemptCancel := context.WithCancel(ctx)
-		var attemptWG sync.WaitGroup
 		log.Printf("capture started on %s (snaplen=%d, rcvbuf=%d, attempt=%d)", iface, cfg.Snaplen, cfg.RcvBufBytes, attempt)
 		sw.SetMode(string(ModeOK), "", iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 		_ = sw.Flush()
@@ -1590,10 +1669,14 @@ func runCapture(
 				if recQName := sw.ObserveHandshakeSideChannel(clientMAC, clientIP, remoteIP, ev.TLS.SNI, ev.TLS.IsQUIC, ev.DSCP, ev.DstPort, ev.Time); recQName != "" {
 					effSNI = recQName
 				}
-				sw.RecordTLS(clientMAC, clientIP, remoteIP, effSNI, ev.TLS.JA4, ev.Time, ev.TLS.QTP)
+				var firstALPN string
+				if len(ev.TLS.ALPN) > 0 && len(ev.TLS.ALPN[0]) <= 32 {
+					firstALPN = ev.TLS.ALPN[0]
+				}
+				sw.RecordTLS(clientMAC, clientIP, remoteIP, effSNI, ev.TLS.JA4, ev.Time, ev.TLS.QTP, firstALPN)
 				shmTracker.observePacket(clientMAC, clientIP, remoteIP, ev.IsUDP, ev.DstPort, ev.Bytes, true, nowUnix)
 				recordFlowFP(ev, clientMAC, clientIP, remoteIP) // v6.x DPI v2
-				if effSNI != "" {
+				if effSNI != "" && !output.IsECHOuterHost(effSNI) {
 					ipNames.RecordConnName(remoteIP, effSNI, output.IPNameSrcSNI, ev.Time)
 				}
 			case capture.EventHTTP:
@@ -1678,9 +1761,15 @@ func runCapture(
 		attemptWG.Wait()
 		h.Close()
 		if err == nil {
-			return nil
+			if ctx.Err() != nil {
+				return nil
+			}
+			iface = ""
+			skipNextArmCrash = true
+			continue
 		}
 		if errors.Is(err, capture.ErrRebound) {
+			skipNextArmCrash = true
 			iface = h.Iface()
 			refreshHotspotContext(iface)
 			log.Printf("capture rebound to %s, retrying (attempt=%d)", iface, attempt+1)
@@ -1695,6 +1784,7 @@ func runCapture(
 			sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 			_ = sw.Flush()
 			clearCrashFlag(cfg.RunDir)
+			skipNextArmCrash = false
 			retry = activity.CaptureRetryBackoff(retry, actReader.Get())
 			cont, woken := sleepOrWake(ctx, retry, wakeCaptureCh)
 			if !cont {
@@ -2442,32 +2532,100 @@ func isIfaceAliveUp(name string) bool {
 	return err == nil && ifc != nil && ifc.Flags&net.FlagUp != 0
 }
 
+func isFreshEmptyIfaceDetect(runDir string, now time.Time) bool {
+	if runDir == "" {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(runDir, "iface_detect.json"))
+	if err != nil {
+		return false
+	}
+	var d struct {
+		Ts    int64  `json:"ts"`
+		Iface string `json:"iface"`
+	}
+	if json.Unmarshal(b, &d) != nil || d.Ts <= 0 {
+		return false
+	}
+	if strings.TrimSpace(d.Iface) != "" {
+		return false
+	}
+	ts := time.Unix(d.Ts, 0)
+	return !now.Add(-ifacehint.FreshWindow).After(ts) && !ts.After(now.Add(ifacehint.FreshWindow))
+}
+
+// isWlan0AllowedAsAP protects single-chip devices from capturing STA wlan0:
+//   - Rejects wlan0 whenever it holds a default route (Wi-Fi STA upstream).
+//   - Rejects wlan0 when activity.json explicitly reports hotspot OFF.
+//   - Rejects wlan0 when iface_detect.json is fresh with an empty iface.
+func isWlan0AllowedAsAP(runDir string) bool {
+	if hasDefaultRouteFn("wlan0") {
+		return false
+	}
+	now := time.Now()
+	if actReader != nil {
+		if !isHotspotActiveOrUnknown(runDir) {
+			return false
+		}
+	} else if runDir != "" {
+		if b, err := os.ReadFile(filepath.Join(runDir, activity.FileName)); err == nil {
+			if fresh := activity.Parse(b, now); fresh.OK && !fresh.Hotspot {
+				return false
+			}
+		}
+	}
+	if isFreshEmptyIfaceDetect(runDir, now) {
+		return false
+	}
+	return true
+}
+
+func sanitizeResolvedIface(runDir, iface string) string {
+	if iface == "wlan0" && !isWlan0AllowedAsAP(runDir) {
+		return ""
+	}
+	return iface
+}
+
 func resolveCurrentIface(cfg Config) string {
+	now := time.Now()
 	// 1. Fresh iface_detect.json (within 10m) takes top priority so band-switching
 	// (e.g. wlan2 -> ap0) never gets stuck on a stale cfg.Iface from dpi_config.json.
-	if s, ok := ifacehint.ReadDetect(cfg.RunDir, time.Now(), ifacehint.FreshWindow); ok {
-		return s
+	if s, ok := ifacehint.ReadDetect(cfg.RunDir, now, ifacehint.FreshWindow); ok {
+		if s = sanitizeResolvedIface(cfg.RunDir, s); s != "" {
+			return s
+		}
 	}
 	// 2. Fallback hotspot_iface via ifacehint.Read unless cfg.Iface explicitly
 	// names a live UP interface while the fallback hint does not.
-	if s, ok := ifacehint.Read(cfg.RunDir, time.Now()); ok {
-		if cfg.Iface == "" || isIfaceAliveUp(s) || !isIfaceAliveUp(cfg.Iface) {
+	cfgIface := sanitizeResolvedIface(cfg.RunDir, cfg.Iface)
+	if s, ok := ifacehint.Read(cfg.RunDir, now); ok {
+		s = sanitizeResolvedIface(cfg.RunDir, s)
+		if s != "" && (cfgIface == "" || isIfaceAliveUp(s) || !isIfaceAliveUp(cfgIface)) {
 			return s
 		}
 	}
 	// 3. Explicit cfg.Iface if alive, otherwise self-heal via live AP discovery.
-	if cfg.Iface != "" {
-		if isIfaceAliveUp(cfg.Iface) {
-			return cfg.Iface
+	if cfgIface != "" {
+		if isIfaceAliveUp(cfgIface) {
+			return cfgIface
 		}
 		if cands, _ := discoverAPFn(); len(cands) > 0 {
-			return cands[0].Name
+			for _, c := range cands {
+				if s := sanitizeResolvedIface(cfg.RunDir, c.Name); s != "" {
+					return s
+				}
+			}
 		}
-		return cfg.Iface
+		return cfgIface
 	}
 	// 4. Auto-discovery fallback.
 	if cands, _ := discoverAPFn(); len(cands) > 0 {
-		return cands[0].Name
+		for _, c := range cands {
+			if s := sanitizeResolvedIface(cfg.RunDir, c.Name); s != "" {
+				return s
+			}
+		}
 	}
 	return ""
 }
@@ -2481,7 +2639,7 @@ func readIfaceRxBytes(iface string) uint64 {
 	return n
 }
 
-func rebindCheckLoop(ctx context.Context, h captureRunner, cfg Config, pr probe.Result, sw *output.Writer, rebindCount *atomic.Int64) {
+func rebindCheckLoop(ctx context.Context, h captureRunner, cfg Config, pr probe.Result, sw *output.Writer, rebindCount *atomic.Int64, onEvict ...func()) {
 	tickDur := rebindCheckTickEvery
 	if tickDur <= 0 {
 		tickDur = 15 * time.Second
@@ -2504,6 +2662,11 @@ func rebindCheckLoop(ctx context.Context, h captureRunner, cfg Config, pr probe.
 		case <-ticker.C:
 			currentIface := resolveCurrentIface(cfg)
 			if currentIface == "" {
+				if h.Iface() == "wlan0" && !isWlan0AllowedAsAP(cfg.RunDir) && len(onEvict) > 0 && onEvict[0] != nil {
+					log.Printf("REBIND-EVICT: stopping capture on %s (hotspot off or STA default route active)", h.Iface())
+					onEvict[0]()
+					return
+				}
 				continue
 			}
 

@@ -15,6 +15,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -22,9 +23,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -2025,13 +2028,17 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 	pid := os.Getpid()
 	tsNano := time.Now().UnixNano()
 	for _, name := range keys {
+		rawContent := effectiveMap[name]
+		if name == "rules.json" {
+			rawContent = mergePreservedSensitiveRulesJSON(rawContent, filepath.Join(dataDir, "rules.json"))
+		}
 		var outBuf bytes.Buffer
 		if name == "webui_access.json" {
 			// webui_guard.sh 要求单行紧凑 JSON
-			outBuf.Write(effectiveMap[name])
+			outBuf.Write(rawContent)
 			outBuf.WriteByte('\n')
 		} else {
-			if err := json.Indent(&outBuf, effectiveMap[name], "", "  "); err != nil {
+			if err := json.Indent(&outBuf, rawContent, "", "  "); err != nil {
 				cleanupTmp()
 				return nil, fmt.Errorf("format %s: %w", name, err)
 			}
@@ -2091,6 +2098,107 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 	// 严守叶子锁序: 在全部外层锁释放后的末尾独立短持 macAliasMu 清空 macAliasCache(防同秒同字节恢复命中旧缓存)
 	invalidateMACAliasCache()
 	return restored, nil
+}
+
+func isEmptyBackupSensitiveValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch x := v.(type) {
+	case string:
+		return x == ""
+	case []any:
+		return len(x) == 0
+	case map[string]any:
+		return len(x) == 0
+	default:
+		return false
+	}
+}
+
+func mergeMissingBackupSensitiveMap(dst, src map[string]any) bool {
+	if dst == nil || src == nil {
+		return false
+	}
+	changed := false
+	for k, srcVal := range src {
+		if isBackupSensitiveKey(k) {
+			if isEmptyBackupSensitiveValue(srcVal) {
+				continue
+			}
+			if dstVal, exists := dst[k]; !exists || isEmptyBackupSensitiveValue(dstVal) {
+				dst[k] = srcVal
+				changed = true
+			}
+			continue
+		}
+		srcSub, okSrc := srcVal.(map[string]any)
+		if !okSrc || srcSub == nil {
+			continue
+		}
+		if dstSub, okDst := dst[k].(map[string]any); okDst && dstSub != nil {
+			if mergeMissingBackupSensitiveMap(dstSub, srcSub) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// mergePreservedSensitiveRulesJSON 在恢复 rules.json 落盘前合并原盘非空敏感键(如 hotspot_pass / psk):
+// 仅当待恢复配置中该敏感键缺失或为空时回填原盘值; 再次 ExportBackupBundle 时会被 sanitizeBackupRulesJSON
+// 完整剥离, 100% 保持往返 SHA256 一致性。调用方需已持有 rulesStore.mu。
+func mergePreservedSensitiveRulesJSON(incomingCanon []byte, existingRulesPath string) []byte {
+	var oldRoot map[string]any
+	if existingRaw, err := os.ReadFile(existingRulesPath); err == nil && len(bytes.TrimSpace(existingRaw)) > 0 {
+		decOld := json.NewDecoder(bytes.NewReader(existingRaw))
+		decOld.UseNumber()
+		_ = decOld.Decode(&oldRoot)
+	}
+	if oldRoot == nil && rulesStore.cachedSnapshot != nil && filepath.Clean(rulesStore.cachedPath) == filepath.Clean(existingRulesPath) {
+		oldRoot = rulesStore.cachedSnapshot
+	}
+	if len(oldRoot) == 0 {
+		return incomingCanon
+	}
+
+	decNew := json.NewDecoder(bytes.NewReader(incomingCanon))
+	decNew.UseNumber()
+	var newRoot map[string]any
+	if err := decNew.Decode(&newRoot); err != nil || newRoot == nil {
+		return incomingCanon
+	}
+	if !mergeMissingBackupSensitiveMap(newRoot, oldRoot) {
+		return incomingCanon
+	}
+	merged, err := json.Marshal(newRoot)
+	if err != nil {
+		return incomingCanon
+	}
+	return merged
+}
+
+func runBackupRestoreSyncScript(hncDir, script string, timeout time.Duration, args ...string) {
+	if strings.TrimSpace(hncDir) == "" {
+		return
+	}
+	scriptPath := filepath.Join(hncDir, "bin", script)
+	st, err := os.Stat(scriptPath)
+	if err != nil || st.IsDir() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmdArgs := append([]string{scriptPath}, args...)
+	cmd := hardenCmd(exec.CommandContext(ctx, "sh", cmdArgs...))
+	cmd.Env = hubAppendAndroidEnv(
+		"HNC_DIR="+hncDir,
+		"HNC="+hncDir,
+		"PATH="+hncExecPATH,
+	)
+	if out, cErr := cmd.CombinedOutput(); cErr != nil {
+		log.Printf("backup restore: %s failed (%v): %s", script, cErr, strings.TrimSpace(string(out)))
+	}
 }
 
 // RestoreBackupBundle 严格校验整机备份载荷(白名单文件名 + 单文件/总表 SHA256 + 业务语义校验),
@@ -2182,8 +2290,13 @@ func (s *server) apiBackupPost(w http.ResponseWriter, r *http.Request) {
 	if useNativeDataplane(s.hncDir) {
 		if _, nErr := s.NativeFullRestoreV6(); nErr == nil {
 			dpRestored = true
+		} else {
+			log.Printf("backup restore: NativeFullRestoreV6 failed: %v", nErr)
 		}
 	}
+	// 若外围防火墙/加密 DNS 同步脚本存在, 受控触发重同步(先 os.Stat 判存在以兼容 TempDir 单测)
+	runBackupRestoreSyncScript(s.hncDir, "webui_guard.sh", 20*time.Second, "apply")
+	runBackupRestoreSyncScript(s.hncDir, "encdns_sync.sh", 25*time.Second)
 	s.actionMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{

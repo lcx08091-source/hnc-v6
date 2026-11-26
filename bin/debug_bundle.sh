@@ -39,8 +39,8 @@ log() { echo "$*" >&2; }
 # POSIX/Toybox 兼容脱敏: 严禁使用 GNU sed 专有的 s///gI 标志(Toybox sed 报错会导致导出文件全部截断为 0 字节!)
 redact() {
     sed -E \
-        -e 's/("([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk]|hotspot_pass)"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"<redacted>"/g' \
-        -e 's/(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk])[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1<redacted>/g' \
+        -e 's/("([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk]|hotspot_pass)"[[:space:]]*:[[:space:]]*)"([^"\\]|\\.)*"/\1"<redacted>"/g' \
+        -e 's/(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk]|hotspot_pass)[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1<redacted>/g' \
         -e 's/(X-HNC-Local-Admin:[[:space:]]*)[^[:space:]]+/\1<redacted>/g'
 }
 
@@ -140,11 +140,12 @@ fi
 
 # ── 6. 打包 ────────────────────────────────────────────────
 ARCHIVE="$OUT.tar.gz"
-if (cd "$OUT_BASE" && tar -czf "$ARCHIVE" "$(basename "$OUT")" 2>/dev/null); then
+if (cd "$OUT_BASE" && { tar -czf "$ARCHIVE" "$(basename "$OUT")" 2>/dev/null || { [ -x /system/bin/tar ] && PATH="/system/bin:$PATH" /system/bin/tar -czf "$ARCHIVE" "$(basename "$OUT")" 2>/dev/null; }; }) && [ -s "$ARCHIVE" ]; then
     rm -rf "$OUT" 2>/dev/null
     chmod 644 "$ARCHIVE" 2>/dev/null
     echo "$ARCHIVE"
 else
+    rm -f "$ARCHIVE" 2>/dev/null
     # tar 不可用(部分精简 ROM): 保留目录形式
     log "tar unavailable, keeping directory form"
     chmod -R 755 "$OUT" 2>/dev/null

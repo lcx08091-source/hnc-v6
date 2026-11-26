@@ -462,6 +462,161 @@ static void close_inherited_fds(void)
 		(void)close((int)fd);
 }
 
+static void unlink_pid_if_match(const char *path, pid_t expected_pid)
+{
+	if (expected_pid <= 0)
+		return;
+	if (read_pid_file(path) == expected_pid)
+		unlink(path);
+}
+
+static int is_live_dpid_process(pid_t pid)
+{
+	char path[64];
+	char buf[512];
+	int fd;
+	ssize_t n;
+	int comm_match = 0;
+
+	if (pid <= 1 || pid == getpid())
+		return 0;
+
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	n = read(fd, buf, sizeof(buf) - 1U);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	buf[n] = '\0';
+
+	{
+		char *lp = strchr(buf, '(');
+		char *rp = strrchr(buf, ')');
+		if (!lp || !rp || rp <= lp)
+			return 0;
+		char state = rp[1] == ' ' ? rp[2] : '\0';
+		if (state == 'Z' || state == 'X' || state == 'x')
+			return 0;
+		if ((size_t)(rp - lp - 1) == 8U && strncmp(lp + 1, "hnc_dpid", 8) == 0)
+			comm_match = 1;
+	}
+
+	snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		n = read(fd, buf, sizeof(buf) - 1U);
+		close(fd);
+		if (n > 0) {
+			buf[n] = '\0';
+			const char *slash = strrchr(buf, '/');
+			const char *base = slash ? (slash + 1) : buf;
+			return strcmp(base, "hnc_dpid") == 0;
+		}
+	}
+	return comm_match;
+}
+
+static int signal_orphan_dpid(int sig)
+{
+	int signaled = 0;
+	pid_t p = read_pid_file(PID_DPID);
+	if (p > 1 && is_live_dpid_process(p)) {
+		if (kill(p, sig) == 0) {
+			log_msg("sent signal %d to lock-holding dpid (pid=%d from %s)",
+				sig, (int)p, PID_DPID);
+			signaled++;
+		}
+	}
+
+	DIR *dir = opendir("/proc");
+	if (dir != NULL) {
+		struct dirent *de;
+		while ((de = readdir(dir)) != NULL) {
+			char *endp = NULL;
+			long v;
+			if (de->d_name[0] < '1' || de->d_name[0] > '9')
+				continue;
+			errno = 0;
+			v = strtol(de->d_name, &endp, 10);
+			if (errno != 0 || endp == de->d_name || *endp != '\0' || v <= 1 || v > 4194304L)
+				continue;
+			if ((pid_t)v == p)
+				continue;
+			if (is_live_dpid_process((pid_t)v)) {
+				if (kill((pid_t)v, sig) == 0) {
+					log_msg("sent signal %d to orphan dpid (pid=%ld via /proc)",
+						sig, v);
+					signaled++;
+				}
+			}
+		}
+		closedir(dir);
+	}
+	return signaled;
+}
+
+static int probe_dpid_lock_free(void)
+{
+	int fd = open("/data/local/hnc/run/dpid.lock", O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return 1;
+	if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+		(void)flock(fd, LOCK_UN);
+		close(fd);
+		return 1;
+	}
+	{
+		int err = errno;
+		close(fd);
+		if (err == EWOULDBLOCK || err == EAGAIN)
+			return 0;
+	}
+	return 1;
+}
+
+/* fork 新 dpid 之前非阻塞探测 dpid.lock:
+ * 若已有存活旧 dpid 持锁, 先发 SIGTERM 等其优雅落盘释锁后再启动新实例,
+ * 返回: 0=锁已空闲可启动, 1=收到 g_shutdown 中断, -1=锁仍被占用暂缓启动 */
+static int ensure_dpid_lock_free_before_spawn(void)
+{
+	int waited;
+
+	if (probe_dpid_lock_free())
+		return 0;
+
+	log_msg("dpid.lock is held by an existing dpid instance; requesting graceful release");
+	(void)signal_orphan_dpid(SIGTERM);
+
+	for (waited = 0; waited < 100; waited++) {	/* 100 × 100ms = 10s */
+		if (g_shutdown)
+			return 1;
+		if (probe_dpid_lock_free()) {
+			log_msg("existing dpid released dpid.lock after %dms", waited * 100);
+			return 0;
+		}
+		usleep(100 * 1000);
+	}
+
+	if (g_shutdown)
+		return 1;
+
+	log_msg("existing dpid did not release dpid.lock in 10s; escalating to SIGKILL");
+	(void)signal_orphan_dpid(SIGKILL);
+	for (waited = 0; waited < 20; waited++) {	/* 20 × 100ms = 2s */
+		if (g_shutdown)
+			return 1;
+		if (probe_dpid_lock_free()) {
+			log_msg("dpid.lock freed after SIGKILL");
+			return 0;
+		}
+		usleep(100 * 1000);
+	}
+
+	return probe_dpid_lock_free() ? 0 : -1;
+}
+
 /*
  * 启动 dpid. 返回 pid (子进程), 失败返回 -1.
  * 标准输出和标准错误重定向到 dpid.log.
@@ -554,7 +709,7 @@ static int wait_dpid(pid_t pid, int *out_rc, int *out_signum)
 	}
 
 	g_child_pid = 0;
-	unlink(PID_DPID); /* dpid 不在了, 删 pid 文件 */
+	unlink_pid_if_match(PID_DPID, pid); /* 仅当 dpid.pid 内 PID 匹配刚退出的子进程时才删 */
 
 	if (WIFEXITED(status)) {
 		int rc = WEXITSTATUS(status);
@@ -591,8 +746,27 @@ static int run_supervise_loop(void)
 
 	while (!g_shutdown) {
 		pid_t pid;
-		int rc, signum, abnormal;
-		int64_t spawn_mono = mono_sec();
+		int rc, signum, abnormal, lock_st;
+		int64_t spawn_mono;
+
+		lock_st = ensure_dpid_lock_free_before_spawn();
+		if (lock_st > 0 || g_shutdown)
+			break;
+		if (lock_st < 0) {
+			log_msg("dpid.lock still busy; retrying after %ds backoff without clobbering %s",
+				backoff, PID_DPID);
+			cooldown_sleep(backoff);
+			if (g_shutdown)
+				break;
+			if (backoff < RESTART_BACKOFF_MAX) {
+				backoff *= 2;
+				if (backoff > RESTART_BACKOFF_MAX)
+					backoff = RESTART_BACKOFF_MAX;
+			}
+			continue;
+		}
+
+		spawn_mono = mono_sec();
 
 		/* 启动 dpid */
 		pid = spawn_dpid();
@@ -699,7 +873,7 @@ static int run_supervise_loop(void)
 				;
 		}
 		g_child_pid = 0;
-		unlink(PID_DPID);
+		unlink_pid_if_match(PID_DPID, cpid);
 	}
 
 	return 0;

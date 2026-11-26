@@ -140,9 +140,11 @@ type dnsForwarder struct {
 	lat         [dnsLatRing]float64
 	latN        int
 	latPos      int
-	closeCtx     context.Context
-	closeCancel  context.CancelFunc
-	lastUpstream string
+	closeCtx       context.Context
+	closeCancel    context.CancelFunc
+	lastUpstream   string
+	rejectFakeIP   func() bool
+	onFakeIPReject func()
 }
 
 func newDNSForwarder() *dnsForwarder {
@@ -552,6 +554,16 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 	} else if m.Rcode == dnsRcodeRefused {
 		f.st.upErrs.Add(1)
 	}
+	if !internal && f.rejectFakeIP != nil && dnsHasFakeIPv4Answer(m) && f.rejectFakeIP() {
+		f.st.errors.Add(1)
+		f.st.upErrs.Add(1)
+		if f.onFakeIPReject != nil {
+			f.onFakeIPReject()
+		}
+		out := dnsRcodeReply(query, q, dnsRcodeServFail)
+		logIt(out, dnsLogEntry{})
+		return finish(out)
+	}
 	captiveHijack := dnsHasCaptiveHijackAnswer(m)
 	if (isProbe || captiveHijack) && m.Rcode == dnsRcodeNoError && m.ANCount > 0 {
 		resp = append([]byte(nil), resp...)
@@ -568,6 +580,28 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 	}
 	logIt(resp, dnsLogEntry{Answers: dnsLogAnswers(m)})
 	return finish(resp)
+}
+
+func isIPv4FakeIP19818(ipStr string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil || !addr.IsValid() {
+		return false
+	}
+	u := addr.Unmap()
+	if !u.Is4() {
+		return false
+	}
+	b := u.As4()
+	return b[0] == 198 && (b[1]&0xfe) == 18
+}
+
+func dnsHasFakeIPv4Answer(m dnsMsgInfo) bool {
+	for _, r := range m.Answers {
+		if (r.Type == dnsTypeA || r.Type == dnsTypeAAAA) && isIPv4FakeIP19818(r.Value) {
+			return true
+		}
+	}
+	return false
 }
 
 type dnsExchResult struct {
@@ -650,6 +684,13 @@ func (f *dnsForwarder) handleWithStale(
 						f.st.upErrs.Add(1)
 						return
 					}
+					if f.rejectFakeIP != nil && dnsHasFakeIPv4Answer(m) && f.rejectFakeIP() {
+						f.st.upErrs.Add(1)
+						if f.onFakeIPReject != nil {
+							f.onFakeIPReject()
+						}
+						return
+					}
 					if m.Flags&dnsFlagTC == 0 {
 						f.cache.putIfSeq(seq, key, r, m, time.Now())
 					}
@@ -703,6 +744,13 @@ func (f *dnsForwarder) handleWithStale(
 	}
 	if m.Rcode == dnsRcodeRefused {
 		f.st.upErrs.Add(1)
+	}
+	if f.rejectFakeIP != nil && dnsHasFakeIPv4Answer(m) && f.rejectFakeIP() {
+		f.st.upErrs.Add(1)
+		if f.onFakeIPReject != nil {
+			f.onFakeIPReject()
+		}
+		return fallback()
 	}
 	outResp := res.resp
 	captiveHijack := dnsHasCaptiveHijackAnswer(m)

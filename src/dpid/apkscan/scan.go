@@ -161,12 +161,15 @@ func (s *Scanner) Scan(ctx context.Context) (*Output, error) {
 	}
 	defer s.mu.Unlock()
 
+	var out *Output
 	// 扫描期间把 GC 调激进一些, 让解压缓冲/临时串尽快回收, 峰值压在几十 MB。
 	old := debug.SetGCPercent(40)
 	defer func() {
 		debug.SetGCPercent(old)
 		s.buf = nil
-		debug.FreeOSMemory()
+		if out != nil && out.Stats.Scanned > 0 {
+			debug.FreeOSMemory()
+		}
 	}()
 	if len(s.buf) != s.opt.ChunkSize {
 		s.buf = make([]byte, s.opt.ChunkSize)
@@ -176,7 +179,7 @@ func (s *Scanner) Scan(ctx context.Context) (*Output, error) {
 	prev := loadCache(s.opt.OutPath)
 	apks := enumerate(s.opt.Roots)
 
-	out := &Output{
+	out = &Output{
 		Schema:      Schema,
 		Extractor:   extractorVersion,
 		Apps:        map[string]*AppEntry{},
@@ -387,6 +390,9 @@ func appendPkgDir(out []apkFile, dir, name string) []apkFile {
 			continue
 		}
 		if n != "base.apk" && !strings.HasPrefix(n, "split_") {
+			continue
+		}
+		if strings.HasPrefix(n, "split_config.") {
 			continue
 		}
 		st, err := e.Info()

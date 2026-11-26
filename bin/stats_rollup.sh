@@ -140,14 +140,18 @@ AGG_TMP=""
 FILTER_TMP=""
 RAW_PRUNE_TMP=""
 DAILY_PRUNE_TMP=""
-TAR_TMP=""
+_raw_locked=0
 _rollup_cleanup() {
+    if [ "${_raw_locked:-0}" = "1" ]; then
+        flock -u 8 8>&8 2>/dev/null || true
+        exec 8>&- 2>/dev/null || true
+        _raw_locked=0
+    fi
     rm -f ${MAC_NAMES_TMP:+"$MAC_NAMES_TMP"} \
           ${AGG_TMP:+"$AGG_TMP"} \
           ${FILTER_TMP:+"$FILTER_TMP"} \
           ${RAW_PRUNE_TMP:+"$RAW_PRUNE_TMP"} \
-          ${DAILY_PRUNE_TMP:+"$DAILY_PRUNE_TMP"} \
-          ${TAR_TMP:+"$TAR_TMP"} 2>/dev/null || true
+          ${DAILY_PRUNE_TMP:+"$DAILY_PRUNE_TMP"} 2>/dev/null || true
 }
 trap '_rollup_cleanup' EXIT
 trap '_rollup_cleanup; trap - EXIT; exit 130' INT
@@ -359,7 +363,7 @@ BEGIN {
     if (!match($0, /"ts"[[:space:]]*:[[:space:]]*[0-9]+/)) next
     s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s)
     ts = s + 0
-    if (ts < ds || ts > de) next
+    if (ts > de) next
 
     if (!match($0, /"mac"[[:space:]]*:[[:space:]]*"[^"]*"/)) next
     s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*"/, "", s); sub(/"$/, "", s)
@@ -372,6 +376,20 @@ BEGIN {
     if (!match($0, /"tx"[[:space:]]*:[[:space:]]*[0-9]+/)) next
     s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s)
     tx_cur = s + 0
+
+    if (ts < ds) {
+        if (!(mac in pre_ts) || ts >= pre_ts[mac]) {
+            pre_ts[mac] = ts
+            pre_rx[mac] = rx_cur
+            pre_tx[mac] = tx_cur
+        }
+        next
+    }
+
+    if (!(mac in last_rx) && (mac in pre_rx)) {
+        last_rx[mac] = pre_rx[mac]
+        last_tx[mac] = pre_tx[mac]
+    }
 
     if (mac in last_rx) {
         d_rx = rx_cur - last_rx[mac]
@@ -432,11 +450,21 @@ rm -f "$AGG_TMP" "$MAC_NAMES_TMP"
 AGG_TMP=""; MAC_NAMES_TMP=""
 
 # ═══════════════════════════════════════════════════════════════
-# 4. 清理 raw: 只保留最近 RAW_RETAIN_HOURS 小时
+# 4. 清理 raw: 只保留最近 RAW_RETAIN_HOURS 小时 (与 stats_sample 追加共享 flock 互斥)
 # ═══════════════════════════════════════════════════════════════
 NOW_TS=$(date +%s 2>/dev/null || echo 0)
 CUTOFF=$(awk -v now="$NOW_TS" -v h="$RAW_RETAIN_HOURS" 'BEGIN { printf "%.0f\n", (now + 0) - (h + 0) * 3600 }')
 RAW_PRUNE_TMP="${RAW_FILE}.prune.$$"
+STATS_RAW_LOCK="$HNC_DIR/run/stats_raw.lock"
+_raw_locked=0
+if command -v flock >/dev/null 2>&1 && ( exec 8>"$STATS_RAW_LOCK" ) 2>/dev/null; then
+    exec 8>"$STATS_RAW_LOCK"
+    if flock -x 8 8>&8 2>/dev/null; then
+        _raw_locked=1
+    else
+        exec 8>&- 2>/dev/null || true
+    fi
+fi
 if awk -v cutoff="$CUTOFF" '
 BEGIN { cutoff = cutoff + 0 }
 {
@@ -444,8 +472,13 @@ BEGIN { cutoff = cutoff + 0 }
         s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s)
         if ((s + 0) >= cutoff) print
     }
-}' "$RAW_FILE" > "$RAW_PRUNE_TMP" && mv "$RAW_PRUNE_TMP" "$RAW_FILE"; then
+}' "$RAW_FILE" > "$RAW_PRUNE_TMP" && mv -f "$RAW_PRUNE_TMP" "$RAW_FILE"; then
     RAW_PRUNE_TMP=""
+fi
+if [ "$_raw_locked" = "1" ]; then
+    flock -u 8 8>&8 2>/dev/null || true
+    exec 8>&- 2>/dev/null || true
+    _raw_locked=0
 fi
 
 raw_after=$(wc -l < "$RAW_FILE" 2>/dev/null | tr -d ' ')
@@ -476,9 +509,8 @@ fi
 fi  # end: if [ -z "$SKIP_STATS" ]
 
 # ═══════════════════════════════════════════════════════════════
-# v4.0 Patch 1.6: 日志备份(跟 stats rollup 一起做,每日一次)
-# logs/ 打 tar.gz 存到 data/.backup-YYYYMMDD/,保留 7 天
-# 轮转过的 .1 .2 已经存进 tarball,因此今天之前的 logs 都有备份
+# v4.0 Patch 1.6 + P1-31: 日志备份(后台异步 + 独立超时, 关闭继承 stdio/fd,
+# 避免 stats_sample.sh:89 同步等待大体积 logs 打包撞看门狗 15s 超时!)
 # ═══════════════════════════════════════════════════════════════
 BACKUP_RETAIN_DAYS=${BACKUP_RETAIN_DAYS:-7}
 LOGS_DIR="$HNC_DIR/logs"
@@ -487,25 +519,37 @@ TODAY=$(date +%Y%m%d)
 BACKUP_DIR="$BACKUP_ROOT/.backup-$TODAY"
 
 if [ -d "$LOGS_DIR" ]; then
-    mkdir -p "$BACKUP_DIR" 2>/dev/null
-    # 每天覆盖写同一个 tarball(允许日内多次 rollup 不爆数量)
-    TARBALL="$BACKUP_DIR/logs.tar.gz"
-    TAR_TMP="$TARBALL.tmp.$$"
-    if tar czf "$TAR_TMP" -C "$HNC_DIR" logs 2>/dev/null && mv "$TAR_TMP" "$TARBALL"; then
-        TAR_TMP=""
-        log "logs backup created: $TARBALL ($(stat -c %s "$TARBALL" 2>/dev/null) bytes)"
-    fi
-    # rc3.1.14 修 P2-D (review): 备份策略统一 post-fs-data 的"按名字排序保留最新 N 个".
-    # 之前 find -mtime +N 在用户调系统时间 (出国旅游 / NTP 异常) 时, 时间跳变可能误删今天的
-    # 或误留 1 年前的. 按名字排序 (.backup-YYYYMMDD 字典序 ≈ 时间序) 不受时钟影响.
-    BACKUP_LIST=$(ls -d "$BACKUP_ROOT"/.backup-* 2>/dev/null | sort -r)
-    n=0
-    for dir in $BACKUP_LIST; do
-        n=$((n + 1))
-        if [ "$n" -gt "$BACKUP_RETAIN_DAYS" ]; then
-            rm -rf "$dir" 2>/dev/null && log "logs backup pruned: $dir"
+    (
+        exec </dev/null >/dev/null 2>&1
+        exec 8>&- 9>&- 2>/dev/null || true
+        mkdir -p "$BACKUP_DIR" 2>/dev/null || exit 0
+        chmod 700 "$BACKUP_DIR" 2>/dev/null || true
+        TARBALL="$BACKUP_DIR/logs.tar.gz"
+        _bg_tar_tmp="$TARBALL.tmp.$$.$(date +%s 2>/dev/null || echo 0)"
+        trap 'rm -f "$_bg_tar_tmp" 2>/dev/null || true' EXIT INT TERM
+        _tar_ok=0
+        if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then
+            timeout 25 tar czf "$_bg_tar_tmp" -C "$HNC_DIR" logs 2>/dev/null && _tar_ok=1
+        elif command -v timeout >/dev/null 2>&1 && timeout -t 1 true >/dev/null 2>&1; then
+            timeout -t 25 tar czf "$_bg_tar_tmp" -C "$HNC_DIR" logs 2>/dev/null && _tar_ok=1
+        else
+            tar czf "$_bg_tar_tmp" -C "$HNC_DIR" logs 2>/dev/null && _tar_ok=1
         fi
-    done
+        if [ "$_tar_ok" = "1" ] && mv -f "$_bg_tar_tmp" "$TARBALL" 2>/dev/null; then
+            _bg_tar_tmp=""
+            log "logs backup created: $TARBALL ($(stat -c %s "$TARBALL" 2>/dev/null) bytes)"
+        else
+            rm -f "$_bg_tar_tmp" 2>/dev/null || true
+        fi
+        BACKUP_LIST=$(ls -d "$BACKUP_ROOT"/.backup-* 2>/dev/null | sort -r)
+        n=0
+        for dir in $BACKUP_LIST; do
+            n=$((n + 1))
+            if [ "$n" -gt "$BACKUP_RETAIN_DAYS" ]; then
+                rm -rf "$dir" 2>/dev/null && log "logs backup pruned: $dir"
+            fi
+        done
+    ) &
 fi
 
 exit 0

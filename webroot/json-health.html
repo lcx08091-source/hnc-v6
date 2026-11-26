@@ -82,6 +82,9 @@
 }
 :root[data-style="cyber"] { --blue: #4ea8de; --blue2: #64748b; --sat: 135%; }
 :root[data-glass="frosted"] { --blur: 28px; --sat: 145%; }
+:root[data-lg-variant="prism"] { --card-bd: rgba(255, 255, 255, 0.9); --sat: 185%; }
+:root[data-theme="dark"][data-lg-variant="prism"] { --card-bd: rgba(255, 255, 255, 0.18); }
+:root[data-lg-variant="dew"] { --blur: 24px; --sat: 190%; }
 * { box-sizing: border-box; }
 body {
   margin: 0; min-height: 100vh;
@@ -162,7 +165,7 @@ button:disabled { opacity: 0.48; cursor: not-allowed; transform: none; }
   <div class="top">
     <div>
       <div class="title">JSON 健康面板</div>
-      <div class="sub"><span id="jh-ver-label" data-ui-ver="v6.1.0-rc.9">HNC v6.1.0-rc.9</span> · 配置完整性只读巡检与诊断包导出</div>
+      <div class="sub"><span id="jh-ver-label" data-ui-ver="v6.1.0-rc.10">HNC v6.1.0-rc.10</span> · 配置完整性只读巡检与诊断包导出</div>
     </div>
     <a class="back-pill" href="./">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
@@ -188,9 +191,24 @@ button:disabled { opacity: 0.48; cursor: not-allowed; transform: none; }
     var t = localStorage.getItem('hnc6.theme');
     var s = localStorage.getItem('hnc6.style');
     var gm = localStorage.getItem('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid';
-    if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t);
+    var lv = localStorage.getItem('hnc6.lg_variant');
+    var mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    var sysDk = !!(mq && mq.matches);
+    var resT = (t === 'light' || t === 'dark') ? t : (sysDk ? 'dark' : 'light');
+    r.setAttribute('data-theme', resT);
+    r.setAttribute('data-theme-mode', (t === 'light' || t === 'dark') ? t : 'auto');
+    r.setAttribute('data-lg-variant', (lv === 'prism' || lv === 'dew') ? lv : 'pure');
     if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); }
     else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber');
+    if (mq && (!t || t === 'auto')) {
+      var onSysTheme = function (ev) {
+        var curT = null;
+        try { curT = localStorage.getItem('hnc6.theme'); } catch (_) {}
+        if (!curT || curT === 'auto') r.setAttribute('data-theme', (ev ? ev.matches : mq.matches) ? 'dark' : 'light');
+      };
+      if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onSysTheme);
+      else if (typeof mq.addListener === 'function') mq.addListener(onSysTheme);
+    }
   } catch (_) {}
 
   var HNC = '/data/local/hnc';

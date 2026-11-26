@@ -95,7 +95,7 @@ func defaultRulesRoot() map[string]interface{} {
 func decodeRulesBytes(b []byte) (map[string]interface{}, error) {
 	trimmed := bytes.TrimSpace(b)
 	if len(trimmed) == 0 {
-		return defaultRulesRoot(), nil
+		return nil, errors.New("empty rules.json file")
 	}
 	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	dec.UseNumber()
@@ -817,6 +817,9 @@ func allocMarkIDFromRootLocked(root map[string]interface{}, mac string) (int, er
 		cand := (start-1+k)%99 + 1
 		if !used[cand] {
 			dm["mark_id"] = json.Number(strconv.Itoa(cand))
+			if _, hasLE := dm["limit_enabled"]; !hasLE {
+				dm["limit_enabled"] = false
+			}
 			dm["last_seen_persist"] = json.Number(strconv.FormatInt(time.Now().Unix(), 10))
 			return cand, nil
 		}

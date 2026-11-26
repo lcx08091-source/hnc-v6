@@ -85,6 +85,67 @@ static int read_cmd_from_stdin(char *out, size_t out_size)
     return (int)len;
 }
 
+static int is_cmd_get_devices(const char *cmd)
+{
+    while (*cmd == ' ' || *cmd == '\t')
+        cmd++;
+    if (strncmp(cmd, "GET_DEVICES", 11) != 0)
+        return 0;
+    cmd += 11;
+    while (*cmd == ' ' || *cmd == '\t' || *cmd == '\r' || *cmd == '\n')
+        cmd++;
+    return *cmd == '\0';
+}
+
+static int is_complete_json_object(const char *buf, size_t len)
+{
+    size_t start = 0;
+    while (start < len && (buf[start] == ' ' || buf[start] == '\t' ||
+                           buf[start] == '\r' || buf[start] == '\n')) {
+        start++;
+    }
+    if (start >= len || buf[start] != '{')
+        return 0;
+
+    size_t end = len;
+    while (end > start && (buf[end - 1] == ' ' || buf[end - 1] == '\t' ||
+                           buf[end - 1] == '\r' || buf[end - 1] == '\n')) {
+        end--;
+    }
+    if (end <= start || buf[end - 1] != '}')
+        return 0;
+
+    int depth = 0;
+    int in_str = 0;
+    int esc = 0;
+    for (size_t i = start; i < end; i++) {
+        char c = buf[i];
+        if (esc) {
+            esc = 0;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\')
+                esc = 1;
+            else if (c == '"')
+                in_str = 0;
+            continue;
+        }
+        if (c == '"') {
+            in_str = 1;
+        } else if (c == '{') {
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth < 0)
+                return 0;
+            if (depth == 0 && i + 1 < end)
+                return 0;
+        }
+    }
+    return (!in_str && !esc && depth == 0) ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
@@ -125,6 +186,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "hnc_ipc: command too long or empty\n");
         return 1;
     }
+    int is_get_devices = is_cmd_get_devices(cmd);
 
     /* socket */
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -185,8 +247,11 @@ int main(int argc, char **argv)
         return 4;
     }
 
-    /* 流式循环接收并写出到 stdout (硬上限 4MB), 修复 >64KB devices.json 静默截断 */
+    /* 流式循环接收并写出到 stdout (硬上限 4MB), 修复 >64KB devices.json 静默截断;
+     * 对 GET_DEVICES 先缓存在内存校验完整闭合 JSON 对象后再写出, 防止对端超时截断被当正常返回 0 */
     char buf[RESP_CHUNK_SIZE];
+    char *json_buf = NULL;
+    size_t json_cap = 0;
     size_t total = 0;
     char last_byte = '\0';
     int recv_err = 0;
@@ -209,10 +274,32 @@ int main(int argc, char **argv)
         if (n == 0) break;     /* 对端正常关闭 */
 
         size_t chunk = (size_t)n;
-        if (fwrite(buf, 1, chunk, stdout) != chunk || ferror(stdout)) {
-            fprintf(stderr, "hnc_ipc: stdout write failed\n");
-            close(fd);
-            return 4;
+        if (is_get_devices) {
+            if (total + chunk > json_cap) {
+                size_t ncap = json_cap ? json_cap : RESP_CHUNK_SIZE;
+                while (ncap < total + chunk && ncap < MAX_RESP_BYTES) {
+                    if (ncap > MAX_RESP_BYTES / 2U)
+                        ncap = MAX_RESP_BYTES;
+                    else
+                        ncap *= 2U;
+                }
+                char *nb = realloc(json_buf, ncap);
+                if (!nb) {
+                    fprintf(stderr, "hnc_ipc: out of memory (%zu bytes)\n", ncap);
+                    free(json_buf);
+                    close(fd);
+                    return 5;
+                }
+                json_buf = nb;
+                json_cap = ncap;
+            }
+            memcpy(json_buf + total, buf, chunk);
+        } else {
+            if (fwrite(buf, 1, chunk, stdout) != chunk || ferror(stdout)) {
+                fprintf(stderr, "hnc_ipc: stdout write failed\n");
+                close(fd);
+                return 4;
+            }
         }
         last_byte = buf[chunk - 1];
         total += chunk;
@@ -226,6 +313,7 @@ int main(int argc, char **argv)
         } while (rem < 0 && errno == EINTR);
         if (rem > 0) {
             fprintf(stderr, "hnc_ipc: response exceeds 4MB limit\n");
+            free(json_buf);
             close(fd);
             return 5;
         }
@@ -235,7 +323,24 @@ int main(int argc, char **argv)
     if (total == 0 || recv_err) {
         if (total == 0)
             fprintf(stderr, "hnc_ipc: no response (timeout %ds)\n", timeout);
+        free(json_buf);
         return 5;
+    }
+
+    if (is_get_devices) {
+        if (!is_complete_json_object(json_buf, total)) {
+            fprintf(stderr, "hnc_ipc: truncated or malformed GET_DEVICES response (%zu bytes)\n",
+                    total);
+            free(json_buf);
+            return 5;
+        }
+        if (fwrite(json_buf, 1, total, stdout) != total || ferror(stdout)) {
+            fprintf(stderr, "hnc_ipc: stdout write failed\n");
+            free(json_buf);
+            return 4;
+        }
+        free(json_buf);
+        json_buf = NULL;
     }
 
     /* hotspotd 响应可能不带换行, 给个收尾 (但若已有 \n 则不加) */

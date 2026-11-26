@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "96-system-updates-v6",
-  "rules_version": "hnc-curated-v6.1.0-rc.9#96-system-updates-v6",
+  "rules_version": "hnc-curated-v6.1.0-rc.10#96-system-updates-v6",
   "rules": [
     {
       "id": "windows_update_v6",

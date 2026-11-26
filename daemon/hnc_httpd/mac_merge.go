@@ -664,14 +664,12 @@ func scoreMacPair(np, op *macProfile) (score int, reasons []string, ok bool) {
 	// 常用应用集合 + 小众专属应用 DNA 命中(区分国民泛应用与个人专属栈)
 	// Jaccard 与共振加分剔除 ubiquitousMergeApps, 防同品牌陌生设备仅凭国民泛应用误合并;
 	// 仅当双方都无任何非泛用应用且应用数 >= 3 时给予低权重参考分(封顶 6 分, 且绝不触发共振)。
-	rareAppOverlap := 0.0
 	var rareCommon []string
 	if len(np.Apps) >= 2 && len(op.Apps) >= 2 {
 		rareNP := filterNonUbiquitousApps(np.Apps)
 		rareOP := filterNonUbiquitousApps(op.Apps)
 		if len(rareNP) > 0 && len(rareOP) > 0 {
 			rj, rc := jaccard(rareNP, rareOP)
-			rareAppOverlap = rj
 			rareCommon = rc
 			if len(rareNP) >= 2 && len(rareOP) >= 2 {
 				if pts := int(math.Round(20 * rj)); pts >= 3 {
@@ -708,7 +706,7 @@ func scoreMacPair(np, op *macProfile) (score int, reasons []string, ok bool) {
 	hasHardConflict := diff(np.Brand, op.Brand) || diff(np.Model, op.Model) || diff(np.OS, op.OS) || diff(np.Type, op.Type) || diff(np.DHCPFP, op.DHCPFP)
 	noHostname := strings.TrimSpace(np.DHCPName) == "" && strings.TrimSpace(np.MDNSName) == ""
 	famAligned := eq(np.Brand, op.Brand) || eq(np.Model, op.Model) || eq(np.OS, op.OS) || eq(np.VendorClass, op.VendorClass)
-	if !hasHardConflict && noHostname && eq(np.DHCPFP, op.DHCPFP) && famAligned && ja4Overlap >= 0.50 && (rareAppOverlap >= 0.50 || len(rareCommon) >= 1) {
+	if !hasHardConflict && noHostname && eq(np.DHCPFP, op.DHCPFP) && famAligned && ja4Overlap >= 0.50 && len(rareCommon) >= 2 {
 		add(16, "匿名轮换 MAC 多维协议栈共振(DHCP 栈+TLS 指纹+应用画像一致)")
 	}
 	if ident < macMergeIdentMin {

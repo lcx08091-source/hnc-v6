@@ -237,19 +237,47 @@ func fpPredict(hncDir, ja4, alpn string, dport int, qtp string, now time.Time) (
 	if q := fpCleanQTP(qtp); q != "" {
 		qKey = fpKeyQ(ja4, alpn, port, q)
 	}
+	fpKey := fpKeyOf(ja4, alpn, port)
+	nowUnix := now.Unix()
 	st.mu.Lock()
 	st.loadLocked()
-	v, _, _ := st.verdictForKeysLocked(qKey, fpKeyOf(ja4, alpn, port), now.Unix())
+	v, _, qGeneric := st.verdictForKeysLocked(qKey, fpKey, nowUnix)
+	var impID, impName string
+	if !v.Usable && !v.Generic && !qGeneric {
+		if imp := st.importedLocked(); imp != nil {
+			var ie rulepackFP
+			var ok bool
+			if qKey != "" {
+				ie, ok = imp[qKey]
+			}
+			if !ok {
+				ie, ok = imp[fpKey]
+			}
+			if ok && ie.AppID != "" && (qKey != "" || !st.ja4GenericLocked(ja4, ie.AppID, nowUnix)) {
+				impID = ie.AppID
+				impName = ie.App
+				if impName == "" {
+					impName = ie.AppID
+				}
+			}
+		}
+	}
 	st.mu.Unlock()
 	if v.Usable && !v.Generic && v.Top != "" && v.Top != fpOtherApp {
 		return v.Top, v.TopName
 	}
+	if impID != "" {
+		return impID, impName
+	}
 	return "", ""
 }
 
-// userPredict combined 的第一优先级: 用户纠正(只读 fp_user_rules.go)。
-// 顺序: 域名 > JA4 > IP(与现有识别优先级一致)。
+// userPredict combined 的用户纠正匹配(只读 fp_user_rules.go)。
+// 顺序严格对齐生产归属链路(fp_learn.go / api_conn.go): IP(+端口) > 域名 > JA4。
 func userPredict(sni, ja4, rip string, dport int, now time.Time) (id, name string) {
+	if a, ok := dpiUserMatchIP(rip, dport, now); ok && a.ID != "" {
+		return a.ID, a.Name
+	}
 	if a, ok := dpiUserMatchName(sni); ok && a.ID != "" {
 		return a.ID, a.Name
 	}
@@ -257,10 +285,22 @@ func userPredict(sni, ja4, rip string, dport int, now time.Time) (id, name strin
 		a := r.app()
 		return a.ID, a.Name
 	}
-	if a, ok := dpiUserMatchIP(rip, dport, now); ok && a.ID != "" {
-		return a.ID, a.Name
-	}
 	return "", ""
+}
+
+func userJA4PredictFiltered(hncDir, sni, ja4 string, now time.Time) (id, name string) {
+	if ja4 == "" || sni != "" {
+		return "", ""
+	}
+	r, ok := dpiUserMatchJA4(ja4)
+	if !ok || r.AppID == "" {
+		return "", ""
+	}
+	if generic, _ := fpFor(hncDir).ja4Generic(ja4, r.AppID, now); generic {
+		return "", ""
+	}
+	a := r.app()
+	return a.ID, a.Name
 }
 
 // ownerPredict IP 归属为 app 类时的伪应用(_org:<key>)。
@@ -374,12 +414,19 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 		if ownID != "" {
 			names[ownID] = ownName
 		}
-		// combined: 用户纠正 > 规则 > 指纹
-		combID, combName := userPredict(s.SNI, s.JA4, s.RIP, s.DPort, now)
-		if combID != "" {
+		// combined: 用户 IP(+端口) > 用户域名 > 静态规则(rule) > 用户 JA4(!ja4Generic) > 学习指纹(fp)
+		var combID, combName string
+		if a, ok := dpiUserMatchIP(s.RIP, s.DPort, now); ok && a.ID != "" {
+			combID, combName = a.ID, a.Name
+			names[combID] = combName
+		} else if a, ok := dpiUserMatchName(s.SNI); ok && a.ID != "" {
+			combID, combName = a.ID, a.Name
 			names[combID] = combName
 		} else if ruleID != "" {
 			combID, combName = ruleID, ruleName
+		} else if uJA4ID, uJA4Name := userJA4PredictFiltered(hncDir, s.SNI, s.JA4, now); uJA4ID != "" {
+			combID, combName = uJA4ID, uJA4Name
+			names[combID] = combName
 		} else if fpID != "" {
 			combID, combName = fpID, fpName
 		}

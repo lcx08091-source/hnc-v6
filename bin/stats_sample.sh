@@ -201,13 +201,18 @@ if [ -z "$aggregated" ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 4. Append 到 raw 文件
+# 4. Append 到 raw 文件 (与 stats_rollup.sh prune mv 共享 flock 互斥防丢行)
 # ═══════════════════════════════════════════════════════════════
-# 用 >> 追加,不做原子写:单次采样丢失 / 半写可接受(rollup 容忍部分损坏行)。
-# 追加操作在 POSIX 下对 < 4KB 是原子的,我们一次最多 50 台 × ~80 字节 ≈ 4KB,
-# 边界情况下可能有部分行损坏,awk rollup 会跳过不合法的行。
-
-echo "$aggregated" >> "$RAW_FILE"
+STATS_RAW_LOCK="$HNC_DIR/run/stats_raw.lock"
+if command -v flock >/dev/null 2>&1 && ( exec 8>"$STATS_RAW_LOCK" ) 2>/dev/null; then
+    (
+        exec 8>"$STATS_RAW_LOCK"
+        flock -x 8 8>&8 2>/dev/null || true
+        printf '%s\n' "$aggregated" >> "$RAW_FILE"
+    )
+else
+    printf '%s\n' "$aggregated" >> "$RAW_FILE"
+fi
 
 # 设备数量(调试用,不常写日志避免 log 涨)
 lines=$(echo "$aggregated" | wc -l)

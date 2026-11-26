@@ -505,57 +505,279 @@ function alertAction(kind, id, mac) {
   }
 }
 
-/* v6 连接抽屉跟手下拉关闭与 Android 侧滑返回统一历史栈拦截 */
+/* v6 连接抽屉跟手下拉关闭（上拉橡皮筋阻尼 + 实时测速甩出 + 6 子步辛欧拉弹簧回弹）与 Android 侧滑返回统一历史栈拦截 */
 (function () {
   var dr = document.getElementById('v6-scalpel-drawer'), sc = document.getElementById('v6-scalpel-scrim'), ds = null;
+  var drClosing = false, drH = 460, drCleanT = 0;
+
+  function clearDrInline() {
+    if (drCleanT) { clearTimeout(drCleanT); drCleanT = 0; }
+    drClosing = false;
+    if (dr) {
+      dr.classList.remove('is-dragging', 'is-spring');
+      dr.style.transition = '';
+      dr.style.transform = '';
+      dr.style.pointerEvents = '';
+    }
+    if (sc) {
+      sc.style.transition = '';
+      sc.style.opacity = '';
+    }
+  }
+
+  function stepSymplectic6(stObj, dtSec) {
+    var n = 6, h = dtSec / n;
+    for (var i = 0; i < n; i++) {
+      stObj.v += (-stObj.k * (stObj.x - stObj.to) - stObj.c * stObj.v) * h;
+      stObj.x += stObj.v * h;
+    }
+  }
+
+  function onDrSpringFrame(curY) {
+    if (!dr) return;
+    dr.style.transform = 'translate3d(-50%,' + curY.toFixed(2) + 'px,0)';
+    if (!drClosing && sc && motionOn()) {
+      if (curY > 0) {
+        var op = clamp(1 - curY / Math.max(240, drH * 0.92), 0.08, 1);
+        sc.style.opacity = op.toFixed(3);
+      } else {
+        sc.style.opacity = '1';
+      }
+    }
+  }
+
+  function onDrSpringRest() {
+    clearDrInline();
+  }
+
+  var drSpring = typeof Spring === 'function'
+    ? new Spring({ k: 340, c: 32.5 }, onDrSpringFrame, onDrSpringRest)
+    : (function () {
+        var fb = {
+          k: 340, c: 32.5, x: 0, v: 0, to: 0, raf: 0, last: 0, eps: 0.4,
+          stop: function () { if (fb.raf) cancelAnimationFrame(fb.raf); fb.raf = 0; fb.last = 0; },
+          set: function (x) { fb.stop(); fb.x = fb.to = x; fb.v = 0; onDrSpringFrame(x); },
+          go: function (to, v, p) {
+            fb.to = to; if (v != null) fb.v = v; if (p) { fb.k = p.k; fb.c = p.c; }
+            if (!motionOn()) { fb.x = to; fb.v = 0; onDrSpringFrame(to); fb.stop(); onDrSpringRest(); return; }
+            if (!fb.raf) {
+              fb.raf = requestAnimationFrame(function step(t) {
+                var dt = fb.last ? Math.min(0.032, (t - fb.last) / 1000) : (1 / 120);
+                fb.last = t;
+                stepSymplectic6(fb, dt);
+                if (Math.abs(fb.x - fb.to) < fb.eps && Math.abs(fb.v) < fb.eps * 10) {
+                  fb.x = fb.to; fb.v = 0; onDrSpringFrame(fb.x); fb.raf = 0; fb.last = 0; onDrSpringRest(); return;
+                }
+                onDrSpringFrame(fb.x);
+                fb.raf = requestAnimationFrame(step);
+              });
+            }
+          }
+        };
+        return fb;
+      })();
+
+  function dampScalpelY(dy) {
+    return dy < 0 ? dy * 0.22 : dy;
+  }
+
+  function canDragScalpelFrom(targetEl, onGrab) {
+    if (onGrab) return true;
+    var listEl = dr ? dr.querySelector('.v6-tuple-list') : null;
+    if (listEl && listEl.scrollTop > 2) return false;
+    var cur = targetEl && targetEl.nodeType === 1 ? targetEl : (targetEl && targetEl.parentElement ? targetEl.parentElement : null);
+    while (cur && cur !== dr && cur !== document.body && cur !== document.documentElement) {
+      if (cur.scrollTop > 2) return false;
+      cur = cur.parentElement;
+    }
+    return true;
+  }
+
+  function beginDrDrag(startY, onGrab, pid, targetEl) {
+    if (!dr || !dr.classList.contains('show') || drClosing) return false;
+    if (!canDragScalpelFrom(targetEl, onGrab)) return false;
+    drH = Math.max(260, dr.offsetHeight || 460);
+    var baseY = 0;
+    if (drSpring.raf) {
+      baseY = drSpring.x || 0;
+      drSpring.stop();
+    }
+    var now = performance.now();
+    ds = {
+      pid: pid,
+      y0: startY,
+      ly: startY,
+      baseY: baseY,
+      dy: baseY,
+      y: baseY,
+      vy: 0,
+      lt: now,
+      onGrab: !!onGrab,
+      drag: !!onGrab || Math.abs(baseY) > 0.5,
+      cap: false,
+      target: targetEl || null
+    };
+    if (ds.drag) {
+      dr.classList.add('is-dragging');
+      dr.style.transition = 'none';
+      if (sc) sc.style.transition = 'none';
+    }
+    return true;
+  }
+
+  function moveDrDrag(cy, ev, capId) {
+    if (!ds) return;
+    var now = performance.now(), dt = Math.max(1, now - ds.lt);
+    var instVy = (cy - ds.ly) / dt;
+    ds.vy = ds.vy * 0.32 + instVy * 0.68;
+    ds.ly = cy;
+    ds.lt = now;
+    var rawDy = ds.baseY + (cy - ds.y0);
+    if (!ds.drag) {
+      if (!ds.onGrab && (rawDy < -6 || !canDragScalpelFrom(ds.target, false))) {
+        ds = null;
+        return;
+      }
+      if (Math.abs(rawDy) < (ds.onGrab ? 4 : 6)) return;
+      if (!ds.onGrab && rawDy < 6) return;
+      ds.drag = true;
+      dr.classList.add('is-dragging');
+      dr.style.transition = 'none';
+      if (sc) sc.style.transition = 'none';
+      if (capId != null && typeof dr.setPointerCapture === 'function') {
+        try { dr.setPointerCapture(capId); ds.cap = true; } catch (_) {}
+      }
+    }
+    ds.dy = rawDy;
+    var y = dampScalpelY(rawDy);
+    ds.y = y;
+    drSpring.x = drSpring.to = y;
+    drSpring.v = 0;
+    dr.style.transform = 'translate3d(-50%,' + y.toFixed(2) + 'px,0)';
+    if (sc) {
+      if (y > 0 && motionOn()) {
+        sc.style.opacity = clamp(1 - y / Math.max(240, drH * 0.92), 0.08, 1).toFixed(3);
+      } else {
+        sc.style.opacity = y > 0 ? String(Math.max(0.15, 1 - y / 320)) : '1';
+      }
+    }
+    if (ev && ev.cancelable) ev.preventDefault();
+  }
+
+  function endDrDrag(capId) {
+    if (!ds) return;
+    if (capId !== undefined && ds.pid != null && capId !== ds.pid) return;
+    var wasDrag = ds.drag, dy = ds.dy, y = ds.y, pid = ds.pid, hadCap = ds.cap;
+    var vy = (performance.now() - ds.lt < 100) ? ds.vy : 0;
+    ds = null;
+    if (hadCap && pid != null && typeof dr.releasePointerCapture === 'function') {
+      try { if (!dr.hasPointerCapture || dr.hasPointerCapture(pid)) dr.releasePointerCapture(pid); } catch (_) {}
+    }
+    if (dr) dr.classList.remove('is-dragging');
+    if (!wasDrag) return;
+
+    var shouldClose = (vy > 0.55 && dy > 0) || dy > 88;
+    if (!motionOn()) {
+      drSpring.stop();
+      if (shouldClose && typeof closeScalpelDrawer === 'function') {
+        clearDrInline();
+        closeScalpelDrawer(false);
+      } else {
+        dr.style.transition = 'none';
+        dr.style.transform = 'translate3d(-50%,0,0)';
+        void dr.offsetWidth;
+        clearDrInline();
+      }
+      return;
+    }
+
+    var sp = typeof springP === 'function' ? springP() : { k: 340, c: 32.5 };
+    if (shouldClose && typeof closeScalpelDrawer === 'function') {
+      if (typeof haptic === 'function') haptic(6);
+      drClosing = true;
+      var outY = Math.max(280, dr.offsetHeight || drH || 460) + 48;
+      var outV = Math.max(vy * 1000, 280);
+      if (sc) { sc.style.transition = ''; sc.style.opacity = ''; }
+      dr.classList.add('is-spring');
+      dr.style.transition = 'opacity .18s ease';
+      dr.style.pointerEvents = 'none';
+      closeScalpelDrawer(false);
+      drSpring.x = y;
+      drSpring.go(outY, outV, sp);
+      if (drCleanT) clearTimeout(drCleanT);
+      drCleanT = setTimeout(function () { drSpring.stop(); clearDrInline(); }, 255);
+      return;
+    }
+
+    drClosing = false;
+    dr.classList.add('is-spring');
+    dr.style.transition = 'none';
+    if (sc) sc.style.transition = 'none';
+    drSpring.x = y;
+    drSpring.go(0, vy * 1000, sp);
+  }
+
   if (dr) {
     if (typeof MutationObserver === 'function') {
       try {
-        new MutationObserver(function () { syncModalHistory(); }).observe(dr, { attributes: true, attributeFilter: ['class', 'hidden'] });
+        new MutationObserver(function () {
+          if (dr.classList.contains('show') && drClosing) {
+            drSpring.stop();
+            clearDrInline();
+          }
+          syncModalHistory();
+        }).observe(dr, { attributes: true, attributeFilter: ['class', 'hidden'] });
       } catch (_) {}
     }
+
+    // 触屏单指手势：支持列表到顶下拉、上拉橡皮筋阻尼与主动 preventDefault 防 WebView 抢走手势
+    dr.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 1) return;
+      var te = evEl(e);
+      if (te && te.closest && te.closest('input, select, textarea, button, a, .seg, .toggle')) return;
+      var onGrab = !!(te && te.closest && te.closest('.grab, .v6-drawer-head'));
+      beginDrDrag(e.touches[0].clientY, onGrab, null, te);
+    }, { passive: true });
+    dr.addEventListener('touchmove', function (e) {
+      if (!ds || ds.pid != null || e.touches.length !== 1) return;
+      moveDrDrag(e.touches[0].clientY, e, null);
+    }, { passive: false });
+    dr.addEventListener('touchend', function () {
+      if (ds && ds.pid == null) endDrDrag(undefined);
+    });
+    dr.addEventListener('touchcancel', function () {
+      if (ds && ds.pid == null) endDrDrag(undefined);
+    });
+
+    // 桌面鼠标 / 触控笔拖拽
     dr.addEventListener('pointerdown', function (e) {
-      if (e.button != null && e.button !== 0) return;
+      if (e.pointerType === 'touch' || (e.button != null && e.button !== 0)) return;
       if (!dr.classList.contains('show')) return;
       var de = evEl(e);
-      if (de && de.closest && de.closest('input, select, textarea, button, a')) return;
-      var listEl = dr.querySelector('.v6-tuple-list');
+      if (de && de.closest && de.closest('input, select, textarea, button, a, .seg, .toggle')) return;
       var onGrab = !!(de && de.closest && de.closest('.grab, .v6-drawer-head'));
-      if (!onGrab && listEl && listEl.scrollTop > 2) return;
-      ds = { id: e.pointerId, y0: e.clientY, dy: 0, drag: false, cap: false };
-    });
-    dr.addEventListener('pointermove', function (e) {
-      if (!ds || e.pointerId !== ds.id) return;
-      var dy = e.clientY - ds.y0;
-      if (!ds.drag) {
-        if (dy < 8) return;
-        ds.drag = true;
-        if (typeof dr.setPointerCapture === 'function') {
+      if (onGrab) {
+        e.preventDefault();
+        if (beginDrDrag(e.clientY, true, e.pointerId, de) && typeof dr.setPointerCapture === 'function') {
           try { dr.setPointerCapture(e.pointerId); ds.cap = true; } catch (_) {}
         }
-        dr.style.transition = 'none';
-        if (sc) sc.style.transition = 'none';
+      } else {
+        beginDrDrag(e.clientY, false, e.pointerId, de);
       }
-      ds.dy = Math.max(0, dy);
-      dr.style.transform = 'translate3d(-50%,' + ds.dy.toFixed(1) + 'px,0)';
-      if (sc) sc.style.opacity = String(Math.max(0.15, 1 - ds.dy / 320));
     });
-    var endDrag = function (e) {
-      if (!ds || (e && e.pointerId != null && e.pointerId !== ds.id)) return;
-      var wasDrag = ds.drag, dy = ds.dy, pid = ds.id, hadCap = ds.cap;
-      ds = null;
-      if (hadCap && typeof dr.releasePointerCapture === 'function') {
-        try { if (!dr.hasPointerCapture || dr.hasPointerCapture(pid)) dr.releasePointerCapture(pid); } catch (_) {}
-      }
-      if (!wasDrag) return;
-      dr.style.transition = '';
-      dr.style.transform = '';
-      if (sc) { sc.style.transition = ''; sc.style.opacity = ''; }
-      if (dy > 68 && typeof closeScalpelDrawer === 'function') closeScalpelDrawer(false);
-    };
-    dr.addEventListener('pointerup', endDrag);
-    dr.addEventListener('pointercancel', endDrag);
-    dr.addEventListener('lostpointercapture', endDrag);
+    dr.addEventListener('pointermove', function (e) {
+      if (!ds || ds.pid == null || e.pointerId !== ds.pid) return;
+      moveDrDrag(e.clientY, e, e.pointerId);
+    });
+    dr.addEventListener('pointerup', function (e) {
+      if (ds && ds.pid != null && e.pointerId === ds.pid) endDrDrag(e.pointerId);
+    });
+    dr.addEventListener('pointercancel', function (e) {
+      if (ds && ds.pid != null && e.pointerId === ds.pid) endDrDrag(e.pointerId);
+    });
+    dr.addEventListener('lostpointercapture', function (e) {
+      if (ds && ds.pid != null && e.pointerId === ds.pid) endDrDrag(e.pointerId);
+    });
   }
   window.addEventListener('popstate', function () {
     if (_mh.inFlight) {

@@ -1030,11 +1030,34 @@ func (e *puEngine) simTopologySnapshot() (maxSlots int, present map[int]puSIM, k
 	return maxSlots, present, known
 }
 
+func puNetstatsOtherSlotActiveToday(cal *calResult, date string, curSlot, maxSlots int) bool {
+	if cal == nil || !cal.NetstatsOK || curSlot < 1 || curSlot > maxSlots {
+		return false
+	}
+	if cal.TodayDate != "" && date != "" && cal.TodayDate != date {
+		return false
+	}
+	for _, c := range cal.NetstatsCellBySim {
+		if c.Slot >= 1 && c.Slot <= maxSlots && c.Slot != curSlot && c.TodayTotal > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // puReconcileDayUnknownSIM 当日内确认了真实上网物理卡 curSIM(Slot >= 1) 时,
 // 若今日记录中存在 "0|蜂窝(未知卡)"(或任何 slot<=0 桶)且今日仅出现过 curSIM.Slot 这唯一一个有效物理卡槽,
 // 直接把今日 slot=0 字节归并进 curSIM.key() 并删除未知卡键。
 func puReconcileDayUnknownSIM(d *puDay, curSIM puSIM, maxSlots int) bool {
+	return puReconcileDayUnknownSIMWithCal(d, curSIM, maxSlots, nil)
+}
+
+func puReconcileDayUnknownSIMWithCal(d *puDay, curSIM puSIM, maxSlots int, cal *calResult) bool {
 	if d == nil || curSIM.Slot < 1 || curSIM.Slot > maxSlots {
+		return false
+	}
+	if puNetstatsOtherSlotActiveToday(cal, d.Date, curSIM.Slot, maxSlots) {
+		// Netstats 明确显示另一物理卡槽当日产生了蜂窝流量, 拒并未知桶防双卡切卡串账
 		return false
 	}
 	var unkKeys []string
@@ -1174,6 +1197,11 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 		stateBytes, stateErr = os.ReadFile(puStatePath(e.hncDir))
 	}
 
+	var calRes *calResult
+	if cal := calGet(e.hncDir); cal != nil {
+		calRes = cal.result()
+	}
+
 	e.mu.Lock()
 	e.lastTick = now
 	e.lastErr = ""
@@ -1243,7 +1271,7 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 	date := now.Format("20060102")
 	if cell == ([2]uint64{}) && wifi == ([2]uint64{}) && hsClient == ([2]uint64{}) {
 		if e.day != nil && e.day.Date == date && e.sim.Slot >= 1 {
-			if puReconcileDayUnknownSIM(e.day, e.sim, maxSlots) {
+			if puReconcileDayUnknownSIMWithCal(e.day, e.sim, maxSlots, calRes) {
 				e.dirty = true
 			}
 		}
@@ -1295,7 +1323,7 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 		d.LocalSIM[key] = lv
 	}
 	if e.sim.Slot >= 1 && e.sim.Slot <= maxSlots {
-		_ = puReconcileDayUnknownSIM(d, e.sim, maxSlots)
+		_ = puReconcileDayUnknownSIMWithCal(d, e.sim, maxSlots, calRes)
 	}
 	puAdd2(&d.Wifi, wifi)
 	puAdd2(&d.Hotspot, hsClient)

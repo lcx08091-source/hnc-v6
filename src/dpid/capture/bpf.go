@@ -303,7 +303,7 @@ func buildFilter(l2 uint32, snaplen uint32) ([]syscall.SockFilter, error) {
 
 	// ── Returns ────────────────────────────────────────────────────────
 	addInsn(LBL_ACCEPT, ret|k, "", "", snaplen)
-	addInsn(LBL_ACCEPT_QUIC, ret|k, "", "", max(snaplen, quicSnaplen))
+	addInsn(LBL_ACCEPT_QUIC, ret|k, "", "", max(snaplen, quicSnaplen)) // quicSnaplen=4096 (GRO/PQ Initial)
 	addInsn(LBL_ACCEPT_BIG, ret|k, "", "", max(snaplen, tlsSnaplen))
 	addInsn(LBL_DROP, ret|k, "", "", 0)
 

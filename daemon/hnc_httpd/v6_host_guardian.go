@@ -218,6 +218,7 @@ type guardianHostEngine struct {
 	pkgListMtimeUnix int64
 	pkgListSize      int64
 	uidToPkg         map[int]string
+	pkgToUID         map[string]int
 	sysUIDs          map[int]bool
 	labelResolver    *appmeta.Resolver
 	liveLabelCache   map[string]string
@@ -263,6 +264,7 @@ func newGuardianHostEngine(s *server) *guardianHostEngine {
 		liveRates:     make(map[int]guardianUIDRate),
 		bootHighWater: make(map[string]map[int]guardianUIDSplitBytes),
 		uidToPkg:      make(map[int]string),
+		pkgToUID:      make(map[string]int),
 		sysUIDs:       make(map[int]bool),
 		labelResolver: appmeta.NewResolver(overridePath),
 	}
@@ -463,8 +465,9 @@ var guardianBuiltinVPNConduitPkgs = map[string]bool{
 	"com.adguard.android":                  true,
 }
 
-func guardianParsePackagesListBytes(data []byte) (map[int]string, map[int]bool) {
+func guardianParsePackagesListBytes(data []byte) (map[int]string, map[string]int, map[int]bool) {
 	uidToPkg := make(map[int]string, 512)
+	pkgToUID := make(map[string]int, 512)
 	sysUIDs := make(map[int]bool, 256)
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	for sc.Scan() {
@@ -483,6 +486,9 @@ func guardianParsePackagesListBytes(data []byte) (map[int]string, map[int]bool) 
 		}
 		if prev, exists := uidToPkg[uid]; !exists || len(pkg) < len(prev) {
 			uidToPkg[uid] = pkg
+		}
+		if prevU, exists := pkgToUID[pkg]; !exists || uid < prevU {
+			pkgToUID[pkg] = uid
 		}
 		isSys := guardianIsSystemAppID(uid)
 		if !isSys && len(fields) >= 5 {
@@ -504,7 +510,7 @@ func guardianParsePackagesListBytes(data []byte) (map[int]string, map[int]bool) 
 			sysUIDs[uid] = true
 		}
 	}
-	return uidToPkg, sysUIDs
+	return uidToPkg, pkgToUID, sysUIDs
 }
 
 func (e *guardianHostEngine) refreshPkgCatalogIfNeeded() {
@@ -556,9 +562,10 @@ func (e *guardianHostEngine) refreshPkgCatalogIfNeeded() {
 
 	if stSize > 0 && stSize <= 16<<20 && (stMtime != e.pkgListMtimeUnix || stSize != e.pkgListSize || len(e.uidToPkg) == 0) {
 		if raw, err := os.ReadFile(pPath); err == nil {
-			uMap, sMap := guardianParsePackagesListBytes(raw)
+			uMap, pMap, sMap := guardianParsePackagesListBytes(raw)
 			if len(uMap) > 0 {
 				e.uidToPkg = uMap
+				e.pkgToUID = pMap
 				e.sysUIDs = sMap
 				e.pkgListMtimeUnix = stMtime
 				e.pkgListSize = stSize
@@ -587,11 +594,21 @@ func (e *guardianHostEngine) isVPNConduitUID(uid int) bool {
 	}
 	e.refreshPkgCatalogIfNeeded()
 
+	userProfile := uid / 100000
 	baseUID := uid % 100000
 	e.pkgMu.RLock()
 	pkg := e.uidToPkg[uid]
-	if pkg == "" && uid >= 100000 {
+	if pkg == "" && userProfile > 0 {
 		pkg = e.uidToPkg[baseUID]
+	}
+	if pkg == "" && baseUID >= 20000 && baseUID <= 29999 {
+		hostBase := baseUID - 10000
+		if userProfile > 0 {
+			pkg = e.uidToPkg[userProfile*100000+hostBase]
+		}
+		if pkg == "" {
+			pkg = e.uidToPkg[hostBase]
+		}
 	}
 	userEx := e.vpnExcludeUser
 	e.pkgMu.RUnlock()
@@ -683,6 +700,23 @@ func (e *guardianHostEngine) resolveAppMeta(uid int) guardianAppMeta {
 		pkg = e.uidToPkg[baseUID]
 		if e.sysUIDs[baseUID] {
 			isSys = true
+		}
+	}
+	// Android 13+ SDK 沙盒 (appId 20000..29999) 减 10000 反查同用户或主用户宿主应用包名
+	if pkg == "" && baseUID >= 20000 && baseUID <= 29999 {
+		hostBaseUID := baseUID - 10000
+		if userProfile > 0 {
+			hostUserUID := userProfile*100000 + hostBaseUID
+			pkg = e.uidToPkg[hostUserUID]
+			if e.sysUIDs[hostUserUID] {
+				isSys = true
+			}
+		}
+		if pkg == "" {
+			pkg = e.uidToPkg[hostBaseUID]
+			if e.sysUIDs[hostBaseUID] {
+				isSys = true
+			}
 		}
 	}
 	var liveName string
@@ -783,7 +817,7 @@ func guardianParseProcHexAddrPort(token string, ipv6 bool) (netip.Addr, int, boo
 
 func guardianIsTCPOrphanCloseState(stHex string) bool {
 	switch strings.ToUpper(stHex) {
-	case "04", "05", "06", "07", "0B", "0C":
+	case "04", "05", "06", "07", "09", "0B", "0C":
 		return true
 	}
 	return false
@@ -1463,7 +1497,26 @@ func guardianSelectBPFCountsByNet(det bytestats.NetdUIDDetail, netFilter string)
 	}
 }
 
+func guardianIsVPNIdent(id nsIdent) bool {
+	return id.Type == "VPN" || strings.HasPrefix(id.Type, "TYPE_VPN")
+}
+
+func guardianHasVPNIdent(k *nsKey) bool {
+	if k == nil {
+		return false
+	}
+	for _, id := range k.Idents {
+		if guardianIsVPNIdent(id) {
+			return true
+		}
+	}
+	return false
+}
+
 func guardianMatchNetType(id nsIdent, netFilter string) bool {
+	if guardianIsVPNIdent(id) {
+		return false
+	}
 	switch netFilter {
 	case "mobile":
 		return id.Type == "MOBILE"
@@ -1502,7 +1555,7 @@ func guardianAggregateNetstatsSplits(
 	}
 
 	for _, k := range entry.dump.Keys {
-		if k.Section != "uid" || k.UID < 0 || !nsCountable(k) {
+		if k.Section != "uid" || k.UID < 0 || !nsCountable(k) || guardianHasVPNIdent(k) {
 			continue
 		}
 		if !guardianMatchNetType(k.Primary(), netFilter) {
@@ -1937,14 +1990,16 @@ func (s *server) apiLocalAppsTraffic(w http.ResponseWriter, r *http.Request) {
 		fgTotal := sp.fgRx + sp.fgTx
 		totBytes := bgTotal + fgTotal
 
+		isConduit := e.isVPNConduitUID(uid)
+
 		// period=boot & net=all 时, map_netd_app_uid_stats_map 是自开机单调递增总真值:
-		// 若 bgSplitAvail 为 false, 直接采用真实 BPF 总字节且不伪造前后台拆分。
+		// 若 bgSplitAvail 为 false, 直接采用真实 BPF 总字节且不伪造前后台拆分(汇总累加时剔除 isVPNConduitUID 防双计)。
 		if period == "boot" && netFilter == "all" && bpfSnap != nil {
 			if det, ok := bpfSnap.ByUID[uid]; ok {
 				bpfTot := det.Total.RxBytes + det.Total.TxBytes
 				if !bgSplitAvail {
 					totBytes = bpfTot
-				} else if bpfTot > totBytes && !bpfSnap.HasStatsAB {
+				} else if bpfTot > totBytes && !bpfSnap.HasStatsAB && !vpnActive && !isConduit {
 					// 当内核无 stats_map_A/B 导致未归档差额未知时, 总量对齐单调 BPF 真值
 					totBytes = bpfTot
 				}
@@ -2011,13 +2066,15 @@ func (s *server) apiLocalAppsTraffic(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, row)
 
-		if !(vpnActive && e.isVPNConduitUID(uid)) {
+		if !(vpnActive && isConduit) {
 			sumRxBps += row.RxBps
 			sumTxBps += row.TxBps
 		}
-		sumTotalBytes += row.TotalBytes
-		sumBgBytes += row.BgTotalBytes
-		sumFgBytes += row.FgTotalBytes
+		if !((vpnActive || !bgSplitAvail) && isConduit) {
+			sumTotalBytes += row.TotalBytes
+			sumBgBytes += row.BgTotalBytes
+			sumFgBytes += row.FgTotalBytes
+		}
 		if row.ActiveConns > 0 {
 			activeConnApps++
 		}
@@ -2187,6 +2244,7 @@ type guardianUIDPowerAccum struct {
 
 	pendingAlarmName string
 	pendingJobName   string
+	procHostPkg      string
 }
 
 type guardianParsedBatteryStats struct {
@@ -2207,7 +2265,9 @@ var guardianBatteryScanBufPool = sync.Pool{
 }
 
 // guardianParseBatteryUID parses Android batterystats UID tokens:
-// "0" -> 0, "1000" -> 1000, "u0a245" -> 10245, "u10a245" -> 1010245, "u0s1000" -> 1000.
+// "0" -> 0, "1000" -> 1000, "u0a245" -> 10245, "u10a245" -> 1010245, "u0s1000" -> 1000,
+// "u0sdk20245" / "u0sdk245" / "u0a245s" -> 10245 (SDK sandbox mapped -10000 to host app),
+// "u0i12" -> 99012, "u0ai5" -> 90005 (isolated processes).
 func guardianParseBatteryUID(tok string) (int, bool) {
 	tok = strings.TrimSpace(strings.TrimSuffix(tok, ":"))
 	if tok == "" {
@@ -2222,6 +2282,9 @@ func guardianParseBatteryUID(tok string) (int, bool) {
 		v, err := strconv.Atoi(tok)
 		if err != nil || v < 0 || v > 100_000_000 {
 			return 0, false
+		}
+		if appID := v % 100000; appID >= 20000 && appID <= 29999 {
+			return v - 10000, true
 		}
 		return v, true
 	}
@@ -2239,8 +2302,23 @@ func guardianParseBatteryUID(tok string) (int, bool) {
 	if err != nil || userID < 0 || userID > 9999 {
 		return 0, false
 	}
-	kind := tok[i]
-	rest := tok[i+1:]
+	tail := tok[i:]
+	kindTag := ""
+	rest := ""
+	switch {
+	case strings.HasPrefix(tail, "sdk"):
+		kindTag = "sdk"
+		rest = tail[3:]
+	case strings.HasPrefix(tail, "ai"):
+		kindTag = "ai"
+		rest = tail[2:]
+	case len(tail) >= 2 && tail[0] == 'a' && tail[len(tail)-1] == 's':
+		kindTag = "as"
+		rest = tail[1 : len(tail)-1]
+	default:
+		kindTag = tail[:1]
+		rest = tail[1:]
+	}
 	if rest == "" {
 		return 0, false
 	}
@@ -2250,16 +2328,43 @@ func guardianParseBatteryUID(tok string) (int, bool) {
 		}
 	}
 	idNum, err := strconv.Atoi(rest)
-	if err != nil || idNum < 0 {
+	if err != nil || idNum < 0 || idNum >= 100000 {
 		return 0, false
 	}
-	switch kind {
-	case 'a':
+	switch kindTag {
+	case "a", "as":
+		if idNum >= 10000 {
+			return 0, false
+		}
 		return userID*100000 + 10000 + idNum, true
-	case 's':
+	case "sdk":
+		switch {
+		case idNum >= 20000 && idNum <= 29999:
+			return userID*100000 + (idNum - 10000), true
+		case idNum >= 10000 && idNum < 20000:
+			return userID*100000 + idNum, true
+		case idNum < 10000:
+			return userID*100000 + 10000 + idNum, true
+		default:
+			return 0, false
+		}
+	case "s":
 		return userID*100000 + idNum, true
-	case 'i':
-		// Isolated process UID (99000+): ignore standalone isolated pseudo-UIDs unless needed.
+	case "ai":
+		if idNum >= 90000 && idNum < 99000 {
+			return userID*100000 + idNum, true
+		}
+		if idNum < 9000 {
+			return userID*100000 + 90000 + idNum, true
+		}
+		return 0, false
+	case "i":
+		if idNum >= 90000 && idNum < 100000 {
+			return userID*100000 + idNum, true
+		}
+		if idNum < 10000 {
+			return userID*100000 + 99000 + idNum, true
+		}
 		return 0, false
 	default:
 		return 0, false
@@ -2493,13 +2598,13 @@ func guardianParsePowerUIDLine(trimmed string, screenOffTable bool, parsed *guar
 	acc.hasPowerRow = true
 
 	if screenOffTable {
-		acc.screenOffMah = guardianRound2(totalVal)
+		acc.screenOffMah = guardianRound2(acc.screenOffMah + totalVal)
 		acc.hasScreenOffMah = true
 		parsed.AnyScreenOffUIDPower = true
 		return
 	}
 
-	acc.totalMah = guardianRound2(totalVal)
+	acc.totalMah = guardianRound2(acc.totalMah + totalVal)
 
 	headPart := afterUID
 	var parenPart string
@@ -2526,16 +2631,16 @@ func guardianParsePowerUIDLine(trimmed string, screenOffTable bool, parsed *guar
 		}
 		switch strings.ToLower(strings.TrimSuffix(tok, ":")) {
 		case "fg":
-			acc.fgMah = guardianRound2(val)
+			acc.fgMah = guardianRound2(acc.fgMah + val)
 			sawStateSplit = true
 		case "bg":
-			acc.bgMah = guardianRound2(val)
+			acc.bgMah = guardianRound2(acc.bgMah + val)
 			sawStateSplit = true
 		case "fgs":
-			acc.fgsMah = guardianRound2(val)
+			acc.fgsMah = guardianRound2(acc.fgsMah + val)
 			sawStateSplit = true
 		case "cached":
-			acc.cachedMah = guardianRound2(val)
+			acc.cachedMah = guardianRound2(acc.cachedMah + val)
 			sawStateSplit = true
 		}
 		i++
@@ -2556,7 +2661,7 @@ func guardianParsePowerUIDLine(trimmed string, screenOffTable bool, parsed *guar
 				if acc.bgComponents == nil {
 					acc.bgComponents = make(map[string]float64, 4)
 				}
-				acc.bgComponents[comp] = guardianRound2(fv)
+				acc.bgComponents[comp] = guardianRound2(acc.bgComponents[comp] + fv)
 				sawStateSplit = true
 			}
 		}
@@ -2569,6 +2674,26 @@ func guardianParsePowerUIDLine(trimmed string, screenOffTable bool, parsed *guar
 		acc.hasLegacySipper = true
 		parsed.AnyLegacySipperPower = true
 	}
+}
+
+func guardianExtractProcHostPkg(trimmed string) string {
+	// Matches "Proc <pkg>:<subproc>:" or "Proc <pkg>:"
+	after := strings.TrimSpace(strings.TrimPrefix(trimmed, "Proc "))
+	colonIdx := strings.IndexByte(after, ':')
+	if colonIdx <= 0 {
+		return ""
+	}
+	cand := strings.TrimSpace(after[:colonIdx])
+	if !strings.Contains(cand, ".") || cand[0] == '.' || cand[len(cand)-1] == '.' {
+		return ""
+	}
+	for i := 0; i < len(cand); i++ {
+		c := cand[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.') {
+			return ""
+		}
+	}
+	return cand
 }
 
 func guardianParseUIDDetailLine(acc *guardianUIDPowerAccum, indent int, trimmed string) {
@@ -2599,6 +2724,13 @@ func guardianParseUIDDetailLine(acc *guardianUIDPowerAccum, indent int, trimmed 
 	}
 
 	switch {
+	case strings.HasPrefix(trimmed, "Proc "):
+		if acc.procHostPkg == "" {
+			if pkg := guardianExtractProcHostPkg(trimmed); pkg != "" {
+				acc.procHostPkg = pkg
+			}
+		}
+
 	case strings.HasPrefix(trimmed, "Wake lock "):
 		// Example:
 		// Wake lock *alarm*: 3m 12s 400ms partial (45 times) max=12000 actual=192400 background: 3m 00s 100ms (42 times) realtime
@@ -2633,7 +2765,7 @@ func guardianParseUIDDetailLine(acc *guardianUIDPowerAccum, indent int, trimmed 
 		if strings.Contains(trimmed, "partial") {
 			_, after, _ := strings.Cut(trimmed, ":")
 			if ms := guardianParseBatteryDurationMs(after); ms > 0 {
-				acc.totalWakeLineMs = ms
+				acc.totalWakeLineMs += ms
 			}
 			if bgIdx := strings.Index(after, "background:"); bgIdx >= 0 {
 				bgMs := guardianParseBatteryDurationMs(strings.TrimSpace(after[bgIdx+len("background:"):]))
@@ -2646,20 +2778,20 @@ func guardianParseUIDDetailLine(acc *guardianUIDPowerAccum, indent int, trimmed 
 	case strings.Contains(trimmed, "Mobile radio active:"):
 		idx := strings.Index(trimmed, "Mobile radio active:")
 		after := strings.TrimSpace(trimmed[idx+len("Mobile radio active:"):])
-		acc.radioActiveMs = guardianParseBatteryDurationMs(after)
-		acc.radioWakeups = guardianExtractParensCount(after)
+		acc.radioActiveMs += guardianParseBatteryDurationMs(after)
+		acc.radioWakeups += guardianExtractParensCount(after)
 
 	case strings.HasPrefix(trimmed, "Wifi Running:"):
 		after := strings.TrimSpace(strings.TrimPrefix(trimmed, "Wifi Running:"))
-		acc.wifiRunningMs = guardianParseBatteryDurationMs(after)
+		acc.wifiRunningMs += guardianParseBatteryDurationMs(after)
 
 	case strings.HasPrefix(trimmed, "Wifi Scan:"):
 		after := strings.TrimSpace(strings.TrimPrefix(trimmed, "Wifi Scan:"))
 		if bgIdx := strings.Index(after, "background:"); bgIdx >= 0 {
 			bgPart := strings.TrimSpace(after[bgIdx+len("background:"):])
-			acc.wifiBgScans = guardianExtractParensCount(bgPart)
+			acc.wifiBgScans += guardianExtractParensCount(bgPart)
 		} else {
-			acc.wifiBgScans = guardianExtractParensCount(after)
+			acc.wifiBgScans += guardianExtractParensCount(after)
 		}
 
 	case strings.HasPrefix(trimmed, "Total cpu time:"):
@@ -2676,7 +2808,7 @@ func guardianParseUIDDetailLine(acc *guardianUIDPowerAccum, indent int, trimmed 
 			}
 		}
 		if uMs+sMs > 0 {
-			acc.uidCPUTotalMs = uMs + sMs
+			acc.uidCPUTotalMs += uMs + sMs
 		}
 
 	case strings.HasPrefix(trimmed, "CPU:"):
@@ -2705,10 +2837,10 @@ func guardianParseUIDDetailLine(acc *guardianUIDPowerAccum, indent int, trimmed 
 			}
 		} else {
 			if tot > 0 {
-				acc.uidCPUTotalMs = tot
+				acc.uidCPUTotalMs += tot
 			}
 			if hasFg {
-				acc.uidCPUFgMs = fgMs
+				acc.uidCPUFgMs += fgMs
 				acc.hasUIDCPUFg = true
 			}
 		}
@@ -3192,106 +3324,7 @@ func (s *server) apiLocalAppsPower(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows := make([]LocalAppPowerRow, 0, len(parsed.ByUID))
-	for uid, acc := range parsed.ByUID {
-		if uid < 0 || uid > 100_000_000 {
-			continue
-		}
-		meta := e.resolveAppMeta(uid)
-		if !includeSystem && meta.IsSystem {
-			continue
-		}
-
-		wlMs := acc.sumWakelockMs
-		if acc.totalWakeLineMs > 0 {
-			wlMs = acc.totalWakeLineMs
-		}
-		wlBgMs := acc.wakelockBgMs
-		if wlBgMs > wlMs {
-			wlBgMs = wlMs
-		}
-
-		cpuTotal := acc.uidCPUTotalMs
-		if cpuTotal <= 0 {
-			cpuTotal = acc.procCPUTotalMs
-		}
-		var cpuFg, cpuBg int64
-		if acc.hasUIDCPUFg {
-			cpuFg = acc.uidCPUFgMs
-			if cpuTotal >= cpuFg {
-				cpuBg = cpuTotal - cpuFg
-			}
-		} else if acc.hasProcCPUFg {
-			cpuFg = acc.procCPUFgMs
-			if cpuTotal >= cpuFg {
-				cpuBg = cpuTotal - cpuFg
-			}
-		}
-
-		alarmsCnt := acc.apkWakeupsSum
-		if acc.alarmItemsSum > alarmsCnt {
-			alarmsCnt = acc.alarmItemsSum
-		}
-
-		// Filter completely idle UID entries
-		if acc.totalMah <= 0 && acc.screenOffMah <= 0 && wlMs <= 0 &&
-			acc.radioActiveMs <= 0 && cpuTotal <= 0 && alarmsCnt <= 0 && acc.bgJobsMs <= 0 {
-			continue
-		}
-
-		rowBgAvail := acc.hasMultiStateBg
-		rowBgReason := ""
-		var rowBgMah float64
-		if rowBgAvail {
-			rowBgMah = acc.bgMah
-		} else if acc.hasLegacySipper {
-			// 严禁使用 CPU / Wakelock 时长比例伪造假毫安时!
-			rowBgMah = 0
-			rowBgReason = "rom_uid_power_no_bg_split"
-		} else if !globalBgMahAvail {
-			rowBgReason = globalBgMahReason
-		}
-
-		topWL := acc.topWakelocks
-		if topWL == nil {
-			topWL = []LocalAppWakelockItem{}
-		}
-		topAL := acc.topAlarms
-		if topAL == nil {
-			topAL = []LocalAppAlarmItem{}
-		}
-
-		rows = append(rows, LocalAppPowerRow{
-			UID:                    uid,
-			Package:                meta.Package,
-			AppName:                meta.AppName,
-			IsSystem:               meta.IsSystem,
-			TotalMah:               acc.totalMah,
-			FgMah:                  acc.fgMah,
-			BgMah:                  rowBgMah,
-			FgsMah:                 acc.fgsMah,
-			CachedMah:              acc.cachedMah,
-			ScreenOffMah:           acc.screenOffMah,
-			BgMahAvailable:         rowBgAvail,
-			BgMahReason:            rowBgReason,
-			BgComponentsMah:        acc.bgComponents,
-			WakelockPartialMs:      wlMs,
-			WakelockBgMs:           wlBgMs,
-			WakelockCount:          acc.wakelockCount,
-			TopWakelocks:           topWL,
-			MobileRadioActiveMs:    acc.radioActiveMs,
-			MobileRadioWakeupCount: acc.radioWakeups,
-			WifiRunningMs:          acc.wifiRunningMs,
-			WifiBgScanCount:        acc.wifiBgScans,
-			CPUTotalMs:             cpuTotal,
-			CPUFgMs:                cpuFg,
-			CPUBgMs:                cpuBg,
-			WakeupAlarmsCount:      alarmsCnt,
-			TopWakeupAlarms:        topAL,
-			BgJobsMs:               acc.bgJobsMs,
-			BgJobsCount:            acc.bgJobsCount,
-		})
-	}
+	rows := e.buildConsolidatedPowerRows(parsed, includeSystem, globalBgMahAvail, globalBgMahReason)
 
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
@@ -3364,6 +3397,361 @@ func (s *server) apiLocalAppsPower(w http.ResponseWriter, r *http.Request) {
 		resp["bg_mah_reason"] = globalBgMahReason
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func guardianClonePowerAccum(src *guardianUIDPowerAccum, targetUID int) *guardianUIDPowerAccum {
+	if src == nil {
+		return &guardianUIDPowerAccum{uid: targetUID}
+	}
+	cp := *src
+	cp.uid = targetUID
+	if src.bgComponents != nil {
+		cp.bgComponents = make(map[string]float64, len(src.bgComponents))
+		for k, v := range src.bgComponents {
+			cp.bgComponents[k] = v
+		}
+	}
+	if len(src.topWakelocks) > 0 {
+		cp.topWakelocks = append([]LocalAppWakelockItem(nil), src.topWakelocks...)
+	}
+	if len(src.topAlarms) > 0 {
+		cp.topAlarms = append([]LocalAppAlarmItem(nil), src.topAlarms...)
+	}
+	return &cp
+}
+
+func guardianEffectiveWakeMs(a *guardianUIDPowerAccum) int64 {
+	if a.totalWakeLineMs > 0 {
+		return a.totalWakeLineMs
+	}
+	return a.sumWakelockMs
+}
+
+func guardianEffectiveCPUTotalMs(a *guardianUIDPowerAccum) int64 {
+	if a.uidCPUTotalMs > 0 {
+		return a.uidCPUTotalMs
+	}
+	return a.procCPUTotalMs
+}
+
+func guardianMergePowerAccum(dst, src *guardianUIDPowerAccum) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.hasPowerRow = dst.hasPowerRow || src.hasPowerRow
+	dst.hasMultiStateBg = dst.hasMultiStateBg || src.hasMultiStateBg
+	dst.hasLegacySipper = dst.hasLegacySipper || src.hasLegacySipper
+	dst.totalMah = guardianRound2(dst.totalMah + src.totalMah)
+	dst.fgMah = guardianRound2(dst.fgMah + src.fgMah)
+	dst.bgMah = guardianRound2(dst.bgMah + src.bgMah)
+	dst.fgsMah = guardianRound2(dst.fgsMah + src.fgsMah)
+	dst.cachedMah = guardianRound2(dst.cachedMah + src.cachedMah)
+	dst.screenOffMah = guardianRound2(dst.screenOffMah + src.screenOffMah)
+	dst.hasScreenOffMah = dst.hasScreenOffMah || src.hasScreenOffMah
+	for k, v := range src.bgComponents {
+		if dst.bgComponents == nil {
+			dst.bgComponents = make(map[string]float64, len(src.bgComponents))
+		}
+		dst.bgComponents[k] = guardianRound2(dst.bgComponents[k] + v)
+	}
+
+	if dst.totalWakeLineMs > 0 || src.totalWakeLineMs > 0 {
+		dst.totalWakeLineMs = guardianEffectiveWakeMs(dst) + guardianEffectiveWakeMs(src)
+	}
+	dst.sumWakelockMs += src.sumWakelockMs
+	dst.wakelockBgMs += src.wakelockBgMs
+	dst.wakelockCount += src.wakelockCount
+	for _, wl := range src.topWakelocks {
+		dst.topWakelocks = guardianPushTopWakelock(dst.topWakelocks, wl)
+	}
+
+	dst.radioActiveMs += src.radioActiveMs
+	dst.radioWakeups += src.radioWakeups
+	dst.wifiRunningMs += src.wifiRunningMs
+	dst.wifiBgScans += src.wifiBgScans
+
+	if dst.uidCPUTotalMs > 0 || src.uidCPUTotalMs > 0 {
+		dst.uidCPUTotalMs = guardianEffectiveCPUTotalMs(dst) + guardianEffectiveCPUTotalMs(src)
+	}
+	dst.procCPUTotalMs += src.procCPUTotalMs
+	if dst.hasUIDCPUFg || src.hasUIDCPUFg {
+		var dfg, sfg int64
+		if dst.hasUIDCPUFg {
+			dfg = dst.uidCPUFgMs
+		} else if dst.hasProcCPUFg {
+			dfg = dst.procCPUFgMs
+		}
+		if src.hasUIDCPUFg {
+			sfg = src.uidCPUFgMs
+		} else if src.hasProcCPUFg {
+			sfg = src.procCPUFgMs
+		}
+		dst.uidCPUFgMs = dfg + sfg
+		dst.hasUIDCPUFg = true
+	} else if src.hasProcCPUFg {
+		dst.procCPUFgMs += src.procCPUFgMs
+		dst.hasProcCPUFg = true
+	}
+
+	dst.apkWakeupsSum += src.apkWakeupsSum
+	dst.alarmItemsSum += src.alarmItemsSum
+	for _, al := range src.topAlarms {
+		dst.topAlarms = guardianPushTopAlarm(dst.topAlarms, al)
+	}
+	dst.bgJobsMs += src.bgJobsMs
+	dst.bgJobsCount += src.bgJobsCount
+}
+
+func (e *guardianHostEngine) lookupPkgUID(pkg string, userProfile int) (int, bool) {
+	if pkg == "" {
+		return 0, false
+	}
+	e.refreshPkgCatalogIfNeeded()
+	e.pkgMu.RLock()
+	baseU, ok := e.pkgToUID[pkg]
+	e.pkgMu.RUnlock()
+	if !ok {
+		return 0, false
+	}
+	if userProfile > 0 && baseU < 100000 {
+		return userProfile*100000 + baseU, true
+	}
+	return baseU, true
+}
+
+func (e *guardianHostEngine) resolveMetaForExplicitPkg(pkg string, userProfile int) guardianAppMeta {
+	e.refreshPkgCatalogIfNeeded()
+	e.pkgMu.RLock()
+	var liveName string
+	if e.liveLabelCache != nil {
+		liveName = e.liveLabelCache[pkg]
+	}
+	resolver := e.labelResolver
+	e.pkgMu.RUnlock()
+
+	appName := liveName
+	if appName == "" && resolver != nil {
+		appName = resolver.Display(pkg)
+	}
+	if appName == "" {
+		low := strings.ToLower(pkg)
+		if strings.Contains(low, "webview") {
+			appName = "Android System WebView"
+		} else {
+			appName = pkg
+		}
+	}
+	if userProfile > 0 && !strings.Contains(appName, "分身") && !strings.Contains(appName, "用户") {
+		if userProfile == 999 {
+			appName += " (应用分身)"
+		} else {
+			appName = fmt.Sprintf("%s (用户%d)", appName, userProfile)
+		}
+	}
+	lowPkg := strings.ToLower(pkg)
+	isSys := lowPkg == "android" ||
+		strings.HasPrefix(lowPkg, "com.android.") ||
+		strings.HasPrefix(lowPkg, "com.google.android.webview") ||
+		strings.HasPrefix(lowPkg, "com.google.android.trichromelibrary")
+	return guardianAppMeta{
+		Package:  pkg,
+		AppName:  appName,
+		IsSystem: isSys,
+	}
+}
+
+func guardianBuildPowerRowFromAccum(uid int, meta guardianAppMeta, acc *guardianUIDPowerAccum, globalBgMahAvail bool, globalBgMahReason string) (LocalAppPowerRow, bool) {
+	wlMs := acc.sumWakelockMs
+	if acc.totalWakeLineMs > 0 {
+		wlMs = acc.totalWakeLineMs
+	}
+	wlBgMs := acc.wakelockBgMs
+	if wlBgMs > wlMs {
+		wlBgMs = wlMs
+	}
+
+	cpuTotal := acc.uidCPUTotalMs
+	if cpuTotal <= 0 {
+		cpuTotal = acc.procCPUTotalMs
+	}
+	var cpuFg, cpuBg int64
+	if acc.hasUIDCPUFg {
+		cpuFg = acc.uidCPUFgMs
+		if cpuTotal >= cpuFg {
+			cpuBg = cpuTotal - cpuFg
+		}
+	} else if acc.hasProcCPUFg {
+		cpuFg = acc.procCPUFgMs
+		if cpuTotal >= cpuFg {
+			cpuBg = cpuTotal - cpuFg
+		}
+	}
+
+	alarmsCnt := acc.apkWakeupsSum
+	if acc.alarmItemsSum > alarmsCnt {
+		alarmsCnt = acc.alarmItemsSum
+	}
+
+	if acc.totalMah <= 0 && acc.screenOffMah <= 0 && wlMs <= 0 &&
+		acc.radioActiveMs <= 0 && cpuTotal <= 0 && alarmsCnt <= 0 && acc.bgJobsMs <= 0 {
+		return LocalAppPowerRow{}, false
+	}
+
+	rowBgAvail := acc.hasMultiStateBg
+	rowBgReason := ""
+	var rowBgMah float64
+	if rowBgAvail {
+		rowBgMah = acc.bgMah
+	} else if acc.hasLegacySipper {
+		// 严禁使用 CPU / Wakelock 时长比例伪造假毫安时!
+		rowBgMah = 0
+		rowBgReason = "rom_uid_power_no_bg_split"
+	} else if !globalBgMahAvail {
+		rowBgReason = globalBgMahReason
+	}
+
+	topWL := acc.topWakelocks
+	if topWL == nil {
+		topWL = []LocalAppWakelockItem{}
+	}
+	topAL := acc.topAlarms
+	if topAL == nil {
+		topAL = []LocalAppAlarmItem{}
+	}
+
+	return LocalAppPowerRow{
+		UID:                    uid,
+		Package:                meta.Package,
+		AppName:                meta.AppName,
+		IsSystem:               meta.IsSystem,
+		TotalMah:               acc.totalMah,
+		FgMah:                  acc.fgMah,
+		BgMah:                  rowBgMah,
+		FgsMah:                 acc.fgsMah,
+		CachedMah:              acc.cachedMah,
+		ScreenOffMah:           acc.screenOffMah,
+		BgMahAvailable:         rowBgAvail,
+		BgMahReason:            rowBgReason,
+		BgComponentsMah:        acc.bgComponents,
+		WakelockPartialMs:      wlMs,
+		WakelockBgMs:           wlBgMs,
+		WakelockCount:          acc.wakelockCount,
+		TopWakelocks:           topWL,
+		MobileRadioActiveMs:    acc.radioActiveMs,
+		MobileRadioWakeupCount: acc.radioWakeups,
+		WifiRunningMs:          acc.wifiRunningMs,
+		WifiBgScanCount:        acc.wifiBgScans,
+		CPUTotalMs:             cpuTotal,
+		CPUFgMs:                cpuFg,
+		CPUBgMs:                cpuBg,
+		WakeupAlarmsCount:      alarmsCnt,
+		TopWakeupAlarms:        topAL,
+		BgJobsMs:               acc.bgJobsMs,
+		BgJobsCount:            acc.bgJobsCount,
+	}, true
+}
+
+func (e *guardianHostEngine) buildConsolidatedPowerRows(
+	parsed *guardianParsedBatteryStats,
+	includeSystem bool,
+	globalBgMahAvail bool,
+	globalBgMahReason string,
+) []LocalAppPowerRow {
+	if parsed == nil || len(parsed.ByUID) == 0 {
+		return []LocalAppPowerRow{}
+	}
+	mergedByUID := make(map[int]*guardianUIDPowerAccum, len(parsed.ByUID))
+	type pkgProfileKey struct {
+		pkg     string
+		profile int
+	}
+	unmappedPkgAcc := make(map[pkgProfileKey]*guardianUIDPowerAccum)
+	unmappedPkgUID := make(map[pkgProfileKey]int)
+	var orphanIsolatedAcc *guardianUIDPowerAccum
+
+	addToUID := func(targetUID int, src *guardianUIDPowerAccum) {
+		if dst, exists := mergedByUID[targetUID]; exists {
+			guardianMergePowerAccum(dst, src)
+		} else {
+			mergedByUID[targetUID] = guardianClonePowerAccum(src, targetUID)
+		}
+	}
+
+	uids := make([]int, 0, len(parsed.ByUID))
+	for uid := range parsed.ByUID {
+		uids = append(uids, uid)
+	}
+	sort.Ints(uids)
+
+	for _, uid := range uids {
+		if uid < 0 || uid > 100_000_000 {
+			continue
+		}
+		acc := parsed.ByUID[uid]
+		if acc == nil {
+			continue
+		}
+		userProfile := uid / 100000
+		appID := uid % 100000
+		if appID >= 20000 && appID <= 29999 {
+			addToUID(uid-10000, acc)
+			continue
+		}
+		if appID >= 90000 {
+			if acc.procHostPkg != "" {
+				if hostUID, ok := e.lookupPkgUID(acc.procHostPkg, userProfile); ok {
+					addToUID(hostUID, acc)
+				} else {
+					pk := pkgProfileKey{pkg: acc.procHostPkg, profile: userProfile}
+					if dst, exists := unmappedPkgAcc[pk]; exists {
+						guardianMergePowerAccum(dst, acc)
+					} else {
+						unmappedPkgAcc[pk] = guardianClonePowerAccum(acc, uid)
+						unmappedPkgUID[pk] = uid
+					}
+				}
+			} else {
+				if orphanIsolatedAcc == nil {
+					orphanIsolatedAcc = guardianClonePowerAccum(acc, 99000)
+				} else {
+					guardianMergePowerAccum(orphanIsolatedAcc, acc)
+				}
+			}
+			continue
+		}
+		addToUID(uid, acc)
+	}
+
+	rows := make([]LocalAppPowerRow, 0, len(mergedByUID)+len(unmappedPkgAcc)+1)
+	for uid, acc := range mergedByUID {
+		meta := e.resolveAppMeta(uid)
+		if !includeSystem && meta.IsSystem {
+			continue
+		}
+		if row, ok := guardianBuildPowerRowFromAccum(uid, meta, acc, globalBgMahAvail, globalBgMahReason); ok {
+			rows = append(rows, row)
+		}
+	}
+	for pk, acc := range unmappedPkgAcc {
+		meta := e.resolveMetaForExplicitPkg(pk.pkg, pk.profile)
+		if !includeSystem && meta.IsSystem {
+			continue
+		}
+		if row, ok := guardianBuildPowerRowFromAccum(unmappedPkgUID[pk], meta, acc, globalBgMahAvail, globalBgMahReason); ok {
+			rows = append(rows, row)
+		}
+	}
+	if includeSystem && orphanIsolatedAcc != nil {
+		isoMeta := guardianAppMeta{
+			Package:  "isolated:summary",
+			AppName:  "系统隔离沙盒汇总",
+			IsSystem: true,
+		}
+		if row, ok := guardianBuildPowerRowFromAccum(99000, isoMeta, orphanIsolatedAcc, globalBgMahAvail, globalBgMahReason); ok {
+			rows = append(rows, row)
+		}
+	}
+	return rows
 }
 
 // ─── 引擎三: L1 零抓包本机隐私与明文连接实时安检 (/api/local_apps/privacy_audit) ───

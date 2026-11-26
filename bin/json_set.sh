@@ -37,16 +37,34 @@ hj() {
     sh "$HNC_JSON" "$@"
 }
 
-# 确保目录和文件存在
+# 原子建档(零 0B 瞬态 + ln 防并发后到者覆盖先到者写入的内容)
+atomic_init_json() {
+    _ai_dst="$1"; _ai_body="$2"
+    [ -f "$_ai_dst" ] && return 0
+    _ai_dir="${_ai_dst%/*}"
+    mkdir -p "$_ai_dir" 2>/dev/null || true
+    _ai_tmp="$_ai_dir/.${_ai_dst##*/}.init.$$"
+    if printf '%s\n' "$_ai_body" > "$_ai_tmp" 2>/dev/null && [ -s "$_ai_tmp" ]; then
+        if ln "$_ai_tmp" "$_ai_dst" 2>/dev/null; then
+            rm -f "$_ai_tmp" 2>/dev/null || true
+        elif [ ! -f "$_ai_dst" ]; then
+            mv -f "$_ai_tmp" "$_ai_dst" 2>/dev/null || rm -f "$_ai_tmp" 2>/dev/null || true
+        else
+            rm -f "$_ai_tmp" 2>/dev/null || true
+        fi
+    else
+        rm -f "$_ai_tmp" 2>/dev/null || true
+    fi
+}
+
+# 确保目录和文件存在(原子建档, 无 0B 瞬态)
 mkdir -p "$HNC/data" "$HNC/run" 2>/dev/null
-[ -f "$RULES" ] || cat > "$RULES" << 'EOF'
-{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}
-EOF
+atomic_init_json "$RULES" '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}'
 
 # v3.4.6: device_names.json 路径与初始化
 NAMES_FILE=$HNC/data/device_names.json
 ensure_names_file() {
-    [ -f "$NAMES_FILE" ] || echo '{}' > "$NAMES_FILE"
+    atomic_init_json "$NAMES_FILE" '{}'
 }
 
 # v5.11: 这些顶层字段是用户自由文本, 语义上永远是字符串, 不能按值猜类型。
@@ -224,7 +242,7 @@ tpl_set)
         esac
     done
     TPL_FILE=$HNC/data/templates.json
-    [ -f "$TPL_FILE" ] || echo '{}' > "$TPL_FILE"
+    atomic_init_json "$TPL_FILE" '{}'
     hj set-object-key "$TPL_FILE" "$NAME" \
         "{\"down_mbps\":$DOWN,\"up_mbps\":$UP,\"delay_ms\":$DELAY,\"jitter_ms\":$JITTER,\"loss_pct\":$LOSS}" json
     ;;

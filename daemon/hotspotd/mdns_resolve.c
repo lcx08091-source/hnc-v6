@@ -238,8 +238,10 @@ static int parse_response(const uint8_t *pkt, size_t pktlen, char *out, size_t o
         }
 
         if (rtype == 0x000C) {  /* PTR */
+            if (rdlen == 0) return -1;
             size_t rdata_off = off;
-            if (decode_dns_name(pkt, pktlen, &rdata_off, out, outlen) == 0) {
+            if (decode_dns_name(pkt, pktlen, &rdata_off, out, outlen) == 0 &&
+                rdata_off <= off + (size_t)rdlen) {
                 VLOG("PTR rdata: %s\n", out);
                 return 0;
             }
@@ -253,9 +255,31 @@ static int parse_response(const uint8_t *pkt, size_t pktlen, char *out, size_t o
     return -1;
 }
 
+/* 过滤主机名中 < 0x20 或 0x7f 控制字符(含中间 \n/\r/\t)并去除首尾空白 */
+static void sanitize_hostname_ctrl(char *name)
+{
+    size_t r = 0, w = 0;
+    while (name[r] != '\0') {
+        unsigned char c = (unsigned char)name[r++];
+        if (c < 0x20U || c == 0x7fU)
+            continue;
+        name[w++] = (char)c;
+    }
+    while (w > 0 && name[w - 1] == ' ')
+        w--;
+    name[w] = '\0';
+
+    size_t lead = 0;
+    while (name[lead] == ' ')
+        lead++;
+    if (lead > 0)
+        memmove(name, name + lead, w - lead + 1);
+}
+
 /* 把 "Mi-10.local" / "Mi-10.local." → "Mi-10" */
 static void strip_local_suffix(char *name)
 {
+    sanitize_hostname_ctrl(name);
     size_t n = strlen(name);
     /* 去尾部 dot */
     while (n > 0 && name[n-1] == '.') { name[n-1] = '\0'; n--; }
@@ -263,6 +287,7 @@ static void strip_local_suffix(char *name)
     if (n > 6 && strcasecmp(name + n - 6, ".local") == 0) {
         name[n-6] = '\0';
     }
+    sanitize_hostname_ctrl(name);
 }
 
 /* ── 网络收发 ─────────────────────────────────────────────── */

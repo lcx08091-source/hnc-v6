@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -266,6 +267,8 @@ func (s *server) rmacReconcile(now time.Time) {
 
 	devsRaw := readJSONMap(filepath.Join(s.hncDir, "data", "devices.json"))
 	onlineIP := map[string]string{}
+	onlineIPSet := map[string]bool{}
+	offlineIPs := map[string][]string{}
 	lastSeenMap := map[string]int64{}
 	bytesMap := map[string]int64{}
 	for m, v := range devsRaw {
@@ -285,8 +288,17 @@ func (s *server) rmacReconcile(now time.Time) {
 		}
 		lastSeenMap[mac] = ls
 		bytesMap[mac] = rx + tx
-		if ip := strings.TrimSpace(asString(dm["ip"])); ip != "" && (ls == 0 || nowU-ls <= 120) {
+		ip := strings.TrimSpace(asString(dm["ip"]))
+		if ip != "" && ip != "-" && (ls == 0 || nowU-ls <= 120) {
 			onlineIP[mac] = ip
+			onlineIPSet[ip] = true
+		} else {
+			if ip != "" && ip != "-" {
+				offlineIPs[mac] = append(offlineIPs[mac], ip)
+			}
+			if ip6 := strings.TrimSpace(asString(dm["ipv6"])); ip6 != "" && ip6 != "-" && ip6 != ip {
+				offlineIPs[mac] = append(offlineIPs[mac], ip6)
+			}
 		}
 	}
 
@@ -350,13 +362,16 @@ func (s *server) rmacReconcile(now time.Time) {
 		}
 	}
 
+	rulesSnap := readJSONMap(filepath.Join(s.hncDir, "data", "rules.json"))
+	blSet := rmacBlacklistedMACSet(rulesSnap)
+	names, _ := loadDeviceNames(filepath.Join(s.hncDir, deviceNamesRelPath))
+
 	// 1. 高置信度无感继承
 	if pol.AutoInherit {
 		macMergeMu.Lock()
 		mf := loadMacMergeFile(s.hncDir)
 		macMergeMu.Unlock()
 		aliases := loadMACAliases(s.hncDir)
-		names, _ := loadDeviceNames(filepath.Join(s.hncDir, deviceNamesRelPath))
 
 		sugMACs := make([]string, 0, len(mf.Suggestions))
 		for m := range mf.Suggestions {
@@ -385,21 +400,32 @@ func (s *server) rmacReconcile(now time.Time) {
 			if isMacMutexApart(mf, newMAC, best.OldMAC, nowU) {
 				continue
 			}
+			// 永久红线守卫: 若旧候选处于黑名单且新设备无明确匹配的真实非垃圾主机名,
+			// 严禁自动强制合并(仅保留前端建议供机主手动确认, 绝不默认阻拦随机 MAC 新访客)!
+			if blSet[strings.ToLower(best.OldMAC)] &&
+				!rmacHasMatchedRealHostname(mf.Profiles[newMAC], mf.Profiles[best.OldMAC], devsRaw[newMAC], devsRaw[best.OldMAC]) {
+				continue
+			}
 			oldName := macDisplayName(names, mf, best.OldMAC)
 
 			s.actionMu.Lock()
 			polLatest := loadRMACPolicy(s.hncDir)
+			blLatest := rmacBlacklistedMACSet(readJSONMap(filepath.Join(s.hncDir, "data", "rules.json")))
 			macMergeMu.Lock()
 			mfLatest := loadMacMergeFile(s.hncDir)
 			_, disNow := mfLatest.Dismissed[macMergeDismissKey(newMAC, best.OldMAC)]
 			apartNow := isMacMutexApart(mfLatest, newMAC, best.OldMAC, nowU)
+			npLatest := mfLatest.Profiles[newMAC]
+			opLatest := mfLatest.Profiles[best.OldMAC]
 			macMergeMu.Unlock()
 			alLatest := loadMACAliases(s.hncDir)
 			_, newGone := alLatest[newMAC]
 			_, oldGone := alLatest[best.OldMAC]
+			blBlocked := blLatest[strings.ToLower(best.OldMAC)] &&
+				!rmacHasMatchedRealHostname(npLatest, opLatest, devsRaw[newMAC], devsRaw[best.OldMAC])
 
 			var err error
-			if !polLatest.AutoInherit || best.Score < polLatest.AutoInheritScore || disNow || apartNow || newGone || oldGone {
+			if !polLatest.AutoInherit || best.Score < polLatest.AutoInheritScore || disNow || apartNow || newGone || oldGone || blBlocked {
 				err = errors.New("stale auto-inherit candidate")
 			} else {
 				_, err = s.deviceMerge(best.OldMAC, newMAC, true, now)
@@ -434,8 +460,8 @@ func (s *server) rmacReconcile(now time.Time) {
 		}
 	}
 
-	// 2. 离线短命无规则随机 MAC 邻居清理(仅清理无手工命名、无持久化限速/黑名单的过期 STALE/FAILED 邻居)
-	// 对同一批已 flush 的离线随机 MAC 按 last_seen 记录水位, 防止 devices.json 保留旧条目时每轮无限 fork ip neigh flush。
+	// 2. 离线短命无规则随机 MAC 邻居清理(仅按离线随机 MAC 曾绑定的具体空闲 IP 单条删除, 严禁整口 flush 误伤在线设备 IPv6 邻居)
+	ruleDevs, _ := rulesSnap["devices"].(map[string]interface{})
 	gcSec := int64(pol.EphemeralGCMinutes) * 60
 	toFlush := map[string]int64{}
 	rmacMu.Lock()
@@ -451,6 +477,9 @@ func (s *server) rmacReconcile(now time.Time) {
 		if onlineIP[mac] != "" || !isRandomizedMAC(mac) || isSimMACPrefix(mac) {
 			continue
 		}
+		if names[mac] != "" || blSet[mac] || (ruleDevs != nil && ruleDevs[mac] != nil) {
+			continue
+		}
 		if ls > 0 && nowU-ls >= gcSec {
 			if flushed == nil || flushed[mac] != ls {
 				toFlush[mac] = ls
@@ -460,8 +489,28 @@ func (s *server) rmacReconcile(now time.Time) {
 	rmacMu.Unlock()
 	if len(toFlush) > 0 {
 		if ap := s.currentHotspotIface(); ap != "" {
-			_, _ = calRunCmd(3*time.Second, "ip", "neigh", "flush", "dev", ap, "nud", "stale")
-			_, _ = calRunCmd(3*time.Second, "ip", "neigh", "flush", "dev", ap, "nud", "failed")
+			gwIP := ifaceIPv4(ap)
+			delIPSet := map[string]bool{}
+			var delIPs []string
+			for mac := range toFlush {
+				for _, candIP := range offlineIPs[mac] {
+					if candIP == "" || candIP == gwIP || onlineIPSet[candIP] || delIPSet[candIP] {
+						continue
+					}
+					if !rmacValidCleanIP(candIP) {
+						continue
+					}
+					delIPSet[candIP] = true
+					delIPs = append(delIPs, candIP)
+				}
+			}
+			sort.Strings(delIPs)
+			if len(delIPs) > 16 {
+				delIPs = delIPs[:16]
+			}
+			for _, targetIP := range delIPs {
+				rmacExecNeighDel(targetIP, ap)
+			}
 			rmacMu.Lock()
 			if rmacFlushedLS[s.hncDir] == nil {
 				rmacFlushedLS[s.hncDir] = map[string]int64{}
@@ -472,6 +521,10 @@ func (s *server) rmacReconcile(now time.Time) {
 			rmacMu.Unlock()
 		}
 	}
+}
+
+var rmacExecNeighDel = func(ipStr, iface string) {
+	_, _ = calRunCmd(2*time.Second, "ip", "neigh", "del", ipStr, "dev", iface)
 }
 
 func actionRMACPolicySet(s *server, p map[string]string) actionResp {
@@ -562,3 +615,69 @@ func (s *server) annotateRMACGuard(rows []map[string]interface{}) {
 		}
 	}
 }
+
+func rmacBlacklistedMACSet(rulesMap map[string]interface{}) map[string]bool {
+	out := map[string]bool{}
+	if rulesMap == nil {
+		return out
+	}
+	bl, _ := rulesMap["blacklist"].([]interface{})
+	for _, item := range bl {
+		if m := strings.ToLower(strings.TrimSpace(asString(item))); m != "" {
+			out[m] = true
+		}
+	}
+	return out
+}
+
+func rmacCollectRealNonJunkHostnames(p *macProfile, devRaw interface{}) []string {
+	var out []string
+	add := func(raw string) {
+		h := strings.TrimSpace(raw)
+		if h == "" || isJunkHostname(h) || isGenericHostname(h) {
+			return
+		}
+		for _, prev := range out {
+			if strings.EqualFold(prev, h) {
+				return
+			}
+		}
+		out = append(out, h)
+	}
+	if p != nil {
+		add(p.DHCPName)
+		add(p.MDNSName)
+	}
+	if dm, ok := devRaw.(map[string]interface{}); ok && dm != nil {
+		if !strings.EqualFold(strings.TrimSpace(asString(dm["hostname_src"])), "manual") {
+			add(asString(dm["hostname"]))
+		}
+	}
+	return out
+}
+
+func rmacHasMatchedRealHostname(np, op *macProfile, newDevRaw, oldDevRaw interface{}) bool {
+	newNames := rmacCollectRealNonJunkHostnames(np, newDevRaw)
+	if len(newNames) == 0 {
+		return false
+	}
+	oldNames := rmacCollectRealNonJunkHostnames(op, oldDevRaw)
+	for _, nh := range newNames {
+		for _, oh := range oldNames {
+			if strings.EqualFold(nh, oh) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func rmacValidCleanIP(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "-" || strings.ContainsAny(s, " \t\r\n%/") {
+		return false
+	}
+	ip := net.ParseIP(s)
+	return ip != nil && !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsMulticast()
+}
+

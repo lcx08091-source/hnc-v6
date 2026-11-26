@@ -17,7 +17,7 @@
   }
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.9', VCODE = String(META.versionCode || '6009309');
+  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.10', VCODE = String(META.versionCode || '6009310');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1', MOCK_HS_ACTIVE = true;
 
@@ -339,30 +339,68 @@
     dual_sim: true, max_slots: 2,
     slot: 2, sub_id: 2, carrier: '中国移动', custom_name: '中国移不动', carrier_short: '移动', mcc_mnc: '46000',
     sharing_mode: '2.6GHz+700MHz 移广双载波共享', upstream_iface: 'rmnet_data2',
-    band: 'n41', bandwidth_mhz: 100, band_combo: 'n41+n28', total_bw_mhz: 130, ca_count: 2,
+    band: 'n41', bandwidth_mhz: 100, pcc_bw_mhz: 100, scc_bw_mhz: 30,
+    band_combo: 'n41+n28', total_bw_mhz: 130, ca_count: 2,
+    cell_bandwidths: [100, 30], cell_bandwidths_mhz: [100, 30],
     arfcn: 504990, freq_mhz: 2600,
-    band_trait: '5G SA / 5G-A 独立组网双载波聚合 n41+n28（总带宽 130MHz） · 兼顾 2.6GHz 极速大带宽与 700MHz 强穿墙稳上行',
+    band_trait: '5G SA / 5G-A 独立组网双载波聚合 n41+n28（100MHz+30MHz，总带宽 130MHz） · 兼顾 2.6GHz 极速大带宽与 700MHz 强穿墙稳上行',
     rsrp_dbm: -84, rsrq_db: -8, sinr_db: 21, has_sinr: true, has_rsrq: true,
     rssi_dbm: -56, pci: 384, has_pci: true,
     lte_pci: 0, has_lte_pci: false, lte_rsrp_dbm: 0, lte_rsrq_db: 0, lte_sinr_db: 0, has_lte_sinr: false,
     rsrp_label: '极强', sinr_label: '极纯净', rsrq_label: '基站空闲',
     speed_potential_pct: 100, speed_potential_text: '可跑满套餐峰值',
     bars: 4, quality: 'excellent', quality_cn: '5G-A 极佳', rf_ceiling_factor: 1.0,
-    diagnosis: 'ok', diagnosis_cn: '双卡 5G SA 独立组网在线，主卡 5G-A 多载波通道（n41+n28）信号纯净、基站空闲，热点可跑满高速带宽',
+    diagnosis: 'ok', diagnosis_cn: '双卡 5G SA 独立组网在线，主卡 5G-A 多载波通道（n41 100MHz + n28 30MHz）信号纯净、基站空闲，热点可跑满高速带宽',
     carriers: [
-      { is_primary: true, net_type: 'NR', band: 'n41', bw_mhz: 100, arfcn: 504990, freq_mhz: 2600, pci: 384, has_pci: true },
-      { is_primary: false, net_type: 'NR', band: 'n28', bw_mhz: 30, arfcn: 145600, freq_mhz: 700, pci: 192, has_pci: true }
+      { is_primary: true, role: 'PCC', net_type: 'NR', band: 'n41', bw_mhz: 100, bandwidth_mhz: 100, arfcn: 504990, freq_mhz: 2600, pci: 384, has_pci: true, rsrp_dbm: -84, rsrq_db: -8, sinr_db: 21, has_sinr: true },
+      { is_primary: false, role: 'SCC1', net_type: 'NR', band: 'n28', bw_mhz: 30, bandwidth_mhz: 30, arfcn: 145600, freq_mhz: 700, pci: 192, has_pci: true, rsrp_dbm: -79, rsrq_db: -7, sinr_db: 23, has_sinr: true }
     ],
     sim_slots: [
-      { slot: 1, sub_id: 1, carrier: '中国联通', carrier_short: '联通', rat: '5G SA', display_rat: '5G SA', is_5ga: false, band: 'n78', bandwidth_mhz: 100, rsrp_dbm: -88, sinr_db: 19, bars: 4, is_default_data: false, standby_sa: true },
-      { slot: 2, sub_id: 2, carrier: '中国移动', custom_name: '中国移不动', carrier_short: '移动', rat: '5G SA', display_rat: '5G-A', is_5ga: true, band: 'n41', band_combo: 'n41+n28', total_bw_mhz: 130, rsrp_dbm: -84, sinr_db: 21, bars: 4, is_default_data: true, standby_sa: true }
+      { slot: 1, sub_id: 1, carrier: '中国联通', carrier_short: '联通', rat: '5G SA', display_rat: '5G SA', is_5ga: false, band: 'n78', bandwidth_mhz: 100, total_bw_mhz: 100, ca_count: 1, rsrp_dbm: -88, rsrq_db: -9, has_rsrq: true, sinr_db: 19, has_sinr: true, bars: 4, is_default_data: false, standby_sa: true },
+      { slot: 2, sub_id: 2, carrier: '中国移动', custom_name: '中国移不动', carrier_short: '移动', rat: '5G SA', display_rat: '5G-A', is_5ga: true, band: 'n41', bandwidth_mhz: 100, band_combo: 'n41+n28', total_bw_mhz: 130, ca_count: 2, cell_bandwidths_mhz: [100, 30], rsrp_dbm: -84, rsrq_db: -8, has_rsrq: true, sinr_db: 21, has_sinr: true, bars: 4, is_default_data: true, standby_sa: true }
     ],
+    wifi_mlo_supported: true,
     handover_count: 1, jitter_db: 4, min_dbm: -87, max_dbm: -83, avg_dbm: -85,
     interference_pct: 14, interference_level: 'clean', interference_label: '信道纯净低噪',
     interference_sources: [],
     history: [],
     updated_at: T
   };
+  var MOCK_WIFI_MLO_SIGNAL = {
+    available: true, mode: 'wifi_sta', rat: 'Wi-Fi 中继', display_rat: 'Wi-Fi 7 MLO',
+    wifi_standard: 'Wi-Fi 7', wifi_generation: 7, wifi_gen: 'Wi-Fi 7',
+    is_mlo: true, wifi_mlo: true, mlo_active: true, mlo_link_count: 2,
+    upstream_iface: 'wlan0', ssid: 'HNC-Home-BE7200', bssid_tag: '7f88c410',
+    band: '5GHz', band_combo: '5GHz+2.4GHz', channel: 44, wifi_channel: 44,
+    freq_mhz: 5220, bandwidth_mhz: 160, wifi_bw_mhz: 160, total_bw_mhz: 200, ca_count: 2,
+    band_trait: 'Wi-Fi 7 MLO 多链路聚合（5GHz CH44 160MHz 主链 + 2.4GHz CH6 40MHz 辅链，总频宽 200MHz） · 超高吞吐与低抖动无缝并发',
+    wifi_rssi_dbm: -52, wifi_noise_dbm: -92, wifi_link_mbps: 2882, wifi_rx_mbps: 2882,
+    sinr_db: 40, has_sinr: true, has_rsrq: false,
+    rsrp_label: '极强', sinr_label: '极纯净', rsrq_label: '5GHz+2.4GHz MLO',
+    speed_potential_pct: 100, speed_potential_text: '满速 Wi-Fi 7 MLO 连接',
+    bars: 4, quality: 'excellent', quality_cn: 'Wi-Fi 7 极佳', rf_ceiling_factor: 1.0,
+    diagnosis: 'ok', diagnosis_cn: 'Wi-Fi 7 MLO 双频多链路已锁定 5GHz 160MHz 高速主链（协商 2882 Mbps，信噪比 40 dB），中继回程极速低噪',
+    mlo_links: [
+      { link_id: 1, is_primary: true, band: '5GHz', freq_mhz: 5220, channel: 44, bw_mhz: 160, bandwidth_mhz: 160, rssi_dbm: -52, noise_dbm: -92, sinr_db: 40, has_sinr: true, link_mbps: 2882, tx_mbps: 2882, rx_mbps: 2882 },
+      { link_id: 0, is_primary: false, band: '2.4GHz', freq_mhz: 2437, channel: 6, bw_mhz: 40, bandwidth_mhz: 40, rssi_dbm: -46, noise_dbm: -90, sinr_db: 44, has_sinr: true, link_mbps: 688, tx_mbps: 688, rx_mbps: 688 }
+    ],
+    carriers: [
+      { is_primary: true, role: 'MLO 主链', net_type: 'Wi-Fi 7', band: '5GHz', channel: 44, bw_mhz: 160, bandwidth_mhz: 160, freq_mhz: 5220, rssi_dbm: -52, sinr_db: 40, has_sinr: true, link_mbps: 2882 },
+      { is_primary: false, role: 'MLO 辅链', net_type: 'Wi-Fi 7', band: '2.4GHz', channel: 6, bw_mhz: 40, bandwidth_mhz: 40, freq_mhz: 2437, rssi_dbm: -46, sinr_db: 44, has_sinr: true, link_mbps: 688 }
+    ],
+    handover_count: 0, jitter_db: 2, min_dbm: -54, max_dbm: -50, avg_dbm: -52,
+    interference_pct: 10, interference_level: 'clean', interference_label: '信道纯净低噪',
+    interference_sources: [
+      { id: 'co_channel', name: '同频与邻频信道干扰', available: true, pct: 10, level: 'clean', value: 'SNR 40 dB', summary: '5GHz CH44 (160MHz) 底噪 -92 dBm，4096-QAM 调制稳定' },
+      { id: 'air_load', name: '无线空口占空比负载', available: true, pct: 12, level: 'clean', value: '2882 Mbps', summary: 'Wi-Fi 7 MLO 双链并发调度顺畅，空口余量充裕' },
+      { id: 'multipath_handover', name: '多径衰落与漫游抖动', available: true, pct: 8, level: 'clean', value: 'Δ2 dB', summary: 'MLO 双频无缝聚合，无漫游断流抖动' },
+      { id: 'backhaul_jitter', name: '上游路由器回程延迟', available: true, pct: 9, level: 'clean', value: 'RTT 4.2 ms', summary: '上游路由器与宽带回程极低延迟' }
+    ],
+    history: [],
+    updated_at: T
+  };
+  MOCK_WIFI_MLO_SIGNAL.wifi_links = MOCK_WIFI_MLO_SIGNAL.mlo_links;
+  MOCK_SIGNAL.wifi_mlo_sample = MOCK_WIFI_MLO_SIGNAL;
   function _recalcMockSignalMeta() {
     var h = MOCK_SIGNAL.history;
     if (!h.length) return;
@@ -379,7 +417,9 @@
     MOCK_SIGNAL.sinr_db = cur.sinr_db;
     MOCK_SIGNAL.has_sinr = true;
     MOCK_SIGNAL.rsrq_db = cur.rsrq_db;
+    MOCK_SIGNAL.has_rsrq = true;
     MOCK_SIGNAL.pci = cur.pci;
+    MOCK_SIGNAL.has_pci = true;
     MOCK_SIGNAL.rssi_dbm = cur.rsrp_dbm + 28;
     MOCK_SIGNAL.min_dbm = mn;
     MOCK_SIGNAL.max_dbm = mx;
@@ -388,6 +428,11 @@
     MOCK_SIGNAL.handover_count = ho;
     MOCK_SIGNAL.rsrp_label = cur.rsrp_dbm >= -85 ? '极强' : (cur.rsrp_dbm >= -95 ? '良好' : '一般');
     MOCK_SIGNAL.sinr_label = cur.sinr_db >= 20 ? '极纯净' : (cur.sinr_db >= 13 ? '纯净' : '轻度干扰');
+    if (Array.isArray(MOCK_SIGNAL.carriers) && MOCK_SIGNAL.carriers[0]) {
+      MOCK_SIGNAL.carriers[0].rsrp_dbm = cur.rsrp_dbm;
+      MOCK_SIGNAL.carriers[0].sinr_db = cur.sinr_db;
+      MOCK_SIGNAL.carriers[0].has_sinr = true;
+    }
     var pEm = lim(round((23 - cur.sinr_db) * 3.4), 6, 92);
     var pLoad = lim(round((-7 - cur.rsrq_db) * 7.2), 8, 92);
     var pFade = lim(round(MOCK_SIGNAL.jitter_db * 4.5 + ho * 12), 6, 92);
@@ -395,7 +440,7 @@
     var lvlOf = function (p) { return p >= 75 ? 'severe' : (p >= 50 ? 'moderate' : (p >= 25 ? 'mild' : 'clean')); };
     MOCK_SIGNAL.interference_sources = [
       { id: 'co_channel', name: '同频与邻区电磁干扰', available: true, pct: pEm, level: lvlOf(pEm), value: 'SINR ' + cur.sinr_db + ' dB', summary: cur.sinr_db >= 13 ? '同频邻区底噪干净，256QAM 高阶调制稳定' : '存在邻区同频重叠干扰，建议移近窗边' },
-      { id: 'air_load', name: '基站空口信道负载', available: true, pct: pLoad, level: lvlOf(pLoad), value: 'RSRQ ' + cur.rsrq_db + ' dB', summary: 'n41+n28 双载波资源块充裕，下行调度响应及时' },
+      { id: 'air_load', name: '基站空口信道负载', available: true, pct: pLoad, level: lvlOf(pLoad), value: 'RSRQ ' + cur.rsrq_db + ' dB', summary: 'n41(100MHz)+n28(30MHz) 双载波资源块充裕，下行调度响应及时' },
       { id: 'multipath_handover', name: '多径衰落与乒乓切换', available: true, pct: pFade, level: lvlOf(pFade), value: 'Δ' + MOCK_SIGNAL.jitter_db + ' dB' + (ho > 0 ? ' · ' + ho + '次切换' : ''), summary: ho > 0 ? '近期完成 1 次更优扇区切换，当前驻留 PCI ' + cur.pci + ' 稳定' : '驻留主服务小区锁频稳定，无乒乓切换' },
       { id: 'backhaul_jitter', name: '回程排队延迟抖动', available: true, pct: pBh, level: lvlOf(pBh), value: 'RTT ' + cur.rtt_ms.toFixed(1) + ' ms', summary: '上游 rmnet_data2 回程延迟平稳，零缓冲区膨胀' }
     ];
@@ -406,10 +451,12 @@
   }
   (function seedMockSignalHistory() {
     var r = srand('sig-seed-rc2');
-    var baseR = -85, baseS = 20;
+    var baseR = -85, baseS = 20, wR = -52, wS = 40;
     for (var i = 23; i >= 0; i--) {
       baseR = lim(round(baseR + (r() - 0.48) * 2.2), -88, -82);
       baseS = lim(round(baseS + (r() - 0.48) * 2.4), 16, 23);
+      wR = lim(round(wR + (r() - 0.48) * 1.6), -55, -49);
+      wS = lim(round(wS + (r() - 0.48) * 1.8), 37, 43);
       var pciVal = i > 17 ? 381 : 384;
       MOCK_SIGNAL.history.push({
         ts: T - i * 3,
@@ -419,8 +466,16 @@
         rsrq_db: -8 - Math.floor(r() * 2),
         pci: pciVal,
         has_pci: true,
-        band: 'n41',
+        band: 'n41+n28',
         rtt_ms: +(20.2 + r() * 4.2).toFixed(1)
+      });
+      MOCK_WIFI_MLO_SIGNAL.history.push({
+        ts: T - i * 3,
+        wifi_rssi_dbm: wR,
+        sinr_db: wS,
+        has_sinr: true,
+        band: '5GHz+2.4GHz',
+        rtt_ms: +(3.8 + r() * 1.4).toFixed(1)
       });
     }
     _recalcMockSignalMeta();
@@ -431,7 +486,7 @@
     if (!force && nowMs - _lastSigStepMs < 1800) return;
     _lastSigStepMs = nowMs;
     var h = MOCK_SIGNAL.history;
-    var prev = h.length ? h[h.length - 1] : { ts: now() - 3, rsrp_dbm: -84, sinr_db: 21, rsrq_db: -8, pci: 384, rtt_ms: 21.5 };
+    var prev = h.length ? h[h.length - 1] : { ts: now() - 3, rsrp_dbm: -84, sinr_db: 21, has_sinr: true, rsrq_db: -8, pci: 384, has_pci: true, rtt_ms: 21.5 };
     var nextTs = Math.max(now(), prev.ts + 1);
     var nextRsrp = lim(round(prev.rsrp_dbm + rnd(-1.4, 1.4) + (-84 - prev.rsrp_dbm) * 0.25), -89, -81);
     var nextSinr = lim(round(prev.sinr_db + rnd(-1.6, 1.6) + (20.5 - prev.sinr_db) * 0.25), 15, 24);
@@ -445,10 +500,27 @@
       rsrq_db: nextRsrq,
       pci: 384,
       has_pci: true,
-      band: 'n41',
+      band: 'n41+n28',
       rtt_ms: nextRtt
     });
     if (h.length > 60) h.splice(0, h.length - 60);
+    var wh = MOCK_WIFI_MLO_SIGNAL.history;
+    var wPrev = wh.length ? wh[wh.length - 1] : { ts: nextTs - 3, wifi_rssi_dbm: -52, sinr_db: 40, has_sinr: true, rtt_ms: 4.2 };
+    var wRssi = lim(round(wPrev.wifi_rssi_dbm + rnd(-1.0, 1.0) + (-52 - wPrev.wifi_rssi_dbm) * 0.3), -56, -48);
+    var wSinr = lim(round(wPrev.sinr_db + rnd(-1.0, 1.0) + (40 - wPrev.sinr_db) * 0.3), 36, 44);
+    wh.push({
+      ts: nextTs,
+      wifi_rssi_dbm: wRssi,
+      sinr_db: wSinr,
+      has_sinr: true,
+      band: '5GHz+2.4GHz',
+      rtt_ms: +(lim((wPrev.rtt_ms || 4.2) + rnd(-0.4, 0.4), 3.2, 6.4)).toFixed(1)
+    });
+    if (wh.length > 60) wh.splice(0, wh.length - 60);
+    MOCK_WIFI_MLO_SIGNAL.wifi_rssi_dbm = wRssi;
+    MOCK_WIFI_MLO_SIGNAL.sinr_db = wSinr;
+    MOCK_WIFI_MLO_SIGNAL.has_sinr = true;
+    MOCK_WIFI_MLO_SIGNAL.updated_at = nextTs;
     _recalcMockSignalMeta();
   }
   var PU_CFG = { billing_day: 1, warn_percent: 80, plan_sim1_gb: 30, plan_sim2_gb: 100, anchor_sim1_gb: 0, anchor_sim2_gb: 0, use_netstats: 'auto' };
@@ -743,26 +815,26 @@
     });
     var idb = 0.89;
     var MOCK_L3_SUBS = [
-      'hnc-curated-v6.1.0-rc.9-dedup#00-core-meta',
-      'hnc-curated-v6.1.0-rc.9#01-short-video', 'hnc-curated-v6.1.0-rc.9#02-video-live', 'hnc-curated-v6.1.0-rc.9#03-social-im',
-      'hnc-curated-v6.1.0-rc.9#04-games-cn', 'hnc-curated-v6.1.0-rc.9#05-games-global', 'hnc-curated-v6.1.0-rc.9#06-shopping-life',
-      'hnc-curated-v6.1.0-rc.9#07-music-audio', 'hnc-curated-v6.1.0-rc.9#08-reading-news', 'hnc-curated-v6.1.0-rc.9#09-office-edu',
-      'hnc-curated-v6.1.0-rc.9#10-cloud-drive', 'hnc-curated-v6.1.0-rc.9#11-finance-bank', 'hnc-curated-v6.1.0-rc.9#12-travel-map',
-      'hnc-curated-v6.1.0-rc.9#13-ai-tools', 'hnc-curated-v6.1.0-rc.9#14-dev-tech', 'hnc-curated-v6.1.0-rc.9#15-app-stores',
-      'hnc-curated-v6.1.0-rc.9#16-oem-vendors', 'hnc-curated-v6.1.0-rc.9#17-iot-smart', 'hnc-curated-v6.1.0-rc.9#18-tv-ott',
-      'hnc-curated-v6.1.0-rc.9#19-carrier-isp', 'hnc-curated-v6.1.0-rc.9#20-gov-public', 'hnc-curated-v6.1.0-rc.9#21-auto-ev',
-      'hnc-curated-v6.1.0-rc.9#22-health-sport', 'hnc-curated-v6.1.0-rc.9#23-food-retail', 'hnc-curated-v6.1.0-rc.9#24-social-global',
-      'hnc-curated-v6.1.0-rc.9#25-stream-global', 'hnc-curated-v6.1.0-rc.9#26-browser-search', 'hnc-curated-v6.1.0-rc.9#27-mail-collab',
-      'hnc-curated-v6.1.0-rc.9#28-security-dns', 'hnc-curated-v6.1.0-rc.9#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.9#30-cdn-infra',
-      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.9#47-v2fly-b',
-      'hnc-curated-v6.1.0-rc.9#95-system-updates', 'hnc-curated-v6.1.0-rc.9#96-system-updates-v6'
+      'hnc-curated-v6.1.0-rc.10-dedup#00-core-meta',
+      'hnc-curated-v6.1.0-rc.10#01-short-video', 'hnc-curated-v6.1.0-rc.10#02-video-live', 'hnc-curated-v6.1.0-rc.10#03-social-im',
+      'hnc-curated-v6.1.0-rc.10#04-games-cn', 'hnc-curated-v6.1.0-rc.10#05-games-global', 'hnc-curated-v6.1.0-rc.10#06-shopping-life',
+      'hnc-curated-v6.1.0-rc.10#07-music-audio', 'hnc-curated-v6.1.0-rc.10#08-reading-news', 'hnc-curated-v6.1.0-rc.10#09-office-edu',
+      'hnc-curated-v6.1.0-rc.10#10-cloud-drive', 'hnc-curated-v6.1.0-rc.10#11-finance-bank', 'hnc-curated-v6.1.0-rc.10#12-travel-map',
+      'hnc-curated-v6.1.0-rc.10#13-ai-tools', 'hnc-curated-v6.1.0-rc.10#14-dev-tech', 'hnc-curated-v6.1.0-rc.10#15-app-stores',
+      'hnc-curated-v6.1.0-rc.10#16-oem-vendors', 'hnc-curated-v6.1.0-rc.10#17-iot-smart', 'hnc-curated-v6.1.0-rc.10#18-tv-ott',
+      'hnc-curated-v6.1.0-rc.10#19-carrier-isp', 'hnc-curated-v6.1.0-rc.10#20-gov-public', 'hnc-curated-v6.1.0-rc.10#21-auto-ev',
+      'hnc-curated-v6.1.0-rc.10#22-health-sport', 'hnc-curated-v6.1.0-rc.10#23-food-retail', 'hnc-curated-v6.1.0-rc.10#24-social-global',
+      'hnc-curated-v6.1.0-rc.10#25-stream-global', 'hnc-curated-v6.1.0-rc.10#26-browser-search', 'hnc-curated-v6.1.0-rc.10#27-mail-collab',
+      'hnc-curated-v6.1.0-rc.10#28-security-dns', 'hnc-curated-v6.1.0-rc.10#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.10#30-cdn-infra',
+      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.10#47-v2fly-b',
+      'hnc-curated-v6.1.0-rc.10#95-system-updates', 'hnc-curated-v6.1.0-rc.10#96-system-updates-v6'
     ];
     return {
       available: true,
       state: {
         schema_version: '2.0', generated_at: t - 2, version: VER, mode: 'af_packet', interface: MOCK_HS_ACTIVE ? IFACE : ((SIM && SIM.enabled) ? 'sim' : ''), tls_reassembly: true, ipv6_capture: true, offload_hint: false,
         uptime_s: round(up), stats: stats, clients: clients, client_count: Object.keys(clients).length, health: 'ok', rebind_count: 1,
-        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true, dfp_rule_version: 'hnc-dfp-v6.1.0-rc.9',
+        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true, dfp_rule_version: 'hnc-dfp-v6.1.0-rc.10',
         conntrack_available: true, conntrack_readable: true, conntrack_path: '/proc/net/nf_conntrack', conntrack_flows: 412,
         unidentified_ratio: { total_bytes: round(sumDays(1)), identified_bytes: round(sumDays(1) * idb), ratio: 1 - idb },
         evidence_summary: { total: 48211 + round(up / 10), by_source: { sni: 31022, dns: 12840, ja4: 2210, ip_owner: 2139 } },
@@ -853,6 +925,7 @@
     stepRates();
     var nowMs = Date.now();
     var isResync = !!opts.resync;
+    var hsOrSim = MOCK_HS_ACTIVE || !!(SIM && SIM.enabled);
     if (opts.reset_baseline) {
       DPV_SNAP.byKey = {};
     }
@@ -871,7 +944,7 @@
       appByMac[m].push({ globalIdx: gIdx, app_id: al.app_id, down_mbps: +al.down_mbps });
     });
 
-    var sortedDevs = DEVS.slice().sort(function (a, b) { return a.mac < b.mac ? -1 : (a.mac > b.mac ? 1 : 0); });
+    var sortedDevs = visibleDevs().slice().sort(function (a, b) { return a.mac < b.mac ? -1 : (a.mac > b.mac ? 1 : 0); });
     var devicesOut = [];
     var hitCnt = 0, idleCnt = 0, errCnt = 0, onlineMarked = 0;
 
@@ -883,12 +956,13 @@
       var isControlled = isBlacklisted || hasRateLimit || !!d.app_qos || !!d.sqm_enabled || hasDelay || devApps.length > 0;
       if (!isControlled) return;
 
+      var devOnline = isDevActive(d);
       var mid = (+d.mark_id > 0) ? Math.floor(+d.mark_id) : 0;
       var cid = mid > 0 ? dpvClassId(mid) : '';
       var mhex = mid > 0 ? dpvMarkHex(mid) : '';
-      if (d.online && mid > 0) onlineMarked += 1;
+      if (devOnline && mid > 0) onlineMarked += 1;
 
-      var activeFlow = d.online && !isBlacklisted;
+      var activeFlow = devOnline && !isBlacklisted;
       var snap = DPV_SNAP.byKey[d.mac];
       if (!snap) {
         var seed = idx + 1;
@@ -940,7 +1014,7 @@
         snap.appSent[ap.app_id] = (snap.appSent[ap.app_id] || 0) + aDelta;
         if (activeFlow) snap.appOver[ap.app_id] = (snap.appOver[ap.app_id] || 0) + Math.max(2, Math.floor(aDelta / 24576));
         var aKbps = activeFlow ? Math.round((aDelta * 8) / (dtSec * 1000) * 100) / 100 : 0;
-        var aHit = (aDelta > 0 || snap.appSent[ap.app_id] > 0);
+        var aHit = devOnline && (aDelta > 0 || snap.appSent[ap.app_id] > 0);
         if (aHit) anyAppHit = true;
         appSentSum += snap.appSent[ap.app_id];
         appDeltaSum += aDelta;
@@ -951,7 +1025,7 @@
           class_id: appCid,
           parent_class_id: cid || '1:1',
           down_limit_mbps: ap.down_mbps,
-          class_present: true,
+          class_present: hsOrSim,
           sent_bytes: snap.appSent[ap.app_id],
           delta_bytes: aDelta,
           drops: snap.appDrops[ap.app_id] || 0,
@@ -971,17 +1045,17 @@
       }
 
       var verdict = 'idle', statusLabel = '规则就绪（空闲）', reason = '限速规则已准备就绪，等待设备产生流量';
-      if (isBlacklisted) {
+      if (isBlacklisted && hsOrSim) {
         verdict = 'hit';
         statusLabel = '黑名单阻断生效';
         reason = '双栈防火墙设备阻断规则已生效，正在拦截该设备转发流量';
-      } else if (outDownDelta + upDelta > 0 || outDownSent + snap.upSent > 0 || anyAppHit) {
+      } else if (devOnline && (outDownDelta + upDelta > 0 || outDownSent + snap.upSent > 0 || anyAppHit)) {
         verdict = 'hit';
         statusLabel = '限速真实生效';
         var totalMb = ((outDownSent + snap.upSent) / MB).toFixed(2);
         var shapeCnt = outDownOver + outDownDrops + snap.upOver + snap.upDrops;
         reason = '限速规则已真实命中该设备流量（累计转发 ' + totalMb + ' MB，超速压制 ' + shapeCnt + ' 次）';
-      } else if (!d.online) {
+      } else if (!devOnline) {
         verdict = 'idle';
         statusLabel = '就绪（设备离线）';
         reason = '限速规则已准备就绪，当前设备离线，重连上网后自动生效';
@@ -995,7 +1069,7 @@
         mac: d.mac,
         name: d.hostname || d.mac,
         ip: d.ip,
-        online: !!d.online,
+        online: devOnline,
         mark_id: mid,
         mark_hex: mhex,
         class_id: cid,
@@ -1024,12 +1098,13 @@
       devicesOut.push(entry);
     });
 
-    var overall = errCnt > 0 ? 'warn' : (hitCnt > 0 ? 'ok' : 'idle');
-    var headline = hitCnt > 0
-      ? ('限速规则真实生效：' + hitCnt + '/' + devicesOut.length + ' 台受控设备正在按规则限速（其余 ' + idleCnt + ' 台空闲待命）')
-      : ('全部 ' + devicesOut.length + ' 台受控设备的限速规则已准备就绪，等待设备上网产生流量');
+    var overall = !hsOrSim ? 'idle' : (errCnt > 0 ? 'warn' : (hitCnt > 0 ? 'ok' : 'idle'));
+    var headline = !hsOrSim
+      ? '热点当前未开启，开启热点后可实时核验内核 HTB 限速队列命中计数'
+      : (hitCnt > 0
+        ? ('限速规则真实生效：' + hitCnt + '/' + devicesOut.length + ' 台受控设备正在按规则限速（其余 ' + idleCnt + ' 台空闲待命）')
+        : ('全部 ' + devicesOut.length + ' 台受控设备的限速规则已准备就绪，等待设备上网产生流量'));
 
-    var hsOrSim = MOCK_HS_ACTIVE || !!(SIM && SIM.enabled);
     var clsOn = hsOrSim && CFG.clsact_bpf_mode !== 'off';
     var out = {
       ok: true,
@@ -1209,7 +1284,11 @@
         has_capabilities: true
       };
     },
-    '/api/signal': function (q) { stepMockSignal(bool(q && q.refresh)); return clone(MOCK_SIGNAL); },
+    '/api/signal': function (q) {
+      stepMockSignal(bool(q && q.refresh));
+      if ((q && q.mode === 'wifi_sta') || MOCK_SIGNAL.mode === 'wifi_sta') return clone(MOCK_WIFI_MLO_SIGNAL);
+      return clone(MOCK_SIGNAL);
+    },
     '/api/live': function (q) {
       stepMockSignal(false);
       var l = liveSummary();
@@ -1674,7 +1753,13 @@
     device_merge_dismiss: function (p) { var d = needDev(p.to_mac); delete d.merge_suggestion; return 'dismissed'; },
     template_set: function (p) { TPL[p.name] = { down_mbps: +p.down_mbps || 0, up_mbps: +p.up_mbps || 0, delay_ms: +p.delay_ms || 0, jitter_ms: +p.jitter_ms || 0, loss_pct: +p.loss_pct || 0 }; return ''; },
     template_del: function (p) { delete TPL[p.name]; return ''; },
-    hotspot_save: function (p) { if (p.ssid) CFG.hotspot_ssid = p.ssid; if (p.delay_sec) CFG.hotspot_delay_sec = +p.delay_sec; if (p.autostart) CFG.hotspot_autostart = bool(p.autostart); return 'config saved'; },
+    hotspot_save: function (p) {
+      if (p.ssid) CFG.hotspot_ssid = p.ssid;
+      if (p.pass || p.hotspot_pass) MOCK_SENSITIVE_RULES.hotspot_pass = String(p.pass || p.hotspot_pass);
+      if (p.delay_sec) CFG.hotspot_delay_sec = +p.delay_sec;
+      if (p.autostart != null) CFG.hotspot_autostart = bool(p.autostart);
+      return 'config saved';
+    },
     hotspot_iface_set: function (p) { CFG.hotspot_iface = p.iface || ''; return p.iface ? 'preferred hotspot iface set to ' + p.iface : 'hotspot iface set to auto'; },
     hotspot_schedule_set: function (p) { CFG.hotspot_time_enable = bool(p.time_enable); CFG.hotspot_charging_only = bool(p.charging_only); if (p.start) CFG.hotspot_time_start = p.start; if (p.end) CFG.hotspot_time_end = p.end; return ''; },
     hotspot_start: function () {
@@ -1947,7 +2032,7 @@
   };
 
 
-  /* ═════════════ HNC v6.1.0-rc.9 · 本机+热点双栈守护、防火墙与 LeakGuard 仿真层 ═════════════ */
+  /* ═════════════ HNC v6.1.0-rc.10 · 本机+热点双栈守护、防火墙与 LeakGuard 仿真层 ═════════════ */
   function v6MockInfraGuard(host) {
     var h = String(host || '').trim().toLowerCase();
     if (!h) return null;
@@ -2903,12 +2988,26 @@
     var host = String((ev && ev.dst_host) || '').toLowerCase();
     var tp = String((ev && ev.leak_type) || '').toUpperCase();
     var mac = String((ev && ev.mac) || '').toLowerCase();
+    var evOrg = ev && ev.origin === 'host' ? 'host' : 'hotspot';
+    var evUid = ev && ev.uid ? round(+ev.uid) : 0;
+    var evPkg = String((ev && (ev.pkg || ev.package)) || '').toLowerCase();
     return (V6_LG_STATE.ignore_rules || []).some(function (w) {
       if (!w) return false;
+      var sc = String(w.scope || '').toLowerCase();
       var wh = String(w.dst_host || '').toLowerCase();
       if (wh && host !== wh && host.slice(-(wh.length + 1)) !== '.' + wh && ev.dst_ip !== wh) return false;
       if (w.leak_type && String(w.leak_type).toUpperCase() !== tp) return false;
-      if (w.mac && String(w.mac).toLowerCase() !== mac) return false;
+      if (sc === 'device_host_type' || w.mac) {
+        if (evOrg !== 'hotspot' || String(w.mac || '').toLowerCase() !== mac) return false;
+      }
+      if (sc === 'app_host_type') {
+        if (evOrg !== 'host') return false;
+        var wUid = w.uid ? round(+w.uid) : 0;
+        var wPkg = String(w.pkg || w.package || '').toLowerCase();
+        if (!(wUid > 0) && !wPkg) return false;
+        if (wUid > 0 && evUid !== wUid) return false;
+        if (wPkg && evPkg !== wPkg) return false;
+      }
       return true;
     });
   }
@@ -2924,7 +3023,7 @@
       totalHits += hits;
       if (org === 'host') {
         hostHits += hits;
-        if (ev.uid || ev.package) appMap[String(ev.uid || ev.package)] = 1;
+        if (ev.uid || ev.package || ev.pkg) appMap[String(ev.uid || ev.package || ev.pkg)] = 1;
       } else {
         hsHits += hits;
         if (ev.mac || ev.src_ip) devMap[ev.mac || ev.src_ip] = 1;
@@ -2956,6 +3055,7 @@
       ok: true,
       scope: scope,
       total_hits: totalHits,
+      window_hits: totalHits,
       hotspot_hits: hsHits,
       host_hits: hostHits,
       affected_devices: affectedDevs,
@@ -2971,6 +3071,7 @@
       },
       stats: {
         total_hits: totalHits,
+        window_hits: totalHits,
         hotspot_hits: hsHits,
         host_hits: hostHits,
         affected_devices: affectedDevs,
@@ -3407,6 +3508,7 @@
         band: 'n78',
         rsrp_dbm: -106,
         sinr_db: 3,
+        has_sinr: true,
         peak_rtt_ms: 58.6,
         delta_rtt_ms: 34.1,
         jitter_ms: 24.2,
@@ -3537,6 +3639,12 @@
       primary_downstream: MOCK_HS_ACTIVE ? IFACE : '',
       shape_targets: MOCK_HS_ACTIVE ? [IFACE, 'ap_br_wlan2'] : [],
       dual_band_or_mlo: MOCK_HS_ACTIVE,
+      wifi_standard: 'Wi-Fi 7',
+      wifi_generation: 7,
+      mlo_links: MOCK_HS_ACTIVE ? [
+        { iface: IFACE, band: '5GHz', channel: 149, bw_mhz: 160 },
+        { iface: 'ap_br_wlan2', band: '2.4GHz', channel: 6, bw_mhz: 40 }
+      ] : [],
       usb_tether_active: false,
       lan_fastlane_class: '1:fffe',
       lan_fastlane_gbps: 2.5,
@@ -3586,6 +3694,28 @@
   }
 
   var V6_VAULT_SHA = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+  var MOCK_SENSITIVE_RULES = { hotspot_pass: 'HNC-Demo-Pass-2026' };
+  var MOCK_RESTORED_RULES_RAW = null;
+  function isMockBackupSensitiveKey(k) {
+    var lk = String(k || '').trim().toLowerCase();
+    if (!lk) return false;
+    if (lk === 'hotspot_pass' || lk === 'psk' || lk === 'pin' || lk === 'auth_token') return true;
+    if (lk.indexOf('password') >= 0 || lk.indexOf('secret') >= 0 || lk.indexOf('token') >= 0) return true;
+    if (/_(pass|pin|psk)$/.test(lk)) return true;
+    return false;
+  }
+  function stripMockBackupSensitiveKeys(v) {
+    if (!v || typeof v !== 'object') return v;
+    if (Array.isArray(v)) {
+      for (var i = 0; i < v.length; i++) stripMockBackupSensitiveKeys(v[i]);
+      return v;
+    }
+    Object.keys(v).forEach(function (k) {
+      if (isMockBackupSensitiveKey(k)) delete v[k];
+      else stripMockBackupSensitiveKeys(v[k]);
+    });
+    return v;
+  }
 
   GET['/api/vector_sync'] = function () {
     var lv = GET['/api/live']({});
@@ -3695,20 +3825,24 @@
   };
   GET['/api/backup'] = function () {
     var fwSnap = v6SelfFirewallSnapshot();
+    var safeRules = stripMockBackupSensitiveKeys(clone(rulesJson()));
+    var outFiles = {
+      'rules.json': safeRules,
+      'vector_express.json': { enabled: V6_EXP_STATE.enabled, auto_detect: V6_EXP_STATE.auto_detect, forced_macs: V6_EXP_STATE.forced_macs },
+      'update_leash.json': { enabled: V6_UL_STATE.enabled, grace_mb: V6_UL_STATE.grace_mb, leash_kbps: V6_UL_STATE.leash_kbps },
+      'thermo_cruise.json': { enabled: V6_TH_STATE.enabled, stage1_temp_c: V6_TH_STATE.stage1_temp_c, stage2_temp_c: V6_TH_STATE.stage2_temp_c },
+      'webui_access.json': { mode: CFG.webui_access.mode, macs: CFG.webui_access.macs.slice(), port: CFG.webui_access.port },
+      'encdns.json': { policy: ENC.policy, devices: clone(ENC.devices) },
+      'self_firewall.json': { version: 1, updated_at: fwSnap.updated_at, uid_rules: fwSnap.uid_rules, blocked_domains: fwSnap.blocked_domains }
+    };
     return {
       schema_version: 'hnc.backup.v6',
       module_version: VER,
       module_version_code: VCODE,
       exported_at: now(),
-      file_count: 17,
+      file_count: Object.keys(outFiles).length,
       sha256: V6_VAULT_SHA,
-      files: {
-        'rules.json': rulesJson(),
-        'vector_express.json': { enabled: V6_EXP_STATE.enabled, auto_detect: V6_EXP_STATE.auto_detect, forced_macs: V6_EXP_STATE.forced_macs },
-        'update_leash.json': { enabled: V6_UL_STATE.enabled, grace_mb: V6_UL_STATE.grace_mb, leash_kbps: V6_UL_STATE.leash_kbps },
-        'thermo_cruise.json': { enabled: V6_TH_STATE.enabled, stage1_temp_c: V6_TH_STATE.stage1_temp_c, stage2_temp_c: V6_TH_STATE.stage2_temp_c },
-        'self_firewall.json': { version: 1, updated_at: fwSnap.updated_at, uid_rules: fwSnap.uid_rules, blocked_domains: fwSnap.blocked_domains }
-      }
+      files: outFiles
     };
   };
 
@@ -3758,25 +3892,36 @@
   POST['/api/leakguard/whitelist'] = function (b) {
     v6AssertAllowedKeys(b, ['action', 'id', 'scope', 'dst_host', 'dst_ip', 'leak_type', 'mac', 'note', 'origin', 'uid', 'package', 'pkg']);
     var act = String((b && b.action) || 'add').toLowerCase();
+    function curWindowHits() {
+      var h = 0;
+      V6_LG_STATE.events.forEach(function (ev) { if (!v6MockEventWhitelisted(ev)) h += (ev.hit_count || 1); });
+      return h;
+    }
     if (act === 'clear') {
       var rmAll = V6_LG_STATE.ignore_rules.length;
       V6_LG_STATE.ignore_rules = [];
-      return { ok: true, action: 'clear', removed: rmAll, ignore_rules: [] };
+      var wh0 = curWindowHits();
+      return { ok: true, action: 'clear', removed: rmAll, window_hits: wh0, total_hits: wh0, ignore_rules: [] };
     }
     var host = String((b && (b.dst_host || b.dst_ip)) || '').trim().toLowerCase();
     var lType = String((b && b.leak_type) || '').trim().toUpperCase();
     var mac = String((b && b.mac) || '').trim().toLowerCase();
-    var scope = String((b && b.scope) || (mac && lType ? 'device_host_type' : (lType ? 'host_type' : 'host'))).toLowerCase();
+    var reqUid = (b && b.uid !== undefined && b.uid !== null && b.uid !== '') ? round(+b.uid) : 0;
+    var reqPkg = String((b && (b.pkg || b.package)) || '').trim().toLowerCase();
+    var scope = String((b && b.scope) || (mac && lType ? 'device_host_type' : ((reqUid > 0 || reqPkg) && lType ? 'app_host_type' : (lType ? 'host_type' : 'host')))).toLowerCase();
     if (act === 'remove' || act === 'del' || act === 'delete') {
       var rid = String((b && b.id) || '').trim();
+      var wantUid = scope === 'app_host_type' ? reqUid : 0;
+      var wantPkg = scope === 'app_host_type' ? reqPkg : '';
       var beforeLen = V6_LG_STATE.ignore_rules.length;
       V6_LG_STATE.ignore_rules = V6_LG_STATE.ignore_rules.filter(function (w) {
         if (!w) return false;
         if (rid && w.id === rid) return false;
-        if (!rid && String(w.dst_host || '').toLowerCase() === host && String(w.scope || '') === scope && String(w.leak_type || '').toUpperCase() === lType && String(w.mac || '').toLowerCase() === mac) return false;
+        if (!rid && String(w.dst_host || '').toLowerCase() === host && String(w.scope || '') === scope && String(w.leak_type || '').toUpperCase() === lType && String(w.mac || '').toLowerCase() === mac && (w.uid || 0) === wantUid && String(w.pkg || w.package || '').toLowerCase() === wantPkg) return false;
         return true;
       });
-      return { ok: true, action: 'remove', removed: beforeLen - V6_LG_STATE.ignore_rules.length, ignore_rules: V6_LG_STATE.ignore_rules.slice() };
+      var whRm = curWindowHits();
+      return { ok: true, action: 'remove', removed: beforeLen - V6_LG_STATE.ignore_rules.length, window_hits: whRm, total_hits: whRm, ignore_rules: V6_LG_STATE.ignore_rules.slice() };
     }
     if (scope !== 'host_type' && scope !== 'host' && scope !== 'device_host_type' && scope !== 'app_host_type') {
       throw err('scope must be host_type|host|device_host_type|app_host_type', 400);
@@ -3788,22 +3933,28 @@
     if (scope === 'device_host_type' && !mac) {
       throw err('valid device mac is required for scope=device_host_type', 400);
     }
+    if (scope === 'app_host_type') {
+      if (reqUid < 0) throw err('uid must not be negative for scope=app_host_type', 400);
+      if (!(reqUid > 0) && !reqPkg) throw err('valid uid or pkg is required for scope=app_host_type', 400);
+    }
     var item = {
       id: 'ig_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
       scope: scope,
       dst_host: host,
       leak_type: (scope === 'host_type' || scope === 'device_host_type' || scope === 'app_host_type') ? lType : '',
       mac: scope === 'device_host_type' ? mac : '',
-      uid: b && b.uid ? round(+b.uid) : 0,
-      package: String((b && (b.package || b.pkg)) || ''),
+      uid: scope === 'app_host_type' ? reqUid : 0,
+      pkg: scope === 'app_host_type' ? reqPkg : '',
+      package: scope === 'app_host_type' ? reqPkg : '',
       note: String((b && b.note) || ''),
       created_at: now()
     };
     V6_LG_STATE.ignore_rules = V6_LG_STATE.ignore_rules.filter(function (w) {
-      return !(w.dst_host === item.dst_host && w.scope === item.scope && w.leak_type === item.leak_type && w.mac === item.mac && (w.uid || 0) === (item.uid || 0));
+      return !(w.dst_host === item.dst_host && w.scope === item.scope && w.leak_type === item.leak_type && w.mac === item.mac && (w.uid || 0) === (item.uid || 0) && String(w.pkg || w.package || '').toLowerCase() === item.pkg);
     });
     V6_LG_STATE.ignore_rules.push(item);
-    return { ok: true, action: 'add', rule: item, ignore_rules: V6_LG_STATE.ignore_rules.slice() };
+    var whAdd = curWindowHits();
+    return { ok: true, action: 'add', rule: item, window_hits: whAdd, total_hits: whAdd, ignore_rules: V6_LG_STATE.ignore_rules.slice() };
   };
   POST['/api/leakguard/block-domain'] = function (b) {
     v6AssertAllowedKeys(b, ['action', 'scope', 'target_scope', 'dst_host', 'mac', 'uid', 'pkg', 'app_name', 'force', 'also_ip']);
@@ -4279,46 +4430,185 @@
     return v6SubtreesPayload();
   };
   POST['/api/backup'] = function (b) {
-    if (b && b.schema_version && !/^(hnc\.backup\.v6(\.0|\.1)?|6\.0|6\.1)$/.test(String(b.schema_version).trim())) {
+    if (!b || typeof b !== 'object' || Array.isArray(b)) {
+      throw err('invalid backup json payload', 400);
+    }
+    var sv = String(b.schema_version || '').trim();
+    if (!/^(hnc\.backup\.v6(\.0|\.1)?|6\.0|6\.1)$/.test(sv)) {
       throw err('unsupported backup schema_version', 400);
     }
-    var files = (b && b.files && typeof b.files === 'object') ? b.files : null;
-    if (files) {
-      var sfRaw = files['self_firewall.json'] != null ? files['self_firewall.json'] : files['v6_self_firewall.json'];
-      if (typeof sfRaw === 'string') {
-        try { sfRaw = JSON.parse(sfRaw); } catch (_) { sfRaw = null; }
-      }
-      if (sfRaw && typeof sfRaw === 'object') {
-        if (Array.isArray(sfRaw.uid_rules)) {
-          var nextRules = {};
-          sfRaw.uid_rules.forEach(function (r) {
-            if (r && r.uid >= 10000 && r.mode && (r.mode !== 'allow' || (Array.isArray(r.block_targets) && r.block_targets.length > 0))) {
-              var cpR = clone(r);
-              cpR.block_targets = Array.isArray(cpR.block_targets) ? cpR.block_targets.slice() : [];
-              nextRules[String(r.uid)] = cpR;
-            }
-          });
-          V6_SELF_FW.uid_rules = nextRules;
-        }
-        if (Array.isArray(sfRaw.blocked_domains)) {
-          var nextDoms = {};
-          sfRaw.blocked_domains.forEach(function (d) {
-            var dn = String(d || '').trim().toLowerCase();
-            if (dn) nextDoms[dn] = 1;
-          });
-          V6_SELF_FW.blocked_domains = nextDoms;
-        } else if (sfRaw.blocked_domains && typeof sfRaw.blocked_domains === 'object') {
-          var nextDomsObj = {};
-          Object.keys(sfRaw.blocked_domains).forEach(function (d) {
-            if (sfRaw.blocked_domains[d]) nextDomsObj[String(d).trim().toLowerCase()] = 1;
-          });
-          V6_SELF_FW.blocked_domains = nextDomsObj;
-        }
-        V6_SELF_FW.updated_at = now();
-      }
+    var sha = String(b.sha256 || '').trim();
+    if (!/^[0-9a-f]{64}$/i.test(sha)) {
+      throw err('missing or invalid backup sha256 digest', 400);
     }
-    var cnt = files ? Object.keys(files).length : (round(+(b && b.file_count) || 17));
-    return { ok: true, restored_count: Math.max(1, cnt), dataplane_reloaded: true, sha256: (b && b.sha256) || V6_VAULT_SHA };
+    if (!b.files || typeof b.files !== 'object' || Array.isArray(b.files)) {
+      throw err('backup bundle missing files object', 400);
+    }
+    var fKeys = Object.keys(b.files);
+    if (!fKeys.length) {
+      throw err('backup bundle contains zero files', 400);
+    }
+    if (fKeys.length > 64) {
+      throw err('backup bundle exceeds maximum file count (64)', 400);
+    }
+    var macRe = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
+    var staged = {};
+    for (var fi = 0; fi < fKeys.length; fi++) {
+      var fn = fKeys[fi];
+      if (!fn || /[\/\\]|\.\./.test(fn) || !/^[a-z0-9_]+\.json$/.test(fn) || fn === 'remote_tokens.json' || fn === 'devices.json') {
+        throw err('forbidden or invalid config filename "' + fn + '"', 400);
+      }
+      var raw = b.files[fn], parsed = null;
+      if (typeof raw === 'string') {
+        try { parsed = JSON.parse(raw); } catch (pe) { throw err('invalid json in ' + fn, 400); }
+      } else if (raw && typeof raw === 'object') {
+        parsed = clone(raw);
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw err(fn + ': root must be a JSON object', 400);
+      }
+      if (fn === 'rules.json') {
+        if (parsed.devices != null) {
+          if (typeof parsed.devices !== 'object' || Array.isArray(parsed.devices)) {
+            throw err('rules.json: devices must be an object', 400);
+          }
+          Object.keys(parsed.devices).forEach(function (mKey) {
+            var nm = String(mKey || '').trim().toLowerCase();
+            if (!macRe.test(nm)) throw err('rules.json: invalid device mac "' + mKey + '"', 400);
+            var dv = parsed.devices[mKey];
+            if (!dv || typeof dv !== 'object' || Array.isArray(dv)) throw err('rules.json: device "' + mKey + '" value must be an object', 400);
+          });
+        }
+        ['blacklist', 'whitelist'].forEach(function (lk) {
+          if (parsed[lk] != null) {
+            if (!Array.isArray(parsed[lk])) throw err('rules.json: ' + lk + ' must be an array', 400);
+            parsed[lk].forEach(function (item) {
+              var sm = typeof item === 'string' ? item.trim().toLowerCase() : '';
+              if (!macRe.test(sm)) throw err('rules.json: invalid mac in ' + lk, 400);
+              if (sm === '00:00:00:00:00:00' || sm === 'ff:ff:ff:ff:ff:ff') {
+                throw err('rules.json: protected special mac "' + item + '" forbidden in ' + lk, 400);
+              }
+            });
+          }
+        });
+      } else if (fn === 'webui_access.json' && parsed.mode != null) {
+        if (['all', 'allowlist', 'local_only'].indexOf(String(parsed.mode)) < 0) {
+          throw err('webui_access.json: invalid mode "' + parsed.mode + '"', 400);
+        }
+      }
+      staged[fn] = parsed;
+    }
+
+    if (staged['rules.json']) {
+      var rj = stripMockBackupSensitiveKeys(staged['rules.json']);
+      Object.keys(MOCK_SENSITIVE_RULES).forEach(function (sk) {
+        if (MOCK_SENSITIVE_RULES[sk] != null && MOCK_SENSITIVE_RULES[sk] !== '') {
+          rj[sk] = MOCK_SENSITIVE_RULES[sk];
+        }
+      });
+      MOCK_RESTORED_RULES_RAW = clone(rj);
+      if (typeof rj.whitelist_mode === 'boolean') CFG.whitelist_mode = rj.whitelist_mode;
+      if (typeof rj.remote_enabled === 'boolean') CFG.remote_enabled = rj.remote_enabled;
+      if (typeof rj.quic_block === 'boolean') CFG.quic_block = rj.quic_block;
+      if (typeof rj.hotspot_ssid === 'string' && rj.hotspot_ssid.trim()) CFG.hotspot_ssid = rj.hotspot_ssid.trim();
+      if (rj.hotspot_auto != null) CFG.hotspot_autostart = bool(rj.hotspot_auto);
+      else if (rj.hotspot_autostart != null) CFG.hotspot_autostart = bool(rj.hotspot_autostart);
+      var blSet = {};
+      if (Array.isArray(rj.blacklist)) {
+        rj.blacklist.forEach(function (m) { blSet[String(m).trim().toLowerCase()] = 1; });
+      }
+      var wlSet = {};
+      if (Array.isArray(rj.whitelist)) {
+        rj.whitelist.forEach(function (m) { wlSet[String(m).trim().toLowerCase()] = 1; });
+      }
+      var devRules = rj.devices || {};
+      DEVS.forEach(function (d) {
+        if (d.sim) return;
+        if (Array.isArray(rj.blacklist)) d.status = blSet[d.mac] ? 'blocked' : 'allowed';
+        if (Array.isArray(rj.whitelist)) d.whitelist = !!wlSet[d.mac];
+        var dr = devRules[d.mac];
+        if (dr) {
+          d.down_mbps = +dr.down_mbps || 0;
+          d.up_mbps = +dr.up_mbps || 0;
+          d.limit_enabled = dr.limit_enabled !== false && (d.down_mbps > 0 || d.up_mbps > 0);
+          d.delay_ms = +dr.delay_ms || 0;
+          d.jitter_ms = +dr.jitter_ms || 0;
+          d.loss_pct = +dr.loss_pct || 0;
+          d.sqm_enabled = !!dr.sqm_enabled;
+          if (dr.whitelist != null) d.whitelist = !!dr.whitelist;
+        } else if (rj.devices != null) {
+          d.down_mbps = d.up_mbps = d.delay_ms = d.jitter_ms = d.loss_pct = 0;
+          d.limit_enabled = false;
+          d.sqm_enabled = false;
+        }
+      });
+    }
+
+    var expCfg = staged['vector_express.json'] || staged['v6_vector_express.json'];
+    if (expCfg) {
+      if (typeof expCfg.enabled === 'boolean') V6_EXP_STATE.enabled = expCfg.enabled;
+      if (typeof expCfg.auto_detect === 'boolean') V6_EXP_STATE.auto_detect = expCfg.auto_detect;
+      if (Array.isArray(expCfg.forced_macs)) V6_EXP_STATE.forced_macs = expCfg.forced_macs.map(function (m) { return String(m).trim().toLowerCase(); }).filter(Boolean);
+    }
+    var ulCfg = staged['update_leash.json'] || staged['v6_update_leash.json'];
+    if (ulCfg) {
+      if (typeof ulCfg.enabled === 'boolean') V6_UL_STATE.enabled = ulCfg.enabled;
+      if (ulCfg.grace_mb != null) V6_UL_STATE.grace_mb = lim(round(+ulCfg.grace_mb || 200), 10, 10240);
+      if (ulCfg.leash_kbps != null) V6_UL_STATE.leash_kbps = lim(round(+ulCfg.leash_kbps || 8000), 500, 500000);
+    }
+    var thCfg = staged['thermo_cruise.json'] || staged['v6_thermo_cruise.json'];
+    if (thCfg) {
+      if (typeof thCfg.enabled === 'boolean') V6_TH_STATE.enabled = thCfg.enabled;
+      if (thCfg.stage1_temp_c != null) V6_TH_STATE.stage1_temp_c = +thCfg.stage1_temp_c || 43;
+      if (thCfg.stage2_temp_c != null) V6_TH_STATE.stage2_temp_c = +thCfg.stage2_temp_c || 45;
+    }
+    if (staged['webui_access.json']) {
+      var wa = staged['webui_access.json'];
+      if (wa.mode) CFG.webui_access.mode = String(wa.mode);
+      if (Array.isArray(wa.macs)) CFG.webui_access.macs = wa.macs.map(function (m) { return String(m).trim().toLowerCase(); }).filter(Boolean);
+    }
+    if (staged['encdns.json']) {
+      var ec = staged['encdns.json'];
+      if (ec.policy) ENC.policy = String(ec.policy);
+      if (ec.devices && typeof ec.devices === 'object' && !Array.isArray(ec.devices)) ENC.devices = clone(ec.devices);
+    }
+
+    var sfRaw = staged['self_firewall.json'] || staged['v6_self_firewall.json'];
+    if (sfRaw) {
+      if (Array.isArray(sfRaw.uid_rules)) {
+        var nextRules = {};
+        sfRaw.uid_rules.forEach(function (r) {
+          if (r && r.uid >= 10000 && r.mode && (r.mode !== 'allow' || (Array.isArray(r.block_targets) && r.block_targets.length > 0))) {
+            var cpR = clone(r);
+            cpR.block_targets = Array.isArray(cpR.block_targets) ? cpR.block_targets.slice() : [];
+            nextRules[String(r.uid)] = cpR;
+          }
+        });
+        V6_SELF_FW.uid_rules = nextRules;
+      }
+      if (Array.isArray(sfRaw.blocked_domains)) {
+        var nextDoms = {};
+        sfRaw.blocked_domains.forEach(function (d) {
+          var dn = String(d || '').trim().toLowerCase();
+          if (dn) nextDoms[dn] = 1;
+        });
+        V6_SELF_FW.blocked_domains = nextDoms;
+      } else if (sfRaw.blocked_domains && typeof sfRaw.blocked_domains === 'object') {
+        var nextDomsObj = {};
+        Object.keys(sfRaw.blocked_domains).forEach(function (d) {
+          if (sfRaw.blocked_domains[d]) nextDomsObj[String(d).trim().toLowerCase()] = 1;
+        });
+        V6_SELF_FW.blocked_domains = nextDomsObj;
+      }
+      V6_SELF_FW.updated_at = now();
+    }
+    return {
+      ok: true,
+      restored_count: fKeys.length,
+      preserved_sensitive_keys: Object.keys(MOCK_SENSITIVE_RULES),
+      dataplane_reloaded: true,
+      sha256: sha.toLowerCase()
+    };
   };
   POST['/api/restore'] = POST['/api/backup'];
 

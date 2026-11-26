@@ -36,9 +36,6 @@ echo "$MAC" | grep -qiE '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$' || { echo "bad MAC: $MA
 [ $# -ge 2 ] && [ $(( $# % 2 )) -eq 0 ] || { echo "need k v pairs" >&2; exit 2; }
 
 mkdir -p "$HNC/data" "$HNC/run" 2>/dev/null || true
-[ -f "$RULES" ] || cat > "$RULES" <<'JSON'
-{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}
-JSON
 
 # v5.11: 不落临时文件, 在位置参数里原地轮转: 每取出一对 k v, 就把 k v auto 追加到
 # "$@" 末尾, 处理完 n 对后 "$@" 恰好只剩三元组(值里含换行也不会错位)。

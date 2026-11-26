@@ -106,8 +106,14 @@ func nsTypeName(s string) string {
 		return "BLUETOOTH"
 	case "9":
 		return "ETHERNET"
+	case "17":
+		return "VPN"
 	}
-	return strings.ToUpper(s)
+	u := strings.ToUpper(s)
+	if u == "TYPE_VPN" {
+		return "VPN"
+	}
+	return u
 }
 
 func nsParseIdent(seg string) nsIdent {

@@ -556,7 +556,10 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		}
 	}
 
-	nowSec := float64(time.Now().Unix())
+	now := time.Now()
+	nowUnix := now.Unix()
+	explicitInactive := hotspotExplicitlyInactive(s.hncDir) && !s.simActive()
+	simOn := s.simOn()
 
 	// 速率: 读后台 RateLoop 发布的快照 (只读, 不在请求里计算). 拷一份避免持锁遍历.
 	s.rateMu.Lock()
@@ -566,9 +569,14 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	}
 	s.rateMu.Unlock()
 
-	// v6.1.0-beta.1: 看门狗刷新回执超时(15s 窗口)或 ACTIVE 态下 devices.json 缺失/超 45s 陈旧时,
-	// 克隆局部 map 并以 2s 冷却只读合并内核邻居表(零子进程、零写盘、零 jsonCache 污染)。
-	devicesMap = s.mergeReadonlyNeighFallback(devicesPath, devicesMap, int64(nowSec))
+	// 只读叠加 SHM 活跃槽位(与 CoreHub /api/vector_sync 完全同源, 绝不写 data/devices.json 严守 m4_owner 唯一写者铁律),
+	// 再以 2s 冷却只读合并内核邻居表兜底。
+	var shmOnline map[string]bool
+	if !explicitInactive {
+		shmRes := s.readDpiShmSnapshotReadonly(now)
+		devicesMap, shmOnline = s.mergeLiveObservationsReadonly(devicesMap, shmRes, now)
+	}
+	devicesMap = s.mergeReadonlyNeighFallback(devicesPath, devicesMap, nowUnix)
 
 	// 合并
 	out := make([]map[string]interface{}, 0, len(devicesMap))
@@ -578,7 +586,10 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		if dev == nil {
 			continue
 		}
-		macKey := strings.ToLower(mac)
+		macKey := strings.ToLower(strings.TrimSpace(mac))
+		if !simOn && (strings.HasPrefix(macKey, simMACPrefix) || dev["sim"] == true) {
+			continue
+		}
 		seen[macKey] = true
 		merged := map[string]interface{}{
 			"mac": mac,
@@ -626,14 +637,14 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 			merged["hostname_src"] = "manual"
 		}
 		// 黑名单状态
-		if blSet[strings.ToLower(mac)] {
+		if blSet[macKey] {
 			merged["status"] = "blocked"
 		} else {
 			merged["status"] = "allowed"
 		}
-		// online 判断(跟 WebUI 一致: last_seen 在 90s 内)
-		lastSeen, _ := merged["last_seen"].(float64)
-		merged["online"] = lastSeen > 0 && (nowSec-lastSeen) < 90
+		// online 判断(与 CoreHub /api/vector_sync 完全同源: isDeviceEntryOnline)
+		devIP := strings.TrimSpace(asString(merged["ip"]))
+		merged["online"] = !explicitInactive && isDeviceEntryOnline(merged, devIP, nowUnix, shmOnline[macKey])
 
 		// v5.7.0-rc5: attach per-device identified apps (by MAC) from dpid.
 		if apps := dpiApps[macKey]; len(apps) > 0 {
@@ -1288,20 +1299,39 @@ func aggregateToday(raw []map[string]interface{}, todayStart time.Time) []Bucket
 		buckets[i].Label = twoDigit(i) + ":00"
 	}
 
-	// 按 mac 分组,时间排序,算 delta
+	// 按 mac 分组,时间排序,算 delta; 取当日零点前最后一条有效 raw 采样作零点基线消除跨零点丢窗
 	byMac := make(map[string][]map[string]interface{})
+	preMidnight := make(map[string]map[string]interface{})
 	for _, r := range raw {
+		if r == nil {
+			continue
+		}
 		ts := int64(getFloat(r, "ts"))
-		if ts < t0 || ts >= t1 {
+		if ts <= 0 || ts >= t1 {
 			continue
 		}
 		mac, _ := r["mac"].(string)
+		if mac == "" {
+			continue
+		}
+		if ts < t0 {
+			if prev, exists := preMidnight[mac]; !exists || ts >= int64(getFloat(prev, "ts")) {
+				preMidnight[mac] = r
+			}
+			continue
+		}
 		byMac[mac] = append(byMac[mac], r)
 	}
-	for _, arr := range byMac {
+	for mac, arr := range byMac {
 		sort.Slice(arr, func(i, j int) bool {
 			return getFloat(arr[i], "ts") < getFloat(arr[j], "ts")
 		})
+		if pre, ok := preMidnight[mac]; ok {
+			withBase := make([]map[string]interface{}, 0, len(arr)+1)
+			withBase = append(withBase, pre)
+			withBase = append(withBase, arr...)
+			arr = withBase
+		}
 		for i := 1; i < len(arr); i++ {
 			curRx := int64(getFloat(arr[i], "rx"))
 			prevRx := int64(getFloat(arr[i-1], "rx"))

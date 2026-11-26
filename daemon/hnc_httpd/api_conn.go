@@ -1368,15 +1368,33 @@ func (s *server) dpiIdentByMAC() map[string]map[string]interface{} {
 		for _, k := range []string{"hostname", "hostname_src", "os", "os_ver", "brand", "model", "type",
 			"confidence", "vendor_class", "services", "last_seen"} {
 			if x, ok := d[k]; ok && x != nil && x != "" {
+				if k == "services" {
+					switch sv := x.(type) {
+					case []interface{}:
+						cp := make([]interface{}, len(sv))
+						copy(cp, sv)
+						id[k] = cp
+					case []string:
+						cp := make([]string, len(sv))
+						copy(cp, sv)
+						id[k] = cp
+					default:
+						id[k] = x
+					}
+					continue
+				}
 				id[k] = x
 			}
 		}
 		dropJunkHostname(id) // v5.30 T1b: 旧 dpid 落盘的 "null" 不当名字用
 		if ev, ok := d["evidence"].([]interface{}); ok && len(ev) > 0 {
-			if len(ev) > 8 {
-				ev = ev[:8]
+			n := len(ev)
+			if n > 8 {
+				n = 8
 			}
-			id["evidence"] = ev
+			evCopy := make([]interface{}, n)
+			copy(evCopy, ev[:n])
+			id["evidence"] = evCopy
 		}
 		if len(id) > 0 {
 			out[strings.ToLower(strings.TrimSpace(mac))] = id

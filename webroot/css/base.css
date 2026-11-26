@@ -115,7 +115,7 @@ svg{flex:none}
 /* 按压 Q 弹 */
 .press{transition:transform .5s var(--q)}
 .press:active{transform:scale(.965);transition:transform .12s ease-out}
-:root.fx-nopress .press:active{transform:none}
+:root.fx-nopress .press:active,.press.fx-nopress:active{transform:none!important}
 
 /* ── 通用小件 ── */
 .badge{display:inline-flex;align-items:center;gap:3px;font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:6px;white-space:nowrap}
@@ -186,6 +186,7 @@ button.row:active{background:var(--input)}
 .seg.glass{border-radius:16px}
 .seg .thumb{position:absolute;top:4px;bottom:4px;left:0;border-radius:11px;background:linear-gradient(135deg,var(--blue),var(--indigo));
   box-shadow:0 4px 12px rgba(0,122,255,.35),0 1px 0 rgba(255,255,255,.28) inset;transition:transform .6s var(--q), width .45s var(--q)}
+.seg .thumb[data-spring="1"]{transition:none!important}
 .seg button{position:relative;z-index:1;flex:1;height:36px;font-size:13.5px;font-weight:700;color:var(--text-2);text-align:center;white-space:nowrap;transition:color .3s}
 .seg button.on{color:#fff}
 .seg.small{padding:3px;border-radius:9px;background:var(--input);border:1px solid var(--stroke)}
@@ -421,16 +422,19 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
 /* ── 底部标签栏: 液态玻璃透镜 ── */
 .tabbar{position:fixed;z-index:60;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 14px);transform:translateX(-50%);
   width:min(456px,calc(100% - 24px));height:66px;padding:5px;border-radius:33px;
-  background:var(--card-2);background:color-mix(in srgb,var(--card-solid) 78%,transparent);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3);
-  -webkit-backdrop-filter:blur(18px) saturate(170%);backdrop-filter:blur(18px) saturate(170%);touch-action:none;user-select:none;-webkit-user-select:none;
+  background:transparent!important;border:0!important;box-shadow:none!important;
+  -webkit-backdrop-filter:none!important;backdrop-filter:none!important;touch-action:none;user-select:none;-webkit-user-select:none;
   animation:navPop .9s var(--q) both .15s}
-@keyframes navPop{from{opacity:0;transform:translateX(-50%) translateY(70px) scale(.9)}to{opacity:1;transform:translateX(-50%)}}
+.tabbar>.tabbar-bg{position:absolute;top:0;right:0;bottom:0;left:0;inset:0;border-radius:inherit;pointer-events:none;z-index:0;
+  background:var(--card-2);background:color-mix(in srgb,var(--card-solid) 78%,transparent);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3);
+  -webkit-backdrop-filter:blur(18px) saturate(170%);backdrop-filter:blur(18px) saturate(170%)}
+@keyframes navPop{from{opacity:0;transform:translateX(-50%) translateY(70px) scale(.9)}to{transform:translateX(-50%)}}
 .tabs,.lens-in{display:grid;grid-template-columns:repeat(var(--tab-n,5),1fr);height:100%}
-.tabs{position:relative;z-index:0}
+.tabs{position:relative;z-index:2}
 .tab{display:grid;justify-items:center;align-content:center;gap:3px;font-size:10.5px;font-weight:700;color:var(--text-2);position:relative;transition:opacity .2s}
 .tab svg{width:23px;height:23px}
 .tab .dot{position:absolute;top:7px;left:58%;width:8px;height:8px;border-radius:50%;background:var(--red);box-shadow:0 0 6px rgba(255,59,48,.6)}
-.lens{position:absolute;z-index:1;top:5px;left:5px;height:54px;border-radius:27px;overflow:hidden;pointer-events:none;will-change:transform;
+.lens{position:absolute;z-index:3;top:5px;left:5px;height:54px;border-radius:27px;overflow:hidden;pointer-events:none;will-change:transform;
   background:var(--lens-glass);
   -webkit-backdrop-filter:var(--hyalite, blur(2px) saturate(200%) brightness(1.06));backdrop-filter:var(--hyalite, blur(2px) saturate(200%) brightness(1.06));
   box-shadow:0 6px 16px -4px rgba(0,122,255,.55),inset 0 0 0 1px rgba(255,255,255,0),inset 3px 0 5px -2px rgba(255,45,120,0),inset -3px 0 5px -2px rgba(0,190,255,0);
@@ -583,7 +587,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 :root.bgscaled .pages{border-radius:calc(var(--bgp,0) * 12px);overflow:hidden;background:var(--bg)}
 :root.bgscaled .header::before{border-radius:calc(var(--bgp,0) * 12px) calc(var(--bgp,0) * 12px) 0 0}
 /* P3 低端机: 去毛玻璃(改实色)、去背景缩放 */
-:root.lowfx .header::before,:root.lowfx .tabbar,:root.lowfx .toast{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+:root.lowfx .header::before,:root.lowfx .tabbar,:root.lowfx .tabbar>.tabbar-bg,:root.lowfx .lens,:root.lowfx .toast{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
 @keyframes lgDrift{0%{transform:translate3d(0,0,0) rotate(0)}50%{transform:translate3d(3%,-2%,0) rotate(6deg)}100%{transform:translate3d(-3%,2%,0) rotate(-5deg)}}
 .style-pick{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 .style-pick button{padding:10px;border-radius:14px;border:2px solid var(--stroke);background:var(--card-2);font-size:12.5px;font-weight:700;display:grid;justify-items:center;gap:8px}
@@ -1908,7 +1912,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 :root.lowfx[data-glass="frosted"] .hbtn,
 :root.lowfx[data-glass="frosted"] .sheet,
 :root.lowfx[data-glass="frosted"] .dd-menu,
-:root.lowfx[data-glass="frosted"] .tabbar,
+:root.lowfx[data-glass="frosted"] .tabbar>.tabbar-bg,
 :root.lowfx[data-glass="frosted"] .toast,
 :root.lowfx[data-glass="frosted"] .v6-drawer,
 :root.lowfx[data-glass="frosted"] .undo-pill {
@@ -1922,7 +1926,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 @media (prefers-reduced-transparency: reduce) {
   .header,
   .header::before,
-  .header.hs-on::after {
+  .header.hs-on::after,
+  .lens {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
   }
@@ -1930,7 +1935,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   .hbtn,
   .sheet,
   .dd-menu,
-  .tabbar,
+  .tabbar>.tabbar-bg,
   .toast,
   .v6-drawer,
   .undo-pill {
@@ -1946,7 +1951,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 /* ── 老旧 Android WebView (Chromium 83-110 / iOS 15) color-mix 与 backdrop-filter 降级保护 ── */
 @supports not (background: color-mix(in srgb, #000 50%, transparent)) {
   .header { background: var(--card); }
-  .tabbar { background: var(--card-2); }
+  .tabbar>.tabbar-bg { background: var(--card-2); }
   .bar.rx, .mini-bars i { background: var(--rx); }
   .bar.tx { background: var(--tx); }
   .pct i { background: rgba(0, 102, 224, .22); }
@@ -1970,7 +1975,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 }
 @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
   .header,
-  .tabbar,
+  .tabbar>.tabbar-bg,
   .undo-pill {
     background: var(--card-solid);
   }

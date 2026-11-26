@@ -53,6 +53,7 @@ type remoteListener struct {
 	https      *http.Server
 	redir      *http.Server
 	baseCancel context.CancelFunc // 取消当前代所有请求的 BaseContext(SSE 等长连接立即退出)
+	stopDone   chan struct{}      // 非 nil 表示当前有一轮 stop() 正在执行 Shutdown 排空
 	mainAddr   string             // 实际监听地址(测试用端口 0 时取真实端口)
 	gen        int                // 每次 start +1; Serve 意外退出时只清理同一代
 
@@ -158,6 +159,15 @@ func listenRemoteTCP(bind string, port int) (net.Listener, error) {
 
 // start 监听远程端口。先同步 Listen(端口被占当场报错, 下一轮重试), 再后台 Serve。
 func (rl *remoteListener) start() error {
+	for {
+		rl.mu.Lock()
+		waitCh := rl.stopDone
+		rl.mu.Unlock()
+		if waitCh == nil {
+			break
+		}
+		<-waitCh
+	}
 	ln, err := listenRemoteTCP(rl.bind, rl.port)
 	if err != nil {
 		return err
@@ -246,30 +256,57 @@ func (rl *remoteListener) start() error {
 	return nil
 }
 
-// stop 关掉远程端口(先取消 BaseContext 断开 SSE 等长连接, 进行中的请求最多等 5 秒, 超时强制 Close)。
+// stop 关掉远程端口(先取消 BaseContext 断开 SSE 等长连接, 进行中的请求最多等 5 秒, 超时强制 Close;
+// 若另一协程正在执行 Shutdown 排空, 后到调用者通过 stopDone 等待其完成而非提前返回)。
 func (rl *remoteListener) stop(why string) {
-	rl.mu.Lock()
-	hs, redir, baseCancel := rl.https, rl.redir, rl.baseCancel
-	rl.https, rl.redir, rl.baseCancel, rl.mainAddr = nil, nil, nil, ""
-	rl.gen++
-	rl.mu.Unlock()
-	if baseCancel != nil {
-		baseCancel()
-	}
-	if hs == nil {
+	if rl == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := hs.Shutdown(ctx); err != nil {
-		_ = hs.Close()
-	}
-	if redir != nil {
-		if err := redir.Shutdown(ctx); err != nil {
-			_ = redir.Close()
+	for {
+		rl.mu.Lock()
+		hs, redir, baseCancel := rl.https, rl.redir, rl.baseCancel
+		waitCh := rl.stopDone
+		if hs == nil {
+			rl.mu.Unlock()
+			if waitCh != nil {
+				<-waitCh
+			}
+			return
 		}
+		if waitCh != nil {
+			rl.mu.Unlock()
+			<-waitCh
+			continue
+		}
+		done := make(chan struct{})
+		rl.stopDone = done
+		rl.https, rl.redir, rl.baseCancel, rl.mainAddr = nil, nil, nil, ""
+		rl.gen++
+		rl.mu.Unlock()
+
+		if baseCancel != nil {
+			baseCancel()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := hs.Shutdown(ctx); err != nil {
+			_ = hs.Close()
+		}
+		if redir != nil {
+			if err := redir.Shutdown(ctx); err != nil {
+				_ = redir.Close()
+			}
+		}
+		cancel()
+		log.Printf("remote listener: closed (%s)", why)
+
+		rl.mu.Lock()
+		if rl.stopDone == done {
+			rl.stopDone = nil
+		}
+		rl.mu.Unlock()
+		close(done)
+		return
 	}
-	log.Printf("remote listener: closed (%s)", why)
 }
 
 // Addr 当前远程端口的监听地址(没开 = "")。

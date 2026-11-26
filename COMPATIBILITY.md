@@ -1,9 +1,9 @@
 # HNC 兼容性矩阵与实测边界说明
 
-**当前版本**: v6.1.0-rc.9
+**当前版本**: v6.1.0-rc.10
 **最后更新**: 2026-11-26
 
-本文件遵循「实测一分说一分，未实测绝不夸大承诺」的工程原则，将 HNC `v6.1.0-rc.9` 的平台兼容性严格划分为**基准真机实测验证**、**源码级防御护栏（待对应真机回报）**与**明确不支持或受宿主内核硬限制**三层证据边界。当任何底层能力在当前设备上不可用时，后端与 WebUI 均如实返回 `supported: false` / `available: false` 与具体原因码，绝不伪造成功状态。
+本文件遵循「实测一分说一分，未实测绝不夸大承诺」的工程原则，将 HNC `v6.1.0-rc.10` 的平台兼容性严格划分为**基准真机实测验证**、**源码级防御护栏（待对应真机回报）**与**明确不支持或受宿主内核硬限制**三层证据边界。当任何底层能力在当前设备上不可用时，后端与 WebUI 均如实返回 `supported: false` / `available: false` 与具体原因码，绝不伪造成功状态。
 
 ## 一、已在基准真机完整实测验证（Tier 1 实证基线）
 
@@ -25,11 +25,11 @@
    - 针对运行期挂载命名空间切换或间歇卸载，高频流控与邻居感知优先走纯 Go 原生 `AF_NETLINK` 直连与 `/proc`、`/sys` 直读；外部命令调用统一经 `./bin/hnc_env.sh` 的 `/data` 备份工具链垫片解析，并配 `Setpgid` 独立进程组 2 秒硬超时连根清理与连续超时熔断保护。
 3. **缺省无 `sch_cake` / `sch_fq_codel` 内核的自动无感降级**：
    - 基准 GKI 6.6 内核未编译 `sch_cake` 与 `sch_fq_codel`。`./bin/capability_probe.sh` 与原生 RTNetlink 引擎实测探测后，自动按五级叶子队列回退链降级至可用调度器（直至按限速值动态缩放队列深度的 `pfifo(16..256)` 配合 `HTB` 令牌桶）；无 `ifb` 模块时上行限速自动切换至双栈 `clsact` / `ingress police`。
-4. **高通热点硬件加速（`tether_limit_map` / IPA 快路径）截流检测、双路径修复与 L3 `eBPF clsact` 四态正交展示**：
+4. **高通热点硬件加速（`tether_limit_map` / IPA 快路径）截流检测、跨重启持久化还原与 L3 `eBPF clsact` 四态正交展示**：
    - 开启系统级热点硬件加速时，Android `tether_limit_map` / `tether_downstream4_map` / `tether_downstream6_map` 与高通 IPA 快路径会旁路软件 `tc` 队列。
-   - 已实测验证两套闭环方案：一是 `hotspotd` 与 `./bin/hnc_offload_guard.sh` 在设备纳入管控时 `T+0` 置位压制并动态驱逐加速表项，同时在 `/api/dataplane_verify` 中交叉对比真实转发流量与 HTB 命中字节计算截流比例；二是当固件锁死 IPA 硬旁路时，WebUI 自检卡片直接给出前往「系统设置 -> 连接与共享 -> 个人热点」关闭热点硬件加速的明确指引；同时将内核 L3 `eBPF clsact` 软件流控快径与系统热点硬件加速拆分为清晰的四态独立展示（已关闭 / 模块已压制 / 待机未激活 / 固件硬旁路），杜绝状态混同误报。
-5. **原生 `dumpsys isub` 双卡物理槽位、5G SA/NSA 精准判定、信号陈旧样本淘汰与 `BOOTCLASSPATH` 环境保护**：
-   - 摒弃易将历史换卡自增 `subId`（如 `subId=9`）误判为新卡或渲染出「第 3 张未知卡」的旧逻辑，实测打通原生 C++ Binder 服务 `dumpsys isub` + `dumpsys telephony.registry` 权威链路，在流量账单与实时信号诊断双路径统一过滤 `INVALID_SUBSCRIPTION_ID`（`2147483647`）、`pid>=2` 软 SIM 与 `v4-` CLAT 转换口前缀，严格按在位物理卡槽 `simSlotIndex`（`0` 为卡 1，`1` 为卡 2）映射并锁定 `activeDataSubId` 当前上网卡的真实 5G SA / NSA 驻留态（修复双卡场景下 5G SA 被副卡状态干扰误判为 NSA），同时自动淘汰过期历史信号样本（杜绝隔天 27 小时旧样本触发假「强干扰」告警）。
+   - 已实测验证两套闭环方案：一是 `hotspotd` 与 `./bin/hnc_offload_guard.sh` 在受控策略（含限速、黑名单、域名/连接封锁、加密 DNS 管控）活跃时 `T+0` 置位压制并动态驱逐加速表项，同时将用户原始 `tether_offload_disabled` 值持久化备份于 `data/`（跨正常重启与模块卸载均能精准无损还原，绝不锁死系统开关），并在 `/api/dataplane_verify` 中交叉对比真实转发流量与 HTB 命中字节计算截流比例；二是当固件锁死 IPA 硬旁路时，WebUI 自检卡片直接给出前往「系统设置 -> 连接与共享 -> 个人热点」关闭热点硬件加速的明确指引；同时将内核 L3 `eBPF clsact` 软件流控快径与系统热点硬件加速拆分为清晰的四态独立展示（已关闭 / 模块已压制 / 待机未激活 / 固件硬旁路），杜绝状态混同误报。
+5. **原生 `dumpsys isub` 双卡物理槽位、5G-A 多载波与 Wi-Fi 7 MLO 精准判定、信号陈旧样本淘汰与 `BOOTCLASSPATH` 环境保护**：
+   - 摒弃易将历史换卡自增 `subId`（如 `subId=9`）误判为新卡或渲染出「第 3 张未知卡」的旧逻辑，实测打通原生 C++ Binder 服务 `dumpsys isub` + `dumpsys telephony.registry` 权威链路，在流量账单与实时信号诊断双路径统一过滤 `INVALID_SUBSCRIPTION_ID`（`2147483647`）、未注册邻区 `mCellInfo` 干扰、`pid>=2` 软 SIM 与 `v4-` CLAT 转换口前缀，严格按在位物理卡槽 `simSlotIndex`（`0` 为卡 1，`1` 为卡 2）映射并锁定当前上网卡的真实 5G SA / 5G-A 多载波带宽（含 `mCellBandwidths`）与 Wi-Fi 7 MLO 多链路高速主频段，保留真实 `0 dB` 临界 SINR 读数并自动淘汰过期历史信号样本（杜绝隔天 27 小时旧样本触发假「强干扰」告警）。
    - 所有需经 `app_process` 执行的系统命令（`content`、`settings`、`cmd`、`am`）均完整保留宿主 `BOOTCLASSPATH`、`SYSTEMSERVERCLASSPATH` 与 `ANDROID_*` 环境变量，根除空环境导致的静默空输出。
 6. **`32MB tmpfs` 瞬态内存盘与持久化目录物理隔离**：
    - 实测验证 `/data/local/hnc/run` 挂载 `32MB tmpfs` 零闪存磨损运行，跨月 SIM 流量账单与本机真值自训练样本已全量迁入持久化 `/data/local/hnc/data/stats/` 与 `/data/local/hnc/data/self_studio/`，配齐硬配额轮转与原子写失败即删 `.tmp` 孤儿清理。

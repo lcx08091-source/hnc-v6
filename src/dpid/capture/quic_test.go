@@ -646,50 +646,58 @@ func TestQUICReassemblerEviction(t *testing.T) {
 	a, ha := mk(0, cryptoFrame(0, ch[:half]))
 	b, hb := mk(1, cryptoFrame(half, ch[half:]))
 	ip := net.ParseIP("192.168.43.20")
+	dstA := net.ParseIP("203.0.113.10")
+	dstB := net.ParseIP("203.0.113.20")
 
 	// 超时: 前半段在 t0, 后半段 4s 后到 → 旧 entry 已过期, 不得拼出 CH。
-	if r.handleInitial(ip, 1000, &ha, a, quicParamsV1, t0) != nil {
+	if r.handleInitial(ip, dstA, 1000, &ha, a, quicParamsV1, t0) != nil {
 		t.Fatal("unexpected hello from half")
 	}
-	if r.handleInitial(ip, 1000, &hb, b, quicParamsV1, t0.Add(4*time.Second)) != nil {
+	if r.handleInitial(ip, dstA, 1000, &hb, b, quicParamsV1, t0.Add(4*time.Second)) != nil {
 		t.Fatal("expired entry should not complete")
 	}
-	// 未超时则能拼出。
-	if r.handleInitial(ip, 1001, &ha, a, quicParamsV1, t0) != nil {
+	// 未超时则能拼出; 且同一源端口并发连向不同 DstIP 绝不串扰。
+	if r.handleInitial(ip, dstA, 1001, &ha, a, quicParamsV1, t0) != nil {
 		t.Fatal("unexpected hello")
 	}
-	if got := r.handleInitial(ip, 1001, &hb, b, quicParamsV1, t0.Add(time.Second)); !bytes.Equal(got, ch) {
+	if got := r.handleInitial(ip, dstA, 1001, &hb, b, quicParamsV1, t0.Add(time.Second)); !bytes.Equal(got, ch) {
 		t.Fatalf("reassembled CH mismatch (len=%d)", len(got))
+	}
+	if r.handleInitial(ip, dstB, 1001, &ha, a, quicParamsV1, t0.Add(time.Second)) != nil {
+		t.Fatal("unexpected hello on dstB")
+	}
+	if got := r.handleInitial(ip, dstB, 1001, &hb, b, quicParamsV1, t0.Add(2*time.Second)); !bytes.Equal(got, ch) {
+		t.Fatalf("same sport to distinct DstIP collided with finished map (len=%d)", len(got))
 	}
 
 	// 数量上限: 灌 20 个不同端口的半包, 表不超过 4 个。
 	t1 := t0.Add(5 * time.Second)
 	for i := 0; i < 20; i++ {
-		r.handleInitial(ip, uint16(2000+i), &ha, a, quicParamsV1, t1.Add(time.Duration(i)*time.Millisecond))
+		r.handleInitial(ip, dstA, uint16(2000+i), &ha, a, quicParamsV1, t1.Add(time.Duration(i)*time.Millisecond))
 		if len(r.m) > 4 {
 			t.Fatalf("entries=%d exceeds cap", len(r.m))
 		}
 	}
 	// LRU: 最后插入的 4 个在, 最早的被淘汰。
-	if _, ok := r.m[quicTupleKey(ip, 2019)+string(dcid)]; !ok {
+	if _, ok := r.m[quicTupleKey(ip, dstA, 2019)+string(dcid)]; !ok {
 		t.Error("most recent entry evicted")
 	}
-	if _, ok := r.m[quicTupleKey(ip, 2000)+string(dcid)]; ok {
+	if _, ok := r.m[quicTupleKey(ip, dstA, 2000)+string(dcid)]; ok {
 		t.Error("oldest entry not evicted")
 	}
 
 	// 字节上限: offset 超过 16KB 的 CRYPTO 帧 → entry 放弃, 不 panic。
 	big, hbig := mk(0, cryptoFrame(16<<10-10, bytes.Repeat([]byte{1}, 50)))
-	if r.handleInitial(ip, 3000, &hbig, big, quicParamsV1, t1.Add(time.Second)) != nil {
+	if r.handleInitial(ip, dstA, 3000, &hbig, big, quicParamsV1, t1.Add(time.Second)) != nil {
 		t.Fatal("oversize should not produce hello")
 	}
-	if e := r.m[quicTupleKey(ip, 3000)+string(dcid)]; e == nil || !e.done || e.data != nil {
+	if e := r.m[quicTupleKey(ip, dstA, 3000)+string(dcid)]; e == nil || !e.done || e.data != nil {
 		t.Errorf("oversize entry should be marked done with data released")
 	}
 	// 声明长度超过 16KB 的 ClientHello 同样放弃。
 	fake := []byte{0x01, 0x01, 0x00, 0x00, 0x03, 0x03}
 	fk, hfk := mk(0, cryptoFrame(0, fake))
-	if r.handleInitial(ip, 3001, &hfk, fk, quicParamsV1, t1.Add(time.Second)) != nil {
+	if r.handleInitial(ip, dstA, 3001, &hfk, fk, quicParamsV1, t1.Add(time.Second)) != nil {
 		t.Fatal("oversize declared CH should not produce hello")
 	}
 }

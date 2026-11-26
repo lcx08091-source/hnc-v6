@@ -130,13 +130,14 @@ type simAcc struct {
 }
 
 type simStore struct {
-	hncDir string
-	once   sync.Once
-	mu     sync.Mutex
-	f      simFile
-	on     atomic.Bool // enabled && len(devices)>0 的快路径标志由 hasDev 配合
-	hasDev atomic.Bool
-	acc    map[string]*simAcc
+	hncDir    string
+	once      sync.Once
+	mu        sync.Mutex
+	f         simFile
+	on        atomic.Bool // enabled && len(devices)>0 的快路径标志由 hasDev 配合
+	hasDev    atomic.Bool
+	hasOnline atomic.Bool
+	acc       map[string]*simAcc
 }
 
 var simStores sync.Map // hncDir → *simStore
@@ -178,9 +179,23 @@ func (st *simStore) load() {
 	st.syncFlagsLocked()
 }
 
-func (st *simStore) syncFlagsLocked() {
+func (st *simStore) recalcFlagsLocked() {
 	st.on.Store(st.f.Enabled)
 	st.hasDev.Store(st.f.Enabled && len(st.f.Devices) > 0)
+	online := false
+	if st.f.Enabled {
+		for i := range st.f.Devices {
+			if !st.f.Devices[i].Offline {
+				online = true
+				break
+			}
+		}
+	}
+	st.hasOnline.Store(online)
+}
+
+func (st *simStore) syncFlagsLocked() {
+	st.recalcFlagsLocked()
 }
 
 func (st *simStore) saveLocked() error {
@@ -206,6 +221,14 @@ func (s *server) simOn() bool { return simFor(s.hncDir).on.Load() }
 
 // simActive: 已开启且至少一台模拟设备 —— 读接口合并只看它
 func (s *server) simActive() bool { return simFor(s.hncDir).hasDev.Load() }
+
+// simHasOnline: 已开启且存在至少一台在线(!d.Offline)的模拟设备
+func (s *server) simHasOnline() bool {
+	if s == nil {
+		return false
+	}
+	return simFor(s.hncDir).hasOnline.Load()
+}
 
 // ─── 速率生成 ─────────────────────────────────────────────────────────
 
@@ -1002,6 +1025,133 @@ func (s *server) purgeSimRuntimeState(targetMAC string) {
 	}
 }
 
+// purgeSimPolicyOrphans 在删除模拟设备或清空模拟列表时清理对应 02:5e:00:* 在内存策略与关联策略表中的孤儿残留。
+func (s *server) purgeSimPolicyOrphans(keepSim map[string]bool, targetMAC string) {
+	if s == nil {
+		return
+	}
+	shouldPurge := func(mac string) bool {
+		m := strings.ToLower(strings.TrimSpace(mac))
+		if !isSimMAC(m) {
+			return false
+		}
+		if targetMAC != "" {
+			return m == targetMAC
+		}
+		if keepSim != nil {
+			return !keepSim[m]
+		}
+		return true
+	}
+
+	if c := s.limitCtl; c != nil {
+		c.mu.Lock()
+		polChanged := false
+		for m := range c.policies {
+			if shouldPurge(m) {
+				delete(c.policies, m)
+				polChanged = true
+			}
+		}
+		for m := range c.st.Devices {
+			if shouldPurge(m) {
+				delete(c.st.Devices, m)
+			}
+		}
+		for m := range c.logged {
+			if shouldPurge(m) {
+				delete(c.logged, m)
+			}
+		}
+		for m := range c.histDay {
+			if shouldPurge(m) {
+				delete(c.histDay, m)
+			}
+		}
+		for m := range c.histMon {
+			if shouldPurge(m) {
+				delete(c.histMon, m)
+			}
+		}
+		for m := range c.histMonSplit {
+			if shouldPurge(m) {
+				delete(c.histMonSplit, m)
+			}
+		}
+		for m := range c.st.GlobalAlertWarn {
+			if shouldPurge(m) {
+				delete(c.st.GlobalAlertWarn, m)
+			}
+		}
+		for m := range c.st.GlobalAlertOver {
+			if shouldPurge(m) {
+				delete(c.st.GlobalAlertOver, m)
+			}
+		}
+		if polChanged && c.hncDir != "" {
+			if _, stErr := os.Stat(c.policyPath()); stErr == nil {
+				_ = c.savePoliciesLocked()
+			}
+		}
+		c.mu.Unlock()
+
+		c.viewMu.Lock()
+		for m := range c.view {
+			if shouldPurge(m) {
+				delete(c.view, m)
+			}
+		}
+		c.viewMu.Unlock()
+	}
+
+	if s.hncDir != "" {
+		appCtlMu.Lock()
+		if _, stErr := os.Stat(appControlsPath(s.hncDir)); stErr == nil {
+			ctl := loadAppControls(s.hncDir)
+			ctlChanged := false
+			keptTL := ctl.TimeLimits[:0]
+			for _, it := range ctl.TimeLimits {
+				if shouldPurge(it.MAC) {
+					ctlChanged = true
+					continue
+				}
+				keptTL = append(keptTL, it)
+			}
+			ctl.TimeLimits = keptTL
+			keptCB := ctl.CategoryBlocks[:0]
+			for _, it := range ctl.CategoryBlocks {
+				if shouldPurge(it.MAC) {
+					ctlChanged = true
+					continue
+				}
+				keptCB = append(keptCB, it)
+			}
+			ctl.CategoryBlocks = keptCB
+			if ctlChanged {
+				_ = saveAppControls(s.hncDir, ctl)
+			}
+		}
+		appCtlMu.Unlock()
+	}
+
+	if v, ok := v6Registry.Load(s); ok {
+		if vst, ok2 := v.(*v6ServerState); ok2 && vst != nil && vst.scalpel != nil {
+			sc := vst.scalpel
+			sc.mu.Lock()
+			if len(sc.simRules) > 0 {
+				kept := sc.simRules[:0]
+				for _, r := range sc.simRules {
+					if !shouldPurge(r.ClientMAC) {
+						kept = append(kept, r)
+					}
+				}
+				sc.simRules = kept
+			}
+			sc.mu.Unlock()
+		}
+	}
+}
+
 // syncSimSnapshotNow 在释放 simStore.mu 后同步清理残留内存态、唤醒活动监听并强制刷新 CoreHub WorldSnapshot,
 // 确保 /api/vector_sync 瞬间剔除或同步 02:5e:00:* 模拟设备。
 func (s *server) syncSimSnapshotNow(purgeAll bool, deletedMAC string) {
@@ -1151,6 +1301,7 @@ func actionSimDeviceDel(s *server, p map[string]string) actionResp {
 	if saveErr != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}
 	}
+	s.purgeSimPolicyOrphans(nil, mac)
 	s.syncSimSnapshotNow(false, mac)
 	return actionResp{OK: true, Detail: "deleted " + mac}
 }
@@ -1166,6 +1317,7 @@ func actionSimClear(s *server) actionResp {
 	if saveErr != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}
 	}
+	s.purgeSimPolicyOrphans(nil, "")
 	s.syncSimSnapshotNow(true, "")
 	return actionResp{OK: true, Detail: fmt.Sprintf("cleared %d sim device(s)", n)}
 }
@@ -1216,6 +1368,7 @@ func actionSimPreset(s *server, p map[string]string) actionResp {
 	st.mu.Lock()
 	rng := simRNG()
 	var built []simDevice
+	keepSet := make(map[string]bool, len(items))
 	for _, it := range items {
 		d, err := st.newDeviceLocked(it.typ, rng)
 		if err != nil {
@@ -1227,6 +1380,7 @@ func actionSimPreset(s *server, p map[string]string) actionResp {
 			return *r
 		}
 		built = append(built, d)
+		keepSet[d.MAC] = true
 	}
 	st.f.Devices = built
 	st.acc = map[string]*simAcc{}
@@ -1236,6 +1390,7 @@ func actionSimPreset(s *server, p map[string]string) actionResp {
 	if saveErr != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: saveErr.Error()}
 	}
+	s.purgeSimPolicyOrphans(keepSet, "")
 	s.syncSimSnapshotNow(true, "")
 	return actionResp{OK: true, Detail: fmt.Sprintf("已载入预设 %s(%d 台), 模拟环境已开启", name, len(items))}
 }

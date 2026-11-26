@@ -158,6 +158,8 @@ var (
 	defaultDPActorOnce  sync.Once
 	defaultDPActor      *DataplaneActor
 	defaultDPActorReady atomic.Bool
+
+	dpSyncPendingLimitsHook func(hncDir string)
 )
 
 func defaultDPTierHooks() dpTierHooks {
@@ -186,7 +188,13 @@ func getDPTierHooks() dpTierHooks {
 
 func init() {
 	runtime.KeepAlive(&dataplaneRequiredAPIMarkers)
-	RegisterVectorSyncProvider("dataplane_tier", func() any {
+	RegisterServerVectorSyncProvider("dataplane_tier", func(s *server) any {
+		if s != nil && s.hncDir != "" {
+			RefreshDataplaneTierIfNeeded(s.hncDir, "")
+			if dpSyncPendingLimitsHook != nil {
+				dpSyncPendingLimitsHook(s.hncDir)
+			}
+		}
 		return CurrentDataplaneTierStatus()
 	})
 }
@@ -464,8 +472,9 @@ func (a *DataplaneActor) InvalidateReconcile(iface string) {
 	})
 }
 
-// InvalidateDataplaneReconcileNative 供规则核对或热点重初始化时清空全局 DataplaneActor 去重缓存。
+// InvalidateDataplaneReconcileNative 供规则核对或热点重初始化时清空全局 DataplaneActor 去重缓存与 Tier 签名缓存。
 func InvalidateDataplaneReconcileNative(hncDir, iface string) {
+	clearDataplaneTierCache(hncDir)
 	if !defaultDPActorReady.Load() && !useNativeDataplane(hncDir) {
 		return
 	}
@@ -583,7 +592,158 @@ func (a *DataplaneActor) Status() DataplaneTierStatus {
 	return st
 }
 
-// ── 启动期实证探针 ProbeDataplaneTier ────────────────────────────────────────
+// ── 启动期与运行期自适应实证探针 ProbeDataplaneTier ────────────────────────────
+
+const dpTierActiveRecheckInterval = 15 * time.Second
+
+var (
+	dpTierRefreshMu       sync.Mutex
+	dpTierLastSigByDir    = make(map[string]string, 2)
+	dpTierLastProbeAt     = make(map[string]time.Time, 2)
+	dpTierRefreshRunning  bool
+	dpTierRefreshPendDir  string
+	dpTierRefreshPendIfc  string
+	dpTierRefreshWaiters  []chan struct{}
+)
+
+func clearDataplaneTierCache(hncDir string) {
+	hncDir = strings.TrimSpace(hncDir)
+	dpTierRefreshMu.Lock()
+	if hncDir == "" {
+		clear(dpTierLastSigByDir)
+		clear(dpTierLastProbeAt)
+	} else {
+		delete(dpTierLastSigByDir, hncDir)
+		delete(dpTierLastProbeAt, hncDir)
+	}
+	dpTierRefreshMu.Unlock()
+}
+
+func buildDataplaneTierRuntimeSig(hncDir, iface string) string {
+	var sb strings.Builder
+	sb.Grow(160)
+	sb.WriteString(iface)
+	for _, rel := range []string{
+		"run/hnc_state",
+		"run/qdisc_caps.json",
+		"run/clsact.state",
+		"run/offload_guard.json",
+		"run/offload_guard.state",
+		"run/offload_slowpath.active",
+	} {
+		sb.WriteByte('|')
+		if st, err := os.Stat(filepath.Join(hncDir, rel)); err == nil {
+			sb.WriteString(strconv.FormatInt(st.Size(), 10))
+			sb.WriteByte('@')
+			sb.WriteString(strconv.FormatInt(st.ModTime().UnixNano(), 10))
+		} else {
+			sb.WriteByte('-')
+		}
+	}
+	return sb.String()
+}
+
+func shouldRefreshDataplaneTier(hncDir, iface string) (string, string, bool) {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" || !useNativeDataplane(hncDir) {
+		return "", "", false
+	}
+	resolved := strings.TrimSpace(iface)
+	if resolved == "" {
+		resolved = readHotspotIfaceName(hncDir)
+	}
+	if resolved == "" {
+		clearDataplaneTierCache(hncDir)
+		return "", "", false
+	}
+	sig := buildDataplaneTierRuntimeSig(hncDir, resolved)
+	now := time.Now()
+	curTier := ""
+	if defaultDPActorReady.Load() {
+		curTier = CurrentDataplaneTierStatus().ActiveTier
+	}
+	screenOff := activityNow().screenOff()
+
+	dpTierRefreshMu.Lock()
+	prevSig, hasSig := dpTierLastSigByDir[hncDir]
+	lastAt := dpTierLastProbeAt[hncDir]
+	need := !hasSig || prevSig != sig
+	if !need && !screenOff && curTier != DataplaneTierEDT && now.Sub(lastAt) >= dpTierActiveRecheckInterval {
+		need = true
+	}
+	if need {
+		dpTierLastSigByDir[hncDir] = sig
+		dpTierLastProbeAt[hncDir] = now
+	}
+	dpTierRefreshMu.Unlock()
+	return resolved, sig, need
+}
+
+// RefreshDataplaneTierSync 在确认不持有 nativeDPLockMu 的上下文中按需同步刷新数据面 Tier 探针。
+func RefreshDataplaneTierSync(hncDir, iface string) string {
+	resolved, _, need := shouldRefreshDataplaneTier(hncDir, iface)
+	if !need {
+		return CurrentDataplaneTierStatus().ActiveTier
+	}
+	return ProbeDataplaneTier(hncDir, resolved)
+}
+
+// RefreshDataplaneTierIfNeeded 按运行时状态文件签名去重触发异步单飞 ProbeDataplaneTier:
+//   - 热点未开启或熄屏无状态变化时零唤醒、零空转;
+//   - 异步单飞脱离调用方锁栈执行, 严格遵守 arb.mu -> Actor.Do -> nativeDPLockMu 铁律锁序。
+func RefreshDataplaneTierIfNeeded(hncDir, iface string) {
+	resolved, _, need := shouldRefreshDataplaneTier(hncDir, iface)
+	if !need {
+		return
+	}
+	hncDir = strings.TrimSpace(hncDir)
+	dpTierRefreshMu.Lock()
+	if dpTierRefreshRunning {
+		dpTierRefreshPendDir = hncDir
+		dpTierRefreshPendIfc = resolved
+		dpTierRefreshMu.Unlock()
+		return
+	}
+	dpTierRefreshRunning = true
+	dpTierRefreshMu.Unlock()
+
+	go func(firstDir, firstIfc string) {
+		dir, ifc := firstDir, firstIfc
+		for {
+			_ = ProbeDataplaneTier(dir, ifc)
+			dpTierRefreshMu.Lock()
+			if dpTierRefreshPendDir != "" {
+				dir = dpTierRefreshPendDir
+				ifc = dpTierRefreshPendIfc
+				dpTierRefreshPendDir = ""
+				dpTierRefreshPendIfc = ""
+				dpTierRefreshMu.Unlock()
+				continue
+			}
+			dpTierRefreshRunning = false
+			waiters := dpTierRefreshWaiters
+			dpTierRefreshWaiters = nil
+			dpTierRefreshMu.Unlock()
+			for _, ch := range waiters {
+				close(ch)
+			}
+			return
+		}
+	}(hncDir, resolved)
+}
+
+// WaitDataplaneTierRefreshIdle 等待异步 Tier 刷新单飞任务排空(供测试确定性同步)。
+func WaitDataplaneTierRefreshIdle() {
+	dpTierRefreshMu.Lock()
+	if !dpTierRefreshRunning {
+		dpTierRefreshMu.Unlock()
+		return
+	}
+	ch := make(chan struct{})
+	dpTierRefreshWaiters = append(dpTierRefreshWaiters, ch)
+	dpTierRefreshMu.Unlock()
+	<-ch
+}
 
 // ProbeDataplaneTier 实测探测当前设备内核与硬件卸载受控状态, 选定最优限速层级:
 //   - tier1_ebpf_edt: 硬件卸载已受控 + clsact BPF 生效 + sch_fq (或 mq 子队列 fq) 可用;
@@ -636,6 +796,13 @@ func probeDataplaneTierOnActor(actor *DataplaneActor, hncDir, iface string) stri
 	})
 
 	if hncDir != "" && useNativeDataplane(hncDir) {
+		if iface != "" && defaultDPActorReady.Load() && actor == defaultDPActor {
+			sig := buildDataplaneTierRuntimeSig(hncDir, iface)
+			dpTierRefreshMu.Lock()
+			dpTierLastSigByDir[hncDir] = sig
+			dpTierLastProbeAt[hncDir] = time.Now()
+			dpTierRefreshMu.Unlock()
+		}
 		st := actor.Status()
 		if b, err := json.Marshal(st); err == nil {
 			runDir := filepath.Join(hncDir, "run")

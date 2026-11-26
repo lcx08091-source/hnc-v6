@@ -197,7 +197,7 @@ func hostConnIsTCPOrphanCloseState(proto string, st uint8) bool {
 		return false
 	}
 	switch st {
-	case 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C:
+	case 0x04, 0x05, 0x06, 0x07, 0x09, 0x0B, 0x0C:
 		return true
 	default:
 		return false
@@ -1096,7 +1096,7 @@ func scalpelIsGatewayLocalServicePort(port int) bool {
 
 func scalpelIsUnknownUIDBlockedPort(port int) bool {
 	switch port {
-	case 53, 853, 67, 68:
+	case 53, 853, 67, 68, 123, 500, 4500, 5060, 5061:
 		return true
 	default:
 		return false
@@ -1669,13 +1669,14 @@ func scalpelHotspotOnlineState(s *server) (hotspotActive bool, onlineCount int, 
 
 	onlineMACs := make(map[string]bool)
 	if s.jsonCache != nil {
+		now := time.Now()
 		var devMap map[string]any
 		if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "data", "devices.json")); err == nil {
 			devMap, _ = raw.(map[string]any)
 		}
-		if dpiRaw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_state.json")); err == nil && dpiRaw != nil {
-			devMap = mergeDpiStateFallbackDevices(devMap, dpiRaw, nowUnix)
-		}
+		shmRes := s.readDpiShmSnapshotReadonly(now)
+		var shmOnline map[string]bool
+		devMap, shmOnline = s.mergeLiveObservationsReadonly(devMap, shmRes, now)
 		for mac, raw := range devMap {
 			dm, _ := raw.(map[string]any)
 			if dm == nil {
@@ -1686,8 +1687,7 @@ func scalpelHotspotOnlineState(s *server) (hotspotActive bool, onlineCount int, 
 				continue
 			}
 			devIP := strings.TrimSpace(asString(dm["ip"]))
-			lastSeen, _ := toInt64(dm["last_seen"])
-			if devIP != "" && devIP != "-" && (lastSeen == 0 || nowUnix-lastSeen <= activityOnlineWindow) {
+			if isDeviceEntryOnline(dm, devIP, nowUnix, shmOnline[cMac]) {
 				onlineMACs[cMac] = true
 			}
 		}

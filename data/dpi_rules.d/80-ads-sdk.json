@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "80-ads-sdk",
-  "rules_version": "hnc-curated-v6.1.0-rc.9#80-ads-sdk",
+  "rules_version": "hnc-curated-v6.1.0-rc.10#80-ads-sdk",
   "rules": [
     {
       "id": "adjust",

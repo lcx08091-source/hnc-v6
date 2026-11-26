@@ -287,22 +287,89 @@ function placeSegs(root) {
  *  - .pending(或其所在 .seg.pending): 请求进行中的乐观状态, 不被后台刷新改回去(避免开关来回闪)
  *  - 临时 class(busy / pending / jelly / run)保留 */
 var MORPH_KEEP_CLS = ['busy', 'pending', 'jelly', 'run'];
+function _dirtyBaseOf(el) {
+  if (!el || !el.getAttribute) return '';
+  var av = el.getAttribute('value');
+  if (av != null) return av;
+  if (el.nodeName === 'SELECT' && el.options && el.options.length) {
+    for (var i = 0; i < el.options.length; i++) {
+      if (el.options[i].defaultSelected) return el.options[i].value || '';
+    }
+    return el.options[0].value || '';
+  }
+  if (el.nodeName === 'TEXTAREA') return el.defaultValue || '';
+  return '';
+}
+function markDirtyInput(el) {
+  if (!el || el.nodeType !== 1) return;
+  var tag = el.nodeName;
+  if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA') return;
+  if (tag === 'INPUT' && (el.type === 'file' || el.type === 'checkbox' || el.type === 'radio' || el.type === 'button' || el.type === 'submit' || el.type === 'reset')) return;
+  if (el.getAttribute('data-dirty') !== '1') {
+    el.setAttribute('data-dirty-base', _dirtyBaseOf(el));
+    el.setAttribute('data-dirty', '1');
+  }
+}
+function clearDirtyInputs(root) {
+  if (arguments.length > 0 && !root) return;
+  var scope = root || (typeof document !== 'undefined' ? document : null);
+  if (!scope) return;
+  if (scope.nodeType === 1 && scope.removeAttribute) {
+    scope.removeAttribute('data-dirty');
+    scope.removeAttribute('data-dirty-base');
+  }
+  if (scope.querySelectorAll) {
+    var list = scope.querySelectorAll('[data-dirty], [data-dirty-base]');
+    for (var i = 0; i < list.length; i++) {
+      list[i].removeAttribute('data-dirty');
+      list[i].removeAttribute('data-dirty-base');
+    }
+  }
+}
+if (typeof window !== 'undefined') {
+  window.clearDirtyInputs = clearDirtyInputs;
+  window.markDirtyInput = markDirtyInput;
+}
+if (typeof document !== 'undefined' && document.addEventListener) {
+  var _onFormDirtyEvt = function (e) {
+    var t = e && e.target;
+    if (t && t.nodeType === 1) markDirtyInput(t);
+  };
+  document.addEventListener('input', _onFormDirtyEvt, true);
+  document.addEventListener('change', _onFormDirtyEvt, true);
+}
 function mkey(n) {
   if (n.nodeType !== 1) return '';
-  var k = n.getAttribute('data-dev') || n.getAttribute('data-side') || n.getAttribute('data-foldkey') || n.id || n.getAttribute('data-app') || n.getAttribute('data-mkey') || n.getAttribute('data-cnk');
+  var k = n.getAttribute('data-dev') || n.getAttribute('data-side') || n.getAttribute('data-foldkey') || n.id || n.getAttribute('data-app') || n.getAttribute('data-mkey') || n.getAttribute('data-cnk') || n.getAttribute('data-dev-pane') || n.getAttribute('data-seg');
   return k ? n.nodeName + ':' + k : '';
 }
 function morphAttrs(a, b) {
   var i, at, frozen = a.classList.contains('pending') || a.classList.contains('busy') || !!(a.parentNode && a.parentNode.classList && (a.parentNode.classList.contains('pending') || a.parentNode.classList.contains('busy')));
+  var activeEl = typeof document !== 'undefined' ? document.activeElement : null;
   var segDir = a.classList.contains('seg') ? a.style.getPropertyValue('--seg-dir') : '';
+  var isTextInp = a.nodeName === 'INPUT' && a.type !== 'checkbox' && a.type !== 'radio' && a.type !== 'file';
+  var hasBVal = isTextInp && b.hasAttribute('value');
+  var bVal = hasBVal ? b.getAttribute('value') : '';
+  var keepDirty = a.getAttribute('data-dirty') === '1';
+  if (isTextInp && keepDirty) {
+    var baseVal = a.getAttribute('data-dirty-base');
+    if (baseVal == null) baseVal = '';
+    if (bVal === a.value || bVal !== baseVal) {
+      keepDirty = false;
+      a.removeAttribute('data-dirty');
+      a.removeAttribute('data-dirty-base');
+    }
+  }
   for (i = a.attributes.length - 1; i >= 0; i--) {
     at = a.attributes[i].name;
     if (b.hasAttribute(at) || (at === 'style' && (a.classList.contains('thumb') || !!segDir))) continue;
+    if (keepDirty && (at === 'data-dirty' || at === 'data-dirty-base')) continue;
     if (frozen && (at === 'class' || at === 'aria-checked' || at === 'disabled' || at === 'aria-busy')) continue;
     a.removeAttribute(at);
   }
   for (i = 0; i < b.attributes.length; i++) {
     at = b.attributes[i];
+    if (isTextInp && keepDirty && at.name === 'value') continue;
     var cur = a.getAttribute(at.name); if (cur === at.value) continue;
     if (at.name === 'class') {
       if (frozen) continue;
@@ -313,14 +380,17 @@ function morphAttrs(a, b) {
     if (frozen && (at.name === 'aria-checked' || at.name === 'disabled' || at.name === 'aria-busy')) continue;
     if (at.name === 'style' && a.classList.contains('thumb')) continue;
     a.setAttribute(at.name, at.value);
-    if (a.nodeName === 'INPUT' && at.name === 'value' && a !== document.activeElement) a.value = at.value;
+    if (isTextInp && at.name === 'value' && !keepDirty && a !== activeEl) a.value = at.value;
+  }
+  if (isTextInp && !keepDirty && hasBVal && a !== activeEl && a.value !== bVal) {
+    a.value = bVal;
   }
   if (segDir && a.style.getPropertyValue('--seg-dir') !== segDir) {
     a.style.setProperty('--seg-dir', segDir);
   }
   if (a.nodeName === 'INPUT' && (a.type === 'checkbox' || a.type === 'radio')) {
     var ck = b.hasAttribute('checked');
-    if (a.defaultChecked !== ck) { if (a !== document.activeElement) a.checked = ck; a.defaultChecked = ck; }
+    if (a.defaultChecked !== ck) { if (a !== activeEl) a.checked = ck; a.defaultChecked = ck; }
   }
   if (a.nodeName === 'OPTION') {
     var sel = b.hasAttribute('selected');
@@ -330,11 +400,40 @@ function morphAttrs(a, b) {
 function morphNode(a, b) {
   if (a.nodeType !== 1) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return a; }
   if (a.hasAttribute('data-keep')) return a;
+  var activeEl = typeof document !== 'undefined' ? document.activeElement : null;
   var hasSelVal = a.nodeName === 'SELECT' && b.options && b.options.length > 0;
   var wantSel = hasSelVal ? b.value : '';
+  var isDirtySel = hasSelVal && a.getAttribute('data-dirty') === '1';
+  var selBase = isDirtySel ? (a.getAttribute('data-dirty-base') || '') : '';
+  var prevSelVal = hasSelVal ? a.value : '';
+  var prevSelIdx = hasSelVal ? a.selectedIndex : -1;
   morphAttrs(a, b);
   if (a.nodeName !== 'TEXTAREA') morphKids(a, b);
-  if (hasSelVal && a !== document.activeElement && a.value !== wantSel) a.value = wantSel;
+  else if (a.getAttribute('data-dirty') === '1') {
+    var bTaVal = b.value || b.textContent || '';
+    var taBase = a.getAttribute('data-dirty-base') || '';
+    if (bTaVal === a.value || bTaVal !== taBase) {
+      a.removeAttribute('data-dirty');
+      a.removeAttribute('data-dirty-base');
+      if (a !== activeEl && a.value !== bTaVal) a.value = bTaVal;
+    }
+  }
+  if (hasSelVal) {
+    if (isDirtySel) {
+      if (wantSel === prevSelVal || wantSel !== selBase) {
+        a.removeAttribute('data-dirty');
+        a.removeAttribute('data-dirty-base');
+        if (a !== activeEl && a.value !== wantSel) a.value = wantSel;
+      } else if (a.value !== prevSelVal) {
+        a.value = prevSelVal;
+        if (a.value !== prevSelVal && prevSelIdx >= 0 && prevSelIdx < a.options.length) {
+          a.selectedIndex = prevSelIdx;
+        }
+      }
+    } else if (a !== activeEl && a.value !== wantSel) {
+      a.value = wantSel;
+    }
+  }
   return a;
 }
 function morphKids(a, b) {

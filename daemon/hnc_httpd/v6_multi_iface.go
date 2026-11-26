@@ -1017,12 +1017,8 @@ func execTun0IptCmdOS(args ...string) (string, error) {
 	if iptBin == "" {
 		return "", errors.New("iptables binary not found")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := hardenCmd(exec.CommandContext(ctx, iptBin, args...))
-	cmd.Env = subprocEnvWithFallbackPath()
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	out, err := runIptWithWaitFallback(iptBin, args...)
+	return strings.TrimSpace(out), err
 }
 
 type tun0ManagedRuleEntry struct {
@@ -1225,21 +1221,30 @@ func syncTun0GuardDataplane(plan *V6Tun0GuardPlan, existingRules []string) error
 		if err := v6ExecTun0IptRestoreFn(snippet); err != nil {
 			applyErrs = append(applyErrs, fmt.Sprintf("iptables-restore HNC_TUN_GUARD: %v", err))
 		} else {
+			hooksOK := true
 			if v6ExecTun0IptCmdFn != nil {
 				if _, cErr := v6ExecTun0IptCmdFn("-t", "mangle", "-C", "FORWARD", "-j", v6Tun0GuardChainName); cErr != nil {
 					if _, iErr := v6ExecTun0IptCmdFn("-t", "mangle", "-I", "FORWARD", "1", "-j", v6Tun0GuardChainName); iErr != nil {
-						_, _ = v6ExecTun0IptCmdFn("-t", "mangle", "-A", "FORWARD", "-j", v6Tun0GuardChainName)
+						if _, aErr := v6ExecTun0IptCmdFn("-t", "mangle", "-A", "FORWARD", "-j", v6Tun0GuardChainName); aErr != nil {
+							hooksOK = false
+							applyErrs = append(applyErrs, fmt.Sprintf("iptables link FORWARD -> %s: %v", v6Tun0GuardChainName, aErr))
+						}
 					}
 				}
 				if _, cErr := v6ExecTun0IptCmdFn("-t", "mangle", "-C", "PREROUTING", "-j", v6Tun0GuardChainName); cErr != nil {
 					if _, iErr := v6ExecTun0IptCmdFn("-t", "mangle", "-I", "PREROUTING", "1", "-j", v6Tun0GuardChainName); iErr != nil {
-						_, _ = v6ExecTun0IptCmdFn("-t", "mangle", "-A", "PREROUTING", "-j", v6Tun0GuardChainName)
+						if _, aErr := v6ExecTun0IptCmdFn("-t", "mangle", "-A", "PREROUTING", "-j", v6Tun0GuardChainName); aErr != nil {
+							hooksOK = false
+							applyErrs = append(applyErrs, fmt.Sprintf("iptables link PREROUTING -> %s: %v", v6Tun0GuardChainName, aErr))
+						}
 					}
 				}
 			}
-			globalV6MultiIface.lastTun0MangleDigest = digest
-			globalV6MultiIface.tun0MangleActive = true
-			globalV6MultiIface.tun0BootCleaned = true
+			if hooksOK {
+				globalV6MultiIface.lastTun0MangleDigest = digest
+				globalV6MultiIface.tun0MangleActive = true
+				globalV6MultiIface.tun0BootCleaned = true
+			}
 		}
 	}
 
@@ -1265,6 +1270,17 @@ func (s *server) ReconcileMultiDownstreamV6() (V6MultiIfaceSnapshot, error) {
 	snap, liveRules := analyzeMultiInterfacesWithLiveRulesDetail(inputs, preferred)
 	if !useNativeDataplane(hncDir) && !v6Tun0ForceDataplane {
 		return snap, nil
+	}
+	if useNativeDataplane(hncDir) {
+		RefreshDataplaneTierIfNeeded(hncDir, snap.PrimaryDownstream)
+	}
+	if s != nil {
+		if v, ok := v6Registry.Load(s); ok {
+			if vs, ok2 := v.(*v6ServerState); ok2 && vs != nil && vs.selfFirewall != nil {
+				_ = vs.selfFirewall.SyncIfDirtyAfterCooldown(5 * time.Second)
+				_, _ = vs.selfFirewall.CheckNetworkFlipAndSync()
+			}
+		}
 	}
 
 	var errs []string

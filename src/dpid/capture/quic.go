@@ -40,10 +40,10 @@ import (
 	"hnc.io/dpid/output"
 )
 
-// quicSnaplen: QUIC Initial 至少 1200 字节 UDP 载荷(RFC 9000 §14.1), 默认
-// snaplen=1024 会截断导致 GCM 认证必然失败。BPF 对 QUIC 分支单独返回
-// max(snaplen, quicSnaplen), Handle 的接收缓冲也按它分配。
-const quicSnaplen = 2048
+// quicSnaplen: QUIC Initial 至少 1200 字节 UDP 载荷(RFC 9000 §14.1), 且 GRO 聚合帧
+// 或大 MTU 后量子 X25519MLKEM768 Initial 可超过 2KB; BPF 对 QUIC 分支返回
+// max(snaplen, quicSnaplen=4096), Handle 接收缓冲同步按 4096+64 分配防截断。
+const quicSnaplen = 4096
 
 // QUIC 版本号与后量子混合密钥组标识。
 const (
@@ -711,16 +711,17 @@ func (r *quicReassembler) markFinishedLocked(tuple string, now time.Time) {
 	r.finished[tuple] = now
 }
 
-func quicTupleKey(ip net.IP, port uint16) string {
-	var b [18]byte
-	copy(b[:16], ip.To16())
-	binary.BigEndian.PutUint16(b[16:], port)
+func quicTupleKey(srcIP, dstIP net.IP, port uint16) string {
+	var b [34]byte
+	copy(b[:16], srcIP.To16())
+	copy(b[16:32], dstIP.To16())
+	binary.BigEndian.PutUint16(b[32:], port)
 	return string(b[:])
 }
 
 // handleInitial 处理一个客户端 Initial 包。ClientHello 完整时返回它的拷贝。
-func (r *quicReassembler) handleInitial(ip net.IP, port uint16, h *quicLongHeader, pkt []byte, p *quicVersionParams, now time.Time) []byte {
-	tuple := quicTupleKey(ip, port)
+func (r *quicReassembler) handleInitial(srcIP, dstIP net.IP, port uint16, h *quicLongHeader, pkt []byte, p *quicVersionParams, now time.Time) []byte {
+	tuple := quicTupleKey(srcIP, dstIP, port)
 	key := tuple + string(h.dcid)
 
 	r.mu.Lock()
@@ -902,7 +903,7 @@ func parseQUIC(ev Event, udp []byte) (Event, ParseResult) {
 			continue
 		}
 		quicStats.initial.Add(1)
-		hello := quicAsm.handleInitial(ev.SrcIP, ev.SrcPort, &h, pkt, p, ev.Time)
+		hello := quicAsm.handleInitial(ev.SrcIP, ev.DstIP, ev.SrcPort, &h, pkt, p, ev.Time)
 		if hello == nil {
 			ev.asmPending = true // Initial 还没凑齐(录制用, 见 Event.asmPending)
 			continue

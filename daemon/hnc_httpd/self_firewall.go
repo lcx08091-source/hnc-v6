@@ -169,9 +169,13 @@ type selfFirewallEngine struct {
 	packagesListPath string
 	forceDataplane   bool
 	cellularVPNHook  func() bool
-	restoreExec      selfFirewallRestoreFunc
-	iptExec          selfFirewallIptFunc
-	resolveBin       func(string) string
+	restoreExec             selfFirewallRestoreFunc
+	iptExec                 selfFirewallIptFunc
+	resolveBin              func(string) string
+	lastAppliedCellVPN      bool
+	lastAppliedCellVPNKnown bool
+	lastRouteCheckMono      int64
+	reconcileInFlight       atomic.Bool
 }
 
 var selfFirewallWriteSeq atomic.Uint64
@@ -1571,9 +1575,111 @@ func (e *selfFirewallEngine) syncDataplane() error {
 	e.mu.Lock()
 	e.lastSyncErr = ""
 	e.lastSyncFailMono = 0
+	if hasUID && hasCellularRule {
+		e.lastAppliedCellVPN = blockCellVPN
+		e.lastAppliedCellVPNKnown = true
+	} else {
+		e.lastAppliedCellVPN = false
+		e.lastAppliedCellVPNKnown = false
+	}
+	e.lastRouteCheckMono = monoNowNs()
 	e.mu.Unlock()
 	e.applyCommits.Add(1)
 	return nil
+}
+
+// CheckNetworkFlipAndSync 当存在 block_cellular 规则且上游网络类型(Wi-Fi <-> 蜂窝)或 VPN 状态导致
+// cellular-only VPN 拦截条件发生翻转时, 按需重同步双栈 HNC_SELF_UID 子链; 无翻转时零子进程开销。
+func (e *selfFirewallEngine) CheckNetworkFlipAndSync() (bool, error) {
+	if e == nil || !e.shouldRunDataplane() {
+		return false, nil
+	}
+	e.mu.Lock()
+	hasCellularRule := false
+	for _, r := range e.uidRules {
+		if r.Mode == SelfFirewallModeBlockCellular {
+			hasCellularRule = true
+			break
+		}
+	}
+	prevVal := e.lastAppliedCellVPN
+	prevKnown := e.lastAppliedCellVPNKnown
+	e.mu.Unlock()
+	if !hasCellularRule {
+		return false, nil
+	}
+	curVal := e.shouldBlockCellularVPN()
+	if prevKnown && curVal == prevVal {
+		return false, nil
+	}
+	e.syncDirty.Store(true)
+	err := e.syncDataplane()
+	return err == nil, err
+}
+
+// ReconcileIfNeeded 执行 SyncIfDirty 冷却补偿与 block_cellular 切网/VPN 翻转按需重同步。
+// 铁律: 无脏标记且无 block_cellular 规则时立即返回; 熄屏且无脏标记时严禁无变化高频探测空转。
+func (e *selfFirewallEngine) ReconcileIfNeeded(minDirtyCooldown time.Duration) (bool, error) {
+	if e == nil || !e.shouldRunDataplane() {
+		return false, nil
+	}
+	if e.syncDirty.Load() {
+		err := e.SyncIfDirtyAfterCooldown(minDirtyCooldown)
+		return err == nil && !e.syncDirty.Load(), err
+	}
+	e.mu.Lock()
+	hasCellularRule := false
+	for _, r := range e.uidRules {
+		if r.Mode == SelfFirewallModeBlockCellular {
+			hasCellularRule = true
+			break
+		}
+	}
+	lastCheck := e.lastRouteCheckMono
+	e.mu.Unlock()
+	if !hasCellularRule {
+		return false, nil
+	}
+	act := activityNow()
+	if act.Known && !act.ScreenOn && !act.WebUIActive {
+		// 熄屏且无前台会话: 禁止高频空转轮询, 仅由显式切网对账入口(CheckNetworkFlipAndSync)按事件触发
+		return false, nil
+	}
+	nowMono := monoNowNs()
+	if lastCheck > 0 && nowMono > lastCheck && nowMono-lastCheck < int64(2*time.Second) {
+		return false, nil
+	}
+	e.mu.Lock()
+	e.lastRouteCheckMono = nowMono
+	e.mu.Unlock()
+	return e.CheckNetworkFlipAndSync()
+}
+
+func (e *selfFirewallEngine) triggerAsyncReconcile(minDirtyCooldown time.Duration) {
+	if e == nil || !e.shouldRunDataplane() {
+		return
+	}
+	e.mu.Lock()
+	forced := e.forceDataplane
+	hasCell := false
+	for _, r := range e.uidRules {
+		if r.Mode == SelfFirewallModeBlockCellular {
+			hasCell = true
+			break
+		}
+	}
+	e.mu.Unlock()
+	// 单测显式开启 forceDataplane 时不派发后台异步协程防与断言竞态, 由同步 API / ReconcileIfNeeded 验证
+	if forced || (!e.syncDirty.Load() && !hasCell) {
+		return
+	}
+	if !e.reconcileInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer e.reconcileInFlight.Store(false)
+		_, _ = e.ReconcileIfNeeded(minDirtyCooldown)
+	}()
 }
 
 // ── 核心读写操作与防自锁守卫校验 ────────────────────────────────────────────
@@ -2275,6 +2381,7 @@ func (e *selfFirewallEngine) summary() map[string]any {
 	if lastErr != "" {
 		out["last_sync_error"] = lastErr
 	}
+	e.triggerAsyncReconcile(5 * time.Second)
 	return out
 }
 

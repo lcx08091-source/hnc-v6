@@ -282,7 +282,7 @@ const (
 	dpiRulesMaxReleaseBytes = 2 * 1024 * 1024 // 2 MB release metadata JSON
 	dpiRulesMaxSHABytes     = 4096            // 4 KB .sha256 manifest
 	dpiRulesMaxZipBytes     = 8 * 1024 * 1024 // 8 MB dpi-rules.zip
-	dpiRulesMaxJSONBytes    = 512 * 1024      // 512 KB extracted rules json
+	dpiRulesMaxJSONBytes    = 1 << 20         // 1 MiB extracted rules json
 )
 
 // 单测注入点(生产保持默认零值, 严格强制 HTTPS 与重定向协议守卫)。
@@ -715,7 +715,7 @@ func (m *dpiMergeBool) UnmarshalJSON(data []byte) error {
 	}
 }
 
-// GET /api/dpi_rules → 当前生效的自定义规则库; POST {rules:"<json>", merge?:true} → 导入(≤512KB)
+// GET /api/dpi_rules → 当前生效的自定义规则库; POST {rules:"<json>", merge?:true} → 导入(≤1MB)
 func (s *server) apiDPIRules(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		rc, out := runBinUnlimited(s.hncDir, "dpi_rules_import.sh", "--export")
@@ -738,8 +738,8 @@ func (s *server) apiDPIRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body := []byte(strings.TrimSpace(req.Rules))
-		if len(body) == 0 || len(body) > 512*1024 || !json.Valid(body) {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "rules must be valid JSON ≤512KB"})
+		if len(body) == 0 || len(body) > dpiRulesMaxJSONBytes || !json.Valid(body) {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "rules must be valid JSON ≤1MB"})
 			return
 		}
 		var probe struct {
@@ -786,7 +786,7 @@ func (s *server) apiDPIRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "detail": lastLine(out)})
-	}, 600*1024)(w, r)
+	}, 2<<20)(w, r)
 }
 
 // ── 只读: 规则导出 / 运行状态 / 进程健康 ─────────────────────

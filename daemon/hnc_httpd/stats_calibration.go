@@ -258,6 +258,7 @@ type calCellSim struct {
 	Rx              uint64   `json:"rx"`                   // 本计费周期(系统统计)
 	Tx              uint64   `json:"tx"`
 	Total           uint64   `json:"total"`
+	TodayTotal      uint64   `json:"today_total,omitempty"`       // 当日本地零点以来系统计费蜂窝字节
 	WindowTotal     uint64   `json:"window_total"`                // 对账窗口内(系统)
 	AnchorAt        int64    `json:"anchor_at,omitempty"`         // 手动校准锚点设置时间戳(秒)
 	PostAnchorTotal uint64   `json:"post_anchor_total,omitempty"` // AnchorAt 之后的系统增量字节
@@ -289,6 +290,7 @@ type calResult struct {
 	Status      string `json:"status"`           // ok|drift|unavailable
 	Reason      string `json:"reason,omitempty"` // unavailable / 窗口不足等原因
 	CheckedAt   int64  `json:"checked_at"`
+	TodayDate   string `json:"today_date,omitempty"`
 	Stale       bool   `json:"stale,omitempty"`
 	UseNetstats string `json:"use_netstats"`
 	Primary     string `json:"primary"` // hnc|netstats(最终 by_sim 主数值来源)
@@ -462,6 +464,8 @@ func calCompute(in calInput) calResult {
 		parser["netstats_since"] = e
 	}
 	res.NetstatsOK = true
+	res.TodayDate = in.Now.Format("20060102")
+	todayStart := time.Date(in.Now.Year(), in.Now.Month(), in.Now.Day(), 0, 0, 0, 0, in.Now.Location()).Unix()
 
 	cs := in.CycleStart.Unix()
 	ws, full, why := calWindowStart(in.CycleStart, in.Days, in.Earliest, in.Now)
@@ -474,7 +478,7 @@ func calCompute(in calInput) calResult {
 	// 每卡(按卡槽合并; 未识别的按 subscriber 前缀分开)
 	type agg struct {
 		calCellSim
-		rx, tx, win, postAnchor float64
+		rx, tx, today, win, postAnchor float64
 	}
 	groups := map[string]*agg{}
 	order := []string{}
@@ -505,6 +509,10 @@ func calCompute(in calInput) calResult {
 		}
 		g.rx += rx
 		g.tx += tx
+		if todayStart <= now {
+			trx, ttx := nsWindowBytes(k, todayStart, now+1, now)
+			g.today += trx + ttx
+		}
 		if winOK {
 			wrx, wtx := nsWindowBytes(k, res.WindowStart, now+1, now)
 			g.win += wrx + wtx
@@ -539,6 +547,7 @@ func calCompute(in calInput) calResult {
 		c := g.calCellSim
 		c.Rx, c.Tx = uint64(g.rx), uint64(g.tx)
 		c.Total = c.Rx + c.Tx
+		c.TodayTotal = uint64(g.today)
 		c.WindowTotal = uint64(g.win)
 		if g.AnchorAt > 0 {
 			c.PostAnchorTotal = uint64(g.postAnchor)
@@ -890,14 +899,28 @@ func (c *calibrator) result() *calResult {
 	return &r
 }
 
-// calRunIptWithFallback 执行 iptables/ip6tables 三级兼容回退: `-w 2` -> `-w` -> 裸调(适配不支持 -w 秒数或不支持 -w 的旧版 xtables)。
+func calIsIptWaitUnsupported(out string, err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode() == 2
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, os.ErrInvalid) || isXtablesWaitFlagError(out+" "+err.Error())
+}
+
+// calRunIptWithFallback 执行 iptables/ip6tables 三级兼容回退: `-w 2` -> `-w` -> 裸调(仅在 rc==2 参数不支持时剥离 -w, 严禁在 rc==4 锁竞争时裸奔)。
 func calRunIptWithFallback(run func(time.Duration, string, ...string) (string, error), timeout time.Duration, bin string, args ...string) (string, error) {
 	out, err := run(timeout, bin, append([]string{"-w", "2"}, args...)...)
-	if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, context.DeadlineExceeded) {
+	if !calIsIptWaitUnsupported(out, err) {
 		return out, err
 	}
 	out2, err2 := run(timeout, bin, append([]string{"-w"}, args...)...)
-	if err2 == nil || errors.Is(err2, os.ErrNotExist) || errors.Is(err2, context.DeadlineExceeded) {
+	if !calIsIptWaitUnsupported(out2, err2) {
 		return out2, err2
 	}
 	return run(timeout, bin, args...)

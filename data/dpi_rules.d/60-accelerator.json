@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "60-accelerator",
-  "rules_version": "hnc-curated-v6.1.0-rc.9#60-accelerator",
+  "rules_version": "hnc-curated-v6.1.0-rc.10#60-accelerator",
   "rules": [
     {
       "id": "xunlei",

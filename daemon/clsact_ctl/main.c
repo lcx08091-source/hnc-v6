@@ -85,6 +85,7 @@
 
 #define HNC_MARK_DEV_MASK    0x00ff0000U
 #define HNC_MARK_DEV_VALID   0x00800000U
+#define HNC_DEV_MARK_DROP    0x00ff0000U
 #define HNC_MARK_DROP        0xffffffffU
 
 #ifndef TCA_BPF_FLAG_ACT_DIRECT
@@ -932,8 +933,8 @@ static int parse_and_normalize_mark(const char *markstr, int allow_zero, uint32_
         *out = 0U;
         return 0;
     }
-    if (raw == HNC_MARK_DROP) {
-        *out = HNC_MARK_DROP;
+    if (raw == HNC_MARK_DROP || raw == HNC_DEV_MARK_DROP) {
+        *out = HNC_DEV_MARK_DROP;
         return 0;
     }
     if (raw >= 1U && raw <= 126U) {

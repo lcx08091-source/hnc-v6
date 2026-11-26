@@ -136,6 +136,7 @@ func actionEncdnsSet(s *server, p map[string]string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "encdns sync failed", Detail: out}
 	}
+	triggerOffloadGuardApplyAsync(s.hncDir)
 	return actionResp{OK: true, Detail: out}
 }
 

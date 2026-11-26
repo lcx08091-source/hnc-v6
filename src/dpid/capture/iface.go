@@ -95,6 +95,19 @@ func DiscoverAPCandidates() ([]IfaceCandidate, error) {
 	return filterAndSortAPCandidates(inputs, hintName, arp, defaultRouteIfaces), nil
 }
 
+// HasDefaultRoute reports whether iface currently carries an IPv4 or IPv6 unicast
+// default gateway route across any routing table (indicating upstream STA/WAN mode).
+func HasDefaultRoute(name string) bool {
+	if name == "" {
+		return false
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	return collectDefaultRouteIfaces(ifaces)[name]
+}
+
 func filterAndSortAPCandidates(
 	ifaces []apIfaceInput,
 	hintName string,
@@ -105,6 +118,13 @@ func filterAndSortAPCandidates(
 
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagLoopback != 0 || ifc.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		// Single-chip Wi-Fi guard: if wlan0 holds a default gateway route, it is
+		// operating as an upstream STA client and must never be captured as an AP
+		// even if a stale run/hotspot_iface hint still says "wlan0".
+		if ifc.Name == "wlan0" && defaultRouteIfaces[ifc.Name] {
 			continue
 		}
 

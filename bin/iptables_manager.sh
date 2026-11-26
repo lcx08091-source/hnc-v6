@@ -516,6 +516,100 @@ init_chains() {
 # v6 上行：MAC 兜底
 # v6 下行：靠 HNC_RESTORE 从 conntrack 恢复 mark
 # ═══════════════════════════════════════════════════════════════
+_IPT_IP6_CANON_AWK='
+function canon_ip6(raw,    s, hal, nl, nr, L, R, z, out, i, h) {
+    s = tolower(raw)
+    sub(/\/[0-9]+$/, "", s)
+    sub(/%.*/, "", s)
+    if (s !~ /:/) return s
+    if (index(s, "::") > 0) {
+        split(s, hal, "::")
+        nl = (hal[1] == "") ? 0 : split(hal[1], L, ":")
+        nr = (hal[2] == "") ? 0 : split(hal[2], R, ":")
+        z = 8 - nl - nr
+        out = ""
+        for (i = 1; i <= nl; i++) { h = L[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+        for (i = 1; i <= z; i++)  { out = (out == "" ? "0" : out ":0") }
+        for (i = 1; i <= nr; i++) { h = R[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+        return out
+    }
+    nl = split(s, L, ":")
+    out = ""
+    for (i = 1; i <= nl; i++) { h = L[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+    return out
+}
+'
+
+_sync_v6_dst_marks_for_mac() {
+    local mac=$1 mark=$2 mark_id=${3:-0}
+    [ -n "$mac" ] && [ -n "$mark" ] || return 0
+    ipv6_mangle_ok || return 0
+    local iface _n6_raw _want6 _cur6 _mark_short _old6 _a6
+    iface=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
+    [ -n "$iface" ] || iface=$(cat "$HNC_DIR/run/iface.cache" 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
+    [ -n "$iface" ] || iface=$(cat "$HNC_DIR/run/active_iface" 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
+    [ -n "$iface" ] || [ -n "${HNC_TEST_MODE:-}" ] || iface=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null | tr -d ' \t\r\n')
+    [ -n "$iface" ] || return 0
+    if ! _n6_raw=$(ip -6 neigh show dev "$iface" 2>/dev/null) || { [ -z "$_n6_raw" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+        _n6_raw=$(ip neigh show dev "$iface" 2>/dev/null)
+    fi
+    _want6=$(printf '%s\n' "$_n6_raw" | awk -v m="$mac" '
+        {
+            line = tolower($0); mc = tolower(m)
+            if (index(line, mc) > 0 && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $1 != "::") {
+                st = toupper($NF)
+                if (st != "FAILED" && st != "INCOMPLETE") print tolower($1)
+            }
+        }' | sort -u)
+    [ -n "$_want6" ] || return 0
+    _mark_short=$(printf '0x%x' $(( 0x00800000 | (mark_id << 16) )))
+    _cur6=$($IP6T -t mangle -S HNC_MARK 2>/dev/null)
+    if [ -n "$_cur6" ]; then
+        for _old6 in $(printf '%s\n' "$_cur6" | awk -v mk="$mark" -v mks="$_mark_short" -v want="$_want6" "$_IPT_IP6_CANON_AWK"'
+            BEGIN {
+                n = split(want, wa, "\n")
+                for (i = 1; i <= n; i++) if (wa[i] != "") wset[canon_ip6(wa[i])] = 1
+            }
+            $1 == "-A" && $2 == "HNC_MARK" {
+                hm = 0; hk = 0; d = ""
+                for (i = 3; i <= NF; i++) {
+                    if ($i == "--mac-source") hm = 1
+                    if ($i == "--set-xmark" || $i == "--set-mark") {
+                        t = tolower($(i+1))
+                        if (index(t, tolower(mk)) == 1 || index(t, tolower(mks)) == 1) hk = 1
+                    }
+                    if ($i == "-d") d = $(i+1)
+                }
+                if (!hm && hk && d != "") {
+                    cd = canon_ip6(d)
+                    if (!(cd in wset)) print d
+                }
+            }' | sort -u); do
+            ipt_del_all "$IP6T" -t mangle -D HNC_MARK -d "$_old6" -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+        done
+    fi
+    for _a6 in $_want6; do
+        if [ -n "$_cur6" ] && printf '%s\n' "$_cur6" | awk -v mk="$mark" -v mks="$_mark_short" -v a="$_a6" "$_IPT_IP6_CANON_AWK"'
+            BEGIN { target = canon_ip6(a); hit = 0 }
+            $1 == "-A" && $2 == "HNC_MARK" {
+                hm = 0; hk = 0; d = ""
+                for (i = 3; i <= NF; i++) {
+                    if ($i == "--mac-source") hm = 1
+                    if ($i == "--set-xmark" || $i == "--set-mark") {
+                        t = tolower($(i+1))
+                        if (index(t, tolower(mk)) == 1 || index(t, tolower(mks)) == 1) hk = 1
+                    }
+                    if ($i == "-d") d = $(i+1)
+                }
+                if (!hm && hk && d != "" && canon_ip6(d) == target) { hit = 1; exit }
+            }
+            END { exit !hit }'; then
+            continue
+        fi
+        $IP6T -t mangle -A HNC_MARK -d "$_a6/128" -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}" 2>/dev/null || true
+    done
+}
+
 mark_device() {
     local ip=$1 mac=$2 mark_id=$3
     local mark; mark=$(hnc_dev_mark_hex "$mark_id") || return 1
@@ -526,30 +620,39 @@ mark_device() {
     _gc_stale_ips_for_mac "$mac" "$mark" "$ip" "$mark_id"
 
     # ── 清除可能的旧规则（幂等，仅限正交 xmark）──
-    ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$ip" -m mac --mac-source "$mac" \
-        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
-    ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" \
-        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+    if [ "$ip" != "-" ]; then
+        ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$ip" -m mac --mac-source "$mac" \
+            -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+        ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" \
+            -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+    fi
     ipt_dual_del_all -t mangle -D HNC_MARK \
         -m mac --mac-source "$mac" -m mark --mark "0x0/${DEV_MARK_MASK}" \
         -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
 
-    # ── v4 上行：src IP + MAC（精确正交打标 [23:16]，绝不触碰低 16 位 netd netId）──
-    $IPT -t mangle -A HNC_MARK \
-        -s "$ip" -m mac --mac-source "$mac" \
-        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+    if [ "$ip" != "-" ]; then
+        # ── v4 上行：src IP + MAC（精确正交打标 [23:16]，绝不触碰低 16 位 netd netId）──
+        $IPT -t mangle -A HNC_MARK \
+            -s "$ip" -m mac --mac-source "$mac" \
+            -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+    fi
 
     # ── v4+v6 上行兜底：仅 MAC（-m mark --mark 0x0/0x00ff0000 判设备位为空）──
     ipt_dual -t mangle -A HNC_MARK \
         -m mac --mac-source "$mac" -m mark --mark "0x0/${DEV_MARK_MASK}" \
         -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
 
-    # ── v4 下行：dst IP ──
-    $IPT -t mangle -A HNC_MARK \
-        -d "$ip" -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+    if [ "$ip" != "-" ]; then
+        # ── v4 下行：dst IP ──
+        $IPT -t mangle -A HNC_MARK \
+            -d "$ip" -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
 
-    # ── v4 流量统计(幂等保计数)──
-    _ensure_v4_stats_ip "$ip"
+        # ── v4 流量统计(幂等保计数)──
+        _ensure_v4_stats_ip "$ip"
+    fi
+
+    # ── v6 下行：活跃全局/ULA 邻居 -d <ip6>/128 正交设备打标（防止缺 [23:16] 被 1:8010 抢走）──
+    _sync_v6_dst_marks_for_mac "$mac" "$mark" "$mark_id"
 
     echo "$mark"
 }
@@ -611,7 +714,7 @@ _gc_stale_ips_for_mac() {
 unmark_device() {
     local ip=$1 mac=$2 mark_id=$3
     local mark; mark=$(hnc_dev_mark_hex "$mark_id") || return 0
-    local mark_short _um_ips _um_ip
+    local mark_short _um_ips _um_ip _um_ip6s _um_ip6
 
     log "Unmarking $ip ($mac) mark=${mark}/${DEV_MARK_MASK}"
 
@@ -650,6 +753,27 @@ unmark_device() {
         ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$_um_ip" \
             -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
     done
+    if ipv6_mangle_ok; then
+        _um_ip6s=$($IP6T -t mangle -S HNC_MARK 2>/dev/null | awk -v mk="$mark" -v mks="$mark_short" '
+            $1 == "-A" && $2 == "HNC_MARK" {
+                hm = 0; hk = 0; d = ""
+                for (i = 3; i <= NF; i++) {
+                    if ($i == "--mac-source") hm = 1
+                    if ($i == "--set-xmark" || $i == "--set-mark") {
+                        t = tolower($(i+1))
+                        if (index(t, tolower(mk)) == 1 || index(t, tolower(mks)) == 1) hk = 1
+                    }
+                    if ($i == "-d") d = $(i+1)
+                }
+                if (!hm && hk && d != "") print d
+            }
+        ' | sort -u)
+        for _um_ip6 in $_um_ip6s; do
+            [ -n "$_um_ip6" ] || continue
+            ipt_del_all "$IP6T" -t mangle -D HNC_MARK -d "$_um_ip6" \
+                -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+        done
+    fi
     ipt_dual_del_all -t mangle -D HNC_MARK \
         -m mac --mac-source "$mac" -m mark --mark "0x0/${DEV_MARK_MASK}" \
         -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"

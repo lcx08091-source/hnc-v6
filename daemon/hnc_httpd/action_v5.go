@@ -302,7 +302,9 @@ func actionDelayClear(hncDir string, p map[string]string) actionResp {
 			log.Printf("WARN: delay_clear remove tc failed rc=%d out=%q", rc2, out2)
 		}
 		runBin(hncDir, "iptables_manager.sh", "unmark", ip, mac, mid)
-		notifyOffloadLimit(hncDir, mac, false)
+		if !rulesStore.IsBlacklisted(hncDir, mac) {
+			notifyOffloadLimit(hncDir, mac, false)
+		}
 	}
 
 	clearFields := []struct{ key, val string }{

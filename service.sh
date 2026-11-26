@@ -142,6 +142,13 @@ if { [ -z "$HNC_TEST_MODE" ] && [ "$RUN" = "/data/local/hnc/run" ]; } || [ "${HN
 fi
 # 紧跟 mount -t tmpfs 之后(无论本次新挂载还是热重启已挂载), 确保 data/self_studio 就绪且 32M tmpfs 干净宽裕
 _hnc_rescue_run_tmpfs "$RUN_DIR"
+# P0-01: 若持久化 data/orig_tether_offload_disabled 存在(上次压制态重启), 镜像回新 tmpfs 的 run/orig_tether_offload_disabled,
+# 使 hnc_watchdog (offload_sched.go:95) 即使在关热点 StateIdle 下也能感知待还原标记并立即恢复用户原设置!
+if [ -s "$DATA_DIR/orig_tether_offload_disabled" ] && [ ! -f "$RUN/orig_tether_offload_disabled" ]; then
+    cp -f "$DATA_DIR/orig_tether_offload_disabled" "$RUN/orig_tether_offload_disabled.tmp.$$" 2>/dev/null \
+        && mv -f "$RUN/orig_tether_offload_disabled.tmp.$$" "$RUN/orig_tether_offload_disabled" 2>/dev/null \
+        || rm -f "$RUN/orig_tether_offload_disabled.tmp.$$" 2>/dev/null || true
+fi
 
 # v5.9.3 BUG-009:run/ 下有 local_admin.secret(middleware 认它就给 root 级
 # 写 API)。secret 文件本身早已是 0600,但目录 0777 且无 sticky 位时,别人
@@ -618,7 +625,13 @@ prune_duplicate_hotspotd
 _hp_keep=$(pidfile_live_pid "$RUN/hotspotd.pid" hotspotd 2>/dev/null)
 [ -n "$_hp_keep" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$_hp_keep" -800 2>/dev/null || true
 
-# ─── WebUI 访问白名单落防火墙(必须在 httpd 开监听之前) ────────
+# ─── WebUI 访问白名单落防火墙与 PENDING 初始状态(必须在 httpd 开监听之前) ────────
+if [ ! -e "$RUN/hnc_state" ]; then
+    printf 'PENDING\n' > "$RUN/hnc_state.tmp.$$" 2>/dev/null \
+        && mv -f "$RUN/hnc_state.tmp.$$" "$RUN/hnc_state" 2>/dev/null \
+        || printf 'PENDING\n' > "$RUN/hnc_state" 2>/dev/null || true
+    rm -f "$RUN/hnc_state.tmp.$$" 2>/dev/null || true
+fi
 if [ -f "$HNC_DIR/bin/webui_guard.sh" ]; then
     sh "$HNC_DIR/bin/webui_guard.sh" apply >> "$HNC_DIR/logs/service.log" 2>&1 \
         || log "WARN: webui_guard apply failed (HTTP-level guard in hnc_httpd still active)"

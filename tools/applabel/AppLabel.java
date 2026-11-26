@@ -3,11 +3,14 @@ package io.hnc.applabel;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
+import android.content.res.Resources;
 import android.os.Looper;
 
 import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Tiny app_process helper for HNC dpid: prints one tab-separated line
@@ -30,6 +33,8 @@ public final class AppLabel {
 
     public static void main(String[] args) {
         try {
+            Locale.setDefault(Locale.SIMPLIFIED_CHINESE);
+
             // Some ROMs require a main looper before ActivityThread bootstrap.
             // systemMain() may prepare it itself on certain versions, so a
             // double-prepare can throw — swallow that specific case.
@@ -46,7 +51,24 @@ public final class AppLabel {
                 return;
             }
 
-            PackageManager pm = ctx.getPackageManager();
+            Context zhCtx = ctx;
+            try {
+                Resources sysRes = ctx.getResources();
+                if (sysRes != null) {
+                    Configuration cfg = new Configuration(sysRes.getConfiguration());
+                    cfg.setLocale(Locale.SIMPLIFIED_CHINESE);
+                    Context created = ctx.createConfigurationContext(cfg);
+                    if (created != null) {
+                        zhCtx = created;
+                    }
+                }
+            } catch (Throwable ignore) {
+            }
+
+            PackageManager pm = zhCtx.getPackageManager();
+            if (pm == null) {
+                pm = ctx.getPackageManager();
+            }
             if (pm == null) {
                 System.err.println("hnc_applabel: null PackageManager");
                 System.exit(2);
@@ -62,16 +84,10 @@ public final class AppLabel {
                 if (ai == null || ai.packageName == null) {
                     continue;
                 }
-                String label;
-                try {
-                    CharSequence cs = pm.getApplicationLabel(ai);
-                    label = (cs == null) ? "" : cs.toString();
-                } catch (Throwable t) {
-                    label = "";
-                }
+                String label = resolveSimplifiedChineseLabel(pm, ai);
                 label = sanitize(label);
-                if (label.isEmpty()) {
-                    // Nothing useful; let dpid fall back to curated/pretty for this pkg.
+                if (label.isEmpty() || label.equalsIgnoreCase(ai.packageName)) {
+                    // Empty or raw package-name fallback; let dpid fall back to curated/pretty.
                     continue;
                 }
                 sb.setLength(0);
@@ -94,6 +110,40 @@ public final class AppLabel {
             return;
         }
         System.exit(0);
+    }
+
+    @SuppressWarnings("deprecation")
+    private static String resolveSimplifiedChineseLabel(PackageManager pm, ApplicationInfo ai) {
+        if (ai.nonLocalizedLabel != null) {
+            String nl = ai.nonLocalizedLabel.toString();
+            if (nl != null && !nl.trim().isEmpty() && !nl.trim().equalsIgnoreCase(ai.packageName)) {
+                return nl;
+            }
+        }
+        if (ai.labelRes != 0) {
+            try {
+                Resources appRes = pm.getResourcesForApplication(ai);
+                if (appRes != null) {
+                    Configuration cfg = new Configuration(appRes.getConfiguration());
+                    cfg.setLocale(Locale.SIMPLIFIED_CHINESE);
+                    appRes.updateConfiguration(cfg, appRes.getDisplayMetrics());
+                    CharSequence cs = appRes.getText(ai.labelRes);
+                    if (cs != null) {
+                        String s = cs.toString();
+                        if (!s.trim().isEmpty() && !s.trim().equalsIgnoreCase(ai.packageName)) {
+                            return s;
+                        }
+                    }
+                }
+            } catch (Throwable ignore) {
+            }
+        }
+        try {
+            CharSequence cs = pm.getApplicationLabel(ai);
+            return (cs == null) ? "" : cs.toString();
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     /** Obtain a system Context via reflection (hidden ActivityThread APIs). */

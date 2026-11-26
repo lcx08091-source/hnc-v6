@@ -35,7 +35,6 @@ command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
 }
 
 [ -x "$CTL" ] || exit 0
-[ -s "$DEVICES_FLAT" ] || [ -f "$DEVICES" ] || exit 0
 [ -f "$RULES" ] || exit 0
 
 IFACE="${1:-$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -n1 | tr -d ' \r\n')}"
@@ -46,7 +45,7 @@ esac
 _CHK=$("$CTL" check "$IFACE" 2>/dev/null)
 printf '%s\n' "$_CHK" | grep -q '"map":true' || exit 0
 
-if ! grep -q '"mark_id"' "$RULES" 2>/dev/null; then
+if ! grep -qE '"mark_id"|"blacklist"' "$RULES" 2>/dev/null; then
     if printf '%s\n' "$_CHK" | grep -q '"ip_entries":0' && {
         ! printf '%s\n' "$_CHK" | grep -q '"mac_map":true' || printf '%s\n' "$_CHK" | grep -q '"mac_entries":0'
     }; then
@@ -85,7 +84,8 @@ extract_dev_mac_ip() {
                     rest = substr(rest, RSTART + RLENGTH)
                     mac = tolower(substr(blk, 2, 17))
                     ip = ""
-                    if (match(blk, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
+                    if (!match(blk, /"online"[[:space:]]*:[[:space:]]*false/) &&
+                        match(blk, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
                         ipseg = substr(blk, RSTART, RLENGTH)
                         sub(/.*"ip"[[:space:]]*:[[:space:]]*"/, "", ipseg)
                         sub(/"$/, "", ipseg)
@@ -121,15 +121,96 @@ extract_rule_mids() {
     ' "$RULES" 2>/dev/null
 }
 
+extract_blacklist_entries() {
+    awk '
+        { s = s $0 " " }
+        END {
+            if (!match(s, /"blacklist"[[:space:]]*:[[:space:]]*\[[^]]*\]/)) exit
+            blseg = substr(s, RSTART, RLENGTH)
+            while (match(blseg, /"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"/)) {
+                mac = tolower(substr(blseg, RSTART + 1, 17))
+                blseg = substr(blseg, RSTART + RLENGTH)
+                if (!(mac in blseen)) {
+                    blseen[mac] = 1
+                    blorder[++bln] = mac
+                }
+            }
+            if (bln == 0) exit
+            if (match(s, /"devices"[[:space:]]*:[[:space:]]*\{/)) {
+                rest = substr(s, RSTART + RLENGTH)
+                while (match(rest, /"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^{}]*\}/)) {
+                    blk = substr(rest, RSTART, RLENGTH)
+                    rest = substr(rest, RSTART + RLENGTH)
+                    dmac = tolower(substr(blk, 2, 17))
+                    if (dmac in blseen) {
+                        bip = ""
+                        if (match(blk, /"blocked_ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
+                            ipseg = substr(blk, RSTART, RLENGTH)
+                            sub(/.*"blocked_ip"[[:space:]]*:[[:space:]]*"/, "", ipseg)
+                            sub(/"$/, "", ipseg)
+                            bip = ipseg
+                        } else if (match(blk, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
+                            ipseg = substr(blk, RSTART, RLENGTH)
+                            sub(/.*"ip"[[:space:]]*:[[:space:]]*"/, "", ipseg)
+                            sub(/"$/, "", ipseg)
+                            bip = ipseg
+                        }
+                        blip[dmac] = bip
+                    }
+                }
+            }
+            for (i = 1; i <= bln; i++) {
+                m = blorder[i]
+                print m, blip[m]
+            }
+        }
+    ' "$RULES" 2>/dev/null
+}
+
 emit_entries() {
     _devs=$(extract_dev_mac_ip)
-    [ -n "$_devs" ] || return 0
+    _bls=$(extract_blacklist_entries)
+    [ -n "$_devs" ] || [ -n "$_bls" ] || return 0
     _mids=$(extract_rule_mids)
     _v6_loaded=0
     V6_NEIGH=""
 
+    if [ -n "$_bls" ]; then
+        _bl_mac_list=" $(printf '%s\n' "$_bls" | awk 'NF { printf "%s ", $1 }')"
+        printf '%s\n' "$_bls" | while read -r bmac bip; do
+            [ -n "$bmac" ] || continue
+            echo "$bmac 0x00ff0000"
+            if [ -n "$_devs" ]; then
+                _live_bip=$(printf '%s\n' "$_devs" | awk -v m="$bmac" '$1 == m && $2 != "" { print $2; exit }')
+                [ -n "$_live_bip" ] && bip="$_live_bip"
+            fi
+            case "$bip" in
+                *[!0-9.]* | "" | *..*) ;;
+                *)
+                    if printf '%s\n' "$bip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+                        _reused_by_innocent=0
+                        if [ -n "$_devs" ] && printf '%s\n' "$_devs" | awk -v ip="$bip" -v bls="$_bl_mac_list" '
+                            $2 == ip && index(bls, " " $1 " ") == 0 { conflict = 1; exit }
+                            END { exit !conflict }
+                        '; then
+                            _reused_by_innocent=1
+                        fi
+                        if [ "$_reused_by_innocent" = "0" ]; then
+                            echo "$bip 0x00ff0000"
+                        fi
+                    fi
+                    ;;
+            esac
+        done
+    fi
+
+    [ -n "$_devs" ] || return 0
+
     printf '%s\n' "$_devs" | while read -r mac ip; do
         [ -n "$mac" ] || continue
+        if [ -n "$_bls" ] && printf '%s\n' "$_bls" | awk -v m="$mac" '$1 == m { found=1; exit } END { exit !found }'; then
+            continue
+        fi
         mid=$(printf '%s\n' "$_mids" | awk -v m="$mac" '$1 == m { print $2; exit }')
         if [ -z "$mid" ] && [ -f "$HNC_DIR/bin/hnc_json" ] && grep -qiF "\"$mac\"" "$RULES" 2>/dev/null; then
             mid=$(sh "$HNC_DIR/bin/hnc_json" get-device "$RULES" "$mac" mark_id 2>/dev/null) || mid=""

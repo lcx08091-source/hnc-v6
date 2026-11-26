@@ -63,8 +63,8 @@ rb_is_stable_vc() {
 rb_data() { echo "$1/data"; }
 rb_run() { echo "$1/run"; }
 
-# v6.1.0-rc.2: 配置快照白名单(覆盖核心策略、五大战术舱、隐私安检、随机 MAC / 访问守卫 / 自训策略及 v6_*.json; 严禁包含凭据与运行态文件)
-RB_CFG_STATIC_LIST="rules.json device_names.json templates.json conn_blocks.json app_limits.json limit_policies.json autorate.json alerts_config.json app_controls.json dns_takeover.json encdns.json mac_aliases.json dpi_user_rules.json phone_usage_config.json dpi_experiment.json device_ident_override.json startup_fp.json fp_prototypes.json dpi_self_config.json leakguard_config.json vector_express.json update_leash.json thermo_cruise.json rmac_policy.json webui_access.json dpi_fp_prototypes.json self_policy.json"
+# v6.1.0-rc.10: 配置快照白名单(覆盖核心策略、本机防火墙、五大战术舱、隐私安检、随机 MAC / 访问守卫 / 自训策略及 v6_*.json; 严禁包含凭据与运行态文件)
+RB_CFG_STATIC_LIST="rules.json self_firewall.json device_names.json templates.json conn_blocks.json app_limits.json limit_policies.json autorate.json alerts_config.json app_controls.json dns_takeover.json encdns.json mac_aliases.json dpi_user_rules.json phone_usage_config.json dpi_experiment.json device_ident_override.json startup_fp.json fp_prototypes.json dpi_self_config.json leakguard_config.json vector_express.json update_leash.json thermo_cruise.json rmac_policy.json webui_access.json dpi_fp_prototypes.json self_policy.json"
 
 rb_is_cfg_whitelisted() {
     case "$1" in
@@ -72,7 +72,7 @@ rb_is_cfg_whitelisted() {
         remote_tokens.json|devices.json|rollback.*|runtime_version*|*.jsonl) return 1 ;;
         leakguard_config.json|vector_express.json|update_leash.json|thermo_cruise.json|\
         rmac_policy.json|webui_access.json|dpi_fp_prototypes.json|self_policy.json|\
-        rules.json|device_names.json|templates.json|conn_blocks.json|app_limits.json|\
+        rules.json|self_firewall.json|device_names.json|templates.json|conn_blocks.json|app_limits.json|\
         limit_policies.json|autorate.json|alerts_config.json|app_controls.json|\
         dns_takeover.json|encdns.json|mac_aliases.json|dpi_user_rules.json|\
         phone_usage_config.json|dpi_experiment.json|device_ident_override.json|\
@@ -95,6 +95,7 @@ rb_pack_cfg_snapshot() {
         [ -f "$_src_d/$_cfn" ] || continue
         rb_is_cfg_whitelisted "$_cfn" || continue
         cp -af "$_src_d/$_cfn" "$_dst_c/$_cfn" 2>/dev/null || true
+        [ "$_cfn" = "self_firewall.json" ] && chmod 600 "$_dst_c/$_cfn" 2>/dev/null || true
     done
     for _v6f in "$_src_d"/v6_*.json; do
         [ -f "$_v6f" ] || continue
@@ -113,11 +114,13 @@ rb_restore_cfg_snapshot() {
         _cfbn="${_cfp##*/}"
         rb_is_cfg_whitelisted "$_cfbn" || continue
         if cp -af "$_cfp" "$_dst_d/${_cfbn}.rb" 2>/dev/null; then
+            [ "$_cfbn" = "self_firewall.json" ] && chmod 600 "$_dst_d/${_cfbn}.rb" 2>/dev/null || true
             mv -f "$_dst_d/${_cfbn}.rb" "$_dst_d/$_cfbn" 2>/dev/null || cp -af "$_cfp" "$_dst_d/$_cfbn" 2>/dev/null || true
             rm -f "$_dst_d/${_cfbn}.rb" 2>/dev/null || true
         else
             cp -af "$_cfp" "$_dst_d/$_cfbn" 2>/dev/null || true
         fi
+        [ "$_cfbn" = "self_firewall.json" ] && chmod 600 "$_dst_d/$_cfbn" 2>/dev/null || true
     done
     return 0
 }
@@ -182,6 +185,14 @@ rb_write_observing() {
 #       1 = 内部错误(照常继续 sync, 失败不影响开机)。
 rb_snapshot() {
     _moddir="$1"; _hnc="$2"; _d=$(rb_data "$_hnc")
+    _mod_bn=$(basename "$_moddir" 2>/dev/null)
+    if [ -e "$_moddir/update" ] && [ -n "$_mod_bn" ] && [ -d "${HNC_MODULES_UPDATE_ROOT:-/data/adb/modules_update}/$_mod_bn" ]; then
+        rb_log "snapshot: live update staged at ${HNC_MODULES_UPDATE_ROOT:-/data/adb/modules_update}/$_mod_bn, skip premature runtime_version rewrite until reboot"
+        if [ -s "$_d/rollback.pinned" ]; then
+            return 3
+        fi
+        return 0
+    fi
     _new=$(rb_mod_vc "$_moddir")
     [ -n "$_new" ] || _new=unknown
     _old=$(cat "$_d/runtime_version" 2>/dev/null | tr -d ' \r\n')

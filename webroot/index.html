@@ -310,7 +310,13 @@
 .fold{transition:grid-template-rows .28s cubic-bezier(.22,1,.36,1)!important}
 .fold-in{transition:opacity .2s ease,transform .28s cubic-bezier(.22,1,.36,1)!important}
 [data-glass="liquid"] .press{transition:transform .24s cubic-bezier(.22,1.28,.36,1),box-shadow .2s ease,background-color .2s ease}
-[data-glass="liquid"] .press:active{transform:scale(.972)}
+:root:not(.fx-nopress)[data-glass="liquid"] .press:not(.fx-nopress):active{transform:scale(.976)}
+[data-glass="liquid"] .btn.press:not(.fx-nopress):active{transform:scale(1.035);transition:transform .14s cubic-bezier(.22,1.28,.36,1)}
+:root.fx-nopress .press:active,
+:root.fx-nopress .hbtn.press:active,
+:root.fx-nopress .chip.press:active,
+:root.fx-nopress .btn.press:active,
+.press.fx-nopress:active{transform:none!important}
 
 /* 7. Bottom Tabbar: Instant button highlight on touch, velocity chromatic lens */
 #tabs{
@@ -320,7 +326,7 @@
   mask-image:none!important;
 }
 #lens{
-  z-index:1!important;
+  z-index:3!important;
   pointer-events:none;
 }
 #lens-in{display:none!important}
@@ -340,12 +346,14 @@
   transform:translateY(-1px) scale(1.1);
   filter:drop-shadow(0 4px 8px rgba(0,122,255,.32));
 }
-[data-glass="liquid"] .lens,
 [data-glass="frosted"] .lens{
   -webkit-backdrop-filter:none!important;
   backdrop-filter:none!important;
+}
+[data-glass="liquid"] .lens,
+[data-glass="frosted"] .lens{
   background:
-    radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0) * 22%) 12%,rgba(255,255,255,.42) 0%,rgba(125,211,252,.10) 54%,rgba(0,122,255,.16) 100%);
+    radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0) * 22%) 12%,rgba(255,255,255,.32) 0%,rgba(125,211,252,.09) 54%,rgba(0,122,255,.14) 100%);
   box-shadow:
     inset 0 1px .5px rgba(255,255,255,.52),
     inset 0 -1px 1px rgba(0,122,255,.18),
@@ -1051,7 +1059,8 @@
 :root:not([data-style]):not([data-glass="liquid"]) .sgrp.scard.open{border-color:var(--stroke-2);box-shadow:var(--shadow-2)}
 :root:not([data-style]):not([data-glass="liquid"]) .scard-rows>.row,
 :root:not([data-style]):not([data-glass="liquid"]) .scard-rows>.row-wrap{border-radius:12px!important;background:var(--def-sub-surface);border:1px solid var(--def-sub-border)!important;box-shadow:none}
-:root:not([data-style]):not([data-glass="liquid"]) .tabbar{height:62px;border-radius:20px;padding:5px;background:var(--card-solid);background:color-mix(in srgb,var(--card-solid) 92%,transparent);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3)}
+:root:not([data-style]):not([data-glass="liquid"]) .tabbar{height:62px;border-radius:20px;padding:5px}
+:root:not([data-style]):not([data-glass="liquid"]) .tabbar > .tabbar-bg{background:var(--card-solid);background:color-mix(in srgb,var(--card-solid) 92%,transparent);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3)}
 :root:not([data-style]):not([data-glass="liquid"]) .lens{height:50px;border-radius:15px;box-shadow:0 4px 12px -3px rgba(0,122,255,.45);box-shadow:0 4px 12px -3px color-mix(in srgb,var(--blue) 45%,transparent)}
 :root:not([data-style]):not([data-glass="liquid"]) .lens-tint{background:var(--blue)}
 :root:not([data-style]):not([data-glass="liquid"]) .tabbar:not(.drag) #tabs .tab.on,
@@ -1429,6 +1438,8 @@
   height:62px;
   border-radius:10px;
   padding:5px;
+}
+[data-style="cyber"] .tabbar > .tabbar-bg{
   background:var(--card-2);
   background:color-mix(in srgb,var(--card-solid) 90%,transparent);
   border:1px solid var(--stroke-2);
@@ -2390,8 +2401,9 @@ html.has-wallpaper[data-glass="liquid"] .hbtn{
   background:rgba(10,18,32,calc(.42 + var(--hs,0)*.06 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
 }
 
-/* 无壁纸标准态 #tabbar 与 #lens 水滴光晕 */
-:root[data-glass="liquid"]:not([data-has-wp="1"]) .tabbar{
+/* 无壁纸标准态 #tabbar > .tabbar-bg 与 #lens 水滴光晕 */
+:root[data-glass="liquid"]:not([data-has-wp="1"]) #tabbar > .tabbar-bg{
+  border:0!important;
   background:rgba(255,255,255,calc(.66 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.16))!important;
   -webkit-backdrop-filter:var(--hyalite, blur(calc(16px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(165%))!important;
   backdrop-filter:var(--hyalite, blur(calc(16px + var(--gx-up,0)*8px - var(--gx-dn,0)*5px)) saturate(165%))!important;
@@ -2435,7 +2447,7 @@ html.has-wallpaper[data-glass="liquid"] .hbtn{
 html.has-wallpaper[data-glass] .tabbar::after{
   opacity:.14!important;
 }
-/* 壁纸态 #tabbar 与顶层 .search / .seg / .qpill 统一由 8.6 与 10.6.4 双材质收口 */
+/* 壁纸态 #tabbar > .tabbar-bg 与顶层 .search / .seg / .qpill 统一由 8.6 与 10.6.4 双材质收口 */
 
 /* 7) 经典毛玻璃模式 (data-glass="frosted") 与极简默认壁纸态（补齐 .page 78/72px 顶距防撞顶栏） */
 :root[data-glass="frosted"] .header{height:calc(env(safe-area-inset-top,0px) + 62px);padding:calc(env(safe-area-inset-top,0px) + 9px) max(20px,calc((100vw - 1180px)/2)) 9px;gap:10px}
@@ -2470,6 +2482,9 @@ html.has-wallpaper[data-glass] .tabbar::after{
 :root[data-glass="frosted"] .tabbar{
   height:64px;
   border-radius:32px;
+}
+:root[data-glass="frosted"] .tabbar > .tabbar-bg{
+  border:0!important;
   background:rgba(255,255,255,calc(.68 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.16))!important;
   -webkit-backdrop-filter:blur(calc(22px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(160%)!important;
   backdrop-filter:blur(calc(22px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(160%)!important;
@@ -2487,7 +2502,7 @@ html.has-wallpaper[data-glass] .tabbar::after{
     background:var(--card);
     box-shadow:var(--lg-rim),var(--lg-drop);
   }
-  :root[data-glass="frosted"]:not([data-theme="light"]) .tabbar{
+  :root[data-glass="frosted"]:not([data-theme="light"]) .tabbar > .tabbar-bg{
     background:rgba(18,22,32,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
     box-shadow:var(--lg-rim),var(--lg-drop)!important;
   }
@@ -2496,7 +2511,7 @@ html.has-wallpaper[data-glass] .tabbar::after{
   background:var(--card);
   box-shadow:var(--lg-rim),var(--lg-drop);
 }
-:root[data-glass="frosted"][data-theme="dark"] .tabbar{
+:root[data-glass="frosted"][data-theme="dark"] .tabbar > .tabbar-bg{
   background:rgba(18,22,32,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
   box-shadow:var(--lg-rim),var(--lg-drop)!important;
 }
@@ -2525,7 +2540,7 @@ html.has-wallpaper:not([data-style]):not([data-glass]) .glass{
   -webkit-backdrop-filter:blur(18px) saturate(150%)!important;
   backdrop-filter:blur(18px) saturate(150%)!important;
 }
-:root[data-has-wp="1"]:not([data-style]):not([data-glass]) .tabbar{
+:root[data-has-wp="1"]:not([data-style]):not([data-glass]) .tabbar > .tabbar-bg{
   border:0!important;
   background:rgba(12,19,32,calc(.72 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
   -webkit-backdrop-filter:blur(20px) saturate(150%)!important;
@@ -2608,18 +2623,18 @@ html.has-wallpaper:not([data-style]):not([data-glass]) .glass{
 :root.lowfx.has-wallpaper[data-glass="liquid"] .glass{
   background:rgba(248,251,255,calc(.52 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.18))!important;
 }
-:root.lowfx[data-has-wp="1"][data-glass="liquid"] .tabbar,
-:root.lowfx.has-wallpaper[data-glass="liquid"] .tabbar{
+:root.lowfx[data-has-wp="1"][data-glass="liquid"]:not([data-wp-bot="light"]) .tabbar > .tabbar-bg,
+:root.lowfx.has-wallpaper[data-glass="liquid"]:not([data-wp-bot="light"]) .tabbar > .tabbar-bg{
   background:rgba(12,19,34,calc(.64 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.16))!important;
 }
 @media (prefers-color-scheme: dark){
   :root.lowfx[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]) .glass,
-  :root.lowfx[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]) .tabbar{
+  :root.lowfx[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]) .tabbar > .tabbar-bg{
     background:rgba(14,22,38,calc(.62 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.16))!important;
   }
 }
 :root.lowfx[data-has-wp="1"][data-glass="liquid"][data-theme="dark"] .glass,
-:root.lowfx[data-has-wp="1"][data-glass="liquid"][data-theme="dark"] .tabbar{
+:root.lowfx[data-has-wp="1"][data-glass="liquid"][data-theme="dark"] .tabbar > .tabbar-bg{
   background:rgba(14,22,38,calc(.62 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.16))!important;
 }
 
@@ -3473,6 +3488,17 @@ body:has(#v6-scalpel-drawer.show) .page::before{
 :root[data-style="cyber"] .seg.small .thumb{
   transition:transform .125s cubic-bezier(.08,.94,.16,1),width .125s cubic-bezier(.08,.94,.16,1),box-shadow .12s linear!important;
 }
+.seg .thumb[data-spring="1"],
+:root .seg .thumb[data-spring="1"],
+:root .seg.small .thumb[data-spring="1"],
+:root[data-glass] .seg .thumb[data-spring="1"],
+:root[data-glass] .seg.small .thumb[data-spring="1"],
+:root[data-style] .seg .thumb[data-spring="1"],
+:root[data-style] .seg.small .thumb[data-spring="1"],
+:root:not([data-style]):not([data-glass]) .seg .thumb[data-spring="1"],
+:root:not([data-style]):not([data-glass]) .seg.small .thumb[data-spring="1"]{
+  transition:none!important;
+}
 :root[data-style="cyber"] .seg.cy-seg-lock .thumb{
   box-shadow:0 0 0 1px var(--cy-accent),0 0 14px -2px var(--cy-glow);
 }
@@ -3797,47 +3823,42 @@ html.has-wallpaper:not([data-style="cyber"]):not(.lowfx) .toast{
   box-shadow:var(--lg-rim-inner)!important;
 }
 
-/* 8.6 底栏 #tabbar 与 #lens 水滴透镜（pure 纯透无白框 / prism 随景色散真折射 / dew 柔润弯月面内光晕） */
-:root[data-has-wp="1"]:not([data-glass="liquid"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar,
-html.has-wallpaper:not([data-glass="liquid"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar{
+/* 8.6 底栏 #tabbar > .tabbar-bg 与 #lens 水滴透镜（pure 纯透无白框 / prism 随景色散真折射 / dew 柔润弯月面内光晕） */
+:root[data-has-wp="1"]:not([data-glass="liquid"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar > .tabbar-bg,
+html.has-wallpaper:not([data-glass="liquid"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar > .tabbar-bg{
   border:0!important;
   background:rgba(14,22,38,calc(.68 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.14))!important;
   -webkit-backdrop-filter:blur(22px) saturate(160%)!important;
   backdrop-filter:blur(22px) saturate(160%)!important;
   box-shadow:inset 0 .5px 0 rgba(255,255,255,.22),0 16px 38px -10px rgba(2,8,20,.44)!important;
 }
-:root[data-has-wp="1"]:not([data-glass="liquid"])[data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar{
+:root[data-has-wp="1"]:not([data-glass="liquid"])[data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar > .tabbar-bg{
   background:rgba(246,250,255,calc(.66 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
   box-shadow:inset 0 .5px 0 rgba(255,255,255,.42),0 14px 34px -10px rgba(8,20,46,.20)!important;
 }
-:root[data-has-wp="1"][data-glass="liquid"]:not(.lowfx) #tabbar.tabbar,
-html.has-wallpaper[data-glass="liquid"]:not(.lowfx) #tabbar.tabbar{
+:root[data-has-wp="1"][data-glass="liquid"]:not(.lowfx) #tabbar.tabbar > .tabbar-bg,
+html.has-wallpaper[data-glass="liquid"]:not(.lowfx) #tabbar.tabbar > .tabbar-bg{
   border:0!important;
   background:rgba(10,18,32,calc(.34 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
-  -webkit-backdrop-filter:blur(20px) saturate(185%)!important;
-  backdrop-filter:blur(20px) saturate(185%)!important;
+  -webkit-backdrop-filter:var(--hyalite, blur(14px) saturate(185%))!important;
+  backdrop-filter:var(--hyalite, blur(14px) saturate(185%))!important;
   box-shadow:inset 0 .5px 0 rgba(255,255,255,.22),0 14px 34px -10px rgba(6,16,36,.22)!important;
 }
-:root[data-has-wp="1"][data-glass="liquid"][data-wp-bot="light"]:not([data-theme="dark"]):not(.lowfx) #tabbar.tabbar{
+:root[data-has-wp="1"][data-glass="liquid"][data-wp-bot="light"]:not([data-theme="dark"]):not(.lowfx) #tabbar.tabbar > .tabbar-bg{
   background:rgba(246,250,255,calc(.26 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.10))!important;
 }
 @media (prefers-color-scheme: dark){
-  :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]):not(.lowfx) #tabbar.tabbar{
+  :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]):not(.lowfx) #tabbar.tabbar > .tabbar-bg{
     background:rgba(10,18,32,calc(.34 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
   }
 }
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #tabbar.tabbar{
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #tabbar.tabbar > .tabbar-bg{
   border:0!important;
-  -webkit-backdrop-filter:var(--hyalite, blur(20px) saturate(196%))!important;
-  backdrop-filter:var(--hyalite, blur(20px) saturate(196%))!important;
+  -webkit-backdrop-filter:var(--hyalite, blur(14px) saturate(196%))!important;
+  backdrop-filter:var(--hyalite, blur(14px) saturate(196%))!important;
   box-shadow:var(--hyalite-edge, inset 0 1px 1.5px var(--prism-hi, rgba(255,250,235,.26)), inset 0 -1.5px 2.5px var(--prism-lo, rgba(180,225,255,.22))), 0 16px 38px -10px rgba(6,16,36,.24)!important;
 }
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling ~ #tabbar.tabbar:not(.drag):not(.pressing),
-:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #tabbar.tabbar:not(.drag):not(.pressing){
-  -webkit-backdrop-filter:blur(20px) saturate(190%)!important;
-  backdrop-filter:blur(20px) saturate(190%)!important;
-}
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not(.lowfx) #tabbar.tabbar{
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not(.lowfx) #tabbar.tabbar > .tabbar-bg{
   border:0!important;
   -webkit-backdrop-filter:blur(22px) saturate(198%) contrast(.95)!important;
   backdrop-filter:blur(22px) saturate(198%) contrast(.95)!important;
@@ -3846,13 +3867,16 @@ html.has-wallpaper[data-glass="liquid"]:not(.lowfx) #tabbar.tabbar{
 :root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar #lens.lens,
 html.has-wallpaper:not([data-style="cyber"]) #tabbar #lens.lens{
   border:0!important;
+  background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*20%) 12%,
+    rgba(125,211,252,.22) 0%,
+    rgba(56,189,248,.10) 55%,
+    rgba(14,165,233,.15) 100%)!important;
+  box-shadow:inset 0 .5px 0 rgba(224,242,255,.28),0 4px 14px -4px rgba(14,165,233,.20)!important;
+}
+:root[data-has-wp="1"]:not([data-glass="liquid"]):not([data-style="cyber"]) #tabbar #lens.lens,
+html.has-wallpaper:not([data-glass="liquid"]):not([data-style="cyber"]) #tabbar #lens.lens{
   -webkit-backdrop-filter:none!important;
   backdrop-filter:none!important;
-  background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*20%) 12%,
-    rgba(125,211,252,.24) 0%,
-    rgba(56,189,248,.12) 55%,
-    rgba(14,165,233,.18) 100%)!important;
-  box-shadow:inset 0 .5px 0 rgba(224,242,255,.28),0 4px 14px -4px rgba(14,165,233,.20)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar .lens-tint,
 html.has-wallpaper:not([data-style="cyber"]) #tabbar .lens-tint{
@@ -3882,10 +3906,17 @@ html.has-wallpaper:not([data-style="cyber"]) #tabbar #tabs .tab[aria-selected="t
 }
 :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #lens.lens{
   background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*20%) 12%,
-    rgba(255,255,255,.40) 0%,
-    rgba(56,189,248,.12) 55%,
-    rgba(0,122,255,.16) 100%)!important;
+    rgba(255,255,255,.32) 0%,
+    rgba(56,189,248,.10) 55%,
+    rgba(0,122,255,.14) 100%)!important;
+}
+:root[data-has-wp="1"][data-wp-bot="light"]:not([data-glass="liquid"]):not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #lens.lens{
   box-shadow:inset 0 .5px 0 rgba(255,255,255,.42),0 4px 12px -4px rgba(0,122,255,.18)!important;
+}
+[data-glass="liquid"]:not(.lowfx) #tabbar #lens.lens{
+  -webkit-backdrop-filter:var(--hyalite, blur(2px) saturate(195%))!important;
+  backdrop-filter:var(--hyalite, blur(2px) saturate(195%))!important;
+  box-shadow:var(--hyalite-edge, inset 0 1px 1.5px rgba(255,248,230,.38), inset 0 -1px 2px rgba(140,210,255,.32)), 0 6px 18px -4px rgba(8,20,44,.22)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) .hbtn,
 html.has-wallpaper:not([data-style="cyber"]) .hbtn{
@@ -4013,11 +4044,48 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
 :root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-weak,
 :root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-critical { color: var(--badge-red, #dc2626); }
 
-/* 9.3 液态玻璃底栏滑动膨胀放大折射透镜 (复刻实机录屏交互) */
+/* 9.3 液态玻璃底栏滑动膨胀放大折射透镜 (复刻实机录屏交互 · W3-01 零漏缝解耦 Backdrop-Root) */
+#tabbar,
 #tabbar.tabbar {
   overflow: visible !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  isolation: auto !important;
+}
+#tabbar > .tabbar-bg {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+}
+[data-style="apple"] #tabbar > .tabbar-bg {
+  border: 0;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .12);
+  background: var(--ap-bar-bg, rgba(255, 255, 255, .72));
+  background: color-mix(in srgb, var(--card-solid) 72%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+}
+[data-glass="liquid"] #tabbar > .tabbar-bg {
+  border: 0;
+  background: var(--lg-fill);
+  -webkit-backdrop-filter: var(--hyalite, blur(10px) saturate(190%) brightness(1.04));
+  backdrop-filter: var(--hyalite, blur(10px) saturate(190%) brightness(1.04));
+  box-shadow: var(--hyalite-edge, var(--lg-rim)), var(--lg-drop);
+}
+[data-glass="liquid"] .tabbar::after {
+  z-index: 1;
 }
 #tabbar #tabs {
+  z-index: 2 !important;
   -webkit-mask-image: linear-gradient(90deg,
     #000 0px,
     #000 var(--ml, -999px),
@@ -4043,24 +4111,22 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
 #tabbar.pressing #lens.lens,
 #tabbar.drag #lens.lens {
   background: radial-gradient(120% 110% at calc(50% + var(--lens-tilt,0)*22%) 18%,
-    rgba(255,255,255,.52) 0%,
-    rgba(125,211,252,.28) 48%,
-    rgba(14,165,233,.24) 100%) !important;
+    rgba(255,255,255,.32) 0%,
+    rgba(125,211,252,.18) 48%,
+    rgba(14,165,233,.16) 100%) !important;
   box-shadow:
-    inset 0 1px 1.5px rgba(255,255,255,.72),
-    inset 0 -1px 2px rgba(14,165,233,.28),
+    var(--hyalite-edge, inset 0 1px 1.5px rgba(255,255,255,.72), inset 0 -1px 2px rgba(14,165,233,.28)),
     0 12px 28px -6px rgba(2,12,32,.36),
     0 0 0 .5px rgba(186,230,253,.46) !important;
 }
 [data-theme="dark"] #tabbar.pressing #lens.lens,
 [data-theme="dark"] #tabbar.drag #lens.lens {
   background: radial-gradient(120% 110% at calc(50% + var(--lens-tilt,0)*22%) 18%,
-    rgba(186,230,253,.28) 0%,
-    rgba(56,189,248,.18) 52%,
-    rgba(15,23,42,.42) 100%) !important;
+    rgba(186,230,253,.20) 0%,
+    rgba(56,189,248,.12) 52%,
+    rgba(15,23,42,.28) 100%) !important;
   box-shadow:
-    inset 0 1px 1.5px rgba(224,242,255,.42),
-    inset 0 -1px 2px rgba(56,189,248,.25),
+    var(--hyalite-edge, inset 0 1px 1.5px rgba(224,242,255,.42), inset 0 -1px 2px rgba(56,189,248,.25)),
     0 14px 32px -6px rgba(0,0,0,.62) !important;
 }
 #tabbar #lens-in {
@@ -4302,15 +4368,10 @@ body::after {
     inset .8px -.8px .8px rgba(244, 114, 182, .18),
     0 6px 16px -6px rgba(15, 30, 65, .16) !important;
 }
-/* 4) 底栏 #tabbar：静止与拖拽透镜时运行精简版 Snell 光学折射；页面高速滚屏期无缝切入硬件 Mipmap 快径稳跑 120fps */
-:root[data-glass="liquid"] #tabbar {
+/* 4) 底栏 #tabbar > .tabbar-bg：全程运行 Snell 光学折射（#tabbar 本身不建 Backdrop-Root，供同级 #lens 独立直采实景） */
+:root[data-glass="liquid"] #tabbar > .tabbar-bg {
   -webkit-backdrop-filter: var(--hyalite, blur(20px)) saturate(185%) !important;
   backdrop-filter: var(--hyalite, blur(20px)) saturate(185%) !important;
-}
-:root.is-scrolling[data-glass="liquid"] #tabbar:not(.drag):not(.pressing),
-:root.is-scrolling[data-glass="liquid"] #tabbar.tabbar:not(.drag):not(.pressing) {
-  -webkit-backdrop-filter: blur(20px) saturate(190%) !important;
-  backdrop-filter: blur(20px) saturate(190%) !important;
 }
 /* 5) 滚动列表卡片保留 layout style 遏制；仅对分段器与弹层内子卡隐藏 ::before */
 :root[data-glass="liquid"] .dev:not(.open),
@@ -4323,7 +4384,7 @@ body::after {
   display: none !important;
   content: none !important;
 }
-:root[data-glass="liquid"]:not([data-theme="dark"]):not([data-has-wp="1"]) .glass:not(#tabbar):not(.seg) {
+:root[data-glass="liquid"]:not([data-theme="dark"]):not([data-has-wp="1"]) .glass:not(#tabbar):not(.seg):not(.v6-drawer) {
   isolation: auto;
   -webkit-backdrop-filter: blur(16px) saturate(190%) !important;
   backdrop-filter: blur(16px) saturate(190%) !important;
@@ -4429,7 +4490,7 @@ html[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]),
 }
 
 /* 暗夜卡片与按钮微晶高光边缘（取代刺眼 .44~.96 死白线框） */
-:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .glass:not(#tabbar):not(.seg) {
+:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .glass:not(#tabbar):not(.seg):not(.v6-drawer) {
   isolation: auto;
   -webkit-backdrop-filter: blur(16px) saturate(180%) !important;
   backdrop-filter: blur(16px) saturate(180%) !important;
@@ -4467,9 +4528,11 @@ html[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]),
   background: var(--card-2) !important;
   box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .12), 0 0 0 .5px rgba(255, 255, 255, .09), var(--lg-drop) !important;
 }
-:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .tabbar,
+:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) #tabbar > .tabbar-bg,
 :root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .hbtn,
 :root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .sheet,
+:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .v6-drawer,
+:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) #v6-scalpel-drawer,
 :root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .toast {
   background: rgba(24, 26, 33, .82) !important;
   border: 0 !important;
@@ -4571,9 +4634,17 @@ html[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]),
   background: linear-gradient(180deg, #34DB61 0%, #30D158 100%) !important;
   box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .28), 0 4px 12px -3px rgba(48, 209, 88, .40) !important;
 }
-:root[data-glass][data-theme="dark"] #tabbar #lens.lens {
+:root[data-glass="frosted"][data-theme="dark"] #tabbar #lens.lens {
   background: rgba(255, 255, 255, .11) !important;
   box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .16), 0 4px 14px -4px rgba(0, 0, 0, .55) !important;
+}
+:root[data-glass="liquid"][data-theme="dark"] #tabbar #lens.lens {
+  background: rgba(255, 255, 255, .09) !important;
+}
+:root[data-glass="liquid"]:not(.lowfx) #tabbar #lens.lens {
+  -webkit-backdrop-filter: var(--hyalite, blur(2px) saturate(195%)) !important;
+  backdrop-filter: var(--hyalite, blur(2px) saturate(195%)) !important;
+  box-shadow: var(--hyalite-edge, inset 0 1px 1.5px rgba(255,248,230,.38), inset 0 -1px 2px rgba(140,210,255,.32)), 0 6px 18px -4px rgba(8,20,44,.22) !important;
 }
 :root[data-glass][data-theme="dark"] #tabbar #tabs .tab.on,
 :root[data-glass][data-theme="dark"] #tabbar #tabs .tab[aria-selected="true"],
@@ -4718,11 +4789,13 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
   box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .12), 0 1px 4px rgba(0, 0, 0, .45) !important;
 }
 :root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar.tabbar {
+  border-radius: 18px !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar.tabbar > .tabbar-bg {
   background: var(--card-solid) !important;
   -webkit-backdrop-filter: blur(14px) !important;
   backdrop-filter: blur(14px) !important;
   border: 1px solid var(--stroke-2) !important;
-  border-radius: 18px !important;
   box-shadow: 0 12px 32px -8px rgba(0, 0, 0, .18) !important;
 }
 :root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar #lens.lens {
@@ -4734,7 +4807,7 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
   :root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) .header {
     background: color-mix(in srgb, var(--bg) 88%, transparent) !important;
   }
-  :root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar.tabbar {
+  :root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar.tabbar > .tabbar-bg {
     background: color-mix(in srgb, var(--card-solid) 94%, transparent) !important;
   }
   :root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar #lens.lens {
@@ -5205,14 +5278,15 @@ html.has-wallpaper[data-glass="liquid"][data-lg-variant="pure"]:not(.lowfx) .gla
   opacity: .38 !important;
 }
 
-/* [版本 2 · prism] 列表卡片高通透滤镜 + 主视觉三通道 RGB Snell 折射 + 120Hz 滚动瞬切硬件模糊 */
+/* [版本 2 · prism] 列表卡片高通透滤镜 + 主视觉三通道 RGB Snell 全程实时折射 + 滚速拉伸实景光谱 */
 :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
 html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
   border: 0 !important;
   background: var(--card) !important;
   -webkit-backdrop-filter: blur(calc(18px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(196%) contrast(1.02) !important;
   backdrop-filter: blur(calc(18px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(196%) contrast(1.02) !important;
-  box-shadow: var(--lg-rim), var(--lg-drop) !important;
+  box-shadow: var(--hyalite-edge, inset 0 calc(1px + var(--scroll-vy-abs, 0) * 1.6px) calc(1.5px + var(--scroll-vy-abs, 0) * 1.8px) var(--prism-hi, rgba(255, 248, 228, .24)), inset 1px 0 1px var(--prism-hi-side, rgba(255, 248, 228, .12)), inset 0 calc(-1.5px - var(--scroll-vy-abs, 0) * 1.8px) calc(2.5px + var(--scroll-vy-abs, 0) * 2.2px) var(--prism-lo, rgba(176, 224, 255, .20)), inset -1px 0 1px var(--prism-lo-side, rgba(176, 224, 255, .10))), var(--lg-drop) !important;
   isolation: isolate;
 }
 :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .page.on .hero,
@@ -5227,25 +5301,7 @@ html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .gl
 :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on > .wrap > .seg:not(.small):not(#tabbar) {
   -webkit-backdrop-filter: var(--hyalite, blur(calc(18px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(198%)) !important;
   backdrop-filter: var(--hyalite, blur(calc(18px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(198%)) !important;
-  box-shadow: var(--hyalite-edge, var(--lg-rim)), var(--lg-drop) !important;
-}
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on .hero,
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on .ahero,
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on .pu,
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on .dpihero,
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on > .wrap > .seg:not(.small),
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on .hero:not(#tabbar),
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on .ahero:not(#tabbar),
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on .pu:not(#tabbar),
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on .dpihero:not(#tabbar),
-:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on > .wrap > .seg:not(.small):not(#tabbar),
-:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .hero:not(#tabbar),
-:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .ahero:not(#tabbar),
-:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .pu:not(#tabbar),
-:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .dpihero:not(#tabbar),
-:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on > .wrap > .seg:not(.small):not(#tabbar) {
-  -webkit-backdrop-filter: blur(18px) saturate(196%) !important;
-  backdrop-filter: blur(18px) saturate(196%) !important;
+  box-shadow: var(--hyalite-edge, inset 0 calc(1px + var(--scroll-vy-abs, 0) * 1.6px) calc(1.5px + var(--scroll-vy-abs, 0) * 1.8px) var(--prism-hi, rgba(255, 248, 228, .24)), inset 1px 0 1px var(--prism-hi-side, rgba(255, 248, 228, .12)), inset 0 calc(-1.5px - var(--scroll-vy-abs, 0) * 1.8px) calc(2.5px + var(--scroll-vy-abs, 0) * 2.2px) var(--prism-lo, rgba(176, 224, 255, .20)), inset -1px 0 1px var(--prism-lo-side, rgba(176, 224, 255, .10))), var(--lg-drop) !important;
 }
 :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"] .glass:not(.seg):not(.sheet):not(.v6-drawer)::after {
   mix-blend-mode: soft-light;
@@ -5311,6 +5367,16 @@ html.has-wallpaper[data-glass="liquid"][data-lg-variant="dew"][data-theme="dark"
   backdrop-filter: blur(16px) saturate(185%) !important;
   box-shadow: var(--lg-rim), 0 8px 22px -8px rgba(6, 16, 36, .16) !important;
 }
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .seg:not(.small),
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .search,
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .qpill:not(.on),
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .chip:not(.on),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .seg:not(.small),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .search,
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .qpill:not(.on),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .chip:not(.on) {
+  box-shadow: var(--hyalite-edge, inset 0 calc(1px + var(--scroll-vy-abs, 0) * 1.6px) calc(1.5px + var(--scroll-vy-abs, 0) * 1.8px) var(--prism-hi, rgba(255, 248, 228, .24)), inset 1px 0 1px var(--prism-hi-side, rgba(255, 248, 228, .12)), inset 0 calc(-1.5px - var(--scroll-vy-abs, 0) * 1.8px) calc(2.5px + var(--scroll-vy-abs, 0) * 2.2px) var(--prism-lo, rgba(176, 224, 255, .20)), inset -1px 0 1px var(--prism-lo-side, rgba(176, 224, 255, .10))), var(--lg-drop) !important;
+}
 :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .glass .seg,
 :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .sheet .seg,
 :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .v6-drawer .seg,
@@ -5353,6 +5419,24 @@ html.has-wallpaper[data-glass="liquid"][data-lg-variant="dew"][data-theme="dark"
   background: var(--lg-sub-2) !important;
   color: var(--text-1) !important;
   box-shadow: var(--lg-rim-inner) !important;
+}
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .glass .seg,
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .sheet .seg,
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .v6-drawer .seg,
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .sheet .search,
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .v6-drawer .search,
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .glass .chip:not(.on),
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .sheet .chip:not(.on),
+:root[data-glass="liquid"][data-has-wp="1"][data-lg-variant="prism"]:not(.lowfx) .v6-drawer .chip:not(.on),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .glass .seg,
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .sheet .seg,
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .v6-drawer .seg,
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .sheet .search,
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .v6-drawer .search,
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .glass .chip:not(.on),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .sheet .chip:not(.on),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .v6-drawer .chip:not(.on) {
+  box-shadow: inset 0 .75px 1px var(--prism-hi-side, rgba(255, 248, 228, .15)), inset 0 -.75px 1px var(--prism-lo-side, rgba(176, 224, 255, .10)) !important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) .btn.sec {
   border: 0 !important;
@@ -6064,17 +6148,32 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   backdrop-filter: none !important;
   background: var(--card-solid) !important;
 }
+:root.lowfx #tabbar#tabbar.tabbar > .tabbar-bg,
+:root.lowfx[data-glass="liquid"] #tabbar#tabbar.tabbar > .tabbar-bg,
+:root.lowfx[data-style="apple"] #tabbar#tabbar.tabbar > .tabbar-bg,
 :root.lowfx[data-glass="frosted"] .glass,
 :root.lowfx[data-glass="frosted"] .hbtn,
 :root.lowfx[data-glass="frosted"] .sheet,
 :root.lowfx[data-glass="frosted"] .dd-menu,
-:root.lowfx[data-glass="frosted"] .tabbar,
+:root.lowfx[data-glass="frosted"] #tabbar#tabbar.tabbar > .tabbar-bg,
 :root.lowfx[data-glass="frosted"] .toast,
 :root.lowfx[data-glass="frosted"] .v6-drawer,
 :root.lowfx[data-glass="frosted"] .undo-pill {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   background: var(--card-solid) !important;
+}
+:root.lowfx[data-has-wp="1"]:not([data-style="cyber"]):not([data-wp-bot="light"]) #tabbar#tabbar.tabbar > .tabbar-bg,
+:root.lowfx.has-wallpaper:not([data-style="cyber"]):not([data-wp-bot="light"]) #tabbar#tabbar.tabbar > .tabbar-bg,
+:root.lowfx[data-has-wp="1"]:not([data-style="cyber"])[data-theme="dark"] #tabbar#tabbar.tabbar > .tabbar-bg {
+  background: rgba(12, 19, 34, 0.82) !important;
+}
+:root.lowfx[data-has-wp="1"]:not([data-style="cyber"])[data-wp-bot="light"]:not([data-theme="dark"]) #tabbar#tabbar.tabbar > .tabbar-bg {
+  background: rgba(248, 251, 255, 0.88) !important;
+}
+:root.lowfx #tabbar #lens#lens.lens {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
 }
 :root.lowfx .gx-btn:not(.on) {
   background: var(--card-2) !important;
@@ -6085,7 +6184,9 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   .header,
   .header::before,
   .header.hs-on::after,
-  [data-glass] .header.hs-on::after {
+  [data-glass] .header.hs-on::after,
+  .lens,
+  #tabbar #lens#lens.lens {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
   }
@@ -6098,7 +6199,7 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   .chip:not(.on),
   .sheet,
   .dd-menu,
-  .tabbar,
+  #tabbar#tabbar.tabbar > .tabbar-bg,
   .toast,
   .v6-drawer,
   #v6-scalpel-drawer,
@@ -6112,12 +6213,20 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   [data-glass="frosted"] .glass:not(.seg),
   [data-glass="liquid"] .v6-drawer,
   [data-glass="frosted"] .v6-drawer,
-  :root[data-has-wp="1"] #tabbar.tabbar,
+  :root[data-has-wp="1"] #tabbar#tabbar.tabbar > .tabbar-bg,
   :root[data-has-wp="1"] .undo-pill,
   html.has-wallpaper .undo-pill {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
     background: var(--card-solid) !important;
+  }
+  :root[data-has-wp="1"]:not([data-style="cyber"]):not([data-wp-bot="light"]) #tabbar#tabbar.tabbar > .tabbar-bg,
+  html.has-wallpaper:not([data-style="cyber"]):not([data-wp-bot="light"]) #tabbar#tabbar.tabbar > .tabbar-bg,
+  :root[data-has-wp="1"]:not([data-style="cyber"])[data-theme="dark"] #tabbar#tabbar.tabbar > .tabbar-bg {
+    background: rgba(12, 19, 34, 0.84) !important;
+  }
+  :root[data-has-wp="1"]:not([data-style="cyber"])[data-wp-bot="light"]:not([data-theme="dark"]) #tabbar#tabbar.tabbar > .tabbar-bg {
+    background: rgba(248, 251, 255, 0.88) !important;
   }
   :root[data-has-wp="1"] div.sec,
   :root[data-has-wp="1"] #apps-sub > .dsec,
@@ -6143,12 +6252,12 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   :root:not([data-style]):not([data-glass="liquid"]) .header { background: var(--card-solid); }
   :root:not([data-style]):not([data-glass="liquid"]) .dn-cap .lcc-fill { background: rgba(0, 102, 224, .22); }
   :root:not([data-style]):not([data-glass="liquid"]) .up-cap .lcc-fill { background: rgba(200, 107, 234, .22); }
-  :root:not([data-style]):not([data-glass="liquid"]) .tabbar { background: var(--card-solid); }
+  :root:not([data-style]):not([data-glass="liquid"]) .tabbar > .tabbar-bg { background: var(--card-solid); }
   :root:not([data-style]):not([data-glass="liquid"]) .lens { box-shadow: 0 4px 12px -3px rgba(0, 122, 255, .45); }
   [data-style="cyber"] .header { background: var(--card); }
   [data-style="cyber"] .cc-tile.on { background: var(--card-2); }
   [data-style="cyber"] .seg .thumb, [data-style="cyber"] .seg.small .thumb { background: var(--card-2); }
-  [data-style="cyber"] .tabbar { background: var(--card-2); }
+  [data-style="cyber"] .tabbar > .tabbar-bg { background: var(--card-2); }
   [data-style="cyber"] .lens { background: rgba(56, 189, 248, .16); }
   .bw-card.dn.has-val { border-color: var(--rx); }
   .bw-card.up.has-val { border-color: var(--tx); }
@@ -6166,7 +6275,7 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   [data-glass="frosted"] .glass:not(.seg),
   [data-style="cyber"] .glass,
   .header,
-  .tabbar,
+  .tabbar > .tabbar-bg,
   .sheet,
   .v6-drawer,
   .undo-pill {
@@ -6203,6 +6312,7 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
 </main>
 
 <nav class="tabbar" id="tabbar" aria-label="主导航">
+  <div class="tabbar-bg" aria-hidden="true"></div>
   <div class="tabs" id="tabs"></div>
   <div class="lens" id="lens" aria-hidden="true"><div class="lens-tint"></div><div class="lens-in" id="lens-in"></div></div>
 </nav>

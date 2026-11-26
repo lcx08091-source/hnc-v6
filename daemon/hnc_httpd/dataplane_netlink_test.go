@@ -7,10 +7,12 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1169,3 +1171,365 @@ func TestEnsureAppLimitTopHooksBeforeHNCSaveAndBatchMultiIfindex(t *testing.T) {
 		t.Fatalf("expected HTB root+1:1 ensured on distinct ifindexes [9 10], got %v", ensured)
 	}
 }
+
+func TestRC10RulesStoreZeroByteRecoveryAndAllocMidDefault(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{"bin", "data", "run"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.WriteFile(filepath.Join(dir, "bin", "hnc_constants.sh"), []byte("HNC_MARK_BASE=0x800000\n"), 0o644)
+
+	// 1. 尚不存在 rules.json 时返回干净默认根
+	root0, err := rulesStore.ReadAll(dir)
+	if err != nil || root0 == nil {
+		t.Fatalf("missing rules.json must return default root: err=%v", err)
+	}
+
+	// 2. AllocMarkID 为新设备分配 mark_id 时必须显式初始化 limit_enabled=false
+	mid, err := rulesStore.AllocMarkID(dir, "aa:bb:cc:11:22:33")
+	if err != nil || mid < 1 || mid > 99 {
+		t.Fatalf("AllocMarkID failed: mid=%d err=%v", mid, err)
+	}
+	dm, ok, err := rulesStore.GetDeviceMap(dir, "aa:bb:cc:11:22:33")
+	if err != nil || !ok || dm["limit_enabled"] != false {
+		t.Fatalf("expected limit_enabled=false on freshly allocated device entry, got %+v", dm)
+	}
+
+	// 3. 写入一条黑名单触发生成 .json_backups/*.bak, 再模拟掉电截断产生 0B rules.json -> 必须从最近备份自愈恢复而非清空!
+	if err := rulesStore.SetBlacklist(dir, "aa:bb:cc:99:88:77", true); err != nil {
+		t.Fatalf("SetBlacklist: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "rules.json"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rulesStore.Invalidate(dir)
+	if !rulesStore.IsBlacklisted(dir, "aa:bb:cc:99:88:77") {
+		t.Fatal("0-byte truncated rules.json must auto-recover from .json_backups instead of wiping blacklist")
+	}
+}
+
+func TestRC10NativeRuleSetPresetRollback19eXXAndBlacklistSync(t *testing.T) {
+	dir := setupNativeTierTestEnv(t, "")
+	mac := "aa:bb:cc:dd:ee:05"
+
+	origResolve := nlResolveIfaceIndexFn
+	origEnsureFW := nlEnsureFWBaseHooksFn
+	origPipeFW := nlPipeFirewallOnlyFn
+	origUpsert := nlUpsertDevHTBFn
+	origDel := nlDeleteDevHTBFn
+	origDump := nlDumpClassesForRuleFn
+	origOpen := nlOpenRuleSocketFn
+	origSendAck := nlSendSingleRtnlAckFn
+	defer func() {
+		nlResolveIfaceIndexFn = origResolve
+		nlEnsureFWBaseHooksFn = origEnsureFW
+		nlPipeFirewallOnlyFn = origPipeFW
+		nlUpsertDevHTBFn = origUpsert
+		nlDeleteDevHTBFn = origDel
+		nlDumpClassesForRuleFn = origDump
+		nlOpenRuleSocketFn = origOpen
+		nlSendSingleRtnlAckFn = origSendAck
+	}()
+
+	// 1. 热点未开/设备离线时: tryNativeRuleSet 原子持久化预设(limit_pending_sync=true)并返回 ("limit preset saved", true)
+	detail, ok := tryNativeRuleSet(dir, mac, "12", "3")
+	if !ok || detail != "limit preset saved" {
+		t.Fatalf("expected offline preset save, got ok=%v detail=%q", ok, detail)
+	}
+	dmPreset, _, _ := rulesStore.GetDeviceMap(dir, mac)
+	if !anyToRuleBool(dmPreset["limit_enabled"]) || !anyToRuleBool(dmPreset["limit_pending_sync"]) {
+		t.Fatalf("expected limit_enabled=true & limit_pending_sync=true, got %+v", dmPreset)
+	}
+
+	// 2. 热点拉起 + 设备上线后: syncPendingOnlineDeviceLimits 自动补挂并清除 limit_pending_sync
+	_ = os.WriteFile(filepath.Join(dir, "run", "hnc_state"), []byte("ACTIVE:wlan2\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "data", "devices.json"), []byte(`{"aa:bb:cc:dd:ee:05":{"ip":"192.168.43.55","online":true}}`), 0o644)
+
+	nlEnsureFWBaseHooksFn = func() bool { return true }
+	nlResolveIfaceIndexFn = func(name string) (int, error) {
+		if name == "wlan2" {
+			return 11, nil
+		}
+		if name == "ifb0" {
+			return 12, nil
+		}
+		return 0, errors.New("no iface")
+	}
+	nlDumpClassesForRuleFn = func(_ int) (map[string]HTBClassStat, error) {
+		return map[string]HTBClassStat{"1:1": {ClassID: "1:1"}}, nil
+	}
+	nlPipeFirewallOnlyFn = func(_, _, _, _ string, _ int, _, _ bool) error { return nil }
+	var upsertedRates []uint64
+	nlUpsertDevHTBFn = func(_ string, _ int, _ uint16, rateBps, _ uint64, _, _, _, _, _ uint32, _ string, _ bool) error {
+		upsertedRates = append(upsertedRates, rateBps)
+		return nil
+	}
+	nlDeleteDevHTBFn = func(_ int, _ uint16, _, _ uint32) error { return nil }
+
+	if n := syncPendingOnlineDeviceLimits(dir); n != 1 {
+		t.Fatalf("expected 1 pending online device limit synced, got %d", n)
+	}
+	dmSynced, _, _ := rulesStore.GetDeviceMap(dir, mac)
+	if anyToRuleBool(dmSynced["limit_pending_sync"]) || len(upsertedRates) < 2 {
+		t.Fatalf("expected limit_pending_sync cleared and down+up HTB applied, dm=%+v rates=%v", dmSynced, upsertedRates)
+	}
+
+	// 3. 在线新设备执行 tryNativeRuleSet 中途内核报错: 必须将 rulesStore 完全回滚至调用前状态(不残留脏 limit_enabled=true)
+	failMAC := "aa:bb:cc:dd:ee:09"
+	_ = os.WriteFile(filepath.Join(dir, "data", "devices.json"), []byte(`{
+		"aa:bb:cc:dd:ee:05":{"ip":"192.168.43.55","online":true},
+		"aa:bb:cc:dd:ee:09":{"ip":"192.168.43.99","online":true}
+	}`), 0o644)
+	nlUpsertDevHTBFn = func(_ string, _ int, _ uint16, _, _ uint64, _, _, _, _, _ uint32, _ string, _ bool) error {
+		return errors.New("simulated kernel ENOBUFS")
+	}
+	if _, okFail := tryNativeRuleSet(dir, failMAC, "20", "5"); okFail {
+		t.Fatal("expected tryNativeRuleSet to return false on kernel error")
+	}
+	if _, existedAfterFail, _ := rulesStore.GetDeviceMap(dir, failMAC); existedAfterFail {
+		t.Fatal("failed online tryNativeRuleSet must rollback newly inserted device entry from rulesStore")
+	}
+
+	// 4. 当设备持有单应用限速且内核已存在 1:9eXX 默认兜底子类时, tryNativeRuleClear 同步将 1:9eXX ceil 恢复至 1000mbit 并写 app_limit.dirty
+	mid5 := anyToRuleInt(dmSynced["mark_id"])
+	defID := fmt.Sprintf("1:%x", v6AppLimitDefBase+uint16(mid5))
+	_ = os.WriteFile(filepath.Join(dir, "data", "app_limits.json"),
+		[]byte(`{"version":1,"items":[{"mac":"aa:bb:cc:dd:ee:05","app_id":"bilibili","down_mbps":4}]}`), 0o644)
+	nlUpsertDevHTBFn = func(_ string, _ int, _ uint16, _, _ uint64, _, _, _, _, _ uint32, _ string, _ bool) error { return nil }
+	nlDumpClassesForRuleFn = func(_ int) (map[string]HTBClassStat, error) {
+		return map[string]HTBClassStat{"1:1": {ClassID: "1:1"}, defID: {ClassID: defID}}, nil
+	}
+	nlOpenRuleSocketFn = func() (int, error) { return -1, nil }
+	var sent9eMsgs [][]byte
+	nlSendSingleRtnlAckFn = func(_ int, msg []byte, _ uint32) error {
+		sent9eMsgs = append(sent9eMsgs, append([]byte(nil), msg...))
+		return nil
+	}
+	if !tryNativeRuleClear(dir, mac) {
+		t.Fatal("tryNativeRuleClear with secondary app_limits owner failed")
+	}
+	if len(sent9eMsgs) != 1 {
+		t.Fatalf("expected 1 in-place 1:9eXX HTB upsert message, got %d", len(sent9eMsgs))
+	}
+	var dump9e []byte
+	dump9e = append(dump9e, sent9eMsgs[0]...)
+	doneHdr := make([]byte, rtnlMsgHdrLen)
+	binary.LittleEndian.PutUint32(doneHdr[0:4], rtnlMsgHdrLen)
+	binary.LittleEndian.PutUint16(doneHdr[4:6], rtnlMsgDone)
+	dump9e = append(dump9e, doneHdr...)
+	parsed9e, pErr := parseTCClassDumpMsgs(dump9e, 11)
+	if pErr != nil || parsed9e[defID].CeilBps != DefaultHTBRootRateBps {
+		t.Fatalf("expected %s ceil restored to %d, got %+v (err=%v)", defID, DefaultHTBRootRateBps, parsed9e[defID], pErr)
+	}
+	if _, sErr := os.Stat(filepath.Join(dir, "run", "app_limit.dirty")); sErr != nil {
+		t.Fatalf("expected run/app_limit.dirty after tryNativeRuleClear: %v", sErr)
+	}
+
+	// 5. 验证 tryNativeBlacklistSet 释放锁后触发 offload_guard apply, 且防火墙失败时自动回滚黑名单
+	ogLog := filepath.Join(dir, "run", "og_calls.log")
+	_ = os.WriteFile(filepath.Join(dir, "bin", "hnc_offload_guard.sh"),
+		[]byte("#!/bin/sh\necho \"$*\" >> '"+ogLog+"'\nexit 0\n"), 0o755)
+	if !tryNativeBlacklistSet(dir, mac, true) {
+		t.Fatal("tryNativeBlacklistSet(true) failed")
+	}
+	waitOffloadGuardAsyncIdle()
+	ogOut, _ := os.ReadFile(ogLog)
+	if !strings.Contains(string(ogOut), "apply") {
+		t.Fatalf("expected hnc_offload_guard.sh apply triggered on blacklist set, got %q", string(ogOut))
+	}
+
+	nlPipeFirewallOnlyFn = func(_, _, _, _ string, _ int, _, _ bool) error { return errors.New("ipt fail") }
+	if tryNativeBlacklistSet(dir, mac, false) {
+		t.Fatal("expected tryNativeBlacklistSet(false) to fail when firewall fails")
+	}
+	if !rulesStore.IsBlacklisted(dir, mac) {
+		t.Fatal("blacklist must remain true when firewall commit fails")
+	}
+}
+
+func TestRC10IPv6DownlinkMarkAppLimitAutoMidAndTierRefresh(t *testing.T) {
+	dir := setupNativeTierTestEnv(t, "wlan2")
+	macLim := "aa:bb:cc:00:11:22"
+	macBlk := "aa:bb:cc:00:33:44"
+
+	origDumpNeigh := nativeDumpIPv6NeighFn
+	origV6Dump := v6DumpIPv6NeighborsFn
+	defer func() {
+		nativeDumpIPv6NeighFn = origDumpNeigh
+		v6DumpIPv6NeighborsFn = origV6Dump
+	}()
+	mockNeigh := func(_ map[int]bool) (map[string][]net.IP, error) {
+		return map[string][]net.IP{
+			macLim: {net.ParseIP("2409:8a00:1234::55")},
+			macBlk: {net.ParseIP("2409:8a00:1234::66")},
+		}, nil
+	}
+	nativeDumpIPv6NeighFn = mockNeigh
+	v6DumpIPv6NeighborsFn = mockNeigh
+
+	// 1. 验证 buildDeviceFirewallRestorePayloads 与 BuildFirewallPayloads 输出 IPv6 -d <ip6>/128 正交高位打标(零触碰低 16 位)与下行阻断
+	_ = rulesStore.SetBlacklist(dir, macBlk, true)
+	_, v6Pay, err := buildDeviceFirewallRestorePayloads(dir, "wlan2", macLim, "192.168.43.22", 6, true, false, false)
+	if err != nil {
+		t.Fatalf("buildDeviceFirewallRestorePayloads: %v", err)
+	}
+	s6 := string(v6Pay)
+	if !strings.Contains(s6, "-A HNC_MARK -d 2409:8a00:1234::55/128 -j MARK --set-xmark 0x00860000/0x00ff0000") {
+		t.Fatalf("missing IPv6 downlink HNC_MARK rule in:\n%s", s6)
+	}
+	if !strings.Contains(s6, "-A HNC_CTRL -d 2409:8a00:1234::66/128 -j DROP") {
+		t.Fatalf("missing IPv6 downlink HNC_CTRL rule in:\n%s", s6)
+	}
+
+	// 2. 验证仅配置单应用限速(无整机限速/无初始 mid)的设备在 PlanAppLimitSlotAssignments 自动持久化分配 mid 且 limit_enabled=false
+	appOnlyMAC := "aa:bb:cc:00:55:66"
+	_ = os.WriteFile(filepath.Join(dir, "data", "app_limits.json"),
+		[]byte(`{"version":1,"items":[{"mac":"`+appOnlyMAC+`","app_id":"douyin","down_mbps":6}]}`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "run", "ip_app_map.flat"), []byte("203.0.113.88\tdouyin\n"), 0o644)
+	srv := &server{hncDir: dir}
+	midMap := map[string]int{}
+	asgs := srv.PlanAppLimitSlotAssignments(midMap)
+	if len(asgs) != 1 || asgs[0].Mid < 1 || asgs[0].Mid > 99 || midMap[appOnlyMAC] != asgs[0].Mid {
+		t.Fatalf("expected auto-allocated persistent mid in PlanAppLimitSlotAssignments, got asgs=%+v midMap=%v", asgs, midMap)
+	}
+	dmApp, okApp, _ := rulesStore.GetDeviceMap(dir, appOnlyMAC)
+	if !okApp || dmApp["limit_enabled"] != false {
+		t.Fatalf("expected limit_enabled=false on app-limit-only device, got %+v", dmApp)
+	}
+
+	// 3. 验证 writeNativeV6SyncSnapshot 落盘与 ./bin/v6_sync.sh 完全一致的 #hnc_v6 快照头与地址时间戳
+	writeNativeV6SyncSnapshot(dir, "wlan2", appOnlyMAC, asgs[0].Mid, true, []string{"2409:8a00:1234::99"}, 1700000123)
+	snapRaw, rErr := os.ReadFile(filepath.Join(dir, "run", "v6", appOnlyMAC))
+	if rErr != nil || !strings.Contains(string(snapRaw), fmt.Sprintf("#hnc_v6 iface=wlan2 mark=%d ing=1\n2409:8a00:1234::99 1700000123\n", asgs[0].Mid)) {
+		t.Fatalf("unexpected v6 sync snapshot content: err=%v raw=%q", rErr, string(snapRaw))
+	}
+
+	// 4. 验证 RefreshDataplaneTierIfNeeded 按状态签名去重自动激活 Tier-1 (tier1_ebpf_edt)
+	_ = os.WriteFile(filepath.Join(dir, "run", "qdisc_caps.json"), []byte(`{"available":["fq_codel","fq"],"chosen":"fq"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "run", "clsact.state"), []byte("active\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "run", "offload_guard.state"), []byte("active=1\n"), 0o644)
+	withMockDPTierHooks(t, func(h *dpTierHooks) {
+		h.ifaceIndex = func(_ string) (int, error) { return 11, nil }
+		h.probeKernel = func(_ int) (bool, bool, bool) { return true, false, false }
+	})
+	t.Cleanup(func() {
+		WaitDataplaneTierRefreshIdle()
+		clearDataplaneTierCache("")
+		_ = DefaultDataplaneActor().Do("reset_test_tier", func(a *DataplaneActor) error {
+			a.probeState = dataplaneProbeSnapshot{tier: DataplaneTierNativeNetlink}
+			a.publishSnapshotLocked()
+			return nil
+		})
+	})
+	clearDataplaneTierCache(dir)
+	RefreshDataplaneTierIfNeeded(dir, "wlan2")
+	WaitDataplaneTierRefreshIdle()
+	if gotTier := CurrentDataplaneTierStatus().ActiveTier; gotTier != DataplaneTierEDT {
+		t.Fatalf("expected RefreshDataplaneTierIfNeeded to activate %s, got %s", DataplaneTierEDT, gotTier)
+	}
+}
+
+func TestRC10UntetheredFakeIPRejectStudioProtoAndSPLTPortIsolation(t *testing.T) {
+	// 1. 验证未共享进 TUN 的热点口拦截 198.18.0.0/15 Fake-IP 返回 SERVFAIL 并触发隔离切换; 共享进 TUN 时正常放行
+	uFake := startControllableUpstream(t)
+	uFake.mu.Lock()
+	uFake.ip = net.IPv4(198, 18, 1, 88)
+	uFake.ttl = 60
+	uFake.mu.Unlock()
+
+	f := newDNSForwarder()
+	f.SetUpstream(uFake.addr)
+	sharedIntoTUN := false
+	var rejectedCnt int
+	f.rejectFakeIP = func() bool { return !sharedIntoTUN }
+	f.onFakeIPReject = func() { rejectedCnt++ }
+
+	q := dnsBuildQuery(0x901, "video.example.com", dnsTypeA, 0, false)
+	resp1 := mustResp(t, f.handle(q, net.ParseIP("192.168.43.10"), "udp"))
+	if resp1.Rcode != dnsRcodeServFail || len(resp1.Answers) != 0 || rejectedCnt != 1 {
+		t.Fatalf("untethered Fake-IP must be rejected with SERVFAIL: rcode=%d ans=%v rejected=%d", resp1.Rcode, resp1.Answers, rejectedCnt)
+	}
+	sharedIntoTUN = true
+	resp2 := mustResp(t, f.handle(dnsBuildQuery(0x902, "video.example.com", dnsTypeA, 0, false), net.ParseIP("192.168.43.10"), "udp"))
+	if resp2.Rcode != 0 || len(resp2.Answers) != 1 || resp2.Answers[0].Value != "198.18.1.88" {
+		t.Fatalf("TUN-shared hotspot must allow Fake-IP response: %+v", resp2)
+	}
+
+	// 2. 验证 hotspotIfaceSharedIntoTUN 精确区分普通 Android 物理转发(iif wlan2 lookup rmnet_data0)与 VPN 热点共享(iif wlan2 lookup tun0)
+	origReadRules := v6ReadLiveIPRulesFn
+	defer func() { v6ReadLiveIPRulesFn = origReadRules }()
+	v6ReadLiveIPRulesFn = func() ([]string, string, bool) {
+		return []string{
+			"0:\tfrom all lookup local",
+			"13000:\tfrom all fwmark 0x10066/0x1ffff iif lo uidrange 0-10299 lookup tun0",
+			"18000:\tfrom all iif wlan2 lookup rmnet_data0",
+		}, "", true
+	}
+	if hotspotIfaceSharedIntoTUN("wlan2") {
+		t.Fatal("host-only uidrange VPN + physical rmnet_data0 tether must NOT be treated as TUN-shared")
+	}
+	v6ReadLiveIPRulesFn = func() ([]string, string, bool) {
+		return []string{
+			"0:\tfrom all lookup local",
+			"17500:\tfrom all iif wlan2 lookup tun0",
+			"18000:\tfrom all iif wlan2 lookup rmnet_data0",
+		}, "", true
+	}
+	if !hotspotIfaceSharedIntoTUN("wlan2") {
+		t.Fatal("explicit iif wlan2 lookup tun0 before physical tether must be recognized as TUN-shared")
+	}
+
+	// 3. 验证 /api/self/studio 返回 prototype_apps 且编译指纹(dpi_fp_compiled.json)隔离非 443 端口规则不污染无端口兼容键
+	sDir := t.TempDir()
+	for _, sub := range []string{"data", "run"} {
+		_ = os.MkdirAll(filepath.Join(sDir, sub), 0o755)
+	}
+	testJA4 := "t13d1516h2_0123456789ab_cdef01234567"
+	impBytes, _ := json.Marshal(rpImportedFPFile{
+		Schema: 1,
+		Entries: []rulepackFP{{
+			JA4: testJA4, ALPN: "h2", Port: "other",
+			AppID: "custom_alt", App: "CustomAlt", Category: "game", Purity: 1, Support: 60,
+		}},
+	})
+	_ = os.MkdirAll(filepath.Dir(fpImportedPath(sDir)), 0o755)
+	_ = os.WriteFile(fpImportedPath(sDir), impBytes, 0o644)
+	now := time.Now()
+	if gotID443, _ := fpPredict(sDir, testJA4, "h2", 443, "", now); gotID443 != "" {
+		t.Fatalf("non-443 port rule must NOT pollute :443 prediction, got %q", gotID443)
+	}
+	if gotID8443, _ := fpPredict(sDir, testJA4, "h2", 8443, "", now); gotID8443 != "custom_alt" {
+		t.Fatalf("expected non-443 port rule to match port 8443 ('other'), got %q", gotID8443)
+	}
+	if err := exportCompiledFPForDPID(sDir, now); err != nil {
+		t.Fatalf("exportCompiledFPForDPID: %v", err)
+	}
+	compRaw, err := os.ReadFile(filepath.Join(sDir, "run", "dpi_fp_compiled.json"))
+	if err != nil {
+		t.Fatalf("read dpi_fp_compiled.json: %v", err)
+	}
+	var bundle compiledFPBundleOut
+	if err := json.Unmarshal(compRaw, &bundle); err != nil {
+		t.Fatalf("unmarshal dpi_fp_compiled.json: %v", err)
+	}
+	if _, leakedNoPort := bundle.ExactFP[testJA4+"|h2"]; leakedNoPort {
+		t.Fatalf("non-443 rule leaked into portless key in dpi_fp_compiled.json: %+v", bundle.ExactFP)
+	}
+	if got, ok := bundle.ExactFP[testJA4+"|h2|other"]; !ok || got.AppID != "custom_alt" || got.Port != "other" {
+		t.Fatalf("expected port-qualified key in dpi_fp_compiled.json, got %+v", bundle.ExactFP)
+	}
+
+	srv := &server{hncDir: sDir}
+	rec := httptest.NewRecorder()
+	srv.apiSelfStudio(rec, httptest.NewRequest("GET", "/api/self/studio", nil))
+	var studioResp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &studioResp); err != nil {
+		t.Fatalf("apiSelfStudio JSON decode: %v", err)
+	}
+	if _, hasTop := studioResp["prototype_apps"]; !hasTop {
+		t.Fatalf("apiSelfStudio missing top-level prototype_apps: %+v", studioResp)
+	}
+}
+

@@ -39,13 +39,16 @@ type CompiledFPBundle struct {
 }
 
 type compiledFPCache struct {
-	mu            sync.RWMutex
-	path          string
-	modUnix       int64
-	size          int64
-	seenGen       uint64
-	lastCheckUnix int64
-	bundle        CompiledFPBundle
+	// 64-bit atomics strictly at offset 0 for 32-bit ARMv7 alignment (arm32_align_gate_test.go).
+	lastCheckUnix atomic.Int64
+	seenGen       atomic.Uint64
+
+	snap   atomic.Pointer[CompiledFPBundle]
+	loadMu sync.Mutex
+	mu     sync.RWMutex
+	path   string
+	modNs  int64
+	size   int64
 }
 
 var defaultCompiledFP = &compiledFPCache{
@@ -56,55 +59,67 @@ func SetCompiledFPPath(runDir string) {
 	if strings.TrimSpace(runDir) == "" {
 		return
 	}
+	defaultCompiledFP.loadMu.Lock()
 	defaultCompiledFP.mu.Lock()
 	defaultCompiledFP.path = filepath.Join(runDir, "dpi_fp_compiled.json")
-	defaultCompiledFP.modUnix = 0
-	defaultCompiledFP.lastCheckUnix = 0
+	defaultCompiledFP.modNs = 0
+	defaultCompiledFP.size = 0
+	defaultCompiledFP.lastCheckUnix.Store(0)
 	defaultCompiledFP.mu.Unlock()
+	defaultCompiledFP.loadMu.Unlock()
 }
 
 func (c *compiledFPCache) ensureLoaded() {
 	gen := compiledForceReloadGen.Load()
 	now := time.Now().Unix()
+	last := c.lastCheckUnix.Load()
+	if c.seenGen.Load() == gen && now-last < 2 && last <= now {
+		return
+	}
+
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+
+	last = c.lastCheckUnix.Load()
+	if c.seenGen.Load() == gen && now-last < 2 && last <= now {
+		return
+	}
+
 	c.mu.RLock()
 	path := c.path
-	skipStat := c.seenGen == gen && now-c.lastCheckUnix < 2 && c.lastCheckUnix <= now
+	prevModNs := c.modNs
+	prevSize := c.size
 	c.mu.RUnlock()
-	if skipStat {
-		return
-	}
+
 	st, err := os.Stat(path)
 	if err != nil {
-		c.mu.Lock()
-		c.lastCheckUnix = now
-		c.seenGen = gen
-		c.mu.Unlock()
+		c.seenGen.Store(gen)
+		c.lastCheckUnix.Store(now)
 		return
 	}
-	c.mu.RLock()
-	unchanged := c.modUnix == st.ModTime().UnixNano() && c.size == st.Size() && c.seenGen == gen
-	c.mu.RUnlock()
-	if unchanged {
-		c.mu.Lock()
-		c.lastCheckUnix = now
-		c.mu.Unlock()
+	if prevModNs == st.ModTime().UnixNano() && prevSize == st.Size() && c.seenGen.Load() == gen && c.snap.Load() != nil {
+		c.lastCheckUnix.Store(now)
 		return
 	}
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) > 4<<20 {
+		c.seenGen.Store(gen)
+		c.lastCheckUnix.Store(now)
 		return
 	}
 	var next CompiledFPBundle
 	if json.Unmarshal(b, &next) != nil {
+		c.seenGen.Store(gen)
+		c.lastCheckUnix.Store(now)
 		return
 	}
+	c.snap.Store(&next)
 	c.mu.Lock()
-	c.bundle = next
-	c.modUnix = st.ModTime().UnixNano()
+	c.modNs = st.ModTime().UnixNano()
 	c.size = st.Size()
-	c.seenGen = gen
-	c.lastCheckUnix = now
 	c.mu.Unlock()
+	c.seenGen.Store(gen)
+	c.lastCheckUnix.Store(now)
 }
 
 func slash24Key(ip net.IP) string {
@@ -119,47 +134,75 @@ func slash24Key(ip net.IP) string {
 
 func IsECHOuterHost(host string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
-	return h == "cloudflare-ech.com" || strings.HasPrefix(h, "ech.") || strings.Contains(h, "-ech.")
+	if h == "" {
+		return true
+	}
+	switch h {
+	case "cloudflare-ech.com", "crypto.cloudflare.com", "encryptedsni.com",
+		"akamai-ech.com", "fastly-ech.com", "ech.cloudflare.com":
+		return true
+	}
+	for _, suf := range []string{
+		".cloudflare-ech.com", ".crypto.cloudflare.com", ".encryptedsni.com",
+		".akamai-ech.com", ".fastly-ech.com",
+	} {
+		if strings.HasSuffix(h, suf) {
+			return true
+		}
+	}
+	return strings.HasPrefix(h, "ech.") || strings.Contains(h, "-ech.")
 }
 
 func MatchCompiledEncrypted(ja4, alpn, qtp, udpSig string, remoteIP net.IP, spltPrefix string, spltSig64 uint64) (CompiledSPLTRule, bool) {
 	c := defaultCompiledFP
 	c.ensureLoaded()
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	bundle := c.snap.Load()
+	if bundle == nil {
+		return CompiledSPLTRule{}, false
+	}
 
-	if ja4 != "" && len(c.bundle.ExactFP) > 0 {
+	if ja4 != "" && len(bundle.ExactFP) > 0 {
 		if qtp != "" {
-			if r, ok := c.bundle.ExactFP[ja4+"|"+alpn+"|"+qtp]; ok && r.AppID != "" {
+			if r, ok := bundle.ExactFP[ja4+"|"+alpn+"|"+qtp]; ok && r.AppID != "" {
+				return r, true
+			}
+			if alpn != "" {
+				if r, ok := bundle.ExactFP[ja4+"||"+qtp]; ok && r.AppID != "" {
+					return r, true
+				}
+			}
+		}
+		if r, ok := bundle.ExactFP[ja4+"|"+alpn]; ok && r.AppID != "" {
+			return r, true
+		}
+		if alpn != "" {
+			if r, ok := bundle.ExactFP[ja4+"|"]; ok && r.AppID != "" {
 				return r, true
 			}
 		}
-		if r, ok := c.bundle.ExactFP[ja4+"|"+alpn]; ok && r.AppID != "" {
-			return r, true
-		}
-		if r, ok := c.bundle.ExactFP[ja4]; ok && r.AppID != "" {
+		if r, ok := bundle.ExactFP[ja4]; ok && r.AppID != "" {
 			return r, true
 		}
 	}
 
 	ip24 := slash24Key(remoteIP)
-	if spltPrefix != "" && len(c.bundle.ExactSPLT) > 0 {
+	if spltPrefix != "" && len(bundle.ExactSPLT) > 0 {
 		if ip24 != "" {
-			if r, ok := c.bundle.ExactSPLT[spltPrefix+"|"+ip24]; ok && r.AppID != "" {
+			if r, ok := bundle.ExactSPLT[spltPrefix+"|"+ip24]; ok && r.AppID != "" {
 				return r, true
 			}
 		}
 		if ja4 != "" {
-			if r, ok := c.bundle.ExactSPLT[spltPrefix+"|"+ja4]; ok && r.AppID != "" {
+			if r, ok := bundle.ExactSPLT[spltPrefix+"|"+ja4]; ok && r.AppID != "" {
 				return r, true
 			}
 		}
 	}
 
-	if spltSig64 != 0 && len(c.bundle.SoftSPLT) > 0 {
+	if spltSig64 != 0 && len(bundle.SoftSPLT) > 0 {
 		var best CompiledSPLTRule
 		bestScore := 0.88
-		for _, cand := range c.bundle.SoftSPLT {
+		for _, cand := range bundle.SoftSPLT {
 			if cand.JA4 != "" && ja4 != "" && cand.JA4 != ja4 {
 				continue
 			}

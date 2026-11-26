@@ -1012,6 +1012,7 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 	}
 
 	seen := make(map[string]struct{}, 8)
+	var suppressedIDVals map[string]struct{}
 	var out []LeakEvent
 
 	var (
@@ -1146,13 +1147,22 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 		})
 
 		// 6. ID_CARD: parameter matching (?i)(id_?card|id_?no|cert_?no|sfz|identity) or standalone
-		// 18-digit Mainland China ID card verified by birth date + ISO 7064:1983.MOD 11-2 check char.
+		// 18-digit Mainland China ID card verified by birth date + ISO 7064:1983.MOD 11-2 check char,
+		// skipping order/trade/sn/bill/seq/trace serial number keys.
 		if keyTrim != "" && idCardKeyRe.MatchString(keyTrim) && ValidCNIDCard(valTrim) {
 			addHit(TypeIDCard, keyTrim, valTrim, rawHint)
+		} else if keyTrim != "" && isOrderOrSerialKey(keyTrim) {
+			scanIDCardTokens(valTrim, func(idRaw string) {
+				if suppressedIDVals == nil {
+					suppressedIDVals = make(map[string]struct{}, 4)
+				}
+				suppressedIDVals[strings.ToUpper(idRaw)] = struct{}{}
+			})
+		} else {
+			scanIDCardTokens(valTrim, func(idRaw string) {
+				addHit(TypeIDCard, keyTrim, idRaw, rawHint)
+			})
 		}
-		scanIDCardTokens(valTrim, func(idRaw string) {
-			addHit(TypeIDCard, keyTrim, idRaw, rawHint)
-		})
 	}
 
 	scanFormEncoded(hp.rawQuery, func(k, v, rawSeg string) {
@@ -1240,6 +1250,11 @@ func (e *Engine) ExtractLeaks(in PacketInput) []LeakEvent {
 			addHit(TypeCredential, "", jwt, jwt)
 		})
 		scanIDCardTokens(decodedBody, func(idRaw string) {
+			if suppressedIDVals != nil {
+				if _, skip := suppressedIDVals[strings.ToUpper(idRaw)]; skip {
+					return
+				}
+			}
 			addHit(TypeIDCard, "", idRaw, idRaw)
 		})
 	}
@@ -1346,8 +1361,34 @@ func stripTrailingDigits(w string) string {
 	return w[:end]
 }
 
+func isHashedKeyWords(words []string) bool {
+	for _, rawW := range words {
+		w := stripTrailingDigits(rawW)
+		if rawW == "md5" || strings.Contains(rawW, "md5") {
+			return true
+		}
+		if w == "sha" || strings.HasPrefix(rawW, "sha1") || strings.HasPrefix(rawW, "sha224") ||
+			strings.HasPrefix(rawW, "sha256") || strings.HasPrefix(rawW, "sha384") || strings.HasPrefix(rawW, "sha512") {
+			return true
+		}
+		if w == "hash" || w == "hashed" || strings.Contains(rawW, "hash") {
+			return true
+		}
+		if w == "hmac" || strings.Contains(rawW, "hmac") {
+			return true
+		}
+		if w == "digest" || strings.Contains(rawW, "digest") {
+			return true
+		}
+	}
+	return false
+}
+
 func classifyDeviceIDKey(k string) string {
 	words := splitKeyWords(k)
+	if isHashedKeyWords(words) {
+		return ""
+	}
 	for i, rawW := range words {
 		w := stripTrailingDigits(rawW)
 		switch w {
@@ -1417,6 +1458,93 @@ func isAllSameChar(s string) bool {
 	return true
 }
 
+func isPeriodicRepeat(s string) bool {
+	n := len(s)
+	if n < 4 {
+		return false
+	}
+	for p := 1; p <= n/2; p++ {
+		if n%p != 0 {
+			continue
+		}
+		match := true
+		for i := p; i < n; i++ {
+			if s[i] != s[i%p] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTimestampOrSnowflakePrefix(s string) bool {
+	return strings.HasPrefix(s, "16") || strings.HasPrefix(s, "17") || strings.HasPrefix(s, "18")
+}
+
+func looksLikeCalendarTimestampDigits(s string) bool {
+	if len(s) < 14 || !isAllDigitsASCII(s) {
+		return false
+	}
+	if !strings.HasPrefix(s, "19") && !strings.HasPrefix(s, "20") {
+		return false
+	}
+	year := int(s[0]-'0')*1000 + int(s[1]-'0')*100 + int(s[2]-'0')*10 + int(s[3]-'0')
+	month := int(s[4]-'0')*10 + int(s[5]-'0')
+	day := int(s[6]-'0')*10 + int(s[7]-'0')
+	hour := int(s[8]-'0')*10 + int(s[9]-'0')
+	min := int(s[10]-'0')*10 + int(s[11]-'0')
+	sec := int(s[12]-'0')*10 + int(s[13]-'0')
+	return year >= 1990 && year <= 2050 &&
+		month >= 1 && month <= 12 &&
+		day >= 1 && day <= 31 &&
+		hour <= 23 && min <= 59 && sec <= 59
+}
+
+func isMonotonicOrLowDiversityDigits(s string) bool {
+	if len(s) == 0 {
+		return true
+	}
+	var seen [10]bool
+	distinct := 0
+	ascRun, descRun := 1, 1
+	maxRun := 1
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+		d := int(c - '0')
+		if !seen[d] {
+			seen[d] = true
+			distinct++
+		}
+		if i > 0 {
+			prev := int(s[i-1] - '0')
+			if (prev+1)%10 == d {
+				ascRun++
+			} else {
+				ascRun = 1
+			}
+			if (prev+9)%10 == d {
+				descRun++
+			} else {
+				descRun = 1
+			}
+			if ascRun > maxRun {
+				maxRun = ascRun
+			}
+			if descRun > maxRun {
+				maxRun = descRun
+			}
+		}
+	}
+	return distinct < 3 || maxRun >= 8 || isPeriodicRepeat(s)
+}
+
 func isStandardUUIDHex(s string) bool {
 	if len(s) != 36 {
 		return false
@@ -1472,11 +1600,28 @@ func okDeviceIDValue(idKind, v string) bool {
 	case "imei":
 		return len(v) == 15 && isAllDigitsASCII(v) && ValidLuhn(v)
 	case "imeisv":
-		return len(v) == 16 && isAllDigitsASCII(v)
+		return len(v) == 16 && isAllDigitsASCII(v) &&
+			!hasTimestampOrSnowflakePrefix(v) &&
+			!looksLikeCalendarTimestampDigits(v) &&
+			!isMonotonicOrLowDiversityDigits(v)
 	case "imsi":
-		return (len(v) == 14 || len(v) == 15) && isAllDigitsASCII(v)
+		return (len(v) == 14 || len(v) == 15) && isAllDigitsASCII(v) &&
+			v[0] >= '2' && v[0] <= '7' &&
+			!looksLikeCalendarTimestampDigits(v) &&
+			!isMonotonicOrLowDiversityDigits(v)
 	case "meid":
-		return (len(v) == 14 && isAllHexASCII(v)) || (len(v) == 18 && isAllDigitsASCII(v))
+		if len(v) == 14 && isAllHexASCII(v) {
+			if isAllDigitsASCII(v) && (hasTimestampOrSnowflakePrefix(v) || looksLikeCalendarTimestampDigits(v) || isMonotonicOrLowDiversityDigits(v)) {
+				return false
+			}
+			return true
+		}
+		if len(v) == 18 && isAllDigitsASCII(v) {
+			return !hasTimestampOrSnowflakePrefix(v) && v[0] != '1' &&
+				!looksLikeCalendarTimestampDigits(v) &&
+				!isMonotonicOrLowDiversityDigits(v)
+		}
+		return false
 	case "android_id":
 		return len(v) == 16 && isAllHexASCII(v)
 	case "oaid", "idfa", "idfv":
@@ -1772,6 +1917,13 @@ func isValidCredentialKV(key, val string, inCookie bool) bool {
 		if isTrivialCredentialPlaceholder(val) || isAllSameChar(val) || isAllAsterisksOrSpace(val) {
 			return false
 		}
+		// Reject partially masked passwords (e.g. "12****89") and hex password digests (MD5/SHA-1/SHA-256).
+		if strings.Contains(val, "**") {
+			return false
+		}
+		if (len(val) == 32 || len(val) == 40 || len(val) == 64) && isAllHexASCII(val) {
+			return false
+		}
 		return true
 	case "sid":
 		if !inCookie {
@@ -1791,6 +1943,59 @@ func isValidCredentialKV(key, val string, inCookie bool) bool {
 	}
 }
 
+func isPureSingleCaseAlpha(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	hasLower, hasUpper := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			hasLower = true
+		case c >= 'A' && c <= 'Z':
+			hasUpper = true
+		default:
+			return false
+		}
+	}
+	return !(hasLower && hasUpper)
+}
+
+func decodeBasicAuthBase64(s string) ([]byte, bool) {
+	if dec, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return dec, true
+	}
+	if dec, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "=")); err == nil {
+		return dec, true
+	}
+	return nil, false
+}
+
+func isValidBasicAuthPayload(cred string) bool {
+	if hasControlOrSpaceASCII(cred) {
+		return false
+	}
+	dec, ok := decodeBasicAuthBase64(cred)
+	if !ok || len(dec) < 2 || !utf8.Valid(dec) {
+		return false
+	}
+	for _, b := range dec {
+		if b < 0x20 || b == 0x7f {
+			return false
+		}
+	}
+	colon := bytes.IndexByte(dec, ':')
+	if colon < 0 {
+		return false
+	}
+	pass := strings.TrimSpace(string(dec[colon+1:]))
+	if pass == "" || isTrivialCredentialPlaceholder(pass) || isAllSameChar(pass) || isAllAsterisksOrSpace(pass) || strings.Contains(pass, "**") {
+		return false
+	}
+	return true
+}
+
 func extractAuthHeaderCredential(hv string) (string, bool) {
 	v := strings.TrimSpace(hv)
 	if v == "" {
@@ -1801,14 +2006,57 @@ func extractAuthHeaderCredential(hv string) (string, bool) {
 		return "", false
 	}
 	scheme := v[:sp]
-	if !strings.EqualFold(scheme, "basic") && !strings.EqualFold(scheme, "bearer") {
+	isBasic := strings.EqualFold(scheme, "basic")
+	isBearer := strings.EqualFold(scheme, "bearer")
+	if !isBasic && !isBearer {
 		return "", false
 	}
 	cred := strings.TrimSpace(v[sp+1:])
-	if len(cred) < 8 || isTrivialCredentialPlaceholder(cred) || isAllSameChar(cred) || isAllAsterisksOrSpace(cred) {
+	if len(cred) < 8 || hasControlOrSpaceASCII(cred) || isTrivialCredentialPlaceholder(cred) ||
+		isAllSameChar(cred) || isAllAsterisksOrSpace(cred) || strings.Contains(cred, "**") {
+		return "", false
+	}
+	if isBasic {
+		if !isValidBasicAuthPayload(cred) {
+			return "", false
+		}
+		return v, true
+	}
+	// Bearer: filter pure digits, single-case word constants, and low-entropy repetitive strings.
+	// Deliberately do NOT call isSnakeVersionConstant so legitimate structured tokens like
+	// "Bearer bearer_secret_token_2026" remain 100% detected.
+	if isAllDigitsASCII(cred) || isPureSingleCaseAlpha(cred) || isPeriodicRepeat(cred) {
+		return "", false
+	}
+	switch strings.ToLower(cred) {
+	case "anonymous", "guest_token", "default_token", "null_token", "empty_token", "test_token", "unauthenticated":
+		return "", false
+	}
+	distinct, entropy := charDiversityAndEntropy(cred)
+	if distinct < 5 || entropy < 2.3 {
 		return "", false
 	}
 	return v, true
+}
+
+func isOrderOrSerialKey(k string) bool {
+	if k == "" || idCardKeyRe.MatchString(k) {
+		return false
+	}
+	for _, rawW := range splitKeyWords(k) {
+		switch stripTrailingDigits(rawW) {
+		case "order", "orders", "orderid", "orderno", "ordersn",
+			"trade", "tradeno", "tradeid", "trans", "transaction", "txn", "txid",
+			"sn", "serial", "serialno",
+			"bill", "billno", "billid", "waybill", "invoice", "logistics",
+			"seq", "seqno", "seqid", "sequence",
+			"trace", "traceid", "span", "spanid", "reqid", "requestid",
+			"payid", "payno", "payment", "refund", "sku", "spu",
+			"timestamp", "nonce", "snowflake":
+			return true
+		}
+	}
+	return false
 }
 
 func isBase64URLChar(c byte) bool {
@@ -1903,9 +2151,10 @@ func ValidCNIDCard(s string) bool {
 	year := int(s[6]-'0')*1000 + int(s[7]-'0')*100 + int(s[8]-'0')*10 + int(s[9]-'0')
 	month := int(s[10]-'0')*10 + int(s[11]-'0')
 	day := int(s[12]-'0')*10 + int(s[13]-'0')
-	maxYear := time.Now().Year()
-	if maxYear < 2030 {
-		maxYear = 2030
+	now := time.Now()
+	maxYear := now.Year()
+	if maxYear < 2026 {
+		maxYear = 2026
 	}
 	if year < 1900 || year > maxYear {
 		return false
@@ -1919,6 +2168,11 @@ func ValidCNIDCard(s string) bool {
 	}
 	if day > daysInMonth[month] {
 		return false
+	}
+	if now.Year() >= 2024 && year == now.Year() {
+		if month > int(now.Month()) || (month == int(now.Month()) && day > now.Day()) {
+			return false
+		}
 	}
 	return true
 }
