@@ -233,6 +233,9 @@ function placeSegs(root) {
     }
     // default 模式完全交由 CSS 175ms cubic-bezier(0.16, 1, 0.3, 1) 处理，零缩放形变与多余晃动
   });
+  if (typeof lgOn !== 'undefined' && lgOn && typeof normLgVariant === 'function' && normLgVariant(S.lgVariant) === 'prism' && typeof rebindHyaliteTargets === 'function') {
+    rebindHyaliteTargets(null, false);
+  }
 }
 
 /* ── 无水平漂移、零 Backdrop-Root 破坏的四模式专属切页引擎 ── */
@@ -273,6 +276,9 @@ function pageEnterTargets(pg) {
 }
 
 function runPageEnterFx(to) {
+  if (typeof lgOn !== 'undefined' && lgOn && typeof normLgVariant === 'function' && normLgVariant(S.lgVariant) === 'prism' && typeof rebindHyaliteTargets === 'function') {
+    rebindHyaliteTargets(null, false);
+  }
   if (!to || !motionOn() || (typeof fxOn === 'function' && !fxOn('page')) || (typeof PERF !== 'undefined' && PERF.low)) return;
   // 严禁对 .page 施加 transform / filter / opacity<1，彻底守护子层 .glass 的 backdrop-filter 采样根与零水平溢出
   to.style.transform = '';
@@ -441,20 +447,39 @@ function resolveEffectiveTheme(mode) {
   try { sysDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches; } catch (_) {}
   return sysDark ? 'dark' : 'light';
 }
+var LG_VARIANTS = [
+  { id: 'pure',  name: '纯透无框', desc: '还原旧版无白框空气感，86% 纯透融景与极轻呼吸顶光' },
+  { id: 'prism', name: '棱镜色散', desc: '主卡与底栏启用真实三通道 RGB 折射，边缘高光随树叶与天空实景动态色散' },
+  { id: 'dew',   name: '凝脂水滴', desc: '水珠表面张力弯月面柔光与微凹水窝子格，温润饱满无硬线' }
+];
+function lgVariantLabel(v) {
+  var id = typeof normLgVariant === 'function' ? normLgVariant(v) : ((v === 'prism' || v === 'dew' || v === 'pure') ? v : 'pure');
+  for (var i = 0; i < LG_VARIANTS.length; i++) {
+    if (LG_VARIANTS[i].id === id) return LG_VARIANTS[i].name;
+  }
+  return '纯透无框';
+}
+function lgVariantDesc(v) {
+  var id = typeof normLgVariant === 'function' ? normLgVariant(v) : ((v === 'prism' || v === 'dew' || v === 'pure') ? v : 'pure');
+  for (var i = 0; i < LG_VARIANTS.length; i++) {
+    if (LG_VARIANTS[i].id === id) return LG_VARIANTS[i].desc;
+  }
+  return LG_VARIANTS[0].desc;
+}
 function applyTheme() {
   var r = document.documentElement, ga = currentGlassAttr();
   var tMode = (S.theme === 'light' || S.theme === 'dark') ? S.theme : 'auto';
   r.setAttribute('data-theme', resolveEffectiveTheme(tMode));
   r.setAttribute('data-theme-mode', tMode);
+  r.setAttribute('data-lg-variant', typeof normLgVariant === 'function' ? normLgVariant(S.lgVariant) : 'pure');
   if (S.style === 'liquid') r.setAttribute('data-style', 'apple');
   else if (S.style === 'cyber') r.setAttribute('data-style', 'cyber');
   else r.removeAttribute('data-style');
   if (ga) r.setAttribute('data-glass', ga); else r.removeAttribute('data-glass');
   var hdr0 = typeof document.querySelector === 'function' ? document.querySelector('.header') : null;
   if (hdr0) hdr0._navKey = '';
-  if (typeof liquidGlass === 'function') liquidGlass();
-  if (typeof refreshHyaliteTargets === 'function' && lgOn) refreshHyaliteTargets();
   applyGlassTint();
+  if (typeof liquidGlass === 'function') liquidGlass();
   r.classList.toggle('calm', !S.motion);
   applyMotion();
 }
@@ -477,99 +502,203 @@ function applyGlassTint(v) {
 var GX_T = [[10, '清透'], [40, '偏清透'], [60, '标准'], [90, '偏着色'], [101, '着色']];
 function glassTintLabel(v) { for (var i = 0; i < GX_T.length; i++) if (v < GX_T[i][0]) return GX_T[i][1]; return '着色'; }
 function apple() { return S.style === 'liquid'; }
+
+/* 解决 Android content:// WebView（MT 管理器等非安全上下文）下 navigator.userAgentData 缺失导致 Hyalite.supported() 误判问题 */
+function ensureHyaliteBlinkSupport() {
+  if (typeof window === 'undefined' || !window.Hyalite || typeof Hyalite.force !== 'function') return false;
+  try {
+    if (typeof Hyalite.supported === 'function' && Hyalite.supported()) return true;
+    var cssOk = typeof CSS !== 'undefined' && !!CSS.supports &&
+      (CSS.supports('backdrop-filter', 'url(#hnc-p)') || CSS.supports('-webkit-backdrop-filter', 'url(#hnc-p)'));
+    var ua = (typeof navigator !== 'undefined' && navigator && navigator.userAgent) || '';
+    var blinkOk = (typeof window.chrome !== 'undefined' || /Chrome\/|Chromium\/|CriOS\/|EdgA\/|Edg\/|\bwv\b/.test(ua)) &&
+      !/Firefox\/|FxiOS\//.test(ua);
+    if (cssOk && blinkOk) {
+      Hyalite.force(true);
+      return true;
+    }
+  } catch (_) {}
+  return typeof Hyalite.supported === 'function' ? !!Hyalite.supported() : false;
+}
+
 var LG_OPTS = {
-  tabbar: { bevel: 20, thickness: 34, slope: .9, shape: 'squircle', blur: 2.2, dispersion: 1.8, shade: .3, rim: 1.8, edgeW: 2, edge: 1, light: -30, sat: 1.1, materialize: 420, settle: 120 },
-  lens: { bevel: 18, thickness: 28, slope: 1.05, shape: 'squircle', blur: 1.6, dispersion: .85, shade: .12, rim: 1.5, edgeW: 1.2, edge: .8, light: -36, sat: 1.06, materialize: 320 },
-  hbtn: { bevel: 20, thickness: 22, shape: 'squircle', blur: 1.2, dispersion: 1.6, shade: .32, rim: 1.9, edge: 1.05, light: -30, materialize: 420 },
-  sheet: { bevel: 26, thickness: 42, slope: .9, shape: 'squircle', blur: 16, dispersion: 1.4, shade: .24, rim: 1.6, edge: 1, light: -30, sat: 1.1, settle: 160 },
-  toast: { bevel: 16, thickness: 22, shape: 'squircle', blur: 10, dispersion: 1.2, shade: .24, rim: 1.5, edge: 1, light: -30 }
-};
-/* 自定义壁纸 120fps 快速真折射配置：保留底栏 Snell 边缘弯曲折射、微色散与菲涅尔高光(滚屏期由 .is-scrolling #tabbar 自动切硬件模糊保满帧) */
-var LG_OPTS_WP = {
-  tabbar: { bevel: 15, thickness: 24, slope: .92, shape: 'squircle', blur: 4.0, dispersion: .42, smooth: 0, shade: .12, rim: .95, edgeW: 1, edge: .62, light: -38, sat: 1, materialize: 0, settle: 90 },
-  hbtn: { bevel: 12, thickness: 16, slope: .86, shape: 'squircle', blur: 1.8, dispersion: 0, smooth: 0, shade: .08, rim: .45, edgeW: 0, edge: 0, light: -38, sat: 1, materialize: 0 },
-  sheet: { bevel: 20, thickness: 28, slope: .88, shape: 'squircle', blur: 16, dispersion: 0, smooth: 0, shade: .08, rim: .55, edgeW: 0, edge: 0, light: -38, sat: 1, settle: 120 },
-  toast: { bevel: 14, thickness: 18, slope: .88, shape: 'squircle', blur: 10, dispersion: 0, smooth: 0, shade: .08, rim: .45, edgeW: 0, edge: 0, light: -38, sat: 1 }
+  tabbar: { shape: 'pill', bevel: 18, slope: 1.08, thickness: 28, blur: 4, sat: 1, rim: .42, edge: 0, dispersion: 0, settle: 160 }
 };
 var lgOn = false;
+var _lgHandles = [];
+var _lgTabHandle = null;
+
 function hasWpActive() {
-  var r = document.documentElement;
-  return r.getAttribute('data-has-wp') === '1' || r.getAttribute('data-has-wallpaper') === '1' || r.classList.contains('has-wallpaper');
+  if (typeof S !== 'undefined' && S && S.wpId && S.wpId !== 'none') return true;
+  var r = typeof document !== 'undefined' ? document.documentElement : null;
+  if (!r || !r.getAttribute) return false;
+  return r.getAttribute('data-has-wp') === '1' || r.getAttribute('data-has-wallpaper') === '1' || !!(r.classList && r.classList.contains('has-wallpaper'));
 }
-function lgOptsFor(kind, g, instant) {
-  var wp = hasWpActive(), dk = false;
+
+function _detachHyaliteItem(item) {
+  if (!item) return;
+  var el = item.el, handle = item.handle;
+  if (handle && typeof handle.detach === 'function') {
+    try { handle.detach(); } catch (_) {}
+  }
+  if (el && typeof window !== 'undefined' && window.Hyalite && typeof Hyalite.detach === 'function') {
+    try { Hyalite.detach(el); } catch (_) {}
+  }
+  if (el) {
+    el.__lgSig = '';
+    if (el.style && typeof el.style.removeProperty === 'function') {
+      el.style.removeProperty('--hyalite');
+      el.style.removeProperty('--hyalite-edge');
+    }
+  }
+}
+
+function detachAllHyaliteTargets() {
+  for (var i = 0; i < _lgHandles.length; i++) {
+    _detachHyaliteItem(_lgHandles[i]);
+  }
+  _lgHandles = [];
+  _lgTabHandle = null;
+  lgOn = false;
+  var ln = typeof $ === 'function' ? $('#lens') : null;
+  if (ln && typeof window !== 'undefined' && window.Hyalite && typeof Hyalite.detach === 'function') {
+    try { Hyalite.detach(ln); } catch (_) {}
+  }
+}
+
+function lgOptsFor(kind, g) {
+  var variant = typeof normLgVariant === 'function' ? normLgVariant(S.lgVariant) : 'pure';
+  var hasWp = hasWpActive();
+  var dk = false;
   try { dk = document.documentElement.getAttribute('data-theme') === 'dark'; } catch (_) {}
-  var o = Object.assign({}, LG_OPTS[kind] || {}, wp ? (LG_OPTS_WP[kind] || {}) : {});
-  var gv = g || (typeof glassTintVars === 'function' ? glassTintVars(S.glassTint) : { up: 0, dn: 0 });
-  if (kind === 'tabbar') {
-    o.blur = +((wp ? 4.0 : 2.4) + (gv.up || 0) * 4.2 - (gv.dn || 0) * 1.1).toFixed(2);
-    o.sat = 1; // Offload saturation boost to native CSS backdrop-filter GPU pass (saves 10 SVG primitives/frame)
+  var o;
+  if (variant === 'prism') {
+    if (kind === 'hero') {
+      o = { shape: 'squircle', bevel: 24, slope: 1.15, thickness: 40, blur: hasWp ? 5.5 : 6, sat: 1, rim: .48, edge: 0, dispersion: 1.85, settle: 120 };
+    } else if (kind === 'seg') {
+      o = { shape: 'pill', bevel: 16, slope: 1.12, thickness: 28, blur: hasWp ? 5.0 : 5, sat: 1, rim: .42, edge: 0, dispersion: 1.45, settle: 120 };
+    } else {
+      o = { shape: 'pill', bevel: 22, slope: 1.14, thickness: 36, blur: hasWp ? 4.5 : 4, sat: 1, rim: .46, edge: 0, dispersion: 1.75, settle: 120 };
+    }
+  } else if (variant === 'dew') {
+    o = { shape: 'lip', bevel: 24, slope: 1.06, thickness: 34, blur: hasWp ? 6.0 : 4.5, sat: 1, rim: .32, edge: 0, dispersion: .28, settle: 160 };
   } else {
-    o.sat = 1;
+    o = { shape: 'pill', bevel: 18, slope: hasWp ? 1.0 : 1.08, thickness: 28, blur: hasWp ? 6.5 : 4, sat: 1, rim: hasWp ? .20 : .42, edge: 0, dispersion: 0, settle: 160 };
+  }
+  var gv = g || (typeof glassTintVars === 'function' ? glassTintVars(S.glassTint) : { up: 0, dn: 0 });
+  if (gv && gv.up > 0) {
+    o.blur = +(o.blur + gv.up * 3.0).toFixed(2);
   }
   if (dk) {
-    o.rim = +((o.rim || 1) * 0.36).toFixed(2);
-    o.edge = +((o.edge || 0.7) * 0.24).toFixed(2);
-    o.shade = +((o.shade || 0.16) * 0.65).toFixed(2);
+    o.rim = +(o.rim * 0.55).toFixed(2);
+    o.edge = 0;
     o.theme = 'dark';
   } else {
     o.theme = 'light';
   }
-  if (instant) o.materialize = 0;
   return o;
 }
-/* 120fps TBDR 优化: SVG ReferenceFilter 仅挂载在底栏 #tabbar (1 个实例, 10 个原语); 3 个 37px 顶栏圆钮改走硬件 Mipmap 棱镜快径, 省去 3 路全分辨率回读 */
+
 function lgTargets() {
-  var tb = typeof $ === 'function' ? $('#tabbar') : null;
-  return tb ? [['tabbar', tb]] : [];
-}
-function rebindHyaliteTargets(g, forceRefresh) {
-  if (!window.Hyalite || !lgOn) return;
-  var wp = hasWpActive();
-  var ln = typeof $ === 'function' ? $('#lens') : null;
-  if (ln) try { Hyalite.detach(ln); } catch (_) {}
-  lgTargets().forEach(function (t) {
-    var kind = t[0], el = t[1]; if (!el) return;
+  var variant = typeof normLgVariant === 'function' ? normLgVariant(S.lgVariant) : 'pure';
+  var out = [], seen = [];
+  function pushTarget(kind, el) {
+    if (!el || el.hidden || seen.indexOf(el) >= 0) return false;
+    seen.push(el);
+    out.push([kind, el]);
+    return true;
+  }
+  var tb = typeof $ === 'function' ? $('#tabbar') : (typeof document !== 'undefined' && document.querySelector ? document.querySelector('#tabbar') : null);
+  pushTarget('tabbar', tb);
+  if (variant === 'prism' && typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
     try {
-      if (wp && kind === 'hbtn') {
-        if (el.__lgSig) { Hyalite.detach(el); el.__lgSig = ''; }
-        return;
-      }
-      var o = lgOptsFor(kind, g, true), sig = JSON.stringify(o);
-      if (el.__lgSig !== sig) {
-        Hyalite.detach(el);
-        Hyalite.attach(el, o);
-        el.__lgSig = sig;
-      } else if (forceRefresh && typeof Hyalite.refresh === 'function') {
-        Hyalite.refresh(el);
+      var heroes = document.querySelectorAll('.page.on .hero, .page.on .ahero, .page.on .pu, .page.on .dpihero');
+      var hCount = 0;
+      for (var i = 0; heroes && i < heroes.length && hCount < 2; i++) {
+        if (pushTarget('hero', heroes[i])) hCount++;
       }
     } catch (_) {}
-  });
+    try {
+      var segs = document.querySelectorAll('.page.on > .wrap > .seg:not(.small)');
+      if (!segs || !segs.length) {
+        segs = document.querySelectorAll('.page.on > .dev-split > .wrap > .seg:not(.small)');
+      }
+      for (var j = 0; segs && j < segs.length; j++) {
+        if (pushTarget('seg', segs[j])) break;
+      }
+    } catch (_) {}
+  }
+  return out;
+}
+
+function rebindHyaliteTargets(g, forceRefresh) {
+  var isLow = !!(S.lowfx || (typeof PERF !== 'undefined' && PERF.low));
+  if (typeof window === 'undefined' || !window.Hyalite || S.style !== 'liquid' || S.glassMode === 'frosted' || isLow) {
+    detachAllHyaliteTargets();
+    return;
+  }
+  ensureHyaliteBlinkSupport();
+  lgOn = true;
+  var ln = typeof $ === 'function' ? $('#lens') : null;
+  if (ln && typeof Hyalite.detach === 'function') {
+    try { Hyalite.detach(ln); } catch (_) {}
+  }
+  var targets = lgTargets();
+  var nextPlan = [];
+  for (var i = 0; i < targets.length; i++) {
+    var kind = targets[i][0], el = targets[i][1];
+    if (!el) continue;
+    var opts = lgOptsFor(kind, g);
+    nextPlan.push({ kind: kind, el: el, opts: opts, sig: kind + ':' + JSON.stringify(opts) });
+  }
+  var kept = [];
+  for (var j = 0; j < _lgHandles.length; j++) {
+    var prev = _lgHandles[j];
+    var keep = false;
+    if (prev && prev.el && prev.el.isConnected !== false) {
+      for (var m = 0; m < nextPlan.length; m++) {
+        if (nextPlan[m].el === prev.el && nextPlan[m].sig === prev.sig) {
+          keep = true;
+          break;
+        }
+      }
+    }
+    if (keep) kept.push(prev);
+    else _detachHyaliteItem(prev);
+  }
+  var nextHandles = [];
+  var nextTabHandle = null;
+  for (var k = 0; k < nextPlan.length; k++) {
+    var plan = nextPlan[k], existing = null;
+    for (var n = 0; n < kept.length; n++) {
+      if (kept[n].el === plan.el) { existing = kept[n]; break; }
+    }
+    if (existing) {
+      if (forceRefresh) {
+        try {
+          if (existing.handle && typeof existing.handle.refresh === 'function') existing.handle.refresh();
+          else if (typeof Hyalite.refresh === 'function') Hyalite.refresh(plan.el);
+        } catch (_) {}
+      }
+      nextHandles.push(existing);
+      if (plan.kind === 'tabbar') nextTabHandle = existing.handle || plan.el;
+    } else {
+      try {
+        var h = Hyalite.attach(plan.el, plan.opts);
+        plan.el.__lgSig = plan.sig;
+        var entry = { kind: plan.kind, el: plan.el, handle: h || null, sig: plan.sig };
+        nextHandles.push(entry);
+        if (plan.kind === 'tabbar') nextTabHandle = h || plan.el;
+      } catch (_) {}
+    }
+  }
+  _lgHandles = nextHandles;
+  _lgTabHandle = nextTabHandle;
 }
 function refreshHyaliteTargets() { rebindHyaliteTargets(null, true); }
 function syncHyaliteTint(g) { rebindHyaliteTargets(g, false); }
-function liquidGlass() {
-  var want = S.style === 'liquid' && S.glassMode !== 'frosted' && !!window.Hyalite && !(typeof PERF !== 'undefined' && PERF.low);
-  if (!window.Hyalite) return;
-  var ln = typeof $ === 'function' ? $('#lens') : null;
-  if (ln) try { Hyalite.detach(ln); } catch (_) {}
-  if (want === lgOn) { if (lgOn) rebindHyaliteTargets(null, false); return; }
-  lgOn = want;
-  var wpNow = hasWpActive();
-  lgTargets().forEach(function (t) {
-    var kind = t[0], el = t[1]; if (!el) return;
-    try {
-      if (want && !(wpNow && kind === 'hbtn')) {
-        var o = lgOptsFor(kind, null, false);
-        Hyalite.attach(el, o);
-        el.__lgSig = JSON.stringify(lgOptsFor(kind, null, true));
-      } else {
-        Hyalite.detach(el);
-        el.__lgSig = '';
-      }
-    } catch (_) {}
-  });
-}
+function initLiquidGlass() { rebindHyaliteTargets(null, false); }
+function liquidGlass() { rebindHyaliteTargets(null, false); }
 /* 大标题滚动插值 —— --lt 大标题淡出缩小, --st 顶栏小标题浮现, --hp 顶栏毛玻璃出现 (严守 v530_frontend.js nav_solid 单测契约) */
 var NAV_T = { devices: '设备', apps: '应用', vector: '智能护航', stats: '分析', settings: '设置' }, navRaf = 0;
 function navSync() {
@@ -603,10 +732,6 @@ document.addEventListener('scroll', function (e) {
   }
 }, { capture: true, passive: true });
 
-Object.assign(LG_OPTS.tabbar, { bevel: 17, thickness: 32, slope: 1.04, shape: 'squircle', blur: 2.4, dispersion: .58, shade: .18, rim: 1.25, edgeW: 1.15, edge: .65, light: -38, sat: 1, materialize: 260 });
-Object.assign(LG_OPTS.hbtn, { bevel: 15, thickness: 24, slope: 1.02, shape: 'squircle', blur: 1.2, dispersion: .55, shade: .16, rim: 1.4, edge: .65, light: -38 });
-Object.assign(LG_OPTS.sheet, { bevel: 23, thickness: 38, slope: .92, blur: 20, dispersion: .5, shade: .13, rim: 1.2, edge: .65, light: -38, sat: 1.05 });
-Object.assign(LG_OPTS.toast, { bevel: 15, thickness: 24, blur: 12, dispersion: .4, shade: .14, rim: 1.2, edge: .6, light: -38 });
 if (typeof window !== 'undefined' && window.__HNC_MOCK_META && !S.sel) S.sel = '1e:52:a8:0c:77:3d';
 
 applyTheme();

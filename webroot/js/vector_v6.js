@@ -1,4 +1,4 @@
-/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.8 · 智能护航、本机守护、隐私安检与连接排障中心
+/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.9 · 智能护航、本机守护、隐私安检与连接排障中心
  * 设计准则:
  *   1. 全站原语彻底收口: 统一复用 .hero.v6-hero、.cc-bento-row/.cc-tile、seg() 弹簧胶囊与 .sgrp.scard.glass.open 标准卡片，零孤岛私有大卡。
  *   2. 诚实三态与正交双连接: 严格区分热点待机/热点就绪无设备/热点活跃三态；热点连接数与本机连接数正交独立展示与检索。
@@ -5759,7 +5759,7 @@ function v6ExportBackupBundle(actEl) {
   if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function' && typeof loadSecret === 'function') {
     var ksuVer = v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.8';
+      'v6.1.0-rc.9';
     var ksuFname = 'hnc-backup-' + ksuVer + '-' + Date.now() + '.json';
     var outPath = '/sdcard/Download/' + ksuFname;
     var runCurlSave = function (forceSec) {
@@ -5805,7 +5805,7 @@ function v6ExportBackupBundle(actEl) {
     var verTag = v6CleanBackupVer(bundle.module_version) ||
       v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.8';
+      'v6.1.0-rc.9';
     var fname = 'hnc-backup-' + verTag + '-' + Date.now() + '.json';
     try {
       var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });

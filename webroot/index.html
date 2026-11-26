@@ -143,7 +143,9 @@
   opacity:.85;
 }
 /* Nested controls inside cards do NOT repeat backdrop-filter (keeps 120fps while looking like recessed glass wells) */
-[data-glass="liquid"] .chip,
+[data-glass="liquid"] .glass .chip,
+[data-glass="liquid"] .sheet .chip,
+[data-glass="liquid"] .v6-drawer .chip,
 [data-glass="liquid"] .glass .seg,
 [data-glass="liquid"] .seg.small,
 [data-glass="liquid"] .seg .thumb,
@@ -1728,8 +1730,8 @@ html.has-wallpaper:not([data-wp-tone="light"]) #fresh,
   font-weight:600!important;
   text-shadow:0 1px 6px rgba(255,255,255,.46)!important;
 }
-:root[data-has-wp="1"][data-wp-tone="light"]:not([data-theme="dark"]) div.sec small,
-:root[data-has-wp="1"][data-wp-tone="light"]:not([data-theme="dark"]) div.sec .r{
+:root[data-has-wp="1"][data-wp-tone="light"]:not([data-theme="dark"]) div.sec:not([data-bt-zone]) small,
+:root[data-has-wp="1"][data-wp-tone="light"]:not([data-theme="dark"]) div.sec:not([data-bt-zone]) .r{
   color:rgba(15,23,42,.76)!important;
 }
 @media (prefers-color-scheme: dark){
@@ -3775,7 +3777,19 @@ html.has-wallpaper:not([data-style="cyber"]):not(.lowfx) .toast{
 :root[data-has-wp="1"]:not([data-style="cyber"]) .dpi-dev-av,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .simdev-ic,
 :root[data-has-wp="1"]:not([data-style="cyber"]) .studio-m,
-:root[data-has-wp="1"]:not([data-style="cyber"]) .studio-recipe{
+:root[data-has-wp="1"]:not([data-style="cyber"]) .studio-recipe,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-kpi,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-flow-item,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-dev-pill:not(.on):not(.is-auto),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .lgd-summary-line,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .lgd-item:not(.is-open),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .lgd-tchip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .lgd-search-mini,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-drawer .v6-tuple-row,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .bw-pre-pill:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-lat-cmp,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .conn-strip,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .ar-pill{
   border-color:transparent!important;
   background:var(--lg-sub)!important;
   -webkit-backdrop-filter:none!important;
@@ -3783,7 +3797,7 @@ html.has-wallpaper:not([data-style="cyber"]):not(.lowfx) .toast{
   box-shadow:var(--lg-rim-inner)!important;
 }
 
-/* 8.6 底栏 #tabbar 与 #lens 水滴透镜（frosted 保留 .66/.68 柔雾底；liquid 恢复 .30/.38 水晶折射底栏） */
+/* 8.6 底栏 #tabbar 与 #lens 水滴透镜（pure 纯透无白框 / prism 随景色散真折射 / dew 柔润弯月面内光晕） */
 :root[data-has-wp="1"]:not([data-glass="liquid"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar,
 html.has-wallpaper:not([data-glass="liquid"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar{
   border:0!important;
@@ -3794,25 +3808,40 @@ html.has-wallpaper:not([data-glass="liquid"]):not([data-style="cyber"]):not(.low
 }
 :root[data-has-wp="1"]:not([data-glass="liquid"])[data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]):not(.lowfx) #tabbar.tabbar{
   background:rgba(246,250,255,calc(.66 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.14))!important;
-  box-shadow:inset 0 .5px 0 rgba(255,255,255,.55),0 14px 34px -10px rgba(8,20,46,.22)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.42),0 14px 34px -10px rgba(8,20,46,.20)!important;
 }
-[data-has-wp="1"][data-glass="liquid"]:not(.lowfx) #tabbar.tabbar,
+:root[data-has-wp="1"][data-glass="liquid"]:not(.lowfx) #tabbar.tabbar,
 html.has-wallpaper[data-glass="liquid"]:not(.lowfx) #tabbar.tabbar{
   border:0!important;
-  background:rgba(12,20,36,calc(.38 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
-  -webkit-backdrop-filter:var(--hyalite, blur(22px)) saturate(190%)!important;
-  backdrop-filter:var(--hyalite, blur(22px)) saturate(190%)!important;
-  box-shadow:var(--hyalite-edge, inset 0 1px .5px rgba(255,255,255,.62)),0 14px 34px -10px rgba(8,20,46,.22)!important;
+  background:rgba(10,18,32,calc(.34 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
+  -webkit-backdrop-filter:blur(20px) saturate(185%)!important;
+  backdrop-filter:blur(20px) saturate(185%)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.22),0 14px 34px -10px rgba(6,16,36,.22)!important;
 }
 :root[data-has-wp="1"][data-glass="liquid"][data-wp-bot="light"]:not([data-theme="dark"]):not(.lowfx) #tabbar.tabbar{
-  background:rgba(240,248,255,calc(.30 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.10))!important;
-  box-shadow:var(--hyalite-edge, inset 0 1px .5px rgba(255,255,255,.62)),0 14px 34px -10px rgba(8,20,46,.22)!important;
+  background:rgba(246,250,255,calc(.26 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.10))!important;
 }
 @media (prefers-color-scheme: dark){
   :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]):not(.lowfx) #tabbar.tabbar{
-    background:rgba(12,20,36,calc(.38 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
-    box-shadow:var(--hyalite-edge, inset 0 1px .5px rgba(255,255,255,.62)),0 14px 34px -10px rgba(8,20,46,.22)!important;
+    background:rgba(10,18,32,calc(.34 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.12))!important;
   }
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #tabbar.tabbar{
+  border:0!important;
+  -webkit-backdrop-filter:var(--hyalite, blur(20px) saturate(196%))!important;
+  backdrop-filter:var(--hyalite, blur(20px) saturate(196%))!important;
+  box-shadow:var(--hyalite-edge, inset 0 1px 1.5px var(--prism-hi, rgba(255,250,235,.26)), inset 0 -1.5px 2.5px var(--prism-lo, rgba(180,225,255,.22))), 0 16px 38px -10px rgba(6,16,36,.24)!important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling ~ #tabbar.tabbar:not(.drag):not(.pressing),
+:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #tabbar.tabbar:not(.drag):not(.pressing){
+  -webkit-backdrop-filter:blur(20px) saturate(190%)!important;
+  backdrop-filter:blur(20px) saturate(190%)!important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not(.lowfx) #tabbar.tabbar{
+  border:0!important;
+  -webkit-backdrop-filter:blur(22px) saturate(198%) contrast(.95)!important;
+  backdrop-filter:blur(22px) saturate(198%) contrast(.95)!important;
+  box-shadow:inset 0 2px 4px -1px rgba(255,255,255,.34), inset 0 -2.5px 6px -1.5px rgba(4,16,32,.10), 0 16px 38px -10px rgba(6,16,36,.22)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar #lens.lens,
 html.has-wallpaper:not([data-style="cyber"]) #tabbar #lens.lens{
@@ -3820,10 +3849,10 @@ html.has-wallpaper:not([data-style="cyber"]) #tabbar #lens.lens{
   -webkit-backdrop-filter:none!important;
   backdrop-filter:none!important;
   background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*20%) 12%,
-    rgba(125,211,252,.28) 0%,
-    rgba(56,189,248,.14) 55%,
-    rgba(14,165,233,.20) 100%)!important;
-  box-shadow:inset 0 1px .5px rgba(224,242,255,.42),0 4px 14px -4px rgba(14,165,233,.24)!important;
+    rgba(125,211,252,.24) 0%,
+    rgba(56,189,248,.12) 55%,
+    rgba(14,165,233,.18) 100%)!important;
+  box-shadow:inset 0 .5px 0 rgba(224,242,255,.28),0 4px 14px -4px rgba(14,165,233,.20)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar .lens-tint,
 html.has-wallpaper:not([data-style="cyber"]) #tabbar .lens-tint{
@@ -3853,15 +3882,33 @@ html.has-wallpaper:not([data-style="cyber"]) #tabbar #tabs .tab[aria-selected="t
 }
 :root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #lens.lens{
   background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*20%) 12%,
-    rgba(255,255,255,.46) 0%,
-    rgba(56,189,248,.14) 55%,
-    rgba(0,122,255,.18) 100%)!important;
-  box-shadow:inset 0 1px .5px rgba(255,255,255,.62),0 4px 12px -4px rgba(0,122,255,.20)!important;
+    rgba(255,255,255,.40) 0%,
+    rgba(56,189,248,.12) 55%,
+    rgba(0,122,255,.16) 100%)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.42),0 4px 12px -4px rgba(0,122,255,.18)!important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]) .hbtn,
 html.has-wallpaper:not([data-style="cyber"]) .hbtn{
   border:0!important;
-  box-shadow:inset 0 1px .5px rgba(255,255,255,.45),0 6px 16px -6px rgba(4,12,28,.24)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.22),0 6px 16px -6px rgba(4,12,28,.24)!important;
+}
+:root[data-has-wp="1"][data-wp-top="light"]:not([data-theme="dark"])[data-glass="liquid"] .hbtn{
+  background:rgba(248,251,255,calc(.28 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.08))!important;
+  color:#09111F!important;
+  border:0!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.32),0 6px 16px -6px rgba(12,28,58,.16)!important;
+}
+:root[data-has-wp="1"][data-wp-top="dark"][data-glass="liquid"]:not([data-theme="dark"]) .hbtn{
+  background:rgba(10, 18, 28, .32) !important;
+  color:rgba(248, 250, 252, .95) !important;
+  border:0 !important;
+  box-shadow:inset 0 .5px 0 rgba(255, 255, 255, .18), 0 6px 16px -6px rgba(4, 12, 28, .28) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"] .hbtn{
+  box-shadow:inset 0 1px 1px var(--prism-hi, rgba(255,248,228,.24)), inset 0 -1px 1.5px var(--prism-lo, rgba(176,224,255,.18)), 0 6px 16px -6px rgba(4,12,28,.24)!important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"] .hbtn{
+  box-shadow:inset 0 1.5px 3px -1px rgba(255,255,255,.30), inset 0 -2px 4px -1px rgba(4,16,32,.10), 0 6px 16px -6px rgba(4,12,28,.24)!important;
 }
 
 /* 8.7 v5.37 新增组件样式：常驻自训模式条、5G Autorate 遥测条与随机 MAC 护栏横幅 */
@@ -3904,7 +3951,7 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
   height: 30px;
   padding: 0 9px;
   border-radius: 999px;
-  border: .5px solid rgba(125,211,252,.26);
+  border: .5px solid rgba(15, 23, 42, .08);
   background: var(--lg-sub, var(--input));
   -webkit-backdrop-filter: blur(12px) saturate(180%);
   backdrop-filter: blur(12px) saturate(180%);
@@ -3926,29 +3973,45 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
 .sig-pill.q-excellent, .sig-pill.q-good { color: var(--badge-ok, #16a34a); }
 .sig-pill.q-fair { color: var(--badge-warn, #d97706); }
 .sig-pill.q-weak, .sig-pill.q-critical { color: var(--badge-red, #dc2626); border-color: rgba(239,68,68,.35); }
-:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill { color: #e0f2fe; background: rgba(12,20,36,.34); border-color: rgba(125,211,252,.28); }
+:root[data-has-wp="1"][data-glass="liquid"] #sig-pill {
+  border: 0;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .16), 0 4px 14px -4px rgba(4, 12, 28, .18);
+}
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill,
+:root[data-has-wp="1"][data-wp-top="dark"] #sig-pill {
+  color: #e0f2fe;
+  background: rgba(10, 18, 28, .34);
+  border: 0;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .16);
+}
 :root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-excellent,
-:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-good { color: #4ade80; }
-:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-fair { color: #fbbf24; }
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-good,
+:root[data-has-wp="1"][data-wp-top="dark"] #sig-pill.q-excellent,
+:root[data-has-wp="1"][data-wp-top="dark"] #sig-pill.q-good { color: #4ade80; }
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-fair,
+:root[data-has-wp="1"][data-wp-top="dark"] #sig-pill.q-fair { color: #fbbf24; }
 :root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-weak,
-:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-critical { color: #f87171; }
-:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on .hbtn {
-  background: rgba(248, 251, 255, calc(.42 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .12)) !important;
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-critical,
+:root[data-has-wp="1"][data-wp-top="dark"] #sig-pill.q-weak,
+:root[data-has-wp="1"][data-wp-top="dark"] #sig-pill.q-critical { color: #f87171; }
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on .hbtn,
+:root[data-has-wp="1"][data-wp-top="dark"][data-glass="liquid"]:not([data-theme="dark"]) .header.hs-on .hbtn {
+  background: rgba(248, 251, 255, calc(.36 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .10)) !important;
   color: #09111F !important;
   border: 0 !important;
-  box-shadow: inset 0 1px .5px rgba(255, 255, 255, .68), 0 6px 16px -6px rgba(12, 28, 58, .16) !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .36), 0 6px 16px -6px rgba(12, 28, 58, .14) !important;
 }
 :root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill {
-  background: rgba(248, 251, 255, calc(.42 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .12)) !important;
-  border-color: rgba(255, 255, 255, .42) !important;
+  background: rgba(248, 251, 255, calc(.36 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .10)) !important;
+  border: 0 !important;
   color: #09111F;
-  box-shadow: inset 0 1px .5px rgba(255, 255, 255, .68), 0 4px 12px -6px rgba(12, 28, 58, .14);
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .36), 0 4px 12px -6px rgba(12, 28, 58, .12);
 }
 :root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-excellent,
 :root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-good { color: var(--badge-ok, #15803d); }
 :root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-fair { color: var(--badge-warn, #b45309); }
 :root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-weak,
-:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-critical { color: var(--badge-red, #dc2626); border-color: rgba(220, 38, 38, .28) !important; }
+:root[data-style="apple"]:not([data-theme="dark"])[data-has-wp="1"] .header.hs-on #sig-pill.q-critical { color: var(--badge-red, #dc2626); }
 
 /* 9.3 液态玻璃底栏滑动膨胀放大折射透镜 (复刻实机录屏交互) */
 #tabbar.tabbar {
@@ -4781,19 +4844,22 @@ html {
   transform: scale(1.05) translateZ(0) !important;
   transition: none !important;
 }
-:root:not([data-wp-blurred="1"]) #hnc-wallpaper .wp-img {
+:root:not([data-wp-blurred="1"]) #hnc-wallpaper .wp-img,
+:root[data-wp-blurred="1"]:not([data-wp-css-blur="1"]) #hnc-wallpaper .wp-img {
   filter: none !important;
 }
-:root[data-wp-blurred="1"] #hnc-wallpaper .wp-img {
+:root[data-wp-blurred="1"][data-wp-css-blur="1"] #hnc-wallpaper .wp-img {
   filter: blur(var(--wp-blur, 0px)) !important;
 }
 :root[data-has-wp="1"][data-wp-vivid="1"]:not([data-wp-blurred="1"]):not([data-theme="dark"]) #hnc-wallpaper .wp-img,
-html.has-wallpaper[data-wp-vivid="1"]:not([data-wp-blurred="1"]):not([data-theme="dark"]) #hnc-wallpaper .wp-img {
-  filter: saturate(1.08) brightness(1.03) !important;
+html.has-wallpaper[data-wp-vivid="1"]:not([data-wp-blurred="1"]):not([data-theme="dark"]) #hnc-wallpaper .wp-img,
+:root[data-has-wp="1"][data-wp-vivid="1"][data-wp-blurred="1"]:not([data-wp-css-blur="1"]):not([data-theme="dark"]) #hnc-wallpaper .wp-img,
+html.has-wallpaper[data-wp-vivid="1"][data-wp-blurred="1"]:not([data-wp-css-blur="1"]):not([data-theme="dark"]) #hnc-wallpaper .wp-img {
+  filter: saturate(1.06) brightness(1.02) !important;
 }
-:root[data-has-wp="1"][data-wp-vivid="1"][data-wp-blurred="1"]:not([data-theme="dark"]) #hnc-wallpaper .wp-img,
-html.has-wallpaper[data-wp-vivid="1"][data-wp-blurred="1"]:not([data-theme="dark"]) #hnc-wallpaper .wp-img {
-  filter: blur(var(--wp-blur, 0px)) saturate(1.08) brightness(1.03) !important;
+:root[data-has-wp="1"][data-wp-vivid="1"][data-wp-blurred="1"][data-wp-css-blur="1"]:not([data-theme="dark"]) #hnc-wallpaper .wp-img,
+html.has-wallpaper[data-wp-vivid="1"][data-wp-blurred="1"][data-wp-css-blur="1"]:not([data-theme="dark"]) #hnc-wallpaper .wp-img {
+  filter: blur(var(--wp-blur, 0px)) saturate(1.06) brightness(1.02) !important;
 }
 :root[data-has-wp="1"] #hnc-wallpaper .wp-scrim,
 html.has-wallpaper #hnc-wallpaper .wp-scrim {
@@ -4869,35 +4935,23 @@ html.has-wallpaper:not([data-glass="liquid"])[data-theme="dark"]:not([data-style
   --lg-drop: 0 18px 40px -12px rgba(0, 4, 14, .58), 0 4px 12px -3px rgba(0, 4, 14, .34) !important;
 }
 
-/* 10.6.2 液态玻璃（liquid 壁纸态）：82% 水滴高透射 + 45° 非对称镜面高光环 + 立体凹凸弧面 */
+/* 10.6.2 液态玻璃（liquid 壁纸态）：三版本光学表面令牌体系（pure 原生无框纯透 / prism 棱镜随景色散 / dew 凝脂水滴柔光） */
+/* 公共文字对比度与通透宝石半透明语义徽章底色 */
 :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="dark"]),
 html.has-wallpaper[data-glass="liquid"]:not([data-theme="dark"]) {
   --text-1: #060D1A;
   --text-2: rgba(9, 17, 31, .90);
   --text-3: rgba(15, 23, 42, .80);
-  --stroke: rgba(255, 255, 255, .30);
-  --stroke-2: rgba(255, 255, 255, .44);
-  --divider: rgba(15, 23, 42, .08);
-  --card: rgba(255, 255, 255, calc(.18 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .08)) !important;
-  --card-2: rgba(255, 255, 255, calc(.24 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .09)) !important;
-  --lg-fill: rgba(255, 255, 255, calc(.20 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .08)) !important;
-  --lg-fill-2: rgba(246, 250, 255, calc(.72 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
-  --lg-sub: rgba(255, 255, 255, calc(.14 + var(--gx-up, 0) * .16 - var(--gx-dn, 0) * .06)) !important;
-  --lg-sub-2: rgba(255, 255, 255, calc(.18 + var(--gx-up, 0) * .16 - var(--gx-dn, 0) * .07)) !important;
-  --input: rgba(255, 255, 255, calc(.18 + var(--gx-up, 0) * .16 - var(--gx-dn, 0) * .06)) !important;
-  --lg-tile-on: rgba(255, 255, 255, calc(.34 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .10)) !important;
-  --bevel-grad: linear-gradient(135deg,
-    rgba(255, 255, 255, .78) 0%,
-    rgba(255, 255, 255, .36) 20%,
-    rgba(255, 255, 255, .06) 48%,
-    rgba(186, 230, 255, .14) 74%,
-    rgba(255, 255, 255, .58) 100%) !important;
-  --lg-rim: inset 0 1.5px 1px rgba(255, 255, 255, .62), inset 1px 0 1px rgba(255, 255, 255, .28), inset 0 -1.5px 2.5px rgba(125, 195, 255, .20), inset 0 -1px 1px rgba(8, 20, 44, .08) !important;
-  --lg-rim-inner: inset 0 1px .5px rgba(255, 255, 255, .46), inset 0 -1px 1px rgba(8, 20, 44, .05) !important;
-  --lg-drop: 0 16px 38px -12px rgba(6, 16, 36, .22), 0 4px 12px -3px rgba(6, 16, 36, .10) !important;
-  --lg-sheen:
-    radial-gradient(96% 56% at var(--spot-x, 18%) var(--spot-y, 0%), rgba(255, 255, 255, .36) 0%, rgba(255, 255, 255, .08) 38%, transparent 64%),
-    linear-gradient(138deg, rgba(255, 255, 255, .28) 0%, rgba(255, 255, 255, .03) 34%, transparent 64%, rgba(186, 230, 255, .14) 100%) !important;
+  --stroke: rgba(255, 255, 255, .20);
+  --stroke-2: rgba(255, 255, 255, .32);
+  --divider: rgba(15, 23, 42, .07);
+  --badge-ok-bg: rgba(34, 197, 94, .18);
+  --badge-warn-bg: rgba(245, 158, 11, .18);
+  --badge-red-bg: rgba(239, 68, 68, .18);
+  --badge-info-bg: rgba(14, 132, 255, .16);
+  --badge-acc-bg: rgba(14, 132, 255, .16);
+  --badge-pur-bg: rgba(168, 85, 247, .16);
+  --badge-gray-bg: rgba(15, 23, 42, .08);
 }
 @media (prefers-color-scheme: dark) {
   :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]),
@@ -4905,29 +4959,16 @@ html.has-wallpaper[data-glass="liquid"]:not([data-theme="dark"]) {
     --text-1: rgba(248, 250, 252, .96);
     --text-2: rgba(226, 236, 248, .88);
     --text-3: rgba(186, 202, 224, .76);
-    --stroke: rgba(186, 225, 255, .16);
-    --stroke-2: rgba(186, 225, 255, .24);
-    --divider: rgba(226, 232, 240, .09);
-    --card: rgba(10, 18, 32, calc(.28 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .12)) !important;
-    --card-2: rgba(12, 22, 38, calc(.36 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .14)) !important;
-    --lg-fill: rgba(10, 18, 32, calc(.30 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .12)) !important;
-    --lg-fill-2: rgba(16, 22, 34, calc(.74 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
-    --lg-sub: rgba(255, 255, 255, calc(.08 + var(--gx-up, 0) * .06 - var(--gx-dn, 0) * .03)) !important;
-    --lg-sub-2: rgba(255, 255, 255, calc(.11 + var(--gx-up, 0) * .06 - var(--gx-dn, 0) * .04)) !important;
-    --input: rgba(12, 20, 34, calc(.28 + var(--gx-up, 0) * .16 - var(--gx-dn, 0) * .08)) !important;
-    --lg-tile-on: rgba(28, 56, 96, calc(.44 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .12)) !important;
-    --bevel-grad: linear-gradient(135deg,
-      rgba(226, 242, 255, .52) 0%,
-      rgba(148, 205, 255, .22) 22%,
-      rgba(255, 255, 255, .04) 48%,
-      rgba(56, 189, 248, .14) 74%,
-      rgba(190, 228, 255, .38) 100%) !important;
-    --lg-rim: inset 0 1.5px 1px rgba(226, 242, 255, .38), inset 1px 0 1px rgba(186, 224, 255, .18), inset 0 -1.5px 2.5px rgba(56, 189, 248, .18), inset 0 -1px 1px rgba(0, 4, 14, .36) !important;
-    --lg-rim-inner: inset 0 1px .5px rgba(226, 242, 255, .22), inset 0 -1px 1px rgba(0, 4, 14, .28) !important;
-    --lg-drop: 0 18px 42px -12px rgba(0, 4, 14, .60), 0 4px 12px -3px rgba(0, 4, 14, .36) !important;
-    --lg-sheen:
-      radial-gradient(96% 56% at var(--spot-x, 18%) var(--spot-y, 0%), rgba(156, 208, 255, .18) 0%, rgba(148, 197, 255, .04) 38%, transparent 64%),
-      linear-gradient(138deg, rgba(215, 235, 255, .14) 0%, transparent 34%, transparent 64%, rgba(56, 189, 248, .08) 100%) !important;
+    --stroke: rgba(186, 225, 255, .14);
+    --stroke-2: rgba(186, 225, 255, .22);
+    --divider: rgba(226, 232, 240, .08);
+    --badge-ok-bg: rgba(48, 209, 88, .16);
+    --badge-warn-bg: rgba(255, 159, 10, .18);
+    --badge-red-bg: rgba(255, 69, 58, .18);
+    --badge-info-bg: rgba(56, 189, 248, .18);
+    --badge-acc-bg: rgba(56, 189, 248, .18);
+    --badge-pur-bg: rgba(191, 90, 242, .18);
+    --badge-gray-bg: rgba(148, 163, 184, .18);
   }
 }
 :root[data-has-wp="1"][data-glass="liquid"][data-theme="dark"],
@@ -4935,32 +4976,191 @@ html.has-wallpaper[data-glass="liquid"][data-theme="dark"] {
   --text-1: rgba(248, 250, 252, .96);
   --text-2: rgba(226, 236, 248, .88);
   --text-3: rgba(186, 202, 224, .76);
-  --stroke: rgba(186, 225, 255, .16);
-  --stroke-2: rgba(186, 225, 255, .24);
-  --divider: rgba(226, 232, 240, .09);
-  --card: rgba(10, 18, 32, calc(.28 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .12)) !important;
-  --card-2: rgba(12, 22, 38, calc(.36 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .14)) !important;
-  --lg-fill: rgba(10, 18, 32, calc(.30 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .12)) !important;
-  --lg-fill-2: rgba(16, 22, 34, calc(.74 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
-  --lg-sub: rgba(255, 255, 255, calc(.08 + var(--gx-up, 0) * .06 - var(--gx-dn, 0) * .03)) !important;
-  --lg-sub-2: rgba(255, 255, 255, calc(.11 + var(--gx-up, 0) * .06 - var(--gx-dn, 0) * .04)) !important;
-  --input: rgba(12, 20, 34, calc(.28 + var(--gx-up, 0) * .16 - var(--gx-dn, 0) * .08)) !important;
-  --lg-tile-on: rgba(28, 56, 96, calc(.44 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .12)) !important;
-  --bevel-grad: linear-gradient(135deg,
-    rgba(226, 242, 255, .52) 0%,
-    rgba(148, 205, 255, .22) 22%,
-    rgba(255, 255, 255, .04) 48%,
-    rgba(56, 189, 248, .14) 74%,
-    rgba(190, 228, 255, .38) 100%) !important;
-  --lg-rim: inset 0 1.5px 1px rgba(226, 242, 255, .38), inset 1px 0 1px rgba(186, 224, 255, .18), inset 0 -1.5px 2.5px rgba(56, 189, 248, .18), inset 0 -1px 1px rgba(0, 4, 14, .36) !important;
-  --lg-rim-inner: inset 0 1px .5px rgba(226, 242, 255, .22), inset 0 -1px 1px rgba(0, 4, 14, .28) !important;
-  --lg-drop: 0 18px 42px -12px rgba(0, 4, 14, .60), 0 4px 12px -3px rgba(0, 4, 14, .36) !important;
-  --lg-sheen:
-    radial-gradient(96% 56% at var(--spot-x, 18%) var(--spot-y, 0%), rgba(156, 208, 255, .18) 0%, rgba(148, 197, 255, .04) 38%, transparent 64%),
-    linear-gradient(138deg, rgba(215, 235, 255, .14) 0%, transparent 34%, transparent 64%, rgba(56, 189, 248, .08) 100%) !important;
+  --stroke: rgba(186, 225, 255, .14);
+  --stroke-2: rgba(186, 225, 255, .22);
+  --divider: rgba(226, 232, 240, .08);
+  --badge-ok-bg: rgba(48, 209, 88, .16);
+  --badge-warn-bg: rgba(255, 159, 10, .18);
+  --badge-red-bg: rgba(255, 69, 58, .18);
+  --badge-info-bg: rgba(56, 189, 248, .18);
+  --badge-acc-bg: rgba(56, 189, 248, .18);
+  --badge-pur-bg: rgba(191, 90, 242, .18);
+  --badge-gray-bg: rgba(148, 163, 184, .18);
 }
 
-/* 10.6.3 卡片强融化高斯模糊 + 195% 鲜翠提色 + .glass::before 斜向镜面环 + .glass::after 水滴焦散 */
+/* [版本 1 · pure] 原生无框纯透版（默认 / data-lg-variant="pure"）：86% 高透射 + 顶缘微光 + 零内白框 */
+:root[data-has-wp="1"][data-glass="liquid"]:not([data-lg-variant]):not([data-theme="dark"]),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="pure"]:not([data-theme="dark"]),
+html.has-wallpaper[data-glass="liquid"]:not([data-lg-variant]):not([data-theme="dark"]),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="pure"]:not([data-theme="dark"]) {
+  --card: rgba(255, 255, 255, calc(.14 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .08)) !important;
+  --card-2: rgba(255, 255, 255, calc(.20 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .09)) !important;
+  --lg-fill: rgba(255, 255, 255, calc(.16 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .08)) !important;
+  --lg-fill-2: rgba(246, 250, 255, calc(.72 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+  --lg-sub: rgba(255, 255, 255, calc(.11 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .05)) !important;
+  --lg-sub-2: rgba(255, 255, 255, calc(.14 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .06)) !important;
+  --input: rgba(255, 255, 255, calc(.14 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .05)) !important;
+  --lg-tile-on: rgba(255, 255, 255, calc(.28 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .09)) !important;
+  --lg-rim: inset 0 .5px 0 rgba(255, 255, 255, .16) !important;
+  --lg-rim-inner: none !important;
+  --lg-drop: 0 14px 34px -12px rgba(6, 16, 36, .18), 0 3px 10px -3px rgba(6, 16, 36, .08) !important;
+  --lg-sheen:
+    radial-gradient(92% 52% at var(--spot-x, 18%) var(--spot-y, 0%), rgba(255, 255, 255, .28) 0%, rgba(255, 255, 255, .05) 38%, transparent 64%),
+    linear-gradient(165deg, rgba(255, 255, 255, .18) 0%, transparent 42%) !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-has-wp="1"][data-glass="liquid"]:not([data-lg-variant]):not([data-theme="light"]),
+  :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="pure"]:not([data-theme="light"]),
+  html.has-wallpaper[data-glass="liquid"]:not([data-lg-variant]):not([data-theme="light"]),
+  html.has-wallpaper[data-glass="liquid"][data-lg-variant="pure"]:not([data-theme="light"]) {
+    --card: rgba(10, 18, 32, calc(.26 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .11)) !important;
+    --card-2: rgba(12, 22, 38, calc(.34 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .12)) !important;
+    --lg-fill: rgba(10, 18, 32, calc(.28 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .11)) !important;
+    --lg-fill-2: rgba(16, 22, 34, calc(.74 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+    --lg-sub: rgba(255, 255, 255, calc(.065 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .025)) !important;
+    --lg-sub-2: rgba(255, 255, 255, calc(.09 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .03)) !important;
+    --input: rgba(12, 20, 34, calc(.24 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .07)) !important;
+    --lg-tile-on: rgba(28, 56, 96, calc(.40 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .11)) !important;
+    --lg-rim: inset 0 .5px 0 rgba(255, 255, 255, .11) !important;
+    --lg-rim-inner: none !important;
+    --lg-drop: 0 18px 40px -12px rgba(0, 4, 14, .56), 0 4px 12px -3px rgba(0, 4, 14, .32) !important;
+    --lg-sheen: radial-gradient(92% 52% at var(--spot-x, 18%) var(--spot-y, 0%), rgba(186, 224, 255, .14) 0%, transparent 60%) !important;
+  }
+}
+:root[data-has-wp="1"][data-glass="liquid"]:not([data-lg-variant])[data-theme="dark"],
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="pure"][data-theme="dark"],
+html.has-wallpaper[data-glass="liquid"]:not([data-lg-variant])[data-theme="dark"],
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="pure"][data-theme="dark"] {
+  --card: rgba(10, 18, 32, calc(.26 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .11)) !important;
+  --card-2: rgba(12, 22, 38, calc(.34 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .12)) !important;
+  --lg-fill: rgba(10, 18, 32, calc(.28 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .11)) !important;
+  --lg-fill-2: rgba(16, 22, 34, calc(.74 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+  --lg-sub: rgba(255, 255, 255, calc(.065 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .025)) !important;
+  --lg-sub-2: rgba(255, 255, 255, calc(.09 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .03)) !important;
+  --input: rgba(12, 20, 34, calc(.24 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .07)) !important;
+  --lg-tile-on: rgba(28, 56, 96, calc(.40 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .11)) !important;
+  --lg-rim: inset 0 .5px 0 rgba(255, 255, 255, .11) !important;
+  --lg-rim-inner: none !important;
+  --lg-drop: 0 18px 40px -12px rgba(0, 4, 14, .56), 0 4px 12px -3px rgba(0, 4, 14, .32) !important;
+  --lg-sheen: radial-gradient(92% 52% at var(--spot-x, 18%) var(--spot-y, 0%), rgba(186, 224, 255, .14) 0%, transparent 60%) !important;
+}
+
+/* [版本 2 · prism] 棱镜随景微色散版（data-lg-variant="prism"）：晶体清透 + 随景光谱色散棱边 */
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not([data-theme="dark"]),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not([data-theme="dark"]) {
+  --card: rgba(255, 255, 255, calc(.125 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .06)) !important;
+  --card-2: rgba(255, 255, 255, calc(.185 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .08)) !important;
+  --lg-fill: rgba(255, 255, 255, calc(.15 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .07)) !important;
+  --lg-fill-2: rgba(246, 250, 255, calc(.72 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+  --lg-sub: rgba(255, 255, 255, calc(.095 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .04)) !important;
+  --lg-sub-2: rgba(255, 255, 255, calc(.13 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .05)) !important;
+  --input: rgba(255, 255, 255, calc(.125 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .05)) !important;
+  --lg-tile-on: rgba(255, 255, 255, calc(.26 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .08)) !important;
+  --lg-rim:
+    inset 0 1px 1.5px var(--prism-hi, rgba(255, 248, 228, .22)),
+    inset 1px 0 1px var(--prism-hi-side, rgba(255, 248, 228, .11)),
+    inset 0 -1.5px 2.5px var(--prism-lo, rgba(176, 224, 255, .18)),
+    inset -1px 0 1px var(--prism-lo-side, rgba(176, 224, 255, .09)) !important;
+  --lg-rim-inner:
+    inset 0 .75px 1px var(--prism-hi-side, rgba(255, 248, 228, .15)),
+    inset 0 -.75px 1px var(--prism-lo-side, rgba(176, 224, 255, .10)) !important;
+  --lg-drop: 0 16px 38px -12px rgba(6, 16, 36, .20), 0 4px 12px -3px rgba(6, 16, 36, .09) !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not([data-theme="light"]),
+  html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not([data-theme="light"]) {
+    --card: rgba(8, 16, 30, calc(.24 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+    --card-2: rgba(10, 20, 36, calc(.32 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .11)) !important;
+    --lg-fill: rgba(8, 16, 30, calc(.26 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+    --lg-fill-2: rgba(14, 20, 32, calc(.74 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+    --lg-sub: rgba(255, 255, 255, calc(.06 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .025)) !important;
+    --lg-sub-2: rgba(255, 255, 255, calc(.085 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .03)) !important;
+    --input: rgba(10, 18, 32, calc(.22 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .07)) !important;
+    --lg-tile-on: rgba(26, 52, 92, calc(.38 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+    --lg-rim:
+      inset 0 1px 1.5px var(--prism-hi, rgba(210, 245, 225, .18)),
+      inset 1px 0 1px var(--prism-hi-side, rgba(210, 245, 225, .09)),
+      inset 0 -1.5px 2.5px var(--prism-lo, rgba(148, 197, 255, .16)),
+      inset -1px 0 1px var(--prism-lo-side, rgba(148, 197, 255, .08)) !important;
+    --lg-rim-inner: inset 0 .75px 1px var(--prism-hi-side, rgba(210, 245, 225, .11)) !important;
+    --lg-drop: 0 18px 42px -12px rgba(0, 4, 14, .58), 0 4px 12px -3px rgba(0, 4, 14, .34) !important;
+  }
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"][data-theme="dark"],
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"][data-theme="dark"] {
+  --card: rgba(8, 16, 30, calc(.24 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+  --card-2: rgba(10, 20, 36, calc(.32 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .11)) !important;
+  --lg-fill: rgba(8, 16, 30, calc(.26 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+  --lg-fill-2: rgba(14, 20, 32, calc(.74 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+  --lg-sub: rgba(255, 255, 255, calc(.06 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .025)) !important;
+  --lg-sub-2: rgba(255, 255, 255, calc(.085 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .03)) !important;
+  --input: rgba(10, 18, 32, calc(.22 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .07)) !important;
+  --lg-tile-on: rgba(26, 52, 92, calc(.38 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+  --lg-rim:
+    inset 0 1px 1.5px var(--prism-hi, rgba(210, 245, 225, .18)),
+    inset 1px 0 1px var(--prism-hi-side, rgba(210, 245, 225, .09)),
+    inset 0 -1.5px 2.5px var(--prism-lo, rgba(148, 197, 255, .16)),
+    inset -1px 0 1px var(--prism-lo-side, rgba(148, 197, 255, .08)) !important;
+  --lg-rim-inner: inset 0 .75px 1px var(--prism-hi-side, rgba(210, 245, 225, .11)) !important;
+  --lg-drop: 0 18px 42px -12px rgba(0, 4, 14, .58), 0 4px 12px -3px rgba(0, 4, 14, .34) !important;
+}
+
+/* [版本 3 · dew] 凝脂水滴张力柔光版（data-lg-variant="dew"）：宽幅弯月面表面张力 + 微凹水窝内嵌子格 */
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="dark"]),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="dark"]) {
+  --card: rgba(255, 255, 255, calc(.105 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .05)) !important;
+  --card-2: rgba(255, 255, 255, calc(.16 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .07)) !important;
+  --lg-fill: rgba(255, 255, 255, calc(.14 + var(--gx-up, 0) * .18 - var(--gx-dn, 0) * .06)) !important;
+  --lg-fill-2: rgba(246, 250, 255, calc(.72 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+  --lg-sub: rgba(6, 18, 36, calc(.045 + var(--gx-up, 0) * .03 - var(--gx-dn, 0) * .015)) !important;
+  --lg-sub-2: rgba(6, 18, 36, calc(.062 + var(--gx-up, 0) * .035 - var(--gx-dn, 0) * .02)) !important;
+  --input: rgba(6, 18, 36, calc(.052 + var(--gx-up, 0) * .03 - var(--gx-dn, 0) * .015)) !important;
+  --lg-tile-on: rgba(255, 255, 255, calc(.30 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .09)) !important;
+  --lg-rim: inset 0 2.5px 5.5px -1.5px rgba(255, 255, 255, .32), inset 0 -3px 7px -2px rgba(4, 16, 32, .085) !important;
+  --lg-rim-inner: inset 0 1.5px 3px rgba(4, 16, 32, .068), inset 0 -.75px 0 rgba(255, 255, 255, .20) !important;
+  --lg-drop: 0 18px 40px -14px rgba(6, 18, 36, .20), 0 5px 14px -4px rgba(6, 18, 36, .09) !important;
+  --lg-sheen:
+    radial-gradient(88% 64% at var(--spot-x, 28%) var(--spot-y, 8%), rgba(255, 255, 255, .42) 0%, rgba(255, 255, 255, .10) 44%, transparent 74%),
+    linear-gradient(165deg, rgba(255, 255, 255, .22) 0%, transparent 48%, rgba(4, 16, 32, .05) 100%) !important;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="light"]),
+  html.has-wallpaper[data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="light"]) {
+    --card: rgba(8, 16, 28, calc(.23 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+    --card-2: rgba(10, 20, 34, calc(.31 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .11)) !important;
+    --lg-fill: rgba(8, 16, 28, calc(.25 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+    --lg-fill-2: rgba(14, 20, 32, calc(.74 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+    --lg-sub: rgba(0, 4, 14, calc(.20 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .05)) !important;
+    --lg-sub-2: rgba(0, 4, 14, calc(.25 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .06)) !important;
+    --input: rgba(0, 4, 14, calc(.22 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .05)) !important;
+    --lg-tile-on: rgba(28, 56, 96, calc(.40 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+    --lg-rim: inset 0 2.5px 5.5px -1.5px rgba(220, 238, 255, .17), inset 0 -3px 7px -2px rgba(0, 4, 14, .34) !important;
+    --lg-rim-inner: inset 0 1.5px 3.5px rgba(0, 4, 14, .30), inset 0 -.75px 0 rgba(220, 238, 255, .09) !important;
+    --lg-drop: 0 20px 44px -14px rgba(0, 4, 14, .60), 0 5px 14px -4px rgba(0, 4, 14, .34) !important;
+    --lg-sheen:
+      radial-gradient(88% 64% at var(--spot-x, 28%) var(--spot-y, 8%), rgba(200, 230, 255, .22) 0%, rgba(180, 220, 255, .05) 44%, transparent 74%),
+      linear-gradient(165deg, rgba(220, 238, 255, .14) 0%, transparent 48%, rgba(0, 4, 14, .18) 100%) !important;
+  }
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"][data-theme="dark"],
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="dew"][data-theme="dark"] {
+  --card: rgba(8, 16, 28, calc(.23 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+  --card-2: rgba(10, 20, 34, calc(.31 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .11)) !important;
+  --lg-fill: rgba(8, 16, 28, calc(.25 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+  --lg-fill-2: rgba(14, 20, 32, calc(.74 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .12)) !important;
+  --lg-sub: rgba(0, 4, 14, calc(.20 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .05)) !important;
+  --lg-sub-2: rgba(0, 4, 14, calc(.25 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .06)) !important;
+  --input: rgba(0, 4, 14, calc(.22 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .05)) !important;
+  --lg-tile-on: rgba(28, 56, 96, calc(.40 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .10)) !important;
+  --lg-rim: inset 0 2.5px 5.5px -1.5px rgba(220, 238, 255, .17), inset 0 -3px 7px -2px rgba(0, 4, 14, .34) !important;
+  --lg-rim-inner: inset 0 1.5px 3.5px rgba(0, 4, 14, .30), inset 0 -.75px 0 rgba(220, 238, 255, .09) !important;
+  --lg-drop: 0 20px 44px -14px rgba(0, 4, 14, .60), 0 5px 14px -4px rgba(0, 4, 14, .34) !important;
+  --lg-sheen:
+    radial-gradient(88% 64% at var(--spot-x, 28%) var(--spot-y, 8%), rgba(200, 230, 255, .22) 0%, rgba(180, 220, 255, .05) 44%, transparent 74%),
+    linear-gradient(165deg, rgba(220, 238, 255, .14) 0%, transparent 48%, rgba(0, 4, 14, .18) 100%) !important;
+}
+
+/* 10.6.3 三版本光学滤镜、真实 SVG 折射挂载、120Hz 滚动瞬切保护与零粉笔白框法则 */
 :root[data-has-wp="1"]:not([data-glass="liquid"]):not([data-style="cyber"]):not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
 html.has-wallpaper:not([data-glass="liquid"]):not([data-style="cyber"]):not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
   border: 0 !important;
@@ -4969,77 +5169,164 @@ html.has-wallpaper:not([data-glass="liquid"]):not([data-style="cyber"]):not(.low
   backdrop-filter: blur(calc(20px + var(--gx-up, 0) * 8px - var(--gx-dn, 0) * 6px)) saturate(155%) !important;
   box-shadow: var(--lg-rim), var(--lg-drop) !important;
 }
-[data-glass="liquid"][data-has-wp="1"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
-html.has-wallpaper[data-glass="liquid"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
-  border: 0 !important;
-  background: var(--card) !important;
-  -webkit-backdrop-filter: blur(calc(24px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 6px)) saturate(195%) brightness(1.04) contrast(.96) !important;
-  backdrop-filter: blur(calc(24px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 6px)) saturate(195%) brightness(1.04) contrast(.96) !important;
-  box-shadow: var(--lg-rim), var(--lg-drop) !important;
-}
-@media (prefers-color-scheme: dark) {
-  :root[data-glass="liquid"][data-has-wp="1"]:not([data-theme="light"]):not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
-  html.has-wallpaper[data-glass="liquid"]:not([data-theme="light"]):not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
-    -webkit-backdrop-filter: blur(calc(24px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 6px)) saturate(190%) brightness(.96) contrast(1.02) !important;
-    backdrop-filter: blur(calc(24px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 6px)) saturate(190%) brightness(.96) contrast(1.02) !important;
-  }
-}
-:root[data-glass="liquid"][data-has-wp="1"][data-theme="dark"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
-html.has-wallpaper[data-glass="liquid"][data-theme="dark"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
-  -webkit-backdrop-filter: blur(calc(24px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 6px)) saturate(190%) brightness(.96) contrast(1.02) !important;
-  backdrop-filter: blur(calc(24px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 6px)) saturate(190%) brightness(.96) contrast(1.02) !important;
-}
-:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .dev.open,
-:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .sgrp.scard.open {
-  background: var(--card-2) !important;
-}
-[data-has-wp="1"][data-glass="liquid"]:not(.lowfx) .glass:not(.seg):not(#tabbar):not(.sheet):not(.v6-drawer)::before {
-  content: "" !important;
-  display: block !important;
-  padding: 1px;
-  background: var(--bevel-grad);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: .90 !important;
-}
-[data-has-wp="1"][data-glass="liquid"] .sheet .glass::before,
-[data-has-wp="1"][data-glass="liquid"] .v6-drawer .glass::before {
+
+/* 彻底关闭壁纸态液态玻璃三版本的 .glass::before 静态渐变粉笔白框 */
+:root[data-has-wp="1"][data-glass="liquid"] .glass:not(.seg):not(#tabbar):not(.sheet):not(.v6-drawer)::before,
+html.has-wallpaper[data-glass="liquid"] .glass:not(.seg):not(#tabbar):not(.sheet):not(.v6-drawer)::before,
+:root[data-has-wp="1"][data-glass="liquid"] .sheet .glass::before,
+:root[data-has-wp="1"][data-glass="liquid"] .v6-drawer .glass::before {
   display: none !important;
   content: none !important;
+  opacity: 0 !important;
 }
-[data-has-wp="1"][data-glass="liquid"] .glass:not(.seg):not(.sheet):not(.v6-drawer)::after {
-  background: var(--lg-sheen) !important;
-  opacity: .52 !important;
-}
-[data-has-wp="1"][data-glass="liquid"] .glass.is-spotting:not(.seg):not(.sheet):not(.v6-drawer)::after {
-  opacity: .78 !important;
+:root[data-has-wp="1"][data-glass="liquid"] .bw-card:not(.has-val):not(:focus-within) {
+  border-color: transparent !important;
 }
 
-/* 10.6.4 顶栏按钮、顶层分段器 / 搜索框 / 快捷胶囊通透水晶槽 & 水滴滑块 */
+/* [版本 1 · pure] 卡片滤镜与克制微光 */
+:root[data-has-wp="1"][data-glass="liquid"]:not([data-lg-variant]):not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="pure"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+html.has-wallpaper[data-glass="liquid"]:not([data-lg-variant]):not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="pure"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
+  border: 0 !important;
+  background: var(--card) !important;
+  -webkit-backdrop-filter: blur(calc(16px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(180%) !important;
+  backdrop-filter: blur(calc(16px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(180%) !important;
+  box-shadow: var(--lg-rim), var(--lg-drop) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"]:not([data-lg-variant]) .glass:not(.seg):not(.sheet):not(.v6-drawer)::after,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="pure"] .glass:not(.seg):not(.sheet):not(.v6-drawer)::after {
+  mix-blend-mode: normal;
+  background: var(--lg-sheen) !important;
+  opacity: .20 !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"]:not([data-lg-variant]) .glass.is-spotting:not(.seg):not(.sheet):not(.v6-drawer)::after,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="pure"] .glass.is-spotting:not(.seg):not(.sheet):not(.v6-drawer)::after {
+  opacity: .38 !important;
+}
+
+/* [版本 2 · prism] 列表卡片高通透滤镜 + 主视觉三通道 RGB Snell 折射 + 120Hz 滚动瞬切硬件模糊 */
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
+  border: 0 !important;
+  background: var(--card) !important;
+  -webkit-backdrop-filter: blur(calc(18px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(196%) contrast(1.02) !important;
+  backdrop-filter: blur(calc(18px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(196%) contrast(1.02) !important;
+  box-shadow: var(--lg-rim), var(--lg-drop) !important;
+  isolation: isolate;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .page.on .hero,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .page.on .ahero,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .page.on .pu,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .page.on .dpihero,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .page.on > .wrap > .seg:not(.small),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .hero:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .ahero:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .pu:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .dpihero:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on > .wrap > .seg:not(.small):not(#tabbar) {
+  -webkit-backdrop-filter: var(--hyalite, blur(calc(18px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(198%)) !important;
+  backdrop-filter: var(--hyalite, blur(calc(18px + var(--gx-up, 0) * 6px - var(--gx-dn, 0) * 5px)) saturate(198%)) !important;
+  box-shadow: var(--hyalite-edge, var(--lg-rim)), var(--lg-drop) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on .hero,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on .ahero,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on .pu,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on .dpihero,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) .pages.is-scrolling .page.on > .wrap > .seg:not(.small),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on .hero:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on .ahero:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on .pu:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on .dpihero:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages.pages.is-scrolling .page.on > .wrap > .seg:not(.small):not(#tabbar),
+:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .hero:not(#tabbar),
+:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .ahero:not(#tabbar),
+:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .pu:not(#tabbar),
+:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on .dpihero:not(#tabbar),
+:root.is-scrolling[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not(.lowfx) #pages .page.on > .wrap > .seg:not(.small):not(#tabbar) {
+  -webkit-backdrop-filter: blur(18px) saturate(196%) !important;
+  backdrop-filter: blur(18px) saturate(196%) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"] .glass:not(.seg):not(.sheet):not(.v6-drawer)::after {
+  mix-blend-mode: soft-light;
+  background: linear-gradient(135deg, var(--prism-hi, rgba(255, 248, 228, .24)) 0%, transparent 38%, transparent 64%, var(--prism-lo, rgba(176, 224, 255, .20)) 100%) !important;
+  opacity: .68 !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"] .glass.is-spotting:not(.seg):not(.sheet):not(.v6-drawer)::after {
+  opacity: .84 !important;
+}
+
+/* [版本 3 · dew] 凝脂融化滤镜与球面柔光隆起 */
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="dew"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
+  border: 0 !important;
+  background: var(--card) !important;
+  -webkit-backdrop-filter: blur(calc(22px + var(--gx-up, 0) * 7px - var(--gx-dn, 0) * 6px)) saturate(202%) contrast(.93) brightness(1.03) !important;
+  backdrop-filter: blur(calc(22px + var(--gx-up, 0) * 7px - var(--gx-dn, 0) * 6px)) saturate(202%) contrast(.93) brightness(1.03) !important;
+  box-shadow: var(--lg-rim), var(--lg-drop) !important;
+  isolation: isolate;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="light"]):not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+  html.has-wallpaper[data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="light"]):not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
+    -webkit-backdrop-filter: blur(calc(22px + var(--gx-up, 0) * 7px - var(--gx-dn, 0) * 6px)) saturate(202%) brightness(.97) contrast(.98) !important;
+    backdrop-filter: blur(calc(22px + var(--gx-up, 0) * 7px - var(--gx-dn, 0) * 6px)) saturate(202%) brightness(.97) contrast(.98) !important;
+  }
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"][data-theme="dark"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+html.has-wallpaper[data-glass="liquid"][data-lg-variant="dew"][data-theme="dark"]:not(.lowfx) .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet) {
+  -webkit-backdrop-filter: blur(calc(22px + var(--gx-up, 0) * 7px - var(--gx-dn, 0) * 6px)) saturate(202%) brightness(.97) contrast(.98) !important;
+  backdrop-filter: blur(calc(22px + var(--gx-up, 0) * 7px - var(--gx-dn, 0) * 6px)) saturate(202%) brightness(.97) contrast(.98) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"] .glass:not(.seg):not(.sheet):not(.v6-drawer)::after {
+  mix-blend-mode: soft-light;
+  background: var(--lg-sheen) !important;
+  opacity: .76 !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"] .glass.is-spotting:not(.seg):not(.sheet):not(.v6-drawer)::after {
+  opacity: .92 !important;
+}
+
+/* 展开卡片继承 --card-2（带 :not(#tabbar) 匹配 .glass 规则特异性） */
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .dev.open,
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .sgrp.scard.open,
+:root[data-has-wp="1"][data-glass="liquid"]:not(.lowfx) .glass.dev.open:not(#tabbar),
+:root[data-has-wp="1"][data-glass="liquid"]:not(.lowfx) .glass.sgrp.scard.open:not(#tabbar) {
+  background: var(--card-2) !important;
+}
+
+/* 10.6.4 顶栏按钮、顶层分段器 / 搜索框 / 快捷胶囊 / 顶层工具胶囊 (.chip:not(.on)) 真透射磨砂 & 嵌套降级 */
 :root[data-has-wp="1"][data-glass="liquid"]:not(.lowfx) .hbtn {
   -webkit-backdrop-filter: blur(12px) saturate(185%) !important;
   backdrop-filter: blur(12px) saturate(185%) !important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .seg:not(.small),
 :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .search,
-:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .qpill:not(.on) {
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .qpill:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .chip:not(.on) {
   border: 0 !important;
   background: var(--card) !important;
   color: var(--text-1) !important;
-  -webkit-backdrop-filter: blur(18px) saturate(190%) !important;
-  backdrop-filter: blur(18px) saturate(190%) !important;
-  box-shadow: var(--lg-rim), 0 8px 22px -8px rgba(6, 16, 36, .18) !important;
+  -webkit-backdrop-filter: blur(16px) saturate(185%) !important;
+  backdrop-filter: blur(16px) saturate(185%) !important;
+  box-shadow: var(--lg-rim), 0 8px 22px -8px rgba(6, 16, 36, .16) !important;
 }
 :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .glass .seg,
 :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .sheet .seg,
 :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .v6-drawer .seg,
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .sheet .search,
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .v6-drawer .search,
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .glass .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .sheet .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .v6-drawer .chip:not(.on),
 :root[data-has-wp="1"] .glass .seg,
 :root[data-has-wp="1"] .sheet .seg,
 :root[data-has-wp="1"] .v6-drawer .seg,
 :root[data-has-wp="1"] .sheet .search,
 :root[data-has-wp="1"] .v6-drawer .search,
-:root[data-has-wp="1"] .chip:not(.on),
+:root[data-has-wp="1"] .glass .chip:not(.on),
+:root[data-has-wp="1"] .sheet .chip:not(.on),
+:root[data-has-wp="1"] .v6-drawer .chip:not(.on),
 :root[data-has-wp="1"] .btn.sec,
 :root[data-has-wp="1"] .dd-btn {
   -webkit-backdrop-filter: none !important;
@@ -5055,7 +5342,12 @@ html.has-wallpaper[data-glass="liquid"][data-theme="dark"]:not(.lowfx) .glass:no
   background: var(--lg-sub) !important;
   box-shadow: var(--lg-rim-inner) !important;
 }
-:root[data-has-wp="1"]:not([data-style="cyber"]) .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .glass .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .sheet .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .v6-drawer .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .glass .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .sheet .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-drawer .chip:not(.on),
 :root[data-has-wp="1"]:not([data-style="cyber"]) .dd-btn {
   border: 0 !important;
   background: var(--lg-sub-2) !important;
@@ -5068,149 +5360,230 @@ html.has-wallpaper[data-glass="liquid"][data-theme="dark"]:not(.lowfx) .glass:no
   color: var(--blue) !important;
   box-shadow: var(--lg-rim-inner) !important;
 }
+/* 分段器滑块 (.seg .thumb)：彻底去掉写死的天蓝底光，按三版本呈现纯透 / 棱镜微光谱 / 水珠隆起 */
 :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="dark"]) .seg .thumb,
 :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="dark"]) .seg.small .thumb {
   border: 0 !important;
-  background: rgba(255, 255, 255, .46) !important;
-  box-shadow: inset 0 1px .5px rgba(255, 255, 255, .78), inset 0 -1px 1.5px rgba(125, 195, 255, .24), 0 3px 10px -2px rgba(8, 20, 44, .16) !important;
+  background: rgba(255, 255, 255, .36) !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .45), 0 2px 8px -2px rgba(8, 20, 44, .12) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not([data-theme="dark"]) .seg .thumb,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not([data-theme="dark"]) .seg.small .thumb {
+  background: rgba(255, 255, 255, .34) !important;
+  box-shadow: inset 0 1px 1px var(--prism-hi, rgba(255, 248, 228, .38)), inset 0 -1px 1.5px var(--prism-lo, rgba(176, 224, 255, .28)), 0 3px 10px -2px rgba(8, 20, 44, .14) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="dark"]) .seg .thumb,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="dark"]) .seg.small .thumb {
+  background: rgba(255, 255, 255, .44) !important;
+  box-shadow: inset 0 2px 3.5px -1px rgba(255, 255, 255, .62), inset 0 -2px 4px -1px rgba(4, 16, 32, .08), 0 3px 10px -2px rgba(6, 18, 36, .14) !important;
 }
 @media (prefers-color-scheme: dark) {
   :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]) .seg .thumb,
   :root[data-has-wp="1"][data-glass="liquid"]:not([data-theme="light"]) .seg.small .thumb {
     border: 0 !important;
-    background: rgba(125, 211, 252, .22) !important;
-    box-shadow: inset 0 1px .5px rgba(226, 242, 255, .38), 0 3px 10px -2px rgba(0, 4, 14, .46) !important;
+    background: rgba(255, 255, 255, .16) !important;
+    box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .22), 0 2px 8px -2px rgba(0, 4, 14, .42) !important;
+  }
+  :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not([data-theme="light"]) .seg .thumb,
+  :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"]:not([data-theme="light"]) .seg.small .thumb {
+    background: rgba(255, 255, 255, .15) !important;
+    box-shadow: inset 0 1px 1px var(--prism-hi, rgba(210, 245, 225, .26)), inset 0 -1px 1.5px var(--prism-lo, rgba(148, 197, 255, .22)), 0 3px 10px -2px rgba(0, 4, 14, .44) !important;
+  }
+  :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="light"]) .seg .thumb,
+  :root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"]:not([data-theme="light"]) .seg.small .thumb {
+    background: rgba(220, 238, 255, .16) !important;
+    box-shadow: inset 0 2px 3.5px -1px rgba(220, 238, 255, .28), inset 0 -2px 4px -1px rgba(0, 4, 14, .34), 0 3px 10px -2px rgba(0, 4, 14, .46) !important;
   }
 }
 :root[data-has-wp="1"][data-glass="liquid"][data-theme="dark"] .seg .thumb,
 :root[data-has-wp="1"][data-glass="liquid"][data-theme="dark"] .seg.small .thumb {
   border: 0 !important;
-  background: rgba(125, 211, 252, .22) !important;
-  box-shadow: inset 0 1px .5px rgba(226, 242, 255, .38), 0 3px 10px -2px rgba(0, 4, 14, .46) !important;
+  background: rgba(255, 255, 255, .16) !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .22), 0 2px 8px -2px rgba(0, 4, 14, .42) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"][data-theme="dark"] .seg .thumb,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="prism"][data-theme="dark"] .seg.small .thumb {
+  background: rgba(255, 255, 255, .15) !important;
+  box-shadow: inset 0 1px 1px var(--prism-hi, rgba(210, 245, 225, .26)), inset 0 -1px 1.5px var(--prism-lo, rgba(148, 197, 255, .22)), 0 3px 10px -2px rgba(0, 4, 14, .44) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"][data-theme="dark"] .seg .thumb,
+:root[data-has-wp="1"][data-glass="liquid"][data-lg-variant="dew"][data-theme="dark"] .seg.small .thumb {
+  background: rgba(220, 238, 255, .16) !important;
+  box-shadow: inset 0 2px 3.5px -1px rgba(220, 238, 255, .28), inset 0 -2px 4px -1px rgba(0, 4, 14, .34), 0 3px 10px -2px rgba(0, 4, 14, .46) !important;
 }
 
-/* 10.6.5 壁纸态卡片外裸文字轻纱微晶胶囊托底（根治深绿树叶与亮斑吃字） */
-:root[data-has-wp="1"]:not([data-style="cyber"]) div.sec,
-:root[data-has-wp="1"]:not([data-style="cyber"]) #apps-sub > .dsec,
-:root[data-has-wp="1"]:not([data-style="cyber"]) .set-top-meta,
-:root[data-has-wp="1"]:not([data-style="cyber"]) #fresh,
-:root[data-has-wp="1"]:not([data-style="cyber"]) .foot.hnc-build-wm,
-:root[data-has-wp="1"]:not([data-style="cyber"]) #p-stats > .wrap > .note,
-:root[data-has-wp="1"]:not([data-style="cyber"]) #p-stats > .wrap > #aseg-body > .note {
-  border-radius: 10px;
-  padding: 4px 10px !important;
-  background: rgba(248, 251, 255, .44);
-  -webkit-backdrop-filter: blur(12px) saturate(180%);
-  backdrop-filter: blur(12px) saturate(180%);
-  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .52);
-  color: #060D1A !important;
-  text-shadow: none !important;
+/* 10.6.5 壁纸态卡片外裸文字：100% 零底框 · 8 频段视口光学柔晕（data-bt-zone） */
+div.sec .r {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-:root[data-has-wp="1"]:not([data-style="cyber"]) div.sec {
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) div.sec,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #apps-sub > .dsec,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) .set-top-meta,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #fresh,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) .foot.hnc-build-wm,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #p-stats > .wrap > .note,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #p-stats > .wrap > #aseg-body > .note {
+  background: transparent !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  box-shadow: none !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 4px !important;
+}
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) div.sec {
   align-items: center;
 }
-:root[data-has-wp="1"]:not([data-style="cyber"]) div.sec.set-lv-hd {
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) div.sec.set-lv-hd {
   margin-top: 6px;
 }
-:root[data-has-wp="1"]:not([data-style="cyber"]) #fresh,
-:root[data-has-wp="1"]:not([data-style="cyber"]) .foot.hnc-build-wm {
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #fresh,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) .foot.hnc-build-wm {
   width: fit-content;
   margin-left: auto;
   margin-right: auto;
 }
-:root[data-has-wp="1"]:not([data-style="cyber"]) div.sec small,
-:root[data-has-wp="1"]:not([data-style="cyber"]) div.sec .r,
-:root[data-has-wp="1"]:not([data-style="cyber"]) .set-top-meta .note {
-  color: rgba(9, 17, 31, .84) !important;
-  text-shadow: none !important;
+
+/* 亮景带（[data-bt-zone="light"] 或首帧未标 data-bt-zone 且 [data-wp-tone="light"]:not([data-theme="dark"])） */
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) [data-bt-zone="light"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) div.sec[data-bt-zone="light"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) #apps-sub > .dsec[data-bt-zone="light"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) .set-top-meta[data-bt-zone="light"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) #fresh[data-bt-zone="light"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) .foot.hnc-build-wm[data-bt-zone="light"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) #p-stats > .wrap > .note[data-bt-zone="light"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) #p-stats > .wrap > #aseg-body > .note[data-bt-zone="light"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) div.sec:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) #apps-sub > .dsec:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) .set-top-meta:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) #fresh:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) .foot.hnc-build-wm:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) #p-stats > .wrap > .note:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) #p-stats > .wrap > #aseg-body > .note:not([data-bt-zone]) {
+  color: #07101E !important;
+  font-weight: 650 !important;
+  text-shadow: 0 .5px 1px rgba(255, 255, 255, .82), 0 0 10px rgba(255, 255, 255, .44) !important;
 }
-:root[data-has-wp="1"]:not([data-style="cyber"]) div.sec .linkish,
-:root[data-has-wp="1"]:not([data-style="cyber"]) .set-top-meta .linkish {
-  color: #0066DC !important;
-  text-shadow: none !important;
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) div.sec[data-bt-zone="light"] small,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) div.sec[data-bt-zone="light"] .r,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) [data-bt-zone="light"] small,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) [data-bt-zone="light"] .r,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) [data-bt-zone="light"] .note,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) div.sec:not([data-bt-zone]) small,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) div.sec:not([data-bt-zone]) .r,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) .set-top-meta:not([data-bt-zone]) .note {
+  color: rgba(9, 18, 34, .86) !important;
+  font-weight: 560 !important;
+  text-shadow: 0 .5px 1px rgba(255, 255, 255, .82), 0 0 10px rgba(255, 255, 255, .44) !important;
 }
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) div.sec,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) #apps-sub > .dsec,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .set-top-meta,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) #fresh,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .foot.hnc-build-wm,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) #p-stats > .wrap > .note,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) #p-stats > .wrap > #aseg-body > .note,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) div.sec,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) #apps-sub > .dsec,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) .set-top-meta,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) #fresh,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) .foot.hnc-build-wm,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) #p-stats > .wrap > .note,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) #p-stats > .wrap > #aseg-body > .note,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) div.sec,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) #apps-sub > .dsec,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) .set-top-meta,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) #fresh,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) .foot.hnc-build-wm,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) #p-stats > .wrap > .note,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) #p-stats > .wrap > #aseg-body > .note {
-  background: rgba(10, 18, 32, .38);
-  box-shadow: inset 0 .5px 0 rgba(226, 242, 255, .20);
-  color: rgba(248, 250, 252, .96) !important;
-  text-shadow: 0 1px 2px rgba(2, 6, 18, .48) !important;
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-theme="dark"]) [data-bt-zone="light"] .linkish,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) div.sec:not([data-bt-zone]) .linkish,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-wp-tone="light"]:not([data-theme="dark"]) .set-top-meta:not([data-bt-zone]) .linkish {
+  color: #005FD4 !important;
+  text-shadow: 0 .5px 1px rgba(255, 255, 255, .82), 0 0 10px rgba(255, 255, 255, .44) !important;
 }
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) div.sec small,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) div.sec .r,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .set-top-meta .note,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) div.sec small,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) div.sec .r,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) .set-top-meta .note,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) div.sec small,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) div.sec .r,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) .set-top-meta .note {
-  color: rgba(226, 236, 248, .90) !important;
-  text-shadow: 0 1px 2px rgba(2, 6, 18, .45) !important;
+
+/* 暗景带（[data-bt-zone="dark"] 或首帧 :not([data-wp-tone="light"]) 或 [data-theme="dark"]） */
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) [data-bt-zone="dark"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) div.sec[data-bt-zone="dark"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #apps-sub > .dsec[data-bt-zone="dark"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) .set-top-meta[data-bt-zone="dark"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #fresh[data-bt-zone="dark"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) .foot.hnc-build-wm[data-bt-zone="dark"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #p-stats > .wrap > .note[data-bt-zone="dark"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) #p-stats > .wrap > #aseg-body > .note[data-bt-zone="dark"],
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) div.sec:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) #apps-sub > .dsec:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) .set-top-meta:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) #fresh:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) .foot.hnc-build-wm:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) #p-stats > .wrap > .note:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) #p-stats > .wrap > #aseg-body > .note:not([data-bt-zone]),
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] div.sec,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] #apps-sub > .dsec,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] .set-top-meta,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] #fresh,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] .foot.hnc-build-wm,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] #p-stats > .wrap > .note,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] #p-stats > .wrap > #aseg-body > .note {
+  color: rgba(248, 250, 252, .97) !important;
+  font-weight: 650 !important;
+  text-shadow: 0 1px 2.5px rgba(2, 8, 20, .68), 0 0 12px rgba(2, 8, 20, .34) !important;
 }
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) div.sec .linkish,
-:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .set-top-meta .linkish,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) div.sec .linkish,
-:root[data-has-wp="1"]:not([data-wp-tone="light"]):not([data-style="cyber"]) .set-top-meta .linkish,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) div.sec .linkish,
-:root[data-has-wp="1"][data-wp-top="dark"][data-wp-vivid="1"]:not([data-style="cyber"]) .set-top-meta .linkish {
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) div.sec[data-bt-zone="dark"] small,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) div.sec[data-bt-zone="dark"] .r,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) [data-bt-zone="dark"] small,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) [data-bt-zone="dark"] .r,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) [data-bt-zone="dark"] .note,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) div.sec:not([data-bt-zone]) small,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) div.sec:not([data-bt-zone]) .r,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) .set-top-meta:not([data-bt-zone]) .note,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] div.sec small,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] div.sec .r,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] .set-top-meta .note {
+  color: rgba(232, 240, 250, .90) !important;
+  text-shadow: 0 1px 2.5px rgba(2, 8, 20, .68), 0 0 12px rgba(2, 8, 20, .34) !important;
+}
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) div.sec[data-bt-zone="dark"] .linkish,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]) [data-bt-zone="dark"] .linkish,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) div.sec:not([data-bt-zone]) .linkish,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"]):not([data-wp-tone="light"]) .set-top-meta:not([data-bt-zone]) .linkish,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] div.sec .linkish,
+:root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-style="cyber"])[data-theme="dark"] .set-top-meta .linkish {
   color: #7DD3FC !important;
-  text-shadow: 0 1px 2px rgba(2, 6, 18, .45) !important;
+  text-shadow: 0 1px 2.5px rgba(2, 8, 20, .68), 0 0 12px rgba(2, 8, 20, .34) !important;
 }
 @media (prefers-color-scheme: dark) {
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) div.sec,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) #apps-sub > .dsec,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .set-top-meta,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) #fresh,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .foot.hnc-build-wm,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) #p-stats > .wrap > .note,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) #p-stats > .wrap > #aseg-body > .note {
-    background: rgba(10, 18, 32, .38);
-    box-shadow: inset 0 .5px 0 rgba(226, 242, 255, .20);
-    color: rgba(248, 250, 252, .96) !important;
-    text-shadow: 0 1px 2px rgba(2, 6, 18, .48) !important;
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) div.sec,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) #apps-sub > .dsec,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) .set-top-meta,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) #fresh,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) .foot.hnc-build-wm,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) #p-stats > .wrap > .note,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) #p-stats > .wrap > #aseg-body > .note {
+    color: rgba(248, 250, 252, .97) !important;
+    font-weight: 650 !important;
+    text-shadow: 0 1px 2.5px rgba(2, 8, 20, .68), 0 0 12px rgba(2, 8, 20, .34) !important;
   }
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) div.sec small,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) div.sec .r,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .set-top-meta .note {
-    color: rgba(226, 236, 248, .90) !important;
-    text-shadow: 0 1px 2px rgba(2, 6, 18, .45) !important;
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) div.sec small,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) div.sec .r,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) .set-top-meta .note {
+    color: rgba(232, 240, 250, .90) !important;
+    text-shadow: 0 1px 2.5px rgba(2, 8, 20, .68), 0 0 12px rgba(2, 8, 20, .34) !important;
   }
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) div.sec .linkish,
-  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .set-top-meta .linkish {
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) div.sec .linkish,
+  :root[data-has-wp="1"]:not([data-wp-text="capsule"]):not([data-theme="light"]):not([data-style="cyber"]) .set-top-meta .linkish {
     color: #7DD3FC !important;
-    text-shadow: 0 1px 2px rgba(2, 6, 18, .45) !important;
+    text-shadow: 0 1px 2.5px rgba(2, 8, 20, .68), 0 0 12px rgba(2, 8, 20, .34) !important;
   }
 }
-/* 卡片与弹层内部的 div.sec 免除二次嵌套胶囊背景与滤镜 */
-:root[data-has-wp="1"] .glass div.sec,
-:root[data-has-wp="1"] .sheet div.sec,
-:root[data-has-wp="1"] .v6-drawer div.sec {
+
+/* 卡片与抽屉内部的 div.sec 始终保持次要字色与零阴影零背景（高特异性压制全部外层裸文字规则） */
+:root[data-has-wp="1"]:not(#hnc-none) .glass div.sec,
+:root[data-has-wp="1"]:not(#hnc-none) .sheet div.sec,
+:root[data-has-wp="1"]:not(#hnc-none) .v6-drawer div.sec {
   background: transparent !important;
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   box-shadow: none !important;
   padding: 6px 2px 0 !important;
   color: var(--text-2) !important;
+  text-shadow: none !important;
+}
+:root[data-has-wp="1"]:not(#hnc-none) .glass div.sec small,
+:root[data-has-wp="1"]:not(#hnc-none) .sheet div.sec small,
+:root[data-has-wp="1"]:not(#hnc-none) .v6-drawer div.sec small,
+:root[data-has-wp="1"]:not(#hnc-none) .glass div.sec .r,
+:root[data-has-wp="1"]:not(#hnc-none) .sheet div.sec .r,
+:root[data-has-wp="1"]:not(#hnc-none) .v6-drawer div.sec .r {
+  color: var(--text-3) !important;
+  text-shadow: none !important;
+}
+:root[data-has-wp="1"]:not(#hnc-none) .glass div.sec .linkish,
+:root[data-has-wp="1"]:not(#hnc-none) .sheet div.sec .linkish,
+:root[data-has-wp="1"]:not(#hnc-none) .v6-drawer div.sec .linkish {
+  color: var(--blue) !important;
   text-shadow: none !important;
 }
 :root[data-has-wp="1"] .glass.is-tilting {
@@ -5570,7 +5943,7 @@ html.has-wallpaper[data-glass="liquid"][data-theme="dark"]:not(.lowfx) .glass:no
   background: rgba(251, 191, 36, .16);
 }
 
-/* v6.1.0-rc.1 零滑条 39px/12px 离散档位胶囊与 SVG 步进器 (.gx-row / .gx-pills-5 / .gx-step-bar / .gx-btn) */
+/* v6.1.0-rc.1 零滑条 39px/12px 离散档位胶囊与 SVG 步进器 (.gx-row / .gx-pills-3 / .gx-pills-5 / .gx-step-bar / .gx-btn) */
 .gx-row {
   display: flex;
   align-items: center;
@@ -5578,6 +5951,17 @@ html.has-wallpaper[data-glass="liquid"][data-theme="dark"]:not(.lowfx) .glass:no
   padding: 6px 0 2px;
   font-size: 12px;
   color: var(--text-2);
+}
+.gx-pills,
+.gx-pills-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+  padding: 6px 0 2px;
+}
+.gx-pills.gx-pills-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .gx-pills-5 {
   display: grid;
@@ -5652,7 +6036,7 @@ html.has-wallpaper[data-glass="liquid"][data-theme="dark"]:not(.lowfx) .glass:no
   box-shadow: 0 4px 12px -4px var(--cy-glow);
 }
 @media (max-width: 370px) {
-  .gx-pills-5, .gx-step-bar { gap: 4px; }
+  .gx-pills, .gx-pills-3, .gx-pills-5, .gx-step-bar { gap: 4px; }
   .gx-btn { font-size: 11.5px; padding: 0 3px; }
 }
 /* 花哨壁纸下底部撤销胶囊高对比防吃字托底 */
@@ -5669,7 +6053,13 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
 }
 :root.lowfx .undo-pill,
 :root.lowfx[data-has-wp="1"] .undo-pill,
-:root.lowfx .sig-pill {
+:root.lowfx .sig-pill,
+:root.lowfx .chip:not(.on),
+:root.lowfx[data-has-wp="1"] .chip:not(.on),
+:root.lowfx .qpill:not(.on),
+:root.lowfx[data-has-wp="1"] .qpill:not(.on),
+:root.lowfx .search,
+:root.lowfx .seg:not(.small) {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   background: var(--card-solid) !important;
@@ -5705,6 +6095,7 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   .search,
   .seg:not(.small),
   .qpill:not(.on),
+  .chip:not(.on),
   .sheet,
   .dd-menu,
   .tabbar,
@@ -5714,6 +6105,10 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
   .undo-pill,
   [data-glass="liquid"] .glass,
   :root[data-glass="liquid"][data-has-wp="1"] .glass:not(#tabbar):not(.seg):not(.v6-drawer):not(.sheet),
+  :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .seg:not(.small),
+  :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .search,
+  :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .qpill:not(.on),
+  :root[data-has-wp="1"]:not([data-style="cyber"]):not(.lowfx) .chip:not(.on),
   [data-glass="frosted"] .glass:not(.seg),
   [data-glass="liquid"] .v6-drawer,
   [data-glass="frosted"] .v6-drawer,
@@ -5784,7 +6179,7 @@ html.has-wallpaper[data-theme="dark"] .undo-pill {
 }
 </style>
 <!-- 首帧前按本地偏好设好主题/风格/玻璃浓度, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme / applyGlassTint 一致, 之后由它接管) -->
-<script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'), gm = g('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid', wp = g('hnc6.wp_id'); var sysDk = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; var resT = (t === 'light' || t === 'dark') ? t : (sysDk ? 'dark' : 'light'); r.setAttribute('data-theme', resT); r.setAttribute('data-theme-mode', (t === 'light' || t === 'dark') ? t : 'auto'); if (parseFloat(g('hnc6.wp_blur')) > 0) r.setAttribute('data-wp-blurred', '1'); if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); } else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber'); if (wp && wp !== 'none' && (wp !== 'custom' || g('hnc6.wp_custom'))) { r.setAttribute('data-has-wp', '1'); r.setAttribute('data-has-wallpaper', '1'); r.classList.add('has-wallpaper'); r.setAttribute('data-wp-text', g('hnc6.wp_text_v2') === 'capsule' ? 'capsule' : 'adaptive'); var wts = (g('hnc6.wp_tones') || '').split(','); if (wp === 'prism') wts = ['light', 'light', 'light']; else if (wts.length !== 3) wts = ['dark', 'light', 'dark']; r.setAttribute('data-wp-top', wts[0]); r.setAttribute('data-wp-tone', wts[1]); r.setAttribute('data-wp-bot', wts[2]); } if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1' && g('hnc6.lowfx_manual') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>
+<script>(function () { try { var r = document.documentElement, g = function (k) { try { var v = localStorage.getItem(k); if (v !== null && v !== undefined) return v; } catch (_) {} var bp = window.__HNC_BOOT_PREFS__; return (bp && bp[k] !== undefined && bp[k] !== null) ? String(bp[k]) : null; }, t = g('hnc6.theme'), s = g('hnc6.style'), gm = (!window.__HNC_PREVIEW_VARIANT__ && g('hnc6.glass_mode') === 'frosted') ? 'frosted' : 'liquid', wp = g('hnc6.wp_id'); if (!s && window.__HNC_PREVIEW_VARIANT__) s = 'liquid'; var sysDk = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; var resT = (t === 'light' || t === 'dark') ? t : (sysDk ? 'dark' : 'light'); r.setAttribute('data-theme', resT); r.setAttribute('data-theme-mode', (t === 'light' || t === 'dark') ? t : 'auto'); if (parseFloat(g('hnc6.wp_blur')) > 0) r.setAttribute('data-wp-blurred', '1'); var lv = window.__HNC_PREVIEW_VARIANT__ || g('hnc6.lg_variant'); r.setAttribute('data-lg-variant', (lv === 'prism' || lv === 'dew') ? lv : 'pure'); if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); } else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber'); if (wp && wp !== 'none' && (wp !== 'custom' || g('hnc6.wp_custom'))) { r.setAttribute('data-has-wp', '1'); r.setAttribute('data-has-wallpaper', '1'); r.classList.add('has-wallpaper'); r.setAttribute('data-wp-text', g('hnc6.wp_text_v2') === 'capsule' ? 'capsule' : 'adaptive'); var wts = (g('hnc6.wp_tones') || '').split(','); if (wp === 'prism') wts = ['light', 'light', 'light']; else if (wts.length !== 3) wts = ['dark', 'light', 'dark']; r.setAttribute('data-wp-top', wts[0]); r.setAttribute('data-wp-tone', wts[1]); r.setAttribute('data-wp-bot', wts[2]); } if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1' && g('hnc6.lowfx_manual') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>
 </head>
 <body>
 <div class="mesh" aria-hidden="true"></div><div id="hnc-wallpaper" aria-hidden="true"><div class="wp-img"></div><div class="wp-scrim"></div></div>

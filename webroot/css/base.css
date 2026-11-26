@@ -1295,6 +1295,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 .dev-r .dev-load-bar > i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--purple)); }
 #v6-scalpel-drawer .grab, #v6-scalpel-drawer .v6-drawer-head { touch-action: none; -webkit-user-select: none; user-select: none; }
 .quick-pills { -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 90%, transparent 100%); mask-image: linear-gradient(90deg, #000 0%, #000 90%, transparent 100%); padding-right: 18px; }
+:root[data-has-wp="1"] .quick-pills { -webkit-mask-image: none; mask-image: none; }
 
 /* Expanded Device: Smart Escort Link Strip & Quick Numeric Rate Pills */
 .dev-v6-strip {
@@ -1315,7 +1316,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 [data-glass="liquid"] .dev-v6-btn:not(.on) {
   background: var(--lg-sub-2, var(--lg-sub));
   border-color: transparent;
-  box-shadow: var(--lg-rim-inner, inset 0 1px .5px rgba(255, 255, 255, .46));
+  box-shadow: var(--lg-rim-inner, none);
 }
 .dev-v6-btn.on { background: var(--green); color: #fff; border-color: transparent; }
 

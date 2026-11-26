@@ -1,7 +1,7 @@
 id=hotspot_net_ctl
 name=Hotspot Network Control (HNC)
-version=v6.1.0-rc.8
-versionCode=6009308
+version=v6.1.0-rc.9
+versionCode=6009309
 author=HNC Team
-description=Android 热点网关与本机网络隐私双域控制中心 v6.1.0-rc.8 · Vector 四舱壁中枢 · 三级零派生限速 · 本机守护四档防火墙与明文隐私安检
+description=Android 热点网关与本机网络隐私双域控制中心 v6.1.0-rc.9 · Vector 四舱壁中枢 · 三级零派生限速 · 本机守护四档防火墙与明文隐私安检
 updateJson=https://raw.githubusercontent.com/lcx08091-source/hnc-v6/main/update.json

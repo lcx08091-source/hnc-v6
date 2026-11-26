@@ -187,10 +187,13 @@ const cases = {
       querySelector: qEl,
       querySelectorAll: () => [],
     };
+    let sceneRebuilt = 0, sceneSynced = 0;
     const globals = {
       num: k.num, clamp: k.clamp, S, document: doc,
       LS: { set: (a, b) => { ls[a] = String(b); }, get: (a, d) => (a in ls ? ls[a] : d) },
       $: qEl, $$: () => [], haptic: () => {},
+      rebuildEffectiveWpScene: () => { sceneRebuilt++; },
+      scheduleWpSceneSync: () => { sceneSynced++; },
       setTimeout: (fn) => { fn(); return 1; }, clearTimeout: () => {},
     };
     const m = load(mainjs, ['syncWpNumericVars', 'setWpBlur', 'setWpDim'], globals);
@@ -203,13 +206,13 @@ const cases = {
     m.setWpBlur(-5);
     eq([S.wpBlur, props['--wp-blur'], 'data-wp-blurred' in attrs, ls['hnc6.wp_blur']], [0, '0px', false, '0'], '模糊归零移除 data-wp-blurred');
     m.setWpDim(35);
-    eq([S.wpDim, props['--wp-dim'], dimLb.textContent, ls['hnc6.wp_dim']], [35, '0.35', '35%', '35'], '设置遮罩 35%');
+    eq([S.wpDim, props['--wp-dim'], dimLb.textContent, ls['hnc6.wp_dim'], sceneRebuilt > 0, sceneSynced > 0], [35, '0.35', '35%', '35', true, true], '设置遮罩 35% 并联动实景采样重算');
     m.setWpDim(120);
     eq([S.wpDim, props['--wp-dim'], ls['hnc6.wp_dim']], [75, '0.75', '75'], '遮罩上限钳制 75%');
     m.setWpDim(-8);
     eq([S.wpDim, props['--wp-dim'], ls['hnc6.wp_dim']], [0, '0.00', '0'], '遮罩下限钳制 0%');
   },
-  // UI: 前端零拖动滑条 —— webroot 运行时代码零 <input type=range>、零 .gx-range、零 glassTintInput
+  // UI: 前端零拖动滑条 —— webroot 运行时代码零 <input type=range>、零旧滑条类名、零 glassTintInput
   webroot_zero_range() {
     const webDir = path.join(root, 'webroot');
     const walk = (dir) => {
@@ -221,12 +224,13 @@ const cases = {
       }
       return out;
     };
+    const legacyRangeCls = 'gx-' + 'range';
     const hits = [];
     for (const fp of walk(webDir)) {
       const rel = path.relative(root, fp);
       const txt = fs.readFileSync(fp, 'utf8');
       if (/<input[^>]*\btype\s*=\s*["']?range\b/i.test(txt)) hits.push(rel + ':<input type=range>');
-      if (txt.indexOf('gx-range') >= 0) hits.push(rel + ':gx-range');
+      if (txt.indexOf(legacyRangeCls) >= 0) hits.push(rel + ':' + legacyRangeCls);
       if (/\bfunction\s+glassTintInput\b/.test(txt)) hits.push(rel + ':glassTintInput');
     }
     eq(hits, [], 'webroot 应零拖动滑条残留');
@@ -258,6 +262,87 @@ const cases = {
     eq([at(0), at(56), at(66), at(200)], [['0.000', false], ['0.000', false], ['0.500', true], ['1.000', true]], '大标题开');
     titleOn = false;
     eq([at(8), at(18), at(40)], [['0.000', false], ['0.500', true], ['1.000', true]], '大标题关');
+  },
+  // UI: 液态玻璃三版本辅助函数 —— normLgVariant / LG_VARIANTS / lgVariantLabel / lgVariantDesc
+  lg_variants() {
+    const files = [core, fxjs, mainjs, path.join(root, 'webroot/js/settings.js')].filter((p) => fs.existsSync(p));
+    const stmtEnd = (src, idx) => {
+      let depth = 0, quote = '', esc = false, lc = false, bc = false;
+      for (let i = idx; i < src.length; i++) {
+        const ch = src[i], nx = src[i + 1];
+        if (lc) { if (ch === '\n') lc = false; continue; }
+        if (bc) { if (ch === '*' && nx === '/') { bc = false; i++; } continue; }
+        if (quote) {
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === quote) quote = '';
+          continue;
+        }
+        if (ch === '/' && nx === '/') { lc = true; i++; continue; }
+        if (ch === '/' && nx === '*') { bc = true; i++; continue; }
+        if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+        if (ch === '(' || ch === '[' || ch === '{') depth++;
+        else if (ch === ')' || ch === ']' || ch === '}') { if (depth > 0) depth--; }
+        else if (ch === ';' && depth === 0) return i + 1;
+      }
+      return src.length;
+    };
+    const ctx = {};
+    const vmCtx = vm.createContext(ctx);
+    for (const fp of files) {
+      const src = fs.readFileSync(fp, 'utf8');
+      const declRe = /(?:^|\n)[ \t]*(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=/g;
+      let m;
+      while ((m = declRe.exec(src))) {
+        const name = m[1];
+        if (/^(?:LG_|_LG|lgVariant|normLgVariant|KEY_LG|DEF_LG)/i.test(name)) {
+          const st = m.index + (src[m.index] === '\n' ? 1 : 0);
+          const ed = stmtEnd(src, m.index + m[0].length);
+          const code = src.slice(st, ed).replace(/^[ \t]*(?:let|const)\b/, 'var');
+          vm.runInContext(code, vmCtx);
+        }
+      }
+    }
+    for (const fp of files) {
+      const src = fs.readFileSync(fp, 'utf8');
+      const fnRe = /(?:^|\n)[ \t]*function\s+([A-Za-z_$][\w$]*)\s*\(/g;
+      const matched = [];
+      let fm;
+      while ((fm = fnRe.exec(src))) {
+        const fn = fm[1];
+        if (/(?:lgVariant|LgVariant|^_?lg[A-Z_])/.test(fn) && !/^(?:setLgVariant|applyLgVariant|initLgVariant|syncLgVariant)$/.test(fn)) {
+          matched.push(fn);
+        }
+      }
+      if (matched.length) Object.assign(ctx, load(fp, matched, ctx));
+    }
+    if (typeof ctx.normLgVariant !== 'function') { console.log('缺少 normLgVariant'); process.exit(1); }
+    if (typeof ctx.lgVariantLabel !== 'function') { console.log('缺少 lgVariantLabel'); process.exit(1); }
+    eq(ctx.normLgVariant('pure'), 'pure', 'normLgVariant pure');
+    eq(ctx.normLgVariant('prism'), 'prism', 'normLgVariant prism');
+    eq(ctx.normLgVariant('dew'), 'dew', 'normLgVariant dew');
+    eq(ctx.normLgVariant('xxx'), 'pure', 'normLgVariant 非法值 xxx -> pure');
+    eq(ctx.normLgVariant(''), 'pure', 'normLgVariant 空串 -> pure');
+    eq(ctx.normLgVariant(null), 'pure', 'normLgVariant null -> pure');
+    eq(ctx.normLgVariant(undefined), 'pure', 'normLgVariant undefined -> pure');
+    eq(ctx.lgVariantLabel('pure'), '纯透无框', 'lgVariantLabel pure');
+    eq(ctx.lgVariantLabel('prism'), '棱镜色散', 'lgVariantLabel prism');
+    eq(ctx.lgVariantLabel('dew'), '凝脂水滴', 'lgVariantLabel dew');
+    eq(ctx.lgVariantLabel('xxx'), '纯透无框', 'lgVariantLabel 非法值 xxx -> 纯透无框');
+    eq(ctx.lgVariantLabel(null), '纯透无框', 'lgVariantLabel null -> 纯透无框');
+    if (typeof ctx.lgVariantDesc === 'function') {
+      for (const v of ['pure', 'prism', 'dew']) {
+        const d = ctx.lgVariantDesc(v);
+        if (typeof d !== 'string' || !d.trim()) { console.log('lgVariantDesc(' + v + ') 为空'); process.exit(1); }
+      }
+      eq(ctx.lgVariantDesc('xxx'), ctx.lgVariantDesc('pure'), 'lgVariantDesc 非法值回退 pure');
+    }
+    if (ctx.LG_VARIANTS !== undefined) {
+      const ids = Array.isArray(ctx.LG_VARIANTS)
+        ? ctx.LG_VARIANTS.map((x) => (typeof x === 'string' ? x : (x.id || x.key || x.val || x.v || x.name)))
+        : Object.keys(ctx.LG_VARIANTS);
+      eq(ids, ['pure', 'prism', 'dew'], 'LG_VARIANTS 三版本顺序');
+    }
   },
 };
 

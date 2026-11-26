@@ -361,33 +361,33 @@ while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_rc4_obs=$?; i=$((
   && grep -q '"from":"6009304","to":"6000001"' "$HNC/data/rollback.json" \
   && test_pass || test_fail "r3=$rc_r3s r4=$rc_r4s prev4=$_prev_after_rc4 obs=$r_rc4_obs bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
 
-test_start "rollback: 6000001 -> 6009307 -> 6009308 (v6.1.0-rc.8) 连刷保护黄金底包并支持异常回退与 6010000 接班"
-rbseed 6009307 6000001
-printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.7\nversionCode=6009307\n' > "$MOD/module.prop"
+test_start "rollback: 6000001 -> 6009308 -> 6009309 (v6.1.0-rc.9) 连刷保护黄金底包并支持异常回退与 6010000 接班"
+rbseed 6009308 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.8\nversionCode=6009308\n' > "$MOD/module.prop"
 echo "GOLDEN-BIN-v601" > "$HNC/bin/hnc_watchdog"
 echo "GOLDEN-HTTPD-v601" > "$HNC/daemon/hnc_httpd/hnc_httpd"
 echo "GOLDEN-WEB-v601" > "$HNC/webroot/index.html"
-rbrun snapshot "$MOD" "$HNC"; rc_r7b=$?
+rbrun snapshot "$MOD" "$HNC"; rc_r8b=$?
 rm -f "$HNC/data/rollback.observing"
-echo "RC7-BIN" > "$HNC/bin/hnc_watchdog"
-printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.8\nversionCode=6009308\n' > "$MOD/module.prop"
-rbrun snapshot "$MOD" "$HNC"; rc_r8s=$?
-_prev_after_rc8="$(cat "$HNC/.prev/version" 2>/dev/null | tr -d ' \r\n')"
-echo "RC8-BROKEN-BIN" > "$HNC/bin/hnc_watchdog"
-i=0; r_rc8_obs=0
-while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_rc8_obs=$?; i=$((i+1)); done
-[ "$rc_r7b" -eq 0 ] && [ "$rc_r8s" -eq 0 ] \
-  && [ "$_prev_after_rc8" = "6000001" ] \
-  && [ "$r_rc8_obs" -eq 9 ] \
+echo "RC8-BIN" > "$HNC/bin/hnc_watchdog"
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.9\nversionCode=6009309\n' > "$MOD/module.prop"
+rbrun snapshot "$MOD" "$HNC"; rc_r9s=$?
+_prev_after_rc9="$(cat "$HNC/.prev/version" 2>/dev/null | tr -d ' \r\n')"
+echo "RC9-BROKEN-BIN" > "$HNC/bin/hnc_watchdog"
+i=0; r_rc9_obs=0
+while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_rc9_obs=$?; i=$((i+1)); done
+[ "$rc_r8b" -eq 0 ] && [ "$rc_r9s" -eq 0 ] \
+  && [ "$_prev_after_rc9" = "6000001" ] \
+  && [ "$r_rc9_obs" -eq 9 ] \
   && [ "$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null)" = "GOLDEN-BIN-v601" ] \
   && [ "$(cat "$HNC/data/runtime_version" 2>/dev/null | tr -d ' \r\n')" = "6000001" ] \
-  && [ "$(cat "$HNC/data/rollback.pinned" 2>/dev/null | tr -d ' \r\n')" = "6009308" ] \
-  && grep -q '"from":"6009308","to":"6000001"' "$HNC/data/rollback.json" \
-  && test_pass || test_fail "r7=$rc_r7b r8=$rc_r8s prev8=$_prev_after_rc8 obs=$r_rc8_obs bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
+  && [ "$(cat "$HNC/data/rollback.pinned" 2>/dev/null | tr -d ' \r\n')" = "6009309" ] \
+  && grep -q '"from":"6009309","to":"6000001"' "$HNC/data/rollback.json" \
+  && test_pass || test_fail "r8=$rc_r8b r9=$rc_r9s prev9=$_prev_after_rc9 obs=$r_rc9_obs bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
 
 test_start "rollback: C005 单调观察窗防 NTP 跳变击穿 + 兼容旧单字段格式"
-rbseed 6009308 6000001
-printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.8\nversionCode=6009308\n' > "$MOD/module.prop"
+rbseed 6009309 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.9\nversionCode=6009309\n' > "$MOD/module.prop"
 HNC_RB_NOW_OVERRIDE=1700000000 HNC_RB_UPTIME_OVERRIDE=12.34 HNC_RB_BOOT_ID_OVERRIDE="boot-uuid-a1" \
     rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
 _obs_saved="$(cat "$HNC/data/rollback.observing" 2>/dev/null | tr -d '\r\n')"
@@ -409,8 +409,8 @@ _closed_legacy=0; [ ! -f "$HNC/data/rollback.observing" ] && _closed_legacy=1
   && test_pass || test_fail "obs=[$_obs_saved] still=$_still_obs streak=$_streak_after_ntp mono=$_closed_mono legacy=$_closed_legacy"
 
 test_start "rollback: C007 回滚核验 cmdline/comm 停止核心守护进程且不误杀复用 PID"
-rbseed 6009308 6000001
-printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.8\nversionCode=6009308\n' > "$MOD/module.prop"
+rbseed 6009309 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.9\nversionCode=6009309\n' > "$MOD/module.prop"
 rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
 FPROC="$HNC_TEST_DIR/fake_proc"
 mkdir -p "$FPROC"
@@ -439,11 +439,11 @@ wait "$_reused_sys" 2>/dev/null || true
   && [ ! -f "$HNC/run/dpid.pid" ] && [ ! -f "$HNC/run/hotspotd.pid" ] \
   && test_pass || test_fail "dpid_dead=$_dpid_dead sys_alive=$_sys_alive"
 
-test_start "rollback: C008 升级新包 v6.1.0-rc.8 (6009308) 解钉时自动清理陈旧 rollback.json 与 rollback.ack"
-rbseed 6009308 6000001
-printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.8\nversionCode=6009308\n' > "$MOD/module.prop"
-echo "6009307" > "$HNC/data/rollback.pinned"
-printf '{"from":"6009307","to":"6000001","reason":"failstreak=6","at":1795410000,"action":"rolled_back"}\n' > "$HNC/data/rollback.json"
+test_start "rollback: C008 升级新包 v6.1.0-rc.9 (6009309) 解钉时自动清理陈旧 rollback.json 与 rollback.ack"
+rbseed 6009309 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.9\nversionCode=6009309\n' > "$MOD/module.prop"
+echo "6009308" > "$HNC/data/rollback.pinned"
+printf '{"from":"6009308","to":"6000001","reason":"failstreak=6","at":1795420000,"action":"rolled_back"}\n' > "$HNC/data/rollback.json"
 : > "$HNC/data/rollback.ack"
 rbrun snapshot "$MOD" "$HNC"; rc_c8=$?
 [ "$rc_c8" -eq 0 ] && [ ! -f "$HNC/data/rollback.pinned" ] \

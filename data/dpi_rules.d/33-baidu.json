@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "33-baidu",
-  "rules_version": "hnc-curated-v6.1.0-rc.8#33-baidu",
+  "rules_version": "hnc-curated-v6.1.0-rc.9#33-baidu",
   "rules": [
     {
       "id": "baidu_group",

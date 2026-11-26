@@ -1,6 +1,40 @@
 /* HNC WebUI · settings.js —— 设置页: VPN 检测 / 随机 MAC 合并、加密 DNS、统计健康、全部设置条目、模拟环境、外观与动效、自检报告、更新日志 */
 'use strict';
 
+var HNC_UI_VER = 'v6.1.0-rc.9';
+var HNC_UI_VC = '6009309';
+var HNC_UI_CODE = HNC_UI_VC;
+var LG_VARIANT_FALLBACK_LABELS = { pure: '纯透无框', prism: '棱镜色散', dew: '凝脂水滴' };
+var LG_VARIANT_FALLBACK_DESCS = {
+  pure: '零白框悬浮纯透 · 实景高清直透与轻量菲涅尔柔光',
+  prism: '真实三通道光学边缘色散 · 随壁纸实景动态折射冷暖光谱',
+  dew: '高曲率水滴弯月面高光 · 温润凝脂内折射与立体浮雕张力'
+};
+function resolveLgVariantId(v) {
+  if (typeof normLgVariant === 'function') return normLgVariant(v);
+  return (v === 'prism' || v === 'dew') ? v : 'pure';
+}
+function resolveLgVariantLabel(v) {
+  var id = resolveLgVariantId(v);
+  return typeof lgVariantLabel === 'function' ? lgVariantLabel(id) : (LG_VARIANT_FALLBACK_LABELS[id] || '纯透无框');
+}
+function resolveLgVariantDesc(v) {
+  var id = resolveLgVariantId(v);
+  return typeof lgVariantDesc === 'function' ? lgVariantDesc(id) : (LG_VARIANT_FALLBACK_DESCS[id] || LG_VARIANT_FALLBACK_DESCS.pure);
+}
+function appearanceStyleTitle() {
+  var sk = (S.style === 'liquid' && S.glassMode !== 'frosted') ? 'liquid' : (S.style === 'liquid' ? 'frosted' : (S.style === 'cyber' ? 'cyber' : 'default'));
+  if (sk === 'liquid') {
+    var vLbl = typeof lgVariantLabel === 'function' ? lgVariantLabel(S.lgVariant) : (LG_VARIANT_FALLBACK_LABELS[resolveLgVariantId(S.lgVariant)] || '纯透无框');
+    return '液态玻璃 · ' + vLbl;
+  }
+  return { frosted: '经典毛玻璃', cyber: '赛博机甲', default: '极简精密' }[sk] || '液态玻璃';
+}
+function appearanceSubLabel() {
+  var themeLbl = { auto: '跟随系统', light: '浅色', dark: '深色' }[S.theme] || '浅色';
+  return appearanceStyleTitle() + ' · ' + themeLbl + ' · 自定义壁纸与视觉引擎';
+}
+
 /* ═══ VPN / 代理检测 · 随机 MAC 合并建议 ═══ */
 function pctTxt(v) { v = num(v); return Math.round((v <= 1 ? v * 100 : v)) + '%'; }
 function vpnBadge(v) {
@@ -603,8 +637,16 @@ function renderSettings(anim1) {
     (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? (S.hotspot.active === false ? '热点未开启 · 待机省电未挂载' : [['clsact', '队列挂点'], ['bpf_filter', '分流程序'], ['map', '状态表'], ['watchdog', '守护巡检']].map(function (it) { return it[1] + (cs[it[0]] ? ':正常' : ':异常'); }).join(' · ')) : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && S.hotspot.active !== false && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
   if (S.open.look === undefined) S.open.look = true;
   var curStyleKey = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : (S.style === 'cyber' ? 'cyber' : 'default');
-  var curStyleName = { liquid: '液态玻璃 · 光学折射', frosted: '经典毛玻璃', cyber: '赛博机甲', default: '极简精密' }[curStyleKey] || '液态玻璃';
+  var curStyleName = appearanceStyleTitle();
   var gxLbl = glassTintLabel(S.glassTint);
+  var curLgVar = resolveLgVariantId(S.lgVariant);
+  var curVarLabel = resolveLgVariantLabel(curLgVar);
+  var curVarDesc = resolveLgVariantDesc(curLgVar);
+  var lgVarIcons = {
+    pure: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;flex-shrink:0" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 9.5a4.5 4.5 0 0 1 4-2"/></svg>',
+    prism: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;flex-shrink:0" aria-hidden="true"><path d="M12 4L3.5 19h17L12 4z"/><path d="M12 4l3.5 15"/></svg>',
+    dew: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;flex-shrink:0" aria-hidden="true"><path d="M12 3.5C8 8.8 5.5 12.2 5.5 15.5a6.5 6.5 0 0 0 13 0c0-3.3-2.5-6.7-6.5-12z"/><path d="M9.2 15.2a3 3 0 0 0 2.6 2.6"/></svg>'
+  };
   groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', curStyleName + ' · 浅色 / 深色 / 跟随系统 · 120fps 动态引擎',
     '<div class="note" style="margin-bottom:2px">四大独立视觉架构（点按即时切换，均支持浅色 / 纯正 OLED 暗夜双态）</div>' +
     '<div class="style-pick style-pick-4">' + [
@@ -618,9 +660,17 @@ function renderSettings(anim1) {
         '<span class="style-meta"><b>' + t[1] + '</b><small>' + t[2] + '</small></span>' +
       '</button>';
     }).join('') + '</div>' +
-    // 玻璃透光度五档离散胶囊(只在液态玻璃风格下显示, liquid.css .lg-only): 点按即切换并保存, 零滑条防展开手势误触
+    // 液态玻璃质感配方三档微晶按钮组 + 玻璃透光度五档离散胶囊(只在液态玻璃风格下显示, liquid.css .lg-only): 零滑条防展开手势误触
     '<div class="lg-only">' +
-    '<div class="note" style="margin:2px 0 -2px">玻璃透光度微调 · <span id="glass-tint-v">' + gxLbl + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
+    '<div class="note" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:2px 0 0"><span>质感配方</span><span class="gx-val" id="lg-variant-v">' + esc(curVarLabel) + '</span></div>' +
+    '<div class="note" id="lg-variant-desc" style="margin:2px 0 8px;font-size:12px">' + esc(curVarDesc) + '</div>' +
+    '<div class="gx-pills gx-pills-3" id="lg-variant" role="radiogroup" aria-label="液态玻璃质感配方">' +
+      [['pure', '纯透无框'], ['prism', '棱镜色散'], ['dew', '凝脂水滴']].map(function (it) {
+        var id = it[0], isOn = curLgVar === id;
+        return '<button type="button" class="gx-btn press' + (isOn ? ' on' : '') + '" data-lg-variant-pick="' + id + '" role="radio" aria-checked="' + (isOn ? 'true' : 'false') + '">' + lgVarIcons[id] + it[1] + '</button>';
+      }).join('') +
+    '</div>' +
+    '<div class="note" style="margin:8px 0 -2px">玻璃透光度微调 · <span id="glass-tint-v">' + gxLbl + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
     '<div class="gx-pills-5" id="glass-tint" role="group" aria-label="玻璃浓度">' +
       [[0, '清透'], [25, '偏清透'], [50, '标准'], [75, '偏着色'], [100, '着色']].map(function (g) {
         var isOn = gxLbl === g[1];
@@ -633,7 +683,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-rc.8', HNC_UI_VC = '6009308', HNC_UI_DATE = '2026-11-26';
+  var HNC_UI_VC = HNC_UI_CODE, HNC_UI_DATE = '2026-11-26';
   var bVer = cleanVer(l.backend_version, HNC_UI_VER);
   var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -649,7 +699,7 @@ function renderSettings(anim1) {
     return '<div class="sgrp scard glass' + (isOpen ? ' open' : '') + '" data-foldkey="' + key + '" data-ic-color="' + ic[0] + '">' +
       '<button class="sgrp-h scard-h press" data-act="fold" data-key="' + key + '">' +
       gi(ic[0], ic[1]) +
-      '<span class="tx"><b>' + title + '</b><small>' + sub + '</small></span>' +
+      '<span class="tx"><b>' + title + '</b><small' + (key === 'scard-look' ? ' id="appearance-sub"' : '') + '>' + sub + '</small></span>' +
       (badgeHtml || '') + ico('chev', 'chev') + '</button>' +
       '<div class="fold"><div><div class="fold-in"><div class="rows scard-rows">' + rowsHtml + '</div></div></div></div></div>';
   };
@@ -663,7 +713,7 @@ function renderSettings(anim1) {
       '<span class="badge ' + (remOn ? 'b-ok' : 'b-gray') + '">' + (remOn ? '已开启' : '已关闭') + '</span>',
       gMap['远程访问'] || ''),
     scard('scard-look', ['purple', 'palette'], '外观、主题与动效',
-      curStyleName + ' · ' + ({ auto: '跟随系统', light: '浅色', dark: '深色' }[S.theme] || '浅色') + ' · 自定义壁纸与视觉引擎',
+      appearanceSubLabel(),
       '<span class="badge b-acc">' + curStyleName.split(' · ')[0] + '</span>',
       gMap['外观'] || ''),
     scard('scard-alert', ['orange', 'bolt'], '告警与配额提醒',
@@ -1442,7 +1492,7 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.8';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || HNC_UI_VER;
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('check') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
@@ -2918,7 +2968,7 @@ function setVaultExport(btn) {
     if (!res || typeof res !== 'object' || res.ok === false || !res.files) {
       throw new Error((res && res.error) || '备份导出载荷无效');
     }
-    var verTag = String(res.module_version || 'v6.1.0-rc.8').replace(/[^a-zA-Z0-9._-]+/g, '-');
+    var verTag = String(res.module_version || HNC_UI_VER).replace(/[^a-zA-Z0-9._-]+/g, '-');
     var tsTag = Math.floor(Date.now() / 1000);
     var fn = 'hnc-backup-' + verTag + '-' + tsTag + '.json';
     var raw = JSON.stringify(res, null, 2);

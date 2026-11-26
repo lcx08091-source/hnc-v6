@@ -51,14 +51,22 @@ function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function trim0(s) { return String(s).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, ''); }
 function pad2(n) { return String(n).padStart(2, '0'); }
 var _memLS = { 'hnc6.style': 'liquid', 'hnc6.theme': 'light', 'hnc6.glass_tint': '38' };
+if (typeof window !== 'undefined' && window.__HNC_BOOT_PREFS__ && typeof window.__HNC_BOOT_PREFS__ === 'object') {
+  Object.keys(window.__HNC_BOOT_PREFS__).forEach(function (k) {
+    if (window.__HNC_BOOT_PREFS__[k] != null) _memLS[k] = String(window.__HNC_BOOT_PREFS__[k]);
+  });
+}
 var LS = {
   get: function (k, d) {
     try { var v = localStorage.getItem(k); if (v != null) return v; } catch (_) { if (Object.prototype.hasOwnProperty.call(_memLS, k)) return _memLS[k]; }
-    return (typeof window !== 'undefined' && window.__HNC_MOCK_META && Object.prototype.hasOwnProperty.call(_memLS, k)) ? _memLS[k] : d;
+    return (typeof window !== 'undefined' && (window.__HNC_MOCK_META || window.__HNC_BOOT_PREFS__) && Object.prototype.hasOwnProperty.call(_memLS, k)) ? _memLS[k] : d;
   },
   set: function (k, v) { _memLS[k] = String(v); try { localStorage.setItem(k, v); } catch (_) {} },
   del: function (k) { delete _memLS[k]; try { localStorage.removeItem(k); } catch (_) {} }
 };
+function normLgVariant(v) {
+  return (v === 'prism' || v === 'dew' || v === 'pure') ? v : 'pure';
+}
 var _memSS = {};
 var SS = {
   get: function (k) { try { var v = sessionStorage.getItem(k); if (v != null) return v; } catch (_) {} return _memSS[k] || null; },
@@ -720,6 +728,7 @@ var S = {
   refreshMode: LS.get('hnc.refresh-mode', 'balanced'),
   statsRange: 'today', aseg: 'stats', appsSub: 'active', devTab: {}, puEditSlot: 0, signal: null,
   theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', glassTint: clamp(Math.round(num(LS.get('hnc6.glass_tint', '50'), 50)), 0, 100), style: (function(){ var sv = LS.get('hnc6.style', 'default'); if (sv === 'apple') sv = 'cyber'; return ['cyber', 'liquid'].indexOf(sv) >= 0 ? sv : 'default'; })(),
+  lgVariant: normLgVariant((typeof window !== 'undefined' && window.__HNC_PREVIEW_VARIANT__) || LS.get('hnc6.lg_variant', 'pure')),
   dpi: null, probe: null, dpiHist: {}, dpiDays: 1, dpiFilter: 'all', dpiSpark: { packets: [], dns_events: [], tls_events: [], kernel_drops: [] },
   self: null, selfCfg: {}, logFile: 'combined',
   vectorSyncState: 'unknown', vecDevSig: '', coreHealthy: true, coreUptimeSec: 0, bulkheads: null, v6: null

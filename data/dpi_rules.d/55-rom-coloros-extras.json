@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "55-rom-coloros-extras",
-  "rules_version": "hnc-curated-v6.1.0-rc.8#55-rom-coloros-extras",
+  "rules_version": "hnc-curated-v6.1.0-rc.9#55-rom-coloros-extras",
   "rules": [
     {
       "id": "oppo_heytap_extras",

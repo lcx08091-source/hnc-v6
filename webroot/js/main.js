@@ -11,11 +11,15 @@ var RENDER = {
   settings: renderSettings
 };
 function onEnter(name) {
-  if (name === 'devices') { paintHero(true); loadOnlineHours(); loadUsage(); if (typeof v6RefreshSummarySilent === 'function') v6RefreshSummarySilent(); }
-  if (name === 'apps') loadApps().then(function () { if (S.page === 'apps') renderApps(false); });
-  if (name === 'vector') { if (typeof onEnterVectorPage === 'function') onEnterVectorPage(); }
-  if (name === 'stats') { afterAseg(); loadUsage().then(function () { var rk = $('#pu-dev-rank'); if (rk && typeof hsMonthRankHtml === 'function') rk.innerHTML = hsMonthRankHtml(); }); }
-  if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_mode === 'on' && !S.clsact) clsactCheck(true); });
+  var syncPrismPage = function () {
+    if (S.style === 'liquid' && S.lgVariant === 'prism' && typeof rebindHyaliteTargets === 'function') rebindHyaliteTargets();
+    scheduleWpSceneSync();
+  };
+  if (name === 'devices') { paintHero(true); loadOnlineHours(); loadUsage(); if (typeof v6RefreshSummarySilent === 'function') v6RefreshSummarySilent(); syncPrismPage(); }
+  if (name === 'apps') loadApps().then(function () { if (S.page === 'apps') { renderApps(false); syncPrismPage(); } });
+  if (name === 'vector') { if (typeof onEnterVectorPage === 'function') onEnterVectorPage(); syncPrismPage(); }
+  if (name === 'stats') { afterAseg(); syncPrismPage(); loadUsage().then(function () { var rk = $('#pu-dev-rank'); if (rk && typeof hsMonthRankHtml === 'function') rk.innerHTML = hsMonthRankHtml(); scheduleWpSceneSync(); }); }
+  if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') { renderSettings(false); syncPrismPage(); } if (S.cfg.clsact_bpf_mode === 'on' && !S.clsact) clsactCheck(true); });
   schedulePoll(50);
 }
 var enterT = 0;
@@ -34,6 +38,7 @@ function go(name) {
     $('#p-' + name).scrollTo({ top: 0, behavior: motionOn() ? 'smooth' : 'auto' });
     syncTab(name);
     if (name === 'apps' && typeof paintAppsDot === 'function') paintAppsDot();
+    scheduleWpSceneSync();
     return;
   }
   var from = $('#p-' + S.page), to = $('#p-' + name);
@@ -45,6 +50,10 @@ function go(name) {
     placeSegs(to);
   }
   if (name === 'apps' && typeof paintAppsDot === 'function') paintAppsDot();
+  if (S.style === 'liquid' && S.lgVariant === 'prism' && typeof rebindHyaliteTargets === 'function') {
+    rebindHyaliteTargets();
+  }
+  scheduleWpSceneSync();
   // v5.35 升级: 严禁对 .page 本身施加位移或半透明组隔离(彻底保护子层 .glass backdrop-filter 采样根与零水平漂移)
   if (typeof runPageEnterFx === 'function') runPageEnterFx(to);
   clearTimeout(enterT);
@@ -956,6 +965,337 @@ function signalSheet() {
   tickSignalSheetPoll();
 }
 
+/* ═════════════════════ 8×4 视口壁纸实景采样矩阵 & 三版本液态玻璃瞬切引擎 ═════════════════════ */
+var _wpRawSceneGrid = null;
+var _wpSceneGrid = null;
+var _wpRowLum = null;
+var _wpSceneCv = null;
+var _wpSceneRaf = 0;
+var _prismDirtyEls = [];
+
+var WP_SCENE_PRESET_STOPS = {
+  aurora: [[[12, 38, 76], [14, 96, 150]], [[24, 142, 188], [45, 196, 178]], [[16, 84, 136], [76, 92, 196]]],
+  slate:  [[[12, 20, 32], [28, 48, 72]], [[24, 42, 64], [58, 108, 152]], [[15, 26, 40], [38, 76, 108]]],
+  dusk:   [[[36, 78, 212], [116, 58, 214]], [[132, 42, 192], [236, 72, 108]], [[32, 24, 68], [18, 24, 46]]],
+  prism:  [[[196, 228, 252], [236, 216, 252]], [[168, 218, 248], [244, 198, 226]], [[176, 232, 226], [252, 222, 228]]],
+  ocean:  [[[8, 46, 94], [14, 116, 178]], [[12, 132, 198], [38, 186, 212]], [[8, 62, 112], [18, 98, 154]]],
+  sunset: [[[88, 44, 138], [198, 62, 102]], [[232, 96, 76], [250, 156, 68]], [[64, 28, 54], [42, 22, 44]]]
+};
+
+if (typeof S === 'object' && S) {
+  S.lgVariant = typeof normLgVariant === 'function'
+    ? normLgVariant(S.lgVariant || LS.get('hnc6.lg_variant', 'pure'))
+    : ((function (rv) { return (rv === 'prism' || rv === 'dew') ? rv : 'pure'; })(S.lgVariant || LS.get('hnc6.lg_variant', 'pure')));
+  try { document.documentElement.setAttribute('data-lg-variant', S.lgVariant); } catch (_) {}
+}
+
+function rebuildEffectiveWpScene() {
+  if (!_wpRawSceneGrid || _wpRawSceneGrid.length !== 32) {
+    _wpSceneGrid = null;
+    _wpRowLum = null;
+    return;
+  }
+  var dimRatio = clamp(num(S.wpDim, 12), 0, 75) / 100;
+  var darkNow = isDark();
+  var scrimAlpha = darkNow
+    ? clamp(0.46 + dimRatio * 0.60, 0.42, 0.88)
+    : clamp(dimRatio, 0, 0.78);
+  var keep = 1 - scrimAlpha;
+  var grid = new Array(32);
+  var rowLum = new Array(8);
+  for (var r = 0; r < 8; r++) {
+    var rLumSum = 0;
+    for (var c = 0; c < 4; c++) {
+      var idx = r * 4 + c;
+      var cell = _wpRawSceneGrid[idx];
+      var er = Math.round(cell.r * keep);
+      var eg = Math.round(cell.g * keep);
+      var eb = Math.round(cell.b * keep);
+      var lum = (0.2126 * er + 0.7152 * eg + 0.0722 * eb) / 255;
+      grid[idx] = { r: er, g: eg, b: eb, lum: lum };
+      rLumSum += lum;
+    }
+    rowLum[r] = rLumSum * 0.25;
+  }
+  _wpSceneGrid = grid;
+  _wpRowLum = rowLum;
+}
+
+function applyPresetToWpScene(presetId) {
+  var stops = WP_SCENE_PRESET_STOPS[presetId];
+  if (!stops) return false;
+  var raw = new Array(32);
+  for (var r = 0; r < 8; r++) {
+    var ty = r / 7;
+    var seg = ty <= 0.5 ? 0 : 1;
+    var fy = seg === 0 ? (ty * 2) : ((ty - 0.5) * 2);
+    var s0 = stops[seg], s1 = stops[seg + 1];
+    for (var c = 0; c < 4; c++) {
+      var tx = c / 3;
+      var topR = s0[0][0] + (s0[1][0] - s0[0][0]) * tx;
+      var topG = s0[0][1] + (s0[1][1] - s0[0][1]) * tx;
+      var topB = s0[0][2] + (s0[1][2] - s0[0][2]) * tx;
+      var botR = s1[0][0] + (s1[1][0] - s1[0][0]) * tx;
+      var botG = s1[0][1] + (s1[1][1] - s1[0][1]) * tx;
+      var botB = s1[0][2] + (s1[1][2] - s1[0][2]) * tx;
+      raw[r * 4 + c] = {
+        r: clamp(Math.round(topR + (botR - topR) * fy), 0, 255),
+        g: clamp(Math.round(topG + (botG - topG) * fy), 0, 255),
+        b: clamp(Math.round(topB + (botB - topB) * fy), 0, 255)
+      };
+    }
+  }
+  _wpRawSceneGrid = raw;
+  rebuildEffectiveWpScene();
+  return true;
+}
+
+function seedWpSceneFromTones(tones) {
+  var tTop = (tones && tones.top) === 'light' ? 206 : 58;
+  var tMid = (tones && tones.tone) === 'light' ? 196 : 64;
+  var tBot = (tones && tones.bot) === 'light' ? 188 : 52;
+  var raw = new Array(32);
+  for (var r = 0; r < 8; r++) {
+    var base = r < 2 ? tTop : (r < 6 ? tMid : tBot);
+    for (var c = 0; c < 4; c++) {
+      raw[r * 4 + c] = { r: base, g: base, b: base };
+    }
+  }
+  _wpRawSceneGrid = raw;
+  rebuildEffectiveWpScene();
+}
+
+function applyPresetOrFallbackWpScene(wpId, tones) {
+  if (!applyPresetToWpScene(wpId)) {
+    seedWpSceneFromTones(tones || { top: 'dark', tone: 'dark', bot: 'dark' });
+  }
+}
+
+function sampleDrawableToWpScene(drawable) {
+  if (!drawable) return false;
+  try {
+    if (!_wpSceneCv) {
+      _wpSceneCv = document.createElement('canvas');
+      _wpSceneCv.width = 32;
+      _wpSceneCv.height = 64;
+    }
+    var sctx = _wpSceneCv.getContext('2d', { willReadFrequently: true }) || _wpSceneCv.getContext('2d');
+    if (!sctx) return false;
+    var nw = drawable.naturalWidth || drawable.width || 0;
+    var nh = drawable.naturalHeight || drawable.height || 0;
+    var vw = (typeof window !== 'undefined' && window.innerWidth) || 390;
+    var vh = (typeof window !== 'undefined' && window.innerHeight) || 844;
+    if (nw > 0 && nh > 0 && vw > 0 && vh > 0) {
+      var imgR = nw / nh, vpR = vw / vh;
+      var sx = 0, sy = 0, sw = nw, sh = nh;
+      if (imgR > vpR) { sw = Math.max(1, nh * vpR); sx = (nw - sw) * 0.5; }
+      else if (imgR < vpR) { sh = Math.max(1, nw / vpR); sy = (nh - sh) * 0.5; }
+      sctx.drawImage(drawable, sx, sy, sw, sh, 0, 0, 32, 64);
+    } else {
+      sctx.drawImage(drawable, 0, 0, 32, 64);
+    }
+    var data = sctx.getImageData(0, 0, 32, 64).data;
+    var raw = new Array(32);
+    for (var gr = 0; gr < 8; gr++) {
+      for (var gc = 0; gc < 4; gc++) {
+        var sumR = 0, sumG = 0, sumB = 0;
+        var y0 = gr * 8, x0 = gc * 8;
+        for (var py = y0; py < y0 + 8; py++) {
+          var rowOff = py * 128 + x0 * 4;
+          for (var px = 0; px < 8; px++, rowOff += 4) {
+            sumR += data[rowOff];
+            sumG += data[rowOff + 1];
+            sumB += data[rowOff + 2];
+          }
+        }
+        raw[gr * 4 + gc] = {
+          r: (sumR + 32) >> 6,
+          g: (sumG + 32) >> 6,
+          b: (sumB + 32) >> 6
+        };
+      }
+    }
+    _wpRawSceneGrid = raw;
+    rebuildEffectiveWpScene();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function clearPrismInlineVars() {
+  for (var i = 0; i < _prismDirtyEls.length; i++) {
+    var el = _prismDirtyEls[i];
+    if (!el) continue;
+    el._prismKey = '';
+    el._prismTracked = false;
+    if (el.style) {
+      el.style.removeProperty('--prism-hi');
+      el.style.removeProperty('--prism-hi-side');
+      el.style.removeProperty('--prism-lo');
+      el.style.removeProperty('--prism-lo-side');
+    }
+  }
+  _prismDirtyEls.length = 0;
+}
+
+function clearBtZoneAttrs() {
+  var zoned = document.querySelectorAll('[data-bt-zone]');
+  for (var i = 0; i < zoned.length; i++) {
+    zoned[i].removeAttribute('data-bt-zone');
+  }
+}
+
+function clearWpSceneAll() {
+  _wpRawSceneGrid = null;
+  _wpSceneGrid = null;
+  _wpRowLum = null;
+  clearBtZoneAttrs();
+  clearPrismInlineVars();
+}
+
+var BT_ZONE_SEL = 'div.sec, #fresh, #apps-sub > .dsec, .set-top-meta, .foot.hnc-build-wm, #p-stats > .wrap > .note, #p-stats > .wrap > #aseg-body > .note';
+var PRISM_CARD_SEL = '.glass:not(#tabbar), .search, .qpill:not(.on), .toolbar > .chip:not(.on)';
+
+function syncWpSceneZonesNow() {
+  if (!_wpRowLum || !_wpSceneGrid) {
+    clearBtZoneAttrs();
+    if (_prismDirtyEls.length) clearPrismInlineVars();
+    return;
+  }
+  var activePage = document.querySelector('.page.on');
+  if (!activePage) return;
+  var vh = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 844);
+  var vw = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 390);
+  var darkTheme = isDark();
+
+  // 功能 A：裸文字零底框自适应明暗（全版本生效）
+  var btNodes = activePage.querySelectorAll(BT_ZONE_SEL);
+  for (var i = 0; i < btNodes.length; i++) {
+    var el = btNodes[i];
+    if (el.offsetParent === null) continue;
+    if (el.closest && el.closest('.glass, .sheet, .v6-drawer')) continue;
+    var rect = el.getBoundingClientRect();
+    var cy = rect.top + rect.height * 0.5;
+    var band = Math.max(0, Math.min(7, Math.floor((cy / vh) * 8)));
+    var zone = darkTheme ? 'dark' : (_wpRowLum[band] > 0.50 ? 'light' : 'dark');
+    if (el.getAttribute('data-bt-zone') !== zone) {
+      el.setAttribute('data-bt-zone', zone);
+    }
+  }
+
+  // 功能 B：版本 2（prism）随景光谱边缘色散变量注入
+  var prismActive = S.style === 'liquid' && S.glassMode !== 'frosted' && S.lgVariant === 'prism';
+  if (!prismActive) {
+    if (_prismDirtyEls.length) clearPrismInlineVars();
+    return;
+  }
+
+  if (_prismDirtyEls.length) {
+    var kept = [];
+    for (var k = 0; k < _prismDirtyEls.length; k++) {
+      var tracked = _prismDirtyEls[k];
+      if (!tracked || !tracked.isConnected) continue;
+      if ((tracked.classList.contains('qpill') || tracked.classList.contains('chip')) && tracked.classList.contains('on')) {
+        tracked._prismKey = '';
+        tracked._prismTracked = false;
+        tracked.style.removeProperty('--prism-hi');
+        tracked.style.removeProperty('--prism-hi-side');
+        tracked.style.removeProperty('--prism-lo');
+        tracked.style.removeProperty('--prism-lo-side');
+        continue;
+      }
+      kept.push(tracked);
+    }
+    _prismDirtyEls = kept;
+  }
+
+  var gNodes = activePage.querySelectorAll(PRISM_CARD_SEL);
+  var satBoost = 1.48;
+  for (var j = 0; j < gNodes.length; j++) {
+    var card = gNodes[j];
+    if (card.offsetParent === null) continue;
+    var r = card.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0 || r.bottom <= -40 || r.top >= vh + 40) continue;
+
+    var colTL = clamp(Math.floor((r.left / vw) * 4), 0, 3);
+    var rowTL = clamp(Math.floor((r.top / vh) * 8), 0, 7);
+    var colBR = clamp(Math.floor((r.right / vw) * 4), 0, 3);
+    var rowBR = clamp(Math.floor((r.bottom / vh) * 8), 0, 7);
+    var cTL = _wpSceneGrid[rowTL * 4 + colTL];
+    var cBR = _wpSceneGrid[rowBR * 4 + colBR];
+
+    var grayTL = 0.2126 * cTL.r + 0.7152 * cTL.g + 0.0722 * cTL.b;
+    var hiR = clamp(Math.round(grayTL + (cTL.r - grayTL) * satBoost + 14), 0, 255);
+    var hiG = clamp(Math.round(grayTL + (cTL.g - grayTL) * satBoost + 6), 0, 255);
+    var hiB = clamp(Math.round(grayTL + (cTL.b - grayTL) * satBoost - 10), 0, 255);
+
+    var grayBR = 0.2126 * cBR.r + 0.7152 * cBR.g + 0.0722 * cBR.b;
+    var loR = clamp(Math.round(grayBR + (cBR.r - grayBR) * satBoost - 10), 0, 255);
+    var loG = clamp(Math.round(grayBR + (cBR.g - grayBR) * satBoost + 6), 0, 255);
+    var loB = clamp(Math.round(grayBR + (cBR.b - grayBR) * satBoost + 18), 0, 255);
+
+    var qHiR = Math.min(255, (hiR + 2) & ~3), qHiG = Math.min(255, (hiG + 2) & ~3), qHiB = Math.min(255, (hiB + 2) & ~3);
+    var qLoR = Math.min(255, (loR + 2) & ~3), qLoG = Math.min(255, (loG + 2) & ~3), qLoB = Math.min(255, (loB + 2) & ~3);
+    var qLumTL = Math.round(cTL.lum * 40), qLumBR = Math.round(cBR.lum * 40);
+    var pKey = qHiR + ',' + qHiG + ',' + qHiB + ',' + qLumTL + '|' + qLoR + ',' + qLoG + ',' + qLoB + ',' + qLumBR;
+
+    if (card._prismKey !== pKey) {
+      if (!card._prismTracked) {
+        card._prismTracked = true;
+        _prismDirtyEls.push(card);
+      }
+      card._prismKey = pKey;
+      var aHi = (0.07 + 0.36 * cTL.lum).toFixed(3);
+      var aHiSide = (0.04 + 0.19 * cTL.lum).toFixed(3);
+      var aLo = (0.06 + 0.30 * cBR.lum).toFixed(3);
+      var aLoSide = (0.03 + 0.15 * cBR.lum).toFixed(3);
+      card.style.setProperty('--prism-hi', 'rgba(' + qHiR + ',' + qHiG + ',' + qHiB + ',' + aHi + ')');
+      card.style.setProperty('--prism-hi-side', 'rgba(' + qHiR + ',' + qHiG + ',' + qHiB + ',' + aHiSide + ')');
+      card.style.setProperty('--prism-lo', 'rgba(' + qLoR + ',' + qLoG + ',' + qLoB + ',' + aLo + ')');
+      card.style.setProperty('--prism-lo-side', 'rgba(' + qLoR + ',' + qLoG + ',' + qLoB + ',' + aLoSide + ')');
+    }
+  }
+}
+
+function scheduleWpSceneSync() {
+  if (_wpSceneRaf) return;
+  _wpSceneRaf = requestAnimationFrame(function () {
+    _wpSceneRaf = 0;
+    syncWpSceneZonesNow();
+  });
+}
+window.syncWpSceneZonesNow = syncWpSceneZonesNow;
+window.scheduleWpSceneSync = scheduleWpSceneSync;
+
+function setLgVariant(rawVal) {
+  var v = typeof normLgVariant === 'function' ? normLgVariant(rawVal) : ((rawVal === 'prism' || rawVal === 'dew') ? rawVal : 'pure');
+  S.lgVariant = v;
+  LS.set('hnc6.lg_variant', v);
+  document.documentElement.setAttribute('data-lg-variant', v);
+  var varLbl = typeof lgVariantLabel === 'function'
+    ? lgVariantLabel(v)
+    : (typeof resolveLgVariantLabel === 'function' ? resolveLgVariantLabel(v) : ({ pure: '纯透无框', prism: '棱镜色散', dew: '凝脂水滴' }[v] || '纯透无框'));
+  var varDesc = typeof lgVariantDesc === 'function'
+    ? lgVariantDesc(v)
+    : (typeof resolveLgVariantDesc === 'function' ? resolveLgVariantDesc(v) : '');
+  $$('[data-lg-variant-pick]').forEach(function (b) {
+    var on = b.getAttribute('data-lg-variant-pick') === v;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  var vv = $('#lg-variant-v');
+  if (vv) vv.textContent = varLbl;
+  var vd = $('#lg-variant-desc');
+  if (vd && varDesc) vd.textContent = varDesc;
+  syncLookCardSub();
+  if (v !== 'prism' && _prismDirtyEls.length) clearPrismInlineVars();
+  if (typeof rebindHyaliteTargets === 'function') rebindHyaliteTargets();
+  scheduleWpSceneSync();
+  if (typeof haptic === 'function') haptic(6);
+}
+window.setLgVariant = setLgVariant;
+
 /* ═════════════════════ 主题(圆形扩散 / 战术瞬切) ═════════════════════ */
 function setStyle(v, x, y) {
   if (v === 'frosted') {
@@ -971,23 +1311,40 @@ function setStyle(v, x, y) {
   }
   LS.set('hnc6.style', S.style);
   var activeKey = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : S.style;
-  revealApply(function () { applyTheme(); if (typeof navSync === 'function') navSync(); }, x, y);
+  revealApply(function () { applyTheme(); if (typeof navSync === 'function') navSync(); syncLookCardSub(); scheduleWpSceneSync(); }, x, y);
   $$('[data-style-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-style-pick') === activeKey); });
   if (S.page === 'settings' && typeof renderSettings === 'function') setTimeout(function () { renderSettings(false); }, 70);
-  setTimeout(function () { placeSegs(); layoutLens(); syncTab(S.page, true); }, 60);
+  setTimeout(function () { placeSegs(); layoutLens(); syncTab(S.page, true); scheduleWpSceneSync(); }, 60);
 }
 function syncLookCardSub() {
-  var subEl = $('#p-settings [data-foldkey="scard-look"] > .scard-h .tx small');
-  if (!subEl) return;
-  var sk = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : (S.style === 'cyber' ? 'cyber' : 'default');
-  var sn = { liquid: '液态玻璃 · 光学折射', frosted: '经典毛玻璃', cyber: '赛博机甲', default: '极简精密' }[sk] || '液态玻璃';
-  subEl.textContent = sn + ' · ' + ({ auto: '跟随系统', light: '浅色', dark: '深色' }[S.theme] || '浅色') + ' · 自定义壁纸与视觉引擎';
+  var subTxt = typeof appearanceSubLabel === 'function'
+    ? appearanceSubLabel()
+    : (function () {
+        var sk = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : (S.style === 'cyber' ? 'cyber' : 'default');
+        var vLbl = typeof lgVariantLabel === 'function' ? lgVariantLabel(S.lgVariant) : ({ prism: '棱镜色散', dew: '凝脂水滴', pure: '纯透无框' }[S.lgVariant] || '纯透无框');
+        var sn = sk === 'liquid' ? ('液态玻璃 · ' + vLbl) : ({ frosted: '经典毛玻璃', cyber: '赛博机甲', default: '极简精密' }[sk] || '液态玻璃');
+        return sn + ' · ' + ({ auto: '跟随系统', light: '浅色', dark: '深色' }[S.theme] || '浅色') + ' · 自定义壁纸与视觉引擎';
+      })();
+  var subEl = $('#appearance-sub') || $('#p-settings [data-foldkey="scard-look"] > .scard-h .tx small');
+  if (subEl) subEl.textContent = subTxt;
+  var lookFoldSub = $('#p-settings [data-foldkey="look"] > .row-h .tx .s');
+  if (lookFoldSub) {
+    var stTitle = typeof appearanceStyleTitle === 'function' ? appearanceStyleTitle() : subTxt.split(' · ').slice(0, 2).join(' · ');
+    lookFoldSub.textContent = stTitle + ' · 浅色 / 深色 / 跟随系统 · 120fps 动态引擎';
+  }
 }
 function setTheme(t, x, y) {
   S.theme = t; LS.set('hnc6.theme', t);
-  revealApply(function () { applyTheme(); syncLookCardSub(); }, x, y);
+  revealApply(function () {
+    applyTheme();
+    syncLookCardSub();
+    rebuildEffectiveWpScene();
+    scheduleWpSceneSync();
+  }, x, y);
   $$('[data-theme-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-theme-pick') === t); });
   syncLookCardSub();
+  rebuildEffectiveWpScene();
+  scheduleWpSceneSync();
 }
 // 圆形扩散切换(主题 / 界面风格共用; Cyber 采用极速战术快切)
 function revealApply(fn, x, y) {
@@ -1023,6 +1380,8 @@ function foldToggle(el, key) {
     placeSegs(el); ensureAboveTabbar(el);
   }
   saveFolds(key);
+  scheduleWpSceneSync();
+  setTimeout(scheduleWpSceneSync, 240);
   return on;
 }
 function ctxDev(a) { var box = a.closest('[data-dev]') || a.closest('[data-side]'); return box ? { box: box, d: devBy(box.getAttribute('data-dev') || box.getAttribute('data-side')) } : { box: null, d: null }; }
@@ -1134,10 +1493,11 @@ document.addEventListener('click', function (e) {
   if ((q = t.closest('[data-filter]'))) { S.filter = q.getAttribute('data-filter'); LS.set('hnc_device_filter', S.filter); closeDD(); listFreezeUntil = 0; renderDevList(false); renderDevices(false); return; }
   if ((q = t.closest('[data-style-pick]'))) { var rs = q.getBoundingClientRect(); setStyle(q.getAttribute('data-style-pick'), rs.left + rs.width / 2, rs.top + rs.height / 2); return; }
   if ((q = t.closest('[data-theme-pick]'))) { var r = q.getBoundingClientRect(); setTheme(q.getAttribute('data-theme-pick'), r.left + r.width / 2, r.top + r.height / 2); return; }
+  if ((q = t.closest('[data-lg-variant-pick]'))) { setLgVariant(q.dataset ? q.dataset.lgVariantPick : q.getAttribute('data-lg-variant-pick')); return; }
   if ((q = t.closest('[data-gx-tint]'))) { setGlassTint(q.getAttribute('data-gx-tint')); return; }
-  if ((q = t.closest('[data-wp-blur]'))) { setWpBlur(q.getAttribute('data-wp-blur')); return; }
+  if ((q = t.closest('[data-wp-blur]'))) { LS.set('hnc6.wp_blur_manual', '1'); setWpBlur(q.getAttribute('data-wp-blur')); return; }
   if ((q = t.closest('[data-wp-dim]'))) { setWpDim(q.getAttribute('data-wp-dim')); return; }
-  if ((q = t.closest('[data-wp-step]'))) { var sp0 = String(q.getAttribute('data-wp-step') || '').split(':'); if (sp0[0] === 'blur') setWpBlur(Math.round(num(S.wpBlur, 0)) + num(sp0[1], 0)); else if (sp0[0] === 'dim') setWpDim(Math.round(num(S.wpDim, 12)) + num(sp0[1], 0)); return; }
+  if ((q = t.closest('[data-wp-step]'))) { var sp0 = String(q.getAttribute('data-wp-step') || '').split(':'); if (sp0[0] === 'blur') { LS.set('hnc6.wp_blur_manual', '1'); setWpBlur(Math.round(num(S.wpBlur, 0)) + num(sp0[1], 0)); } else if (sp0[0] === 'dim') setWpDim(Math.round(num(S.wpDim, 12)) + num(sp0[1], 0)); return; }
   if ((q = t.closest('[data-qh-fix]'))) { execQuickHealthFix(q.getAttribute('data-qh-fix'), q.getAttribute('data-qh-params') || '', q); return; }
   if ((q = t.closest('[data-qh-jump]'))) { var qCard = q.closest('[data-qh-id]'); jumpQuickHealthTarget(q.getAttribute('data-qh-jump'), qCard ? qCard.getAttribute('data-qh-id') : ''); return; }
   if ((q = t.closest('[data-al]'))) { var row = q.closest('[data-alid]'); alertAction(q.getAttribute('data-al'), row.getAttribute('data-alid'), row.getAttribute('data-almac')); return; }
@@ -1588,6 +1948,8 @@ function setWpDim(rawVal) {
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', String(on));
   });
+  if (typeof rebuildEffectiveWpScene === 'function') rebuildEffectiveWpScene();
+  if (typeof scheduleWpSceneSync === 'function') scheduleWpSceneSync();
   if (typeof haptic === 'function') haptic(6);
 }
 document.addEventListener('keydown', function (e) {
@@ -1863,11 +2225,23 @@ if (typeof navSync === 'function') navSync();
 layoutLens(); syncTab(S.page, true);
 // v5.36.0: #lens 作为 #tabbar 内部水滴光晕胶囊不再嵌套挂载二次 Hyalite，根治底栏白蛋与白色折射摩尔纹
 if (window.Hyalite && lens) { try { Hyalite.detach(lens); } catch (_) {} }
-onMQChange(wideMQ, function () { RENDER[S.page](false); });
-addEventListener('resize', function () { layoutLens(); syncTab(S.page, true); placeSegs(document); drawSpark(); });
-onMQChange(typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null, function () { if (S.theme === 'auto') applyTheme(); });
+onMQChange(wideMQ, function () { RENDER[S.page](false); scheduleWpSceneSync(); });
+addEventListener('resize', function () { layoutLens(); syncTab(S.page, true); placeSegs(document); drawSpark(); scheduleWpSceneSync(); });
+document.addEventListener('scroll', function (e) {
+  var st = e && e.target;
+  if (st && st.closest && st.closest('#sheet')) return;
+  scheduleWpSceneSync();
+}, { capture: true, passive: true });
+onMQChange(typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null, function () {
+  if (S.theme === 'auto') {
+    applyTheme();
+    syncLookCardSub();
+    rebuildEffectiveWpScene();
+    scheduleWpSceneSync();
+  }
+});
 boot(false);
-window.__hnc6 = { S: S, go: go, api: api, boot: boot, L: L };   // 调试/截图用
+window.__hnc6 = { S: S, go: go, api: api, boot: boot, L: L, setLgVariant: setLgVariant, syncWpSceneZonesNow: syncWpSceneZonesNow, scheduleWpSceneSync: scheduleWpSceneSync };   // 调试/截图用
 
 
 // ── v5.29 T3: 升级回滚横幅 ──────────────────────────────────────────
@@ -2227,12 +2601,14 @@ function showRollbackBanner(rb) {
     _origRenderDevices(anim1);
     injectQuickPills();
     drawSpark();
+    if (typeof scheduleWpSceneSync === 'function') scheduleWpSceneSync();
   };
 
   var _origRenderDevList = window.renderDevList;
   window.renderDevList = function(animate) {
     _origRenderDevList(animate);
     injectQuickPills();
+    if (typeof scheduleWpSceneSync === 'function') scheduleWpSceneSync();
   };
 
   var _origRefreshCard = window.refreshCard;
@@ -2240,6 +2616,7 @@ function showRollbackBanner(rb) {
     window.refreshCard = function(mac) {
       _origRefreshCard(mac);
       injectQuickPills();
+      if (typeof scheduleWpSceneSync === 'function') scheduleWpSceneSync();
     };
   }
 
@@ -2348,6 +2725,7 @@ function showRollbackBanner(rb) {
         inpEl.focus();
         try { if (selStart != null) inpEl.setSelectionRange(selStart, selEnd); } catch (_) {}
       }
+      if (typeof scheduleWpSceneSync === 'function') scheduleWpSceneSync();
     };
   }
 
@@ -2800,6 +3178,8 @@ function showRollbackBanner(rb) {
         var nextLayer = layers[nextIdx], curLayer = layers[curIdx];
         var cssUri = 'url("' + escCssUrl(texRawSrc) + '")';
         styleWpLayer(nextLayer, _wpTainted, blurPx);
+        if (_wpTainted) r.setAttribute('data-wp-css-blur', '1');
+        else r.removeAttribute('data-wp-css-blur');
         nextLayer.style.backgroundImage = cssUri;
         nextLayer.style.zIndex = '2';
         nextLayer.style.opacity = '1';
@@ -2819,6 +3199,7 @@ function showRollbackBanner(rb) {
           _wpWasActive = true;
           if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets();
         }
+        scheduleWpSceneSync();
       });
     });
   }
@@ -2826,17 +3207,24 @@ function showRollbackBanner(rb) {
   window.__hncUpdateWpBlurTex = function (blurVal) {
     if (!_wpSourceReady || !_wpCurRawSrc) return;
     var b = clamp(Math.round(num(blurVal, 0)), 0, 24);
+    var r = document.documentElement;
     if (_wpTainted) {
+      r.setAttribute('data-wp-css-blur', '1');
       var layers = ensureWpLayers();
       if (layers && layers[_wpActiveIdx]) styleWpLayer(layers[_wpActiveIdx], true, b);
+      scheduleWpSceneSync();
       return;
     }
     var texUrl = buildBlurredTexUrl(b);
     if (_wpTainted) {
+      r.setAttribute('data-wp-css-blur', '1');
       var layers2 = ensureWpLayers();
       if (layers2 && layers2[_wpActiveIdx]) styleWpLayer(layers2[_wpActiveIdx], true, b);
+      scheduleWpSceneSync();
       return;
     }
+    r.removeAttribute('data-wp-css-blur');
+    sampleDrawableToWpScene((b > 0 && _wpOutCv) ? _wpOutCv : _wpThumbCv);
     commitTextureToScreen(texUrl, b <= 0, b);
   };
 
@@ -2862,6 +3250,7 @@ function showRollbackBanner(rb) {
       r.removeAttribute('data-has-wp');
       r.removeAttribute('data-has-wallpaper');
       r.removeAttribute('data-wp-blurred');
+      r.removeAttribute('data-wp-css-blur');
       r.removeAttribute('data-wp-vivid');
       r.classList.remove('has-wallpaper');
       r.removeAttribute('data-wp-text');
@@ -2869,6 +3258,7 @@ function showRollbackBanner(rb) {
       r.removeAttribute('data-wp-top');
       r.removeAttribute('data-wp-bot');
       r.style.removeProperty('--wp-image');
+      clearWpSceneAll();
       var ls0 = ensureWpLayers();
       if (ls0) {
         for (var k = 0; k < ls0.length; k++) {
@@ -2893,11 +3283,18 @@ function showRollbackBanner(rb) {
 
     if (S.wpId !== 'custom' && PRESET_TONES[S.wpId] && !WP_PRESETS[S.wpId].rawSrc) {
       setWpToneAttrs(PRESET_TONES[S.wpId], true);
+      if (applyPresetToWpScene(S.wpId)) scheduleWpSceneSync();
     } else {
       var cached = String(LS.get('hnc6.wp_tones', '') || '').split(',');
       var cachedVivid = LS.get('hnc6.wp_vivid', '0') === '1';
-      if (cached.length === 3) setWpToneAttrs({ top: cached[0], tone: cached[1], bot: cached[2], vivid: cachedVivid }, false);
-      else if (PRESET_TONES[S.wpId]) setWpToneAttrs(PRESET_TONES[S.wpId], false);
+      if (cached.length === 3) {
+        var cTones = { top: cached[0], tone: cached[1], bot: cached[2], vivid: cachedVivid };
+        setWpToneAttrs(cTones, false);
+        if (!_wpRowLum) { seedWpSceneFromTones(cTones); scheduleWpSceneSync(); }
+      } else if (PRESET_TONES[S.wpId]) {
+        setWpToneAttrs(PRESET_TONES[S.wpId], false);
+        if (!_wpRowLum) { applyPresetOrFallbackWpScene(S.wpId, PRESET_TONES[S.wpId]); scheduleWpSceneSync(); }
+      }
     }
 
     var wpKey = S.wpId + '|' + rawSrc.length + ':' + rawSrc.slice(0, 64);
@@ -2940,6 +3337,13 @@ function showRollbackBanner(rb) {
       _wpSourceReady = true;
       var curB = clamp(Math.round(num(S.wpBlur, 0)), 0, 24);
       var firstTex = (!_wpTainted && curB > 0) ? buildBlurredTexUrl(curB) : rawSrc;
+      if (!_wpTainted) {
+        if (!sampleDrawableToWpScene((curB > 0 && _wpOutCv) ? _wpOutCv : (_wpThumbCv || im))) {
+          applyPresetOrFallbackWpScene(S.wpId, PRESET_TONES[S.wpId]);
+        }
+      } else {
+        applyPresetOrFallbackWpScene(S.wpId, PRESET_TONES[S.wpId]);
+      }
       commitTextureToScreen(firstTex, firstTex === rawSrc, curB);
     }).catch(function () {
       if (seq !== _wpLoadSeq) return;
@@ -2980,7 +3384,7 @@ function showRollbackBanner(rb) {
         '<div class="note" style="margin-bottom:-2px">背景景深模糊 · <span id="wp-blur-v">' + curBlur + ' px</span>（0 px 可最大化液态玻璃边缘折射细节）</div>' +
         '<div class="gx-step-bar" id="wp-blur" role="group" aria-label="背景景深模糊">' +
           '<button type="button" class="gx-btn press" data-wp-step="blur:-2" aria-label="减弱背景模糊">' + svgMinus + '</button>' +
-          [[0, '0px'], [6, '6px'], [12, '12px'], [24, '24px']].map(function (it) {
+          [[0, '0px'], [8, '8px'], [14, '14px'], [24, '24px']].map(function (it) {
             var on = curBlur === it[0];
             return '<button type="button" class="gx-btn press' + (on ? ' on' : '') + '" data-wp-blur="' + it[0] + '" aria-pressed="' + on + '">' + it[1] + '</button>';
           }).join('') +
@@ -3094,6 +3498,11 @@ function showRollbackBanner(rb) {
         S.wpCustom = res.dataUrl;
         S.wpId = 'custom';
         _wpCurKey = '';
+        _wpSourceReady = false;
+        if (LS.get('hnc6.wp_blur_manual', '0') !== '1' && !(S.wpBlur > 0)) {
+          setWpBlur(8);
+          LS.set('hnc6.wp_blur', '8');
+        }
         applyWallpaper();
         syncWpUi();
         if (res.tier === 0) toast('已应用自定义本地壁纸');
